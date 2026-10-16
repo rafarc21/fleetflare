@@ -57,7 +57,7 @@ describe("runLegStep", () => {
     let sent = 0;
     const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" }); };
     const result = await runLegStep(step, dispatch, PLANNED);
-    expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "success", description: "flaky: passed on retry" });
+    expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "success", description: "flaky: passed on retry; first: timing" });
     expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
@@ -140,7 +140,7 @@ describe("runLegStep: time and test summary per leg (#1049)", () => {
     const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" }); };
     try {
       const result = await runLegStep(step, dispatch, PLANNED);
-      expect(result).toMatchObject({ state: "success", ms: 800, description: "flaky: passed on retry" });
+      expect(result).toMatchObject({ state: "success", ms: 800, description: "flaky: passed on retry; first: timing" });
     } finally {
       now.mockRestore();
     }
@@ -161,6 +161,42 @@ describe("runLegStep: time and test summary per leg (#1049)", () => {
       return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success", summary: "5 pass" });
     };
     const result = await runLegStep(step, dispatch, PLANNED);
-    expect(result).toMatchObject({ state: "success", description: "flaky: passed on retry", summary: "5 pass" });
+    expect(result).toMatchObject({ state: "success", description: "flaky: passed on retry; first: timing", summary: "5 pass" });
+  });
+});
+
+describe("runLegStep: flaky evidence and HTTP fallback (#1057)", () => {
+  it("the retry's resultKey is the first key with '.retry'; the first attempt keeps the plain key", async () => {
+    const step = fakeStep();
+    const keys: string[] = [];
+    let sent = 0;
+    const dispatch = async (p: PlannedLeg) => {
+      keys.push(p.resultKey);
+      sent++;
+      return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" });
+    };
+    await runLegStep(step, dispatch, PLANNED);
+    expect(keys).toEqual([
+      "gate/o/r/runs/1/i/shard-lint.json",
+      "gate/o/r/runs/1/i/shard-lint.retry.json",
+    ]);
+  });
+
+  it("the flaky description cuts the first attempt's description at 150 chars", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      return sent === 1 ? reply({ state: "failure", description: "y".repeat(400) }) : reply({ state: "success" });
+    };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result.description).toBe(`flaky: passed on retry; first: ${"y".repeat(150)}`);
+  });
+
+  it("non-2xx with a non-JSON body: the cause is '<leg>: HTTP <status>'", async () => {
+    const step = fakeStep();
+    const dispatch = async () => new Response("<html>bad gateway</html>", { status: 502 });
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toMatchObject({ leg: "lint", state: "error", description: "lint: HTTP 502" });
   });
 });
