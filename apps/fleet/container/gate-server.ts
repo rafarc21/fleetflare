@@ -134,7 +134,9 @@ export async function restoreBaseline(baselineKeys: string[], deps: BaselineDeps
 export async function putResult(key: string, body: unknown, fetchFn: FetchFn = fetch): Promise<void> {
   if (!key) return;
   try {
-    await fetchFn(`${R2_INTERNAL_BASE}/${key}`, { method: "PUT", body: JSON.stringify(body) });
+    const res = await fetchFn(`${R2_INTERNAL_BASE}/${key}`, { method: "PUT", body: JSON.stringify(body) });
+    // #1100: a refused PUT (e.g. a key the outbound allow-list rejects) must not vanish silently.
+    if (!res.ok) console.error(`gate-server: result PUT ${key} -> ${res.status}`);
   } catch (err) {
     console.error("gate-server: result PUT failed", err instanceof Error ? err.message : String(err));
   }
