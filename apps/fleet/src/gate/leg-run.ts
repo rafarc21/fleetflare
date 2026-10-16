@@ -7,10 +7,14 @@
 // once, and a second failure becomes this leg's "error".
 import type { GateLegRequest } from "./leg-env";
 import { normalizeLegResult, type LegRunMeta, type PlannedLeg } from "./fanout";
+import { legTimeoutMin } from "./config";
 import type { LegResult } from "./verdict";
 
 /** A leg's result as the step returns it: the DO's LegResult plus wall time and summary. */
-export type LegRunResult = LegResult & LegRunMeta;
+export type LegRunResult = LegResult & LegRunMeta & {
+  /** Set when the leg's first attempt was a red test: its retry's infra error is not infra (#1119). */
+  redFirst?: true;
+};
 
 /** Workflows caps a step result at 1 MiB; a leg description has no reason to
  *  be near that, so it is bounded well under it. */
@@ -55,6 +59,22 @@ export function gateRunnerName(instanceId: string, leg: string, attemptId: strin
  *  caller without it keeps the transport error as the whole description. */
 export interface LegRunDeps {
   readResult?: (resultKey: string) => Promise<StoredLegResult | undefined>;
+  /** Overrides the step deadline (tests). Default: the leg's own timeout plus LEG_STEP_GRACE_MS. */
+  stepDeadlineMs?: number;
+}
+
+/** Slack past the leg's own timeout before its step gives up on a dispatch that
+ *  never answered: covers the DO's readiness wait (180 s) and port-retry budget (240 s). */
+const LEG_STEP_GRACE_MS = 10 * 60_000;
+
+/** Ends a step whose work has no progress past its deadline (#1119): the work is
+ *  abandoned and the step rejects, so no orphan step holds the run open. */
+export function withStepDeadline<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
 
 /** A leg's result as the container wrote it to R2: state and description, no leg name. */
@@ -72,6 +92,7 @@ export async function runLegStep(
 ): Promise<LegRunResult> {
   // targetFor takes the try number: the start step's infra retry gets its own
   // result key (see infraRetryResultKey).
+  const deadlineMs = deps.stepDeadlineMs ?? legTimeoutMin(planned.timeoutMin) * 60_000 + LEG_STEP_GRACE_MS;
   const attempt = (name: string, targetFor: (tryNo: number) => PlannedLeg): Promise<LegRunResult> => {
     let tryNo = 0;
     return step.do(name, LEG_STEP_CONFIG, async () => {
@@ -83,7 +104,9 @@ export async function runLegStep(
       // instead of timing the replay.
       const started = Date.now();
       try {
-        const res = await dispatch(target, attemptId);
+        const res = await withStepDeadline(
+          dispatch(target, attemptId), deadlineMs, `${planned.leg}: no progress past its deadline`,
+        );
         if (!res.ok) {
           // A non-2xx (infra, 503) carries its cause in the body's `error`
           // field — surface it. No usable body: name the HTTP status.
@@ -145,7 +168,8 @@ export async function runLegStep(
       leg: planned.leg, state: "success", description: `flaky: passed on retry; first: ${firstCause}`, ms, summary: retry.summary,
     };
   }
-  if (first.state === "failure") return { ...retry, ms };
+  // A red first try stays a real failure for the infra rerun, even if its retry lost the connection (#1119).
+  if (first.state === "failure") return { ...retry, ms, redFirst: true };
   // An install retry that did not pass: its final description notes the first cause (#1092).
   const retryCause = retry.description ?? retry.state;
   return {

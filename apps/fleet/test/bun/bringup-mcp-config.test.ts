@@ -68,19 +68,25 @@ const PLAYWRIGHT = { command: "bun", args: ["x", "@playwright/mcp@latest"] };
 
 describe("bring-up MCP config — roles honor mcp: (issue #276)", () => {
   for (const role of ["pilot", "scratch"]) {
-    test(`real roles/${role}.md -> bring-up config has the playwright server and claude gets --mcp-config`, () => {
+    test(`real roles/${role}.md declares no mcp -> no bring-up config, no --mcp-config flag`, () => {
       const parsed = parseRoleFile(readFileSync(join(BLUEPRINT, "roles", `${role}.md`), "utf8"));
       const env = roleBringupEnv(parsed);
       const out = bringUp({ ...env });
-      expect(out.config?.mcpServers.playwright).toEqual(PLAYWRIGHT);
-      expect(out.args).toEqual(["--mcp-config", out.file]);
+      expect(out.config).toBeNull();
+      expect(out.args).toEqual([]);
     });
   }
 
-  test("real studios/web-studio -> same server, same flag (studio path unchanged in effect)", () => {
+  test("real studios/web-studio declares no mcp -> no bring-up config, no flag", () => {
     const studio = parseStudioFile(readFileSync(join(BLUEPRINT, "studios", "web-studio", "studio.md"), "utf8"));
     const env = studioBringupEnv(studio, []);
     const out = bringUp({ ...env });
+    expect(out.config).toBeNull();
+    expect(out.args).toEqual([]);
+  });
+
+  test("an mcp server named in ROLE_MCP -> config written and claude gets --mcp-config", () => {
+    const out = bringUp({ ROLE_MCP: "playwright" });
     expect(out.config?.mcpServers.playwright).toEqual(PLAYWRIGHT);
     expect(out.args).toEqual(["--mcp-config", out.file]);
   });

@@ -84,6 +84,15 @@ while the real work runs underneath.
 reads `claude` for a lead mid-turn, a lead waiting on subagents, and a lead
 stopped at a prompt alike.
 
+**A Worker deploy during an in-flight gate run can break it.** Measured on
+2026-10-16: a `gate` Worker redeploy with no container change left 39 leg
+steps failing with `Attempt failed due to internal workflows error` (two
+waves, about 2 min apart) and one `Network connection lost`, on a run of 24
+legs. Those infra-class failures now re-run the gate once on the same head
+(#1119: the status reads `rerun after infra error`), but a run that fails
+again is a final error. Deploy the Worker at a lull. Per #1119, the maestro
+tooling waits up to 10 min for zero running instances before it deploys.
+
 ## Clearing a dead claude account
 
 Issue #141: an account whose org disabled Claude subscription access answers

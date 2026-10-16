@@ -55,7 +55,7 @@ describe("runLegStep", () => {
     let sent = 0;
     const dispatch = async () => { sent++; return reply({ state: "failure", description: "3 errors" }); };
     const result = await runLegStep(step, dispatch, PLANNED);
-    expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "failure", description: "3 errors" });
+    expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "failure", description: "3 errors", redFirst: true });
     expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
