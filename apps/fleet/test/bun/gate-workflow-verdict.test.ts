@@ -11,7 +11,7 @@ import { verdictToStatusArgs } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
 
 const RUN_ID = "0123456789abcdef"; // the Workflow instance id; the roster shows its first 8
-const ID8 = "(run 01234567)";
+const ID8 = `(run ${RUN_ID})`;
 
 const green = (leg: string, description?: string): LegResult => ({ leg, state: "success", description });
 const red = (leg: string, state: "failure" | "error" = "failure"): LegResult => ({ leg, state, description: "x" });
@@ -60,6 +60,6 @@ describe("verdictToStatusArgs: the roster description", () => {
       expected, results: expected.map((l) => red(l)), runId: RUN_ID,
     });
     expect(args.description.length).toBeLessThanOrEqual(140);
-    expect(args.description).toMatch(/^0\/60 green; red: vitest-1, .*, \+\d+ more \(run 01234567\)$/);
+    expect(args.description).toMatch(/^0\/60 green; red: vitest-1, .*, \+\d+ more \(run 0123456789abcdef\)$/);
   });
 });

@@ -31,9 +31,9 @@ function fakePort(failOn: number[] = [], mintFails = false) {
 const SHA = "a".repeat(40);
 
 describe("pendingStatusArgs: the run-start status", () => {
-  it("reads 'running (run <id8>) — <n> legs' in state pending", () => {
+  it("reads 'running (run <full id>) — <n> legs' in state pending (#1144)", () => {
     expect(pendingStatusArgs(RUN_ID, 3)).toEqual({
-      state: "pending", description: "running (run 01234567) — 3 legs",
+      state: "pending", description: `running (run ${RUN_ID}) — 3 legs`,
     });
   });
 });

@@ -74,7 +74,8 @@ export function infraRerunDecision(results: LegResult[], rerunOf: string | undef
   return errors.every(isInfraLegFailure);
 }
 
-/** The status a run posts when it re-runs instead of ending with an error verdict. */
+/** The status a run posts when it re-runs instead of ending with an error verdict.
+ *  The rerun's full id, not a cut (#1144): a cut tag is shared by every rerun. */
 export function rerunStatusArgs(runId: string): { state: "pending"; description: string } {
-  return { state: "pending", description: `rerun after infra error (run ${runId.slice(0, 8)})` };
+  return { state: "pending", description: `rerun after infra error (run ${runId})` };
 }
