@@ -2564,8 +2564,10 @@ export async function cmdRescueAll(creds: Credentials, flags: RescueAllFlags): P
 const REAP_STATE_PATH = join(homedir(), ".fleet", "reap-state.json");
 
 /** Review F1: every plain read reap makes is bounded. A hung read must never
- *  sit between the last live read and a destroy, nor stall a poll. */
-const REAP_READ_TIMEOUT_MS = 20_000;
+ *  sit between the last live read and a destroy, nor stall a poll. Issue
+ *  #1117: 20 s timed out on a big repo's board listing (~25 s), so no nudge
+ *  fired. `--read-timeout` overrides it. */
+const REAP_READ_TIMEOUT_MS = 60_000;
 /** `--nudge` (issue #1098): one assign call, whose wake the Worker runs. */
 const REAP_NUDGE_TIMEOUT_MS = 60_000;
 /** A lock file older than this is a crashed run's, and is taken over. */
@@ -2626,6 +2628,19 @@ export function reapDeps(
   const headers = accessHeaders(creds);
   const repoQ = `repo=${encodeURIComponent(repo)}`;
   const readMs = opts.readTimeoutMs ?? REAP_READ_TIMEOUT_MS;
+  // Issue #1117: every board read logs its elapsed ms, ok or failed, so a slow
+  // listing is visible before it times out.
+  const boardRead = async (path: string) => {
+    const started = Date.now();
+    try {
+      const body = await fetchJson(boardUrl(creds, path), headers, readMs);
+      log(`fleet reap: board read ${Date.now() - started} ms`);
+      return body;
+    } catch (err) {
+      log(`fleet reap: board read ${Date.now() - started} ms (failed)`);
+      throw err;
+    }
+  };
   return {
     now: () => new Date(),
     listStudios: async () => {
@@ -2635,12 +2650,12 @@ export function reapDeps(
       return studios;
     },
     listBoard: async () => {
-      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}`), headers, readMs);
+      const body = await boardRead(`/tasks?${repoQ}`);
       if (!Array.isArray(body)) throw new Error("board listing was not a JSON array");
       return body as BoardTask[];
     },
     studioTasks: async (id) => {
-      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}&assignedTo=${encodeURIComponent(id)}`), headers, readMs);
+      const body = await boardRead(`/tasks?${repoQ}&assignedTo=${encodeURIComponent(id)}`);
       if (!Array.isArray(body)) throw new Error("task listing was not a JSON array");
       return body as BoardTask[];
     },
@@ -2755,7 +2770,9 @@ export async function withReapLock<T>(statePath: string, fn: (refresh: () => Pro
   }
 }
 
-async function cmdReap(creds: Credentials, flags: Omit<ReapFlags, "repo"> & { repo: string | null }): Promise<void> {
+async function cmdReap(
+  creds: Credentials, flags: Omit<ReapFlags, "repo"> & { repo: string | null; readTimeoutMs: number },
+): Promise<void> {
   let repo = flags.repo;
   if (repo === null) {
     const detected = await detectRepo();
@@ -2766,8 +2783,12 @@ async function cmdReap(creds: Credentials, flags: Omit<ReapFlags, "repo"> & { re
     console.error("fleet reap: no repo — stand in a repo checkout or pass --repo owner/name. Never fleet-wide.");
     process.exit(1);
   }
+  const { readTimeoutMs, ...reapFlags } = flags;
   const { exitCode } = await withReapLock(REAP_STATE_PATH, (refresh) =>
-    runReap({ ...flags, repo }, { ...reapDeps(creds, repo, REAP_STATE_PATH, (l) => console.log(l)), heartbeat: refresh }));
+    runReap({ ...reapFlags, repo }, {
+      ...reapDeps(creds, repo, REAP_STATE_PATH, (l) => console.log(l), undefined, { readTimeoutMs }),
+      heartbeat: refresh,
+    }));
   if (exitCode !== 0) process.exit(exitCode);
 }
 
@@ -3325,7 +3346,7 @@ async function main(): Promise<void> {
     case "reap":
       return cmdReap(creds, {
         apply: parsed.apply, idleMs: parsed.idleMs, repo: parsed.repo,
-        nudge: parsed.nudge, nudgeAfterMs: parsed.nudgeAfterMs,
+        nudge: parsed.nudge, nudgeAfterMs: parsed.nudgeAfterMs, readTimeoutMs: parsed.readTimeoutMs,
       });
     case "memory-ls":
       return cmdMemoryLs(creds);
