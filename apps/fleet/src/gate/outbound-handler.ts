@@ -62,11 +62,18 @@ export class BundleBodyError extends Error {
   }
 }
 
-/** Passes the body through, and fails it when its bytes stop matching `declared`:
- *  more bytes than declared is 413, fewer is 400. R2 then stores nothing. */
+/** Passes the body through, and fails it when its bytes stop matching `declared`.
+ *  R2 stores only a stream of known length, so in the Workers runtime the body
+ *  goes through FixedLengthStream, which carries that length and fails a body
+ *  that disagrees with it (real R2, test/gate-bundle-r2.test.ts). The counting
+ *  TransformStream below is the Bun test runtime's stand-in, where no such class exists. */
 export function lengthChecked(body: ReadableStream<Uint8Array> | null, declared: number): ReadableStream<Uint8Array> {
+  const source = body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() });
+  // Read off globalThis: the Bun-typed project declares no FixedLengthStream, and Bun has none at runtime.
+  const FixedLength = (globalThis as { FixedLengthStream?: new (length: number) => TransformStream<Uint8Array, Uint8Array> }).FixedLengthStream;
+  if (FixedLength !== undefined) return source.pipeThrough(new FixedLength(declared));
   let seen = 0;
-  return (body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() })).pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+  return source.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, ctl) {
       seen += chunk.byteLength;
       if (seen > declared) ctl.error(new BundleBodyError(413, "body longer than declared"));
@@ -344,6 +351,10 @@ async function putBundle(req: Request, bucket: OutboundBucket, key: string): Pro
     return new Response(null, { status: 201 });
   } catch (err) {
     if (err instanceof BundleBodyError) return new Response(err.message, { status: err.status });
+    // R2 refused the stream: a body that disagrees with its declared length. Nothing is stored; the leg clones.
+    if (err instanceof TypeError || err instanceof Error && /length/i.test(err.message)) {
+      return new Response(`bundle body rejected: ${err.message}`, { status: 400 });
+    }
     throw err;
   }
 }

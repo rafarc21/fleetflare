@@ -231,3 +231,11 @@ the daemon. The scripts (`localci.sh`, `localci-daemon.sh`,
 `known-flaky.txt`) still exist for reproducing a lane on a Mac by hand
 (`localci.sh <pr-number|sha> --dry-run` runs it without posting anything),
 but no longer gate a merge or post a commit status.
+
+## Gate git bundle (#1080)
+
+Operator steps for the one-bundle-per-run path. Off by default.
+
+1. **Flag:** `GATE_BUNDLE=1` turns the bundle step on. Set it only after the gate container image that understands the `bundle` leg is live. Before that, an old image runs `bundle` as a normal clone-and-checkout leg, one extra serial leg per run.
+2. **R2 lifecycle:** add a rule on the archive bucket that expires objects under the prefix `gate-bundles/` after 1 day. Bundles live under their own top-level prefix because a lifecycle rule matches a plain prefix only, and `gate/*/*/bundles/` cannot be expressed.
+3. **Cap:** bundles over `MAX_BUNDLE_BYTES` (256 MiB, provisional) are not uploaded, and every leg clones. Size the cap from a measured large repo before relying on it for big consumers.
