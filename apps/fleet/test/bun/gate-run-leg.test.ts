@@ -4,7 +4,7 @@ import { buildLegEnvVars, type GateLegRequest } from "../../src/gate/leg-env";
 
 // #715: GateRunnerDO drives the native ctx.container API. These tests run the
 // pure runLegInContainer with a fake container that records every call. A
-// fake clock makes the 180 s readiness bound and the 60 s port-retry budget
+// fake clock makes the 180 s readiness bound and the 240 s port-retry budget
 // cost nothing to exercise.
 
 const LEG: GateLegRequest = {
@@ -196,15 +196,15 @@ describe("runLegInContainer: readiness and port", () => {
     expect(c.destroyCount).toBe(1);
   });
 
-  test("a port refusal that outlasts the 60 s budget returns an error leg and destroys", async () => {
+  test("a port refusal that outlasts the 240 s budget returns an error leg and destroys (live: cold image pulls took over 60 s)", async () => {
     const c = new FakeContainer();
-    c.portOutcomes = Array.from({ length: 500 }, () => new Error("ECONNREFUSED"));
+    c.portOutcomes = Array.from({ length: 1000 }, () => new Error("ECONNREFUSED"));
     const result = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
     expect(result.state).toBe("error");
     expect(result.description).toContain("ECONNREFUSED");
-    // 60 s of 500 ms retries: one attempt at t=0 through t=60000 inclusive.
-    expect(c.fetchCalls).toBe(121);
+    // 240 s of 500 ms retries: one attempt at t=0 through t=240000 inclusive.
+    expect(c.fetchCalls).toBe(481);
     expect(c.destroyCount).toBe(1);
   });
 
