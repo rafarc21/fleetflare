@@ -502,6 +502,10 @@ interface StreamState {
 interface RunawayScan {
   /** Characters of text/reasoning seen while no tool_use had started. */
   chars: number;
+  /** Issue #1099 (review, finding 3): true while a kimi think region carries a
+   *  tool-call payload. That text is tool arguments, not reasoning, so it is
+   *  not counted. Cleared when the think region closes. */
+  payload: boolean;
   /** Soft cap in characters (`softCapTokens` * CHARS_PER_TOKEN); 0 = none. */
   softCapChars: number;
   /** Text after the last newline, not yet a complete line. */
@@ -524,11 +528,13 @@ export const RUNAWAY_REPEAT_LINE_LIMIT = 20;
 export const RUNAWAY_REPEAT_PARAGRAPH_LIMIT = 8;
 /** Issue #1099: shorter lines (`}`, `---`) repeat legitimately, so they never count. */
 const RUNAWAY_MIN_REPEAT_CHARS = 8;
-/** Issue #1099: the soft cap is in tokens (models.ts `softCapTokens`), but the
- *  scan counts characters; this rough ratio converts it. Typical English and
- *  code run closer to 3-4 chars per token, so the cap fires a little late
- *  rather than early. */
-const CHARS_PER_TOKEN = 4;
+/** Issue #1099 (review, finding 2): the soft cap is in tokens (models.ts
+ *  `softCapTokens`), but the scan counts characters, so this ratio converts it.
+ *  Conservative on purpose: CJK runs ~1.5 chars/token and JSON/code ~2.5, so a
+ *  2.5 ratio trips before the token ceiling. English (~4 chars/token) trips a
+ *  little early, the safe side. Upstream token counts arrive only on the final
+ *  usage chunk, so they cannot drive a mid-stream abort. */
+const CHARS_PER_TOKEN = 2.5;
 
 export function createStreamState(opts: { thinkTags?: boolean; softCapTokens?: number } = {}): StreamState {
   return {
@@ -538,7 +544,7 @@ export function createStreamState(opts: { thinkTags?: boolean; softCapTokens?: n
     thinkTags: opts.thinkTags === true,
     runaway: null,
     scan: {
-      chars: 0, softCapChars: (opts.softCapTokens ?? 0) * CHARS_PER_TOKEN, partial: "",
+      chars: 0, payload: false, softCapChars: (opts.softCapTokens ?? 0) * CHARS_PER_TOKEN, partial: "",
       line: "", lineRun: 0, para: "", prevPara: "", paraRun: 0,
     },
   };
@@ -568,8 +574,15 @@ function scanForRunaway(state: StreamState, text: string): void {
   if (state.runaway !== null || text.length === 0) return;
   const scan = state.scan;
   if (!toolStarted(state)) {
-    scan.chars += text.length;
-    if (scan.softCapChars > 0 && scan.chars > scan.softCapChars) { state.runaway = "soft_cap"; return; }
+    // Issue #1099 (review, finding 3): kimi's tool call sits inside <think> and
+    // only registers at </think>, so its payload would otherwise count as
+    // reasoning. A think region that carries the tool marker is latched as
+    // payload until it closes.
+    if ((state.thinking || text.includes(THINK_OPEN)) && TOOL_CALL_MARKER.test(text)) scan.payload = true;
+    if (!scan.payload) {
+      scan.chars += text.length;
+      if (scan.softCapChars > 0 && scan.chars > scan.softCapChars) { state.runaway = "soft_cap"; return; }
+    }
   }
   const pieces = (scan.partial + text).split("\n");
   scan.partial = pieces.pop() ?? "";
@@ -585,14 +598,22 @@ function scanForRunaway(state: StreamState, text: string): void {
   }
 }
 
+/** Issue #1099 (review, finding 5): the token count to record for an aborted
+ *  runaway. The upstream usage chunk never arrives on an abort, so this is the
+ *  scan's own estimate of the reasoning/text emitted so far, not a real count. */
+export function runawayTokenEstimate(state: StreamState): number {
+  return Math.ceil(state.scan.chars / CHARS_PER_TOKEN);
+}
+
 /** Issue #1099: the SSE error frame for an aborted runaway stream. Typed
  *  overloaded_error (529) so Claude Code retries the turn, the same
  *  retriable shape as the other upstream-capacity failures in this file. */
+export function runawayErrorMessage(reason: string): string {
+  return `upstream output runaway (${reason}); retry the turn`;
+}
+
 export function runawayErrorFrame(reason: string): string {
-  return sseEvent("error", {
-    type: "error",
-    error: { type: "overloaded_error", message: `upstream output runaway (${reason}); retry the turn` },
-  });
+  return sseEvent("error", { type: "error", error: { type: "overloaded_error", message: runawayErrorMessage(reason) } });
 }
 
 /** Closes whatever content block is currently open (if any) — the one place
@@ -726,6 +747,7 @@ function recoverThinkToolCalls(thinkText: string): Array<{ name: string; input: 
  *  tool-call-shaped text that could not be recovered is flagged for the
  *  error path in closeStreamOrError. */
 function finishThink(state: StreamState, events: string[]): void {
+  state.scan.payload = false;
   const calls = recoverThinkToolCalls(state.thinkText);
   if (calls.length === 0 && TOOL_CALL_MARKER.test(state.thinkText)) state.unrecoverableToolCall = true;
   state.thinkText = "";

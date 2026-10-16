@@ -113,19 +113,36 @@ describe("defaultModelFor", () => {
 // (only when overflow is on, since overflow is what lets the retry move on).
 describe("pickModels avoid (issue #1099)", () => {
   test("the avoided model is never first when overflow is on", () => {
-    const order = pickModels({ ...base, assigned: "@cf/b/kimi", avoid: "@cf/b/kimi", states: { ...ALL }, overflowOn: true });
+    const order = pickModels({ ...base, assigned: "@cf/b/kimi", avoid: ["@cf/b/kimi"], states: { ...ALL }, overflowOn: true });
     expect(order[0]).not.toBe("@cf/b/kimi");
     expect(order).toContain("@cf/b/kimi");
     expect(order[order.length - 1]).toBe("@cf/b/kimi");
   });
 
   test("avoid is ignored when overflow is off (retry stays on the one model)", () => {
-    expect(pickModels({ ...base, assigned: "@cf/b/kimi", avoid: "@cf/b/kimi", states: { ...ALL }, overflowOn: false })).toEqual(["@cf/b/kimi"]);
+    expect(pickModels({ ...base, assigned: "@cf/b/kimi", avoid: ["@cf/b/kimi"], states: { ...ALL }, overflowOn: false })).toEqual(["@cf/b/kimi"]);
   });
 
   test("avoid naming a model not in the candidate list changes nothing", () => {
     const without = pickModels({ ...base, assigned: "@cf/b/kimi", states: { ...ALL }, overflowOn: true });
-    const withStale = pickModels({ ...base, assigned: "@cf/b/kimi", avoid: "@cf/gone/model", states: { ...ALL }, overflowOn: true });
+    const withStale = pickModels({ ...base, assigned: "@cf/b/kimi", avoid: ["@cf/gone/model"], states: { ...ALL }, overflowOn: true });
     expect(withStale).toEqual(without);
+  });
+});
+
+// Maestro review (finding 4): the avoid move pushed the avoided model to the
+// back without re-sorting the rest, so a demoted model could precede an active
+// one. Rank is primary; avoid is a set, used as a tie-break inside a rank.
+describe("pickModels avoid is demotion-aware and takes a set (issue #1099 review)", () => {
+  test("a demoted model never precedes an active one because of the avoid move", () => {
+    const states = { "@cf/a/glm": "active", "@cf/c/ds": "active", "@cf/b/kimi": "demoted" } as const;
+    const order = pickModels({ ...base, assigned: "@cf/a/glm", avoid: ["@cf/a/glm"], states: { ...states }, overflowOn: true });
+    expect(order).toEqual(["@cf/c/ds", "@cf/a/glm", "@cf/b/kimi"]);
+  });
+
+  test("every avoided model sorts behind the non-avoided ones of the same rank", () => {
+    const order = pickModels({ ...base, assigned: "@cf/a/glm", avoid: ["@cf/a/glm", "@cf/c/ds"], states: { ...ALL }, overflowOn: true });
+    expect(order[0]).toBe("@cf/b/kimi");
+    expect(order.slice(1).sort()).toEqual(["@cf/a/glm", "@cf/c/ds"]);
   });
 });

@@ -39,9 +39,10 @@ export function pickModels(input: {
   pool?: readonly PoolModel[];
   poolOn: boolean;
   overflowOn: boolean;
-  /** Issue #1099: a model this studio just ran away on. Only moved to the
-   *  back of the order, and only with overflow on (so a retry can move on). */
-  avoid?: string | null;
+  /** Issue #1099: models this studio just ran away on. Within each rank, these
+   *  sort behind the others (rank stays primary, so a demoted model never jumps
+   *  ahead of an active one). Only with overflow on, so a retry can move on. */
+  avoid?: readonly string[];
 }): string[] {
   const pool = input.pool ?? POOL;
   if (!input.poolOn) return [pool[0].id];
@@ -62,8 +63,15 @@ export function pickModels(input: {
     const roleId = nextActiveAfter(main, eligible.map((m) => m.id), rank);
     if (roleId !== null) order = [roleId, main, ...order.filter((id) => id !== roleId && id !== main)];
   }
-  if (input.avoid && order.includes(input.avoid) && order.length > 1) {
-    order = [...order.filter((id) => id !== input.avoid), input.avoid];
+  const avoided = new Set(input.avoid ?? []);
+  if (avoided.size > 0 && order.length > 1 && order.some((id) => avoided.has(id))) {
+    // Stable sort by rank, then avoided-last within a rank. Re-sorting the whole
+    // list (not just moving the avoided ids to the end) keeps demoted models
+    // behind active ones, which the old end-of-list move did not.
+    order = order
+      .map((id, i) => ({ id, i }))
+      .sort((a, b) => rank(a.id) - rank(b.id) || Number(avoided.has(a.id)) - Number(avoided.has(b.id)) || a.i - b.i)
+      .map((x) => x.id);
   }
   return order;
 }

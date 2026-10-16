@@ -28,7 +28,7 @@ import { insertJuniorUsage } from "../junior/usage";
 import {
   GLM_LEAD_MODEL, anthropicRequestToOpenAI, openAIResponseToAnthropic, classifyAiError,
   createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStreamOrError, parseSseDataLine, runawayErrorFrame,
-  parseStreamErrorChunk, streamErrorFrame,
+  parseStreamErrorChunk, streamErrorFrame, runawayErrorMessage, runawayTokenEstimate,
 } from "./translate";
 import { pickModels } from "./router";
 import { getAssignedModel, getModelStates, getRunawayAvoid, markRunawayAvoid } from "./model-store";
@@ -387,9 +387,14 @@ async function pumpAnthropicStream(
   const state = createStreamState({ thinkTags: poolModel?.thinkTags === true, softCapTokens: poolModel?.softCapTokens });
   const reader = upstream.getReader();
   const cancelUpstream = () => { reader.cancel().catch(() => {}); };
+  // Issue #1099 (review, finding 5): an aborted runaway never gets the upstream
+  // usage chunk, so its output count is the scan's own estimate (see
+  // runawayTokenEstimate) rather than the 0 the stream would otherwise report.
   const end = (ok: boolean, failure?: string): PumpResult => ({
     inputTokens: state.inputTokens,
-    outputTokens: ok ? Math.min(state.outputTokens, requestedMaxTokens) : state.outputTokens,
+    outputTokens: ok ? Math.min(state.outputTokens, requestedMaxTokens)
+      : failure?.startsWith("runaway:") ? Math.min(Math.max(state.outputTokens, runawayTokenEstimate(state)), requestedMaxTokens)
+      : state.outputTokens,
     ok, ...(failure === undefined ? {} : { failure }),
   });
 
@@ -461,6 +466,81 @@ async function pumpAnthropicStream(
     cancelUpstream();
     return end(false, "client_abort");
   }
+}
+
+/** Issue #1099 (review, finding 1): the non-streaming path reads the upstream as
+ *  a stream too, so the runaway scan sees the output while it is generated. A
+ *  runaway aborts upstream and reports `runaway` (the caller answers 529 before
+ *  any byte goes out). Otherwise the chunks are reassembled into one OpenAI-shaped
+ *  reply for the usual non-streaming translation. */
+type CollectedUpstream =
+  | { kind: "reply"; reply: Json; inputTokens: number; outputTokens: number }
+  | { kind: "runaway"; reason: string; inputTokens: number; outputTokens: number }
+  | { kind: "error"; message: string };
+
+async function collectUpstreamStream(
+  upstream: ReadableStream<Uint8Array>, idleMs: number, poolModel: PoolModel | undefined,
+  model: string, requestedMaxTokens: number,
+): Promise<CollectedUpstream> {
+  const reader = upstream.getReader();
+  const cancelUpstream = () => { reader.cancel().catch(() => {}); };
+  const state = createStreamState({ thinkTags: poolModel?.thinkTags === true, softCapTokens: poolModel?.softCapTokens });
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
+  let done = false;
+  while (!done) {
+    let step: ReadableStreamReadResult<Uint8Array> | typeof IDLE;
+    try {
+      step = await readWithIdleTimeout(reader, idleMs);
+    } catch (e) {
+      return { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+    if (step === IDLE) {
+      cancelUpstream();
+      return { kind: "error", message: `upstream stream idle timeout: no data for ${idleMs}ms` };
+    }
+    if (step.done) { done = true; buffer += decoder.decode(); } else { buffer += decoder.decode(step.value, { stream: true }); }
+    const frames = buffer.split("\n\n");
+    buffer = done ? "" : (frames.pop() ?? "");
+    for (const frame of frames) {
+      for (const line of frame.split("\n")) {
+        const parsed = parseSseDataLine(line);
+        if (parsed === "DONE" || parsed === null) continue;
+        const errorMessage = parseStreamErrorChunk(parsed);
+        if (errorMessage !== null) { cancelUpstream(); return { kind: "error", message: errorMessage }; }
+        applyOpenAIStreamChunk(state, parsed);
+        if (state.runaway !== null) {
+          cancelUpstream();
+          return {
+            kind: "runaway", reason: state.runaway, inputTokens: state.inputTokens,
+            outputTokens: Math.min(Math.max(state.outputTokens, runawayTokenEstimate(state)), requestedMaxTokens),
+          };
+        }
+        const delta = parsed?.choices?.[0]?.delta ?? {};
+        if (typeof delta.content === "string") content += delta.content;
+        for (const tc of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+          const call = toolCalls.get(tc.index ?? 0) ?? { id: "", name: "", arguments: "" };
+          if (tc.id) call.id = tc.id;
+          if (tc.function?.name) call.name = tc.function.name;
+          call.arguments += tc.function?.arguments ?? "";
+          toolCalls.set(tc.index ?? 0, call);
+        }
+      }
+    }
+  }
+  const message = {
+    content: content.length > 0 ? content : null,
+    ...(toolCalls.size === 0 ? {} : {
+      tool_calls: [...toolCalls.values()].map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.arguments } })),
+    }),
+  };
+  const reply = openAIResponseToAnthropic(
+    { choices: [{ message, finish_reason: state.finishReason }], usage: { prompt_tokens: state.inputTokens, completion_tokens: state.outputTokens } },
+    { model, requestedMaxTokens },
+  );
+  return { kind: "reply", reply, inputTokens: reply.usage.input_tokens, outputTokens: reply.usage.output_tokens };
 }
 
 /** Shared gate both `/fleet/llm/anthropic/v1/messages` handlers in this file
@@ -630,7 +710,9 @@ async function runModelPoolOverflow(
   for (const [index, modelId] of order.entries()) {
     const pm = modelById(modelId) ?? POOL[0];
     usedModel = pm.id;
-    const openaiBody = anthropicRequestToOpenAI(body, { id: pm.id, minMaxTokens: pm.minMaxTokens, maxMaxTokens: pm.maxMaxTokens });
+    // Issue #1099 (review, finding 1): always stream upstream, so the runaway scan
+    // runs on the non-streaming path too (the caller reassembles a reply).
+    const openaiBody = anthropicRequestToOpenAI({ ...body, stream: true }, { id: pm.id, minMaxTokens: pm.minMaxTokens, maxMaxTokens: pm.maxMaxTokens });
     const backoffHere = order.length === 1 || order.every((id) => id === modelId || seen.has(id));
     // Incident fix (#717): the gateway option is attached ONLY when
     // `gatewayId` is actually set — `ai.run(pm.id, openaiBody)` with no
@@ -713,17 +795,22 @@ export async function handleFleetAnthropicMessages(
   // `pickModels` returns the one model and the overflow loop below never
   // has a second candidate to move to.
   const gatewayId = resolveGatewayId(env);
+  const avoidOn = poolOn && env.LEAD_MODEL_OVERFLOW !== "off";
   const order = pickModels({
     studioId: studio.id,
     requestedModel: body.model,
     poolOn,
     overflowOn: env.LEAD_MODEL_OVERFLOW !== "off",
     // Issue #1099: after a runaway abort the studio's next call moves off that model.
-    avoid: poolOn && env.LEAD_MODEL_OVERFLOW !== "off" ? await getRunawayAvoid(env.DB, studio.id) : null,
+    avoid: avoidOn ? await getRunawayAvoid(env.DB, studio.id) : [],
     assigned: poolOn ? await getAssignedModel(env.DB, studio.id) : null,
     states: poolOn ? await getModelStates(env.DB) : {},
     ...(pool === undefined ? {} : { pool }),
   });
+
+  // Input count for a runaway, whose aborted upstream never reports prompt
+  // tokens. Same heuristic as count_tokens (estimateInputTokens).
+  const requestInputEstimate = () => estimateInputTokens(anthropicRequestToOpenAI(body).messages, body.tools);
 
   // Issue #335: one clock per call. `attempts` now accumulates across EVERY
   // model this call walks (Task 4's overflow loop), not just the winning
@@ -797,9 +884,12 @@ export async function handleFleetAnthropicMessages(
     ctx.waitUntil(
       pumpAnthropicStream(upstream, writer, id, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel))
         .then((result) => {
-          logUsage(env, ctx, studio.id, { model: usedModel, stream: true, ...result, startedAt, attempts });
+          const runaway = result.failure?.startsWith("runaway:") === true;
+          // The aborted upstream never reports prompt tokens; estimate them (see requestInputEstimate).
+          const inputTokens = runaway && result.inputTokens === 0 ? requestInputEstimate() : result.inputTokens;
+          logUsage(env, ctx, studio.id, { model: usedModel, stream: true, ...result, inputTokens, startedAt, attempts });
           // Issue #1099: the retry (a 529 the client re-sends) moves to the next model.
-          if (result.failure?.startsWith("runaway:") && poolOn && env.LEAD_MODEL_OVERFLOW !== "off") {
+          if (runaway && avoidOn) {
             ctx.waitUntil(markRunawayAvoid(env.DB, studio.id, usedModel).catch(() => {}));
           }
         })
@@ -819,9 +909,33 @@ export async function handleFleetAnthropicMessages(
   // `requestedMaxTokens` was previously omitted here entirely, so an
   // inflated upstream `completion_tokens` reached the client, and this logged
   // usage row, completely unclamped.
-  const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
-  logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
-  return json(anthropic, 200);
+  if (!(upstream instanceof ReadableStream)) {
+    const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
+    logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
+    return json(anthropic, 200);
+  }
+  // Issue #1099 (review, finding 1): the upstream is read as a stream here so a
+  // runaway is caught before any byte goes out — 529 overloaded_error, the same
+  // retriable shape the streaming path ends with.
+  const collected = await collectUpstreamStream(upstream, leadStreamIdleMs(env), modelById(usedModel), requestedModel, body.max_tokens);
+  if (collected.kind === "error") {
+    const { status, type, message: overrideMessage } = classifyAiError(collected.message);
+    logUsage(env, ctx, studio.id, {
+      model: usedModel, stream: false, inputTokens: 0, outputTokens: 0, ok: false,
+      failure: `upstream_error ${type}: ${collected.message}`, startedAt, attempts,
+    });
+    return json(anthropicErrorBody(type, overrideMessage ?? collected.message), status);
+  }
+  if (collected.kind === "runaway") {
+    logUsage(env, ctx, studio.id, {
+      model: usedModel, stream: false, inputTokens: collected.inputTokens || requestInputEstimate(), outputTokens: collected.outputTokens,
+      ok: false, failure: `runaway:${collected.reason}`, startedAt, attempts,
+    });
+    if (avoidOn) ctx.waitUntil(markRunawayAvoid(env.DB, studio.id, usedModel).catch(() => {}));
+    return json(anthropicErrorBody("overloaded_error", runawayErrorMessage(collected.reason)), 529);
+  }
+  logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: collected.inputTokens, outputTokens: collected.outputTokens, ok: true, startedAt, attempts });
+  return json(collected.reply, 200);
 }
 
 /** ESTIMATE ONLY, not a real count — this backend has no tokenizer exposed

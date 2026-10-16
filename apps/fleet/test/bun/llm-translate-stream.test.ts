@@ -581,3 +581,45 @@ describe("runaway output detection (issue #1099)", () => {
     expect(JSON.stringify(frame.data)).toContain("repeat_line");
   });
 });
+
+// Maestro review (#1099 follow-up, finding 2): the soft cap counted characters
+// at 4 chars/token, but CJK and JSON run at <=3 chars/token, so a run could
+// pass the per-model token ceiling before the cap tripped. Ratio is now 2.5.
+describe("soft cap counts CJK and JSON conservatively (issue #1099 review)", () => {
+  test("a CJK run past the cap trips soft_cap (CJK ~1.5 chars/token)", () => {
+    const state = createStreamState({ softCapTokens: 1000 });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "推".repeat(2600) } }] });
+    expect(state.runaway).toBe("soft_cap");
+  });
+
+  test("a JSON run past the cap trips soft_cap (JSON ~2.5 chars/token)", () => {
+    const state = createStreamState({ softCapTokens: 1000 });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: '{"k":1}'.repeat(400) } }] });
+    expect(state.runaway).toBe("soft_cap");
+  });
+
+  test("text under the cap does not trip", () => {
+    const state = createStreamState({ softCapTokens: 1000 });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: '{"k":1}'.repeat(200) } }] });
+    expect(state.runaway).toBeNull();
+  });
+});
+
+// Maestro review (finding 3): kimi writes a tool call inside <think>, and the
+// tool registers only at </think>, so its payload counted toward the soft cap
+// and tripped it on a legitimate Write. Payload text is not reasoning.
+describe("kimi in-think tool payload is not counted toward the soft cap (issue #1099 review)", () => {
+  test("a recovered in-think Write payload past the cap is not a runaway", () => {
+    const state = createStreamState({ thinkTags: true, softCapTokens: 1000 });
+    const payload = `<tool_call>{"name":"Write","arguments":{"file_path":"a.ts","content":"${"y".repeat(6000)}"}}</tool_call>`;
+    const events = applyOpenAIStreamChunk(state, { choices: [{ delta: { content: `<think>Plan the file.\n${payload}</think>` } }] });
+    expect(state.runaway).toBeNull();
+    expect(events.join("")).toContain('"name":"Write"');
+  });
+
+  test("reasoning in a think region with no tool call still trips the soft cap", () => {
+    const state = createStreamState({ thinkTags: true, softCapTokens: 1000 });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: `<think>${"z".repeat(2600)}` } }] });
+    expect(state.runaway).toBe("soft_cap");
+  });
+});

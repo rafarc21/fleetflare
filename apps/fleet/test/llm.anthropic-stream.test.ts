@@ -1717,3 +1717,76 @@ describe("handleFleetAnthropicMessages — runaway output abort (issue #1099)", 
     expect(seen[1]).toBe(seen[0]);
   });
 });
+
+// Maestro review (#1099 follow-up): findings 1 (non-streaming path had no
+// scan — a 32k-token loop went out as a 200), 5 (cancelUpstream untested;
+// runaway usage row logged 0/0).
+describe("handleFleetAnthropicMessages — runaway review follow-ups (issue #1099)", () => {
+  const looping = Array.from({ length: 60 }, () => "the same looping sentence here\n");
+  const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+
+  function trackedStream(contents: string[], onCancel: () => void, finish = false): ReadableStream<Uint8Array> {
+    const enc = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const content of contents) controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        // A runaway is left open on purpose: a real upstream is still generating,
+        // and a closed stream never fires its cancel callback. A clean reply closes.
+        if (finish) controller.close();
+      },
+      cancel() { onCancel(); },
+    });
+  }
+
+  it("a streamed runaway cancels the upstream read (no tokens paid after the trip)", async () => {
+    let cancelled = false;
+    const run = vi.fn(async () => trackedStream(looping, () => { cancelled = true; }));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: { ...good, stream: true } });
+    await r.text();
+    await ctx.drain();
+    expect(cancelled).toBe(true);
+  });
+
+  it("a non-streaming runaway returns 529 overloaded_error before any byte, and cancels upstream", async () => {
+    let cancelled = false;
+    const run = vi.fn(async () => trackedStream(looping, () => { cancelled = true; }));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: good });
+    expect(r.status).toBe(529);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    expect(await r.json()).toMatchObject({ type: "error", error: { type: "overloaded_error" } });
+    expect(cancelled).toBe(true);
+    await ctx.drain();
+    expect((await usageRows()).at(-1)).toMatchObject({ ok: 0, error: "runaway:repeat_line" });
+  });
+
+  it("a runaway usage row records non-zero input and output counts", async () => {
+    const run = vi.fn(async () => trackedStream(looping, () => {}));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: { ...good, stream: true } });
+    await r.text();
+    await ctx.drain();
+    const row = (await usageRows()).at(-1)!;
+    expect(row.inputTokens).toBeGreaterThan(0);
+    expect(row.outputTokens).toBeGreaterThan(0);
+  });
+
+  it("two runaways in a row avoid both models (the avoid set grows)", async () => {
+    const seen: string[] = [];
+    const run = vi.fn(async (model: string) => {
+      seen.push(model);
+      return seen.length <= 2 ? trackedStream(looping, () => {}) : trackedStream(["fine answer"], () => {}, true);
+    });
+    const envOverrides = { LEAD_MODEL_POOL: "on" } as Partial<Env>;
+    for (let i = 0; i < 2; i++) {
+      const r = await callRoute({ ai: { run }, envOverrides, pool: testPool, body: { ...good, stream: true } });
+      await r.text();
+      await ctx.drain();
+    }
+    const third = await callRoute({ ai: { run }, envOverrides, pool: testPool, body: { ...good, stream: true } });
+    await third.text();
+    expect(seen).toHaveLength(3);
+    expect(seen[2]).not.toBe(seen[0]);
+    expect(seen[2]).not.toBe(seen[1]);
+  });
+});
