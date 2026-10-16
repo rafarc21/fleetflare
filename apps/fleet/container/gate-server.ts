@@ -66,12 +66,17 @@ export interface GateDeps {
   workdir: string;
   /** Backoff between clone attempts; tests pass a no-op. */
   sleep?: (ms: number) => Promise<void>;
+  /** Jitter source for the clone backoff; tests pin it. */
+  random?: () => number;
 }
 
 /** Live: concurrent legs got HTTP 429 from GitHub on clone. A rate limit or a
  *  5xx is worth another try; anything else (repository not found) is not. */
 const TRANSIENT_CLONE = /returned error: (429|5\d\d)\b/;
-const CLONE_ATTEMPTS = 3;
+const CLONE_ATTEMPTS = 5;
+/** Live: 9 legs cloning at once got 429 again after 2 s + 4 s. Exponential
+ *  from 3 s with ±50% jitter de-syncs the legs: ~3, 6, 12, 24 s (~45 s total). */
+const CLONE_BACKOFF_BASE_MS = 3_000;
 
 export interface GateBody {
   state: "success" | "failure" | "error";
@@ -156,12 +161,13 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
   // Blobless and without a checkout: commits and trees come down now, file
   // contents only when a step reads them.
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const random = deps.random ?? Math.random;
   const cloneArgs = ["clone", "--filter=blob:none", "--no-checkout", "--quiet", cloneUrl(repo, req.private === true), workdir];
   let clone = await run("git", cloneArgs, { cwd: "/workspace" });
   for (let attempt = 2; clone.code !== 0 && attempt <= CLONE_ATTEMPTS && TRANSIENT_CLONE.test(clone.stderr); attempt++) {
     // A failed clone can leave a partial directory that the next clone refuses.
     await run("rm", ["-rf", workdir], { cwd: "/workspace" });
-    await sleep(2_000 * (attempt - 1));
+    await sleep(CLONE_BACKOFF_BASE_MS * 2 ** (attempt - 2) * (0.5 + random()));
     clone = await run("git", cloneArgs, { cwd: "/workspace" });
   }
   if (clone.code !== 0) return { state: "error", description: `clone failed: ${firstLine(clone.stderr)}` };

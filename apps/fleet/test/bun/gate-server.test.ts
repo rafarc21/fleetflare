@@ -334,12 +334,23 @@ describe("runGate: a transient clone failure is retried (live: 429 from GitHub o
     expect(world.calls.some((c) => c[0] === "rm" && c.includes("-rf"))).toBe(true);
   });
 
-  it("gives up after 3 transient failures and reports the clone error", async () => {
-    const world = fakeWorld({ cloneErrs: [RATE_LIMITED, RATE_LIMITED, RATE_LIMITED] });
+  it("gives up after 5 transient failures and reports the clone error", async () => {
+    const world = fakeWorld({ cloneErrs: [RATE_LIMITED, RATE_LIMITED, RATE_LIMITED, RATE_LIMITED, RATE_LIMITED] });
     const out = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(), sleep: noSleep });
     expect(out.state).toBe("error");
     expect(out.description).toContain("429");
-    expect(cloneCalls(world.calls)).toBe(3);
+    expect(cloneCalls(world.calls)).toBe(5);
+  });
+
+  it("backs off exponentially with jitter between clone attempts (live: 2s/4s was too short for GitHub's 429)", async () => {
+    const world = fakeWorld({ cloneErrs: [RATE_LIMITED, RATE_LIMITED, RATE_LIMITED, RATE_LIMITED] });
+    const waits: number[] = [];
+    const out = await runGate(RUN, {
+      exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(),
+      sleep: async (ms) => { waits.push(ms); }, random: () => 0.5,
+    });
+    expect(out.state).toBe("success");
+    expect(waits).toEqual([3_000, 6_000, 12_000, 24_000]);
   });
 
   it("does not retry a clone that failed for good (repository not found)", async () => {

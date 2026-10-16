@@ -16,7 +16,9 @@ export const GATE_INSTANCE = "standard-4";
 const READY_TIMEOUT_MS = 180_000;
 const READY_POLL_MS = 250;
 const PORT_RETRY_MS = 500;
-const PORT_RETRY_BUDGET_MS = 60_000;
+/** Live: on a host that has not pulled the (Rust-sized) gate image yet, the
+ *  server took over 60 s to listen after start(). Pulls are cached per host. */
+const PORT_RETRY_BUDGET_MS = 240_000;
 /** One leg's ceiling, counted from its start. A leg past it is an error, and
  *  the finally-destroy kills its container, so nothing keeps billing. */
 export const LEG_RUN_TIMEOUT_MS = 25 * 60_000;
