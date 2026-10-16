@@ -11,25 +11,25 @@
 # Scope, same posture as lead-gate.sh: no STUDIO_ID -> no-op (never fires on
 # an operator's Mac). A Claude-led studio has no fleet-route ANTHROPIC_BASE_URL
 # -> no-op. Stop fires for the lead's own turn end only; members emit
-# SubagentStop and are not registered on it.
+# SubagentStop and are not registered on it. Subagent (sidechain) transcript
+# lines are ignored: a member's TodoWrite is not the lead's list.
 #
 # Decision (Claude Code Stop hook protocol: stdout JSON, exit 0):
-#   - last TodoWrite has no pending/in_progress item    -> allow
-#   - no TodoWrite in the transcript                    -> allow
-#   - last assistant text asks the operator (a line ending "?", a numbered
-#     option list, or approve/confirm/which/should I)   -> allow
-#   - 8 blocks already for this user prompt             -> allow (loop guard)
+#   - no TodoWrite, or the last one has no pending/in_progress item -> allow
+#   - the last assistant text asks the operator something -> allow. A question
+#     line ending in "?", a numbered option list, or a confirm/approve/which/
+#     "should I" phrase all count.
+#   - 8 blocks already made for this user prompt -> allow (loop guard)
 #   - otherwise -> {"decision":"block","reason":"continue with <first open todo>"}
-# The loop guard counts per real user prompt (uuid, or line index), not per
-# stop_hook_active: that flag is not reliable on every CLI build. Tool results
-# and isMeta entries (the "Stop hook feedback" line after each block) do not
-# start a new prompt. The counter
-# lives in ~/.claude/state, one file per session, as "<prompt-key>\n<count>".
-# A block is emitted only after the counter write succeeded.
 #
-# FAIL OPEN. Any error (no python3, unreadable transcript or counter, unwritable
-# state dir, bad JSON) allows the stop. A broken hook must never wedge a lead
-# mid-task.
+# The loop guard counts per real user prompt (the last transcript user entry
+# that is neither a tool result nor CLI-injected isMeta feedback), not per
+# stop_hook_active flag. The count lives in
+# ~/.claude/state, one file per session, and is persisted BEFORE any block.
+#
+# FAIL OPEN. Any error (no python3, unreadable transcript, bad JSON, unreadable
+# or unwritable counter) allows the stop. A broken hook must never wedge a lead
+# mid-task, and a block that cannot be counted could never be capped.
 
 [ -n "${STUDIO_ID:-}" ] || exit 0
 
@@ -41,102 +41,105 @@ esac
 command -v python3 >/dev/null 2>&1 || exit 0
 
 PY=$(cat <<'PYEOF'
-import json, os, re, sys
+import hashlib, json, os, re, sys
 
-MAX_CHAIN = 8
+MAX_BLOCKS_PER_PROMPT = 8
 OPEN = ("pending", "in_progress")
+NUMBERED = re.compile(r"^\d+[.)]\s")
 ASK_WORDS = re.compile(r"\b(approve|confirm|which|should i)\b", re.I)
-OPTION_LINE = re.compile(r"^\s*\d+[.)]\s+\S")
-
-def asks_operator(text):
-    lines = [l.rstrip() for l in text.splitlines() if l.strip()]
-    if any(l.endswith("?") for l in lines):
-        return True
-    if any(OPTION_LINE.match(l) for l in lines):
-        return True
-    return ASK_WORDS.search(text) is not None
-
-def read_count(path, key):
-    # None = counter exists but cannot be read -> caller allows the stop.
-    try:
-        with open(path) as f:
-            parts = f.read().split("\n")
-    except FileNotFoundError:
-        return 0
-    except OSError:
-        return None
-    if len(parts) < 2 or parts[0] != key:
-        return 0
-    try:
-        return int(parts[1])
-    except ValueError:
-        return 0
-
-def write_state(path, key, count):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        f.write(key + "\n" + str(count))
-    os.replace(tmp, path)
-
-def allow(state_file, key, count):
-    try:
-        write_state(state_file, key, count)
-    except OSError:
-        pass
-    sys.exit(0)
 
 payload = json.load(sys.stdin)
 sid = re.sub(r"[^A-Za-z0-9_.-]", "_", str(payload.get("session_id") or "unknown"))
-state_file = os.path.join(os.path.expanduser("~"), ".claude", "state", "oss-lead-continue-" + sid)
+state_dir = os.path.join(os.path.expanduser("~"), ".claude", "state")
+state_file = os.path.join(state_dir, "oss-lead-continue-" + sid)
 
-todos, last_text, prompt_key = None, "", "none"
-with open(payload["transcript_path"]) as f:
-    for n, line in enumerate(f):
-        try:
-            m = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(m, dict) or m.get("isSidechain") is True:
-            continue
-        kind = m.get("type")
-        content = (m.get("message") or {}).get("content") or []
-        if kind == "user":
-            # isMeta: Claude Code's own "Stop hook feedback" line after a block.
-            # It is not an operator prompt, so it must not reset the chain.
-            if m.get("isMeta") is True:
-                continue
-            if isinstance(content, str) or not any(
-                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-            ):
-                prompt_key = str(m.get("uuid") or n)
-            continue
-        if kind != "assistant":
-            continue
-        blocks = content if isinstance(content, list) else []
-        text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
-        if text.strip():
-            last_text = text
-        for b in blocks:
-            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "TodoWrite":
-                todos = (b.get("input") or {}).get("todos") or []
 
-open_items = [t for t in (todos or []) if t.get("status") in OPEN]
-if not open_items:
-    allow(state_file, prompt_key, 0)
-if asks_operator(last_text):
-    allow(state_file, prompt_key, 0)
+def save(key, count):
+    # Best effort. A counter that cannot be written must not produce a block.
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(state_file, "w") as f:
+            f.write("%s\t%d" % (key, count))
+        return True
+    except OSError:
+        return False
 
-count = read_count(state_file, prompt_key)
-if count is None or count >= MAX_CHAIN:
-    allow(state_file, prompt_key, count or 0)
 
-block = {"decision": "block", "reason": "continue with " + str(open_items[0].get("content", "the next open todo"))}
+def allow(key="", count=0):
+    save(key, count)
+    sys.exit(0)
+
+
+def is_real_prompt(entry):
+    # isMeta entries are CLI-injected (e.g. "Stop hook feedback" after each block),
+    # not something the user typed, so they never start a new count.
+    if entry.get("isMeta") is True:
+        return False
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return True
+    return isinstance(content, list) and not any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+
+
+def asks_operator(text):
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if any(l.endswith("?") for l in lines):
+        return True
+    if any(NUMBERED.match(l) for l in lines):
+        return True
+    return bool(ASK_WORDS.search(text))
+
+
+todos, last_text, prompt_key = None, "", ""
 try:
-    write_state(state_file, prompt_key, count + 1)
-except OSError:
-    sys.exit(0)  # no counter, no block: fail open
-sys.stdout.write(json.dumps(block))
+    with open(payload["transcript_path"]) as f:
+        for line in f:
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if m.get("isSidechain") is True:
+                continue
+            if m.get("type") == "user" and is_real_prompt(m):
+                prompt_key = m.get("uuid") or hashlib.sha1(
+                    json.dumps(m.get("message"), sort_keys=True).encode()).hexdigest()
+            if m.get("type") != "assistant":
+                continue
+            blocks = (m.get("message") or {}).get("content") or []
+            text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+            if text.strip():
+                last_text = text
+            for b in blocks:
+                if b.get("type") == "tool_use" and b.get("name") == "TodoWrite":
+                    todos = (b.get("input") or {}).get("todos") or []
+except (OSError, KeyError, TypeError):
+    allow()
+
+open_items = [t for t in (todos or []) if isinstance(t, dict) and t.get("status") in OPEN]
+if not open_items or asks_operator(last_text):
+    allow(prompt_key, 0)
+
+count = 0
+try:
+    with open(state_file) as f:
+        key, _, n = f.read().strip().partition("\t")
+    if key == prompt_key:
+        count = int(n or 0)
+except FileNotFoundError:
+    count = 0
+except (OSError, ValueError):
+    allow(prompt_key, 0)
+
+if count >= MAX_BLOCKS_PER_PROMPT:
+    allow(prompt_key, 0)
+
+# Persist the count first: a block is only issued once it is recorded.
+if not save(prompt_key, count + 1):
+    sys.exit(0)
+
+reason = "continue with " + str(open_items[0].get("content", "the next open todo"))
+sys.stdout.write(json.dumps({"decision": "block", "reason": reason}))
 PYEOF
 )
 

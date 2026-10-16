@@ -30,8 +30,8 @@ afterEach(() => {
 
 type Todo = { content: string; status: "pending" | "in_progress" | "completed" };
 
-function todoWrite(todos: Todo[]) {
-  return { type: "assistant", message: { role: "assistant", content: [
+function todoWrite(todos: Todo[], extra: Record<string, unknown> = {}) {
+  return { type: "assistant", ...extra, message: { role: "assistant", content: [
     { type: "text", text: "Working." },
     { type: "tool_use", id: "tu_1", name: "TodoWrite", input: { todos } },
   ] } };
@@ -41,20 +41,22 @@ function assistantText(text: string) {
   return { type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } };
 }
 
-function userLine(text: string) {
-  return { type: "user", message: { role: "user", content: text } };
+/** A real user prompt: string content, with a uuid so the hook can tell turns apart. */
+function userLine(text: string, uuid = `u-${text}`) {
+  return { type: "user", uuid, message: { role: "user", content: text } };
+}
+
+/** A tool result: also type "user" in a transcript, but NOT a new prompt. */
+function toolResultLine(uuid: string) {
+  return { type: "user", uuid, message: { role: "user", content: [
+    { type: "tool_result", tool_use_id: "tu_1", content: "ok" },
+  ] } };
 }
 
 // The entry Claude Code appends after every Stop block: a meta user line, not
 // an operator prompt.
 function stopFeedbackLine(reason: string) {
   return { type: "user", isMeta: true, message: { role: "user", content: `Stop hook feedback:\n${reason}` } };
-}
-
-function toolResultLine() {
-  return { type: "user", message: { role: "user", content: [
-    { type: "tool_result", tool_use_id: "tu_1", content: "ok" },
-  ] } };
 }
 
 function writeTranscript(lines: unknown[]): string {
@@ -65,17 +67,18 @@ function writeTranscript(lines: unknown[]): string {
 
 function run(
   transcriptLines: unknown[],
-  opts: { stopHookActive?: boolean; env?: Record<string, string>; sessionId?: string } = {},
+  opts: { stopHookActive?: boolean; omitActiveFlag?: boolean; env?: Record<string, string>; sessionId?: string } = {},
 ) {
   const transcript_path = writeTranscript(transcriptLines);
+  const payload: Record<string, unknown> = {
+    hook_event_name: "Stop",
+    session_id: opts.sessionId ?? SESSION,
+    transcript_path,
+  };
+  if (!opts.omitActiveFlag) payload.stop_hook_active = opts.stopHookActive ?? false;
   return runSnippet({
     script: GATE,
-    stdin: JSON.stringify({
-      hook_event_name: "Stop",
-      session_id: opts.sessionId ?? SESSION,
-      transcript_path,
-      stop_hook_active: opts.stopHookActive ?? false,
-    }),
+    stdin: JSON.stringify(payload),
     shell: "bash",
     env: {
       HOME: home,
@@ -141,6 +144,23 @@ describe("oss-lead-continue.sh — blocking", () => {
     ]);
     expect(blocked(res)).toBeNull();
   });
+
+  // Maestro review (#1116, item 4): a subagent's TodoWrite is not the lead's list.
+  test("ignores TodoWrite entries from sidechain (subagent) transcript lines", () => {
+    const res = run([
+      todoWrite(OPEN_TODOS, { isSidechain: true }),
+      todoWrite([{ content: "Lead step", status: "completed" }]),
+    ]);
+    expect(blocked(res)).toBeNull();
+  });
+
+  test("a sidechain TodoWrite never supplies the reason for a lead block", () => {
+    const res = run([
+      todoWrite([{ content: "Lead open", status: "pending" }]),
+      todoWrite([{ content: "Member open", status: "pending" }], { isSidechain: true }),
+    ]);
+    expect(blocked(res)!.reason).toContain("Lead open");
+  });
 });
 
 describe("oss-lead-continue.sh — allowing", () => {
@@ -162,49 +182,51 @@ describe("oss-lead-continue.sh — allowing", () => {
     expect(blocked(res)).toBeNull();
   });
 
-  test("an option-list question is allowed even when the question is not the last line", () => {
+  test("a question ending is detected even with trailing whitespace", () => {
+    const res = run([todoWrite(OPEN_TODOS), assistantText("Should I drop the flag?  \n")]);
+    expect(blocked(res)).toBeNull();
+  });
+
+  // Maestro review (#1116, item 3): a question need not be the last line.
+  test("allows when a question line is followed by a numbered option list", () => {
     const res = run([todoWrite(OPEN_TODOS), assistantText("Should I force-push main?\n1. yes\n2. no")]);
     expect(blocked(res)).toBeNull();
   });
 
-  test("a numbered option list alone is allowed", () => {
-    const res = run([todoWrite(OPEN_TODOS), assistantText("Pick one:\n1) keep it\n2) drop it")]);
+  test("allows when the operator is asked to pick from a numbered list with no question mark", () => {
+    const res = run([todoWrite(OPEN_TODOS), assistantText("Pick one:\n1. rebase\n2. merge")]);
     expect(blocked(res)).toBeNull();
   });
 
-  test("a question ending is detected even with trailing whitespace", () => {
-    const res = run([todoWrite(OPEN_TODOS), assistantText("Should I drop the flag?  \n")]);
+  test("allows when the text asks for confirmation without a question mark", () => {
+    const res = run([todoWrite(OPEN_TODOS), assistantText("Please confirm the target branch before I continue.")]);
     expect(blocked(res)).toBeNull();
   });
 });
 
 describe("oss-lead-continue.sh — fail open", () => {
-  test("unwritable ~/.claude (state dir cannot be created) -> allow, never block", () => {
-    // ~/.claude as a plain file: makedirs and the counter write both fail.
-    writeFileSync(join(home, ".claude"), "not a dir");
+  // Maestro review (#1116, item 1): a counter that cannot be written must never
+  // turn into an endless block. No counter write -> no block.
+  test("allows the stop when the counter directory cannot be created (a regular file sits in its place)", () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(join(home, ".claude", "state"), "not a directory");
     const res = run([userLine("go"), todoWrite(OPEN_TODOS)]);
     expect(res.code).toBe(0);
     expect(blocked(res)).toBeNull();
   });
 
-  test("unreadable existing counter -> allow, never block", () => {
+  test("allows the stop when the counter file exists but cannot be read", () => {
     const stateDir = join(home, ".claude", "state");
-    mkdirSync(join(stateDir, `oss-lead-continue-${SESSION}`), { recursive: true }); // a dir where the file should be
+    mkdirSync(stateDir, { recursive: true });
+    // A directory where the counter file should be: opening it for read fails.
+    mkdirSync(join(stateDir, `oss-lead-continue-${SESSION}`));
     const res = run([userLine("go"), todoWrite(OPEN_TODOS)]);
     expect(blocked(res)).toBeNull();
   });
 });
 
-describe("oss-lead-continue.sh — sidechain", () => {
-  test("an open TodoWrite inside a sidechain (subagent) entry is ignored", () => {
-    const side = { ...todoWrite(OPEN_TODOS), isSidechain: true };
-    const res = run([userLine("go"), todoWrite([{ content: "x", status: "completed" }]), side]);
-    expect(blocked(res)).toBeNull();
-  });
-});
-
 describe("oss-lead-continue.sh — loop guard", () => {
-  test("blocks up to 8 consecutive times within one turn chain, then allows", () => {
+  test("blocks up to 8 consecutive times within one user prompt, then allows", () => {
     const lines = [userLine("go"), todoWrite(OPEN_TODOS)];
     for (let i = 1; i <= 8; i++) {
       const res = run(lines, { stopHookActive: i > 1 });
@@ -214,22 +236,31 @@ describe("oss-lead-continue.sh — loop guard", () => {
     expect(blocked(ninth)).toBeNull();
   });
 
-  test("a new user prompt starts a fresh chain", () => {
-    const lines = [userLine("go"), todoWrite(OPEN_TODOS)];
-    for (let i = 1; i <= 8; i++) run(lines, { stopHookActive: i > 1 });
-    // Chain exhausted for prompt #1; prompt #2 starts again from zero.
-    const next = [...lines, userLine("next"), todoWrite(OPEN_TODOS)];
-    const fresh = run(next, { stopHookActive: false });
-    expect(blocked(fresh)?.decision).toBe("block");
-  });
-
-  test("the cap holds without stop_hook_active (flag absent -> still 8 per prompt)", () => {
+  // Maestro review (#1116, item 2): the cap must not depend on stop_hook_active.
+  test("caps at 8 per prompt even when stop_hook_active is absent from the payload", () => {
     const lines = [userLine("go"), todoWrite(OPEN_TODOS)];
     for (let i = 1; i <= 8; i++) {
-      expect(blocked(run(lines, { stopHookActive: false }))?.decision).toBe("block");
+      const res = run(lines, { omitActiveFlag: true });
+      expect(blocked(res)?.decision).toBe("block");
     }
-    expect(blocked(run(lines, { stopHookActive: false }))).toBeNull();
-    expect(blocked(run(lines, { stopHookActive: false }))).toBeNull();
+    expect(blocked(run(lines, { omitActiveFlag: true }))).toBeNull();
+  });
+
+  test("a new user prompt starts a fresh count", () => {
+    const first = [userLine("go", "u-A"), todoWrite(OPEN_TODOS)];
+    for (let i = 1; i <= 8; i++) run(first, { stopHookActive: i > 1 });
+    expect(blocked(run(first, { stopHookActive: true }))).toBeNull();
+    const second = [...first, userLine("next task", "u-B"), todoWrite(OPEN_TODOS)];
+    expect(blocked(run(second, { stopHookActive: false }))?.decision).toBe("block");
+  });
+
+  test("tool results between blocks do not count as a new prompt", () => {
+    const lines: unknown[] = [userLine("go", "u-A"), todoWrite(OPEN_TODOS)];
+    for (let i = 1; i <= 8; i++) {
+      run(lines, { stopHookActive: i > 1 });
+      lines.push(toolResultLine(`tr-${i}`));
+    }
+    expect(blocked(run(lines, { stopHookActive: true }))).toBeNull();
   });
 
   test("the counter is keyed by session: another session's chain does not exhaust this one", () => {
@@ -242,7 +273,7 @@ describe("oss-lead-continue.sh — loop guard", () => {
   test("live loop: the isMeta Stop-feedback entry after each block does not reset the cap (<= 8 blocks)", () => {
     // Real loop, not a frozen transcript: every block appends the feedback
     // entry and the lead's next TodoWrite, the way Claude Code grows the file.
-    const transcript: unknown[] = [userLine("go"), todoWrite(OPEN_TODOS)];
+    const transcript: unknown[] = [userLine("go", "u-live"), todoWrite(OPEN_TODOS)];
     let blocks = 0;
     for (let i = 0; i < 30; i++) {
       if (blocked(run(transcript, { stopHookActive: true })) === null) break;
@@ -253,52 +284,26 @@ describe("oss-lead-continue.sh — loop guard", () => {
     expect(blocks).toBe(8);
   });
 
-  test("tool_result entries between blocks do not start a new chain (live loop, <= 8 blocks)", () => {
-    const transcript: unknown[] = [userLine("go"), todoWrite(OPEN_TODOS)];
+  test("live loop with a tool result between blocks still caps at 8", () => {
+    const transcript: unknown[] = [userLine("go", "u-tool"), todoWrite(OPEN_TODOS)];
     let blocks = 0;
     for (let i = 0; i < 30; i++) {
-      if (blocked(run(transcript, {})) === null) break;
+      if (blocked(run(transcript, { stopHookActive: true })) === null) break;
       blocks++;
-      transcript.push(toolResultLine(), todoWrite(OPEN_TODOS));
+      transcript.push(toolResultLine("tr-live"), todoWrite(OPEN_TODOS));
     }
     expect(blocks).toBe(8);
   });
 
-  test("an allowed stop clears the counter so the next chain starts fresh", () => {
-    const open = [userLine("go"), todoWrite(OPEN_TODOS)];
-    const done = [userLine("go"), todoWrite([{ content: "x", status: "completed" }])];
-    run(open, { stopHookActive: false });
-    run(done, { stopHookActive: true });
-    const counterDir = join(home, ".claude", "state");
-    const count = existsSync(counterDir) ? readFileSync(join(counterDir, `oss-lead-continue-${SESSION}`), "utf8").trim().split("\n")[1] : "0";
-    expect(count).toBe("0");
-  });
-});
-
-describe("studio-bringup.sh lead-gate settings write — OSS Stop registration fails open", () => {
-  test("happy path: one settings write registers the OSS Stop hook and the lead-gate PreToolUse", () => {
-    mkdirSync(join(home, ".claude", "hooks"), { recursive: true });
-    writeFileSync(join(home, ".claude", "hooks", "oss-lead-continue.sh"), "#!/usr/bin/env bash\n");
-    const region = extractRegion(BRINGUP, "lead-gate-settings-merge");
-    const res = runSnippet({ script: region, shell: "bash", env: { HOME: home }, timeout: 10_000 });
-    expect(res.code).toBe(0);
-    const cfg = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
-    expect(JSON.stringify(cfg.hooks.Stop)).toContain("oss-lead-continue.sh");
-    expect(JSON.stringify(cfg.hooks.PreToolUse)).toContain("lead-gate.sh");
-  });
-
-  test("Stop as a non-list does not abort the settings write: PreToolUse still lands, exit 0", () => {
-    const claudeDir = join(home, ".claude");
-    mkdirSync(join(claudeDir, "hooks"), { recursive: true });
-    writeFileSync(join(claudeDir, "hooks", "oss-lead-continue.sh"), "#!/usr/bin/env bash\n");
-    // Stop as a string: the Stop registration cannot merge into it.
-    writeFileSync(join(claudeDir, "settings.json"), JSON.stringify({ hooks: { Stop: "not-a-list" } }));
-    const region = extractRegion(BRINGUP, "lead-gate-settings-merge");
-    const res = runSnippet({ script: region, shell: "bash", env: { HOME: home }, timeout: 10_000 });
-    expect(res.code).toBe(0);
-    expect(res.stderr).toContain("oss-lead-continue");
-    const cfg = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf8"));
-    expect(JSON.stringify(cfg.hooks.PreToolUse)).toContain("lead-gate.sh");
+  test("an allowed stop clears the count so the same prompt can block again", () => {
+    const open = [userLine("go", "u-A"), todoWrite(OPEN_TODOS)];
+    for (let i = 1; i <= 3; i++) run(open, { stopHookActive: i > 1 });
+    const done = [...open, todoWrite([{ content: "x", status: "completed" }])];
+    expect(blocked(run(done, { stopHookActive: true }))).toBeNull();
+    const reopened = [...done, todoWrite(OPEN_TODOS)];
+    expect(blocked(run(reopened, { stopHookActive: false }))?.decision).toBe("block");
+    const counter = readFileSync(join(home, ".claude", "state", `oss-lead-continue-${SESSION}`), "utf8");
+    expect(counter).toContain("\t1");
   });
 });
 
@@ -308,41 +313,30 @@ describe("studio-bringup.sh installs the Stop hook for OSS leads", () => {
     expect(BRINGUP).toContain("~/.claude/hooks/oss-lead-continue.sh");
   });
 
-  test("registers the hook on the Stop event (lead turn end; members emit SubagentStop)", () => {
-    expect(BRINGUP).toContain("oss-lead-continue.sh");
-    expect(BRINGUP).toMatch(/setdefault\("Stop", \[\]\)/);
-  });
-
-  test("Stop registration rides the SAME settings.json write as the lead gate (one write, all hooks or none)", () => {
-    const leadWrite = BRINGUP.indexOf("pre.append(entry)");
-    const stopReg = BRINGUP.indexOf('stop.append(');
-    expect(leadWrite).toBeGreaterThan(-1);
-    expect(stopReg).toBeGreaterThan(leadWrite);
-    // No settings.json write between the lead-gate entry and the Stop registration.
-    expect(BRINGUP.slice(leadWrite, stopReg)).not.toContain('with open(path, "w")');
-  });
-
-  test("a missing source under set -e logs and boot continues without the hook", () => {
-    const start = BRINGUP.indexOf("    if cp /opt/blueprint/gates/oss-lead-continue.sh");
-    expect(start).toBeGreaterThan(-1);
-    const end = BRINGUP.indexOf("\n    fi\n", start) + "\n    fi\n".length;
-    const block = BRINGUP.slice(start, end);
-    const bringHome = mkdtempSync(join(tmpdir(), "oss-boot-"));
-    mkdirSync(join(bringHome, ".claude", "hooks"), { recursive: true });
-    const res = runSnippet({
-      script: `set -e\n${block}\necho BOOT_CONTINUES`,
-      stdin: "",
-      shell: "bash",
-      env: { HOME: bringHome },
-      timeout: 10_000,
-    });
+  // Maestro review (#1116, item 5): the Stop entry rides the SAME settings.json
+  // write as lead-gate.sh, so there is one settings write, not a second that can
+  // abort boot on its own. The region is extracted and executed for real.
+  test("the lead-gate settings write also registers the OSS Stop hook", () => {
+    // bring-up runs `mkdir -p ~/.claude` before this write; mirror that precondition.
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const region = extractRegion(BRINGUP, "lead-gate-settings-merge");
+    const res = runSnippet({ script: region, shell: "bash", env: { HOME: home }, timeout: 10_000 });
     expect(res.code).toBe(0);
-    expect(res.stdout).toContain("BOOT_CONTINUES");
-    expect(res.stderr).toContain("continuing boot without it");
-    rmSync(bringHome, { recursive: true, force: true });
+    const cfg = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+    expect(JSON.stringify(cfg.hooks.Stop)).toContain("oss-lead-continue.sh");
+    expect(JSON.stringify(cfg.hooks.PreToolUse)).toContain("lead-gate.sh");
   });
 
-  test("the copy is guarded: a failed cp logs and bring-up continues", () => {
-    expect(BRINGUP).toMatch(/if cp \/opt\/blueprint\/gates\/oss-lead-continue\.sh/);
+  test("a failing OSS Stop registration does not abort the lead-gate settings write", () => {
+    const claudeDir = join(home, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    // Stop as a string: the Stop registration cannot merge into it.
+    writeFileSync(join(claudeDir, "settings.json"), JSON.stringify({ hooks: { Stop: "not-a-list" } }));
+    const region = extractRegion(BRINGUP, "lead-gate-settings-merge");
+    const res = runSnippet({ script: region, shell: "bash", env: { HOME: home }, timeout: 10_000 });
+    expect(res.code).toBe(0);
+    expect(res.stderr).toContain("oss-lead-continue");
+    const cfg = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf8"));
+    expect(JSON.stringify(cfg.hooks.PreToolUse)).toContain("lead-gate.sh");
   });
 });
