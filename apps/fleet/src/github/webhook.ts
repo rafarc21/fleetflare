@@ -320,7 +320,7 @@ async function flipTasksOnPullRequest(env: Env, body: string): Promise<void> {
     if (payload === null || typeof payload !== "object") return;
     const req = flipRequestFromPullRequest(payload as Parameters<typeof flipRequestFromPullRequest>[0]);
     if (req === null) return;
-    await markAwaitingMerge(githubBoardApi(env), req.repo, req.refs);
+    await markAwaitingMerge(githubBoardApi(env), req.repo, req.refs, req.head);
   } catch (err) {
     console.error("pull_request awaiting_merge flip threw", err);
   }

@@ -109,19 +109,97 @@ describe("markAwaitingMerge — flip the referenced task when its PR is ready", 
   });
 });
 
+// Board issue #1077: several working refs need the PR's head branch to break
+// the tie. A sub-PR routinely names its umbrella tasks too (`refs #977, refs
+// #945, refs #715`), so an umbrella left in `working` must not flip with it.
+describe("markAwaitingMerge — several working refs, the PR's head branch breaks the tie", () => {
+  const board = (tasks: Record<number, ReturnType<typeof task>>) =>
+    fakeApi({ getIssue: vi.fn(async (_repo: string, n: number) => tasks[n]!) });
+
+  it("an umbrella still working next to the sub-task the branch names: only the sub-task flips", async () => {
+    const api = board({ 715: assigned(715, "working"), 1049: assigned(1049, "working") });
+    expect(await markAwaitingMerge(api, REPO, [715, 1049], "task-1049-board-umbrella")).toEqual([1049]);
+    expect(api.addLabels).toHaveBeenCalledTimes(1);
+    expect(api.addLabels).toHaveBeenCalledWith(REPO, 1049, ["awaiting_merge"]);
+  });
+
+  it("several candidates and the branch names none of them: nothing flips, and the ambiguity is logged", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const api = board({ 715: assigned(715, "working"), 1049: assigned(1049, "working") });
+    expect(await markAwaitingMerge(api, REPO, [715, 1049], "fix-refactor-login")).toEqual([]);
+    expect(api.addLabels).not.toHaveBeenCalled();
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it("several candidates and the branch names two of them: still ambiguous, nothing flips", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const api = board({ 715: assigned(715, "working"), 1049: assigned(1049, "working") });
+    expect(await markAwaitingMerge(api, REPO, [715, 1049], "task-715-1049-umbrella")).toEqual([]);
+    expect(api.addLabels).not.toHaveBeenCalled();
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it("a number inside a longer digit run is not a token: `task-10491` does not name #1049", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const api = board({ 715: assigned(715, "working"), 1049: assigned(1049, "working") });
+    expect(await markAwaitingMerge(api, REPO, [715, 1049], "task-10491-board")).toEqual([]);
+    expect(api.addLabels).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it("several candidates and no head branch to read: nothing flips", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const api = board({ 715: assigned(715, "working"), 1049: assigned(1049, "working") });
+    expect(await markAwaitingMerge(api, REPO, [715, 1049])).toEqual([]);
+    expect(api.addLabels).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it("exactly one candidate flips even when the branch names another task", async () => {
+    const api = board({ 715: assigned(715, "working"), 1049: assigned(1049, "submitted") });
+    expect(await markAwaitingMerge(api, REPO, [715, 1049], "task-1049-board-umbrella")).toEqual([715]);
+    expect(api.addLabels).toHaveBeenCalledWith(REPO, 715, ["awaiting_merge"]);
+  });
+
+  it("a closed or unassigned ref is not a candidate, so it never competes for the tie-break", async () => {
+    const api = board({
+      715: assigned(715, "working"),
+      1049: assigned(1049, "working", { open: false }),
+      977: task({ number: 977, state: "working", labels: ["working"], assignee: null }),
+    });
+    expect(await markAwaitingMerge(api, REPO, [715, 1049, 977], "fix-refactor-login")).toEqual([715]);
+  });
+});
+
 describe("flipRequestFromPullRequest — what one PR delivery asks the board to flip", () => {
   const pr = (action: string, overrides: Record<string, unknown> = {}) => ({
     action,
     repository: { full_name: "Acme/Websites" },
-    pull_request: { draft: false, title: "Board work", body: "Ships it.\n\nrefs #12", ...overrides },
+    pull_request: {
+      draft: false, title: "Board work", body: "Ships it.\n\nrefs #12",
+      head: { ref: "task-12-board-work" }, ...overrides,
+    },
   });
 
-  it("a PR opened ready asks for its refs, repo lowercased", () => {
-    expect(flipRequestFromPullRequest(pr("opened"))).toEqual({ repo: "acme/websites", refs: [12] });
+  it("a PR opened ready asks for its refs and its head branch, repo lowercased", () => {
+    expect(flipRequestFromPullRequest(pr("opened"))).toEqual({
+      repo: "acme/websites", refs: [12], head: "task-12-board-work",
+    });
   });
 
-  it("a draft marked ready for review asks for its refs", () => {
-    expect(flipRequestFromPullRequest(pr("ready_for_review"))).toEqual({ repo: "acme/websites", refs: [12] });
+  it("a draft marked ready for review asks for its refs and its head branch", () => {
+    expect(flipRequestFromPullRequest(pr("ready_for_review"))).toEqual({
+      repo: "acme/websites", refs: [12], head: "task-12-board-work",
+    });
+  });
+
+  it("a PR with no readable head branch still asks, with an empty head", () => {
+    expect(flipRequestFromPullRequest({
+      action: "opened", repository: { full_name: "Acme/Websites" },
+      pull_request: { draft: false, title: "x", body: "refs #3" },
+    })).toEqual({ repo: "acme/websites", refs: [3], head: "" });
   });
 
   it("a draft opened is NOT ready — no request", () => {
@@ -133,7 +211,9 @@ describe("flipRequestFromPullRequest — what one PR delivery asks the board to 
   });
 
   it("a ref in the TITLE counts as much as one in the body", () => {
-    expect(flipRequestFromPullRequest(pr("opened", { title: "refs #40", body: null }))).toEqual({ repo: "acme/websites", refs: [40] });
+    expect(flipRequestFromPullRequest(pr("opened", { title: "refs #40", body: null }))).toEqual({
+      repo: "acme/websites", refs: [40], head: "task-12-board-work",
+    });
   });
 
   it("a null body and a missing repo are no request, never a throw", () => {
