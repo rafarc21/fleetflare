@@ -28,6 +28,7 @@ import {
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
 import { bundleStepEnabled, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
+import { markRunProgress } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import { infraRerunDecision, recordInfraRerun, rerunStatusArgs, startInfraRerun } from "./infra-rerun";
 import { postGateStatus, type StatusPort } from "./status-post";
@@ -109,16 +110,16 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     }
 
     const decision = decideGateRun({
-      changedFiles: resolved.changedFiles, fleetJsonChanged: configChanged, base, head,
+      baseSha: resolved.baseSha, changedFiles: resolved.changedFiles, fleetJsonChanged: configChanged, base, head,
       truncated: resolved.truncated, headGatesInvalid,
     });
+    // A failure posts on the head: a bad head config, or a base with no gate block (#1132).
     if (decision.action === "fail") {
       const statusPostFailed = await step.do("post-head-invalid", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: decision.description }));
       return { state: "failure", description: decision.description, statusPostFailed, legs: [] };
     }
     if (decision.action === "skip") {
-      if (!decision.status) return { skipped: decision.reason, statusPostFailed: false };
       // Post success so the required context is not left pending forever. (A guess: localci.sh's own skip path is the model.)
       const statusPostFailed = await step.do("post-skip-status", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha,
@@ -177,12 +178,16 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       planBundleLeg({ owner, repo: repoName, pr, runId: event.instanceId, headSha: resolved.headSha, baseSha: resolved.baseSha }),
     );
 
+    // Every leg attempt stamps the run's progress, so a live run that stops
+    // progressing is hung to a manual start (#1135). A failed stamp never fails the leg.
+    const touch = (): Promise<void> =>
+      markRunProgress(d1RunIndex(this.env.DB), repo, pr, event.instanceId, Date.now());
     const results = await Promise.all(
       legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName,
         {
           baseRef: resolved.baseRef, pr: String(pr), private: resolved.private,
           bundleKey: bundled ? bundleKey : undefined, mergeBase: bundled ? resolved.mergeBaseSha : undefined,
-        }, planned)),
+        }, planned, touch)),
     );
 
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
@@ -198,13 +203,17 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       const statusPostFailed = await step.do("post-infra-rerun", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, rerunStatusArgs(event.instanceId)));
       const started = await step.do("start-infra-rerun", async () => {
-        const ok = await startInfraRerun(() => this.env.GATE_WORKFLOW.create({
-          id: rerunId, params: { repo, pr, headSha: resolved.headSha, rerunOf: event.instanceId },
-        }));
+        const ok = await startInfraRerun(
+          () => this.env.GATE_WORKFLOW.create({
+            id: rerunId, params: { repo, pr, headSha: resolved.headSha, rerunOf: event.instanceId },
+          }),
+          () => this.env.GATE_WORKFLOW.get(rerunId),
+        );
         // The rerun takes the PR's run pointer, so a manual start finds it (#1084).
+        // One conditional handoff: a newer push's pointer is never taken back (#1135).
         if (ok) {
           await recordInfraRerun(d1RunIndex(this.env.DB), {
-            repo, pr, headSha: resolved.headSha, runId: rerunId, instanceId: event.instanceId,
+            repo, pr, headSha: resolved.headSha, runId: rerunId, instanceId: event.instanceId, at: Date.now(),
           });
         }
         return ok;
@@ -232,17 +241,21 @@ function bunLaneFiles(tree: Parameters<typeof laneFilesFromTree>[0], cfg: GateCo
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
   owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean; bundleKey?: string; mergeBase?: string }, planned: PlannedLeg,
+  touch: () => Promise<void>,
 ): Promise<LegRunResult> {
   return runLegStep(
     { do: (name, config, fn) => step.do(name, config, fn) },
-    async (leg, attemptId) => {
+    async (leg, attemptId, signal) => {
       // Scoped by run instance, leg AND attempt: two PRs gating the same leg name
       // must never share one container, one leg per container is the DO's
       // contract, and a retry must never reuse a DO a prior attempt is tearing down (#1068).
       const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(gateRunnerName(instanceId, leg.leg, attemptId)));
+      await touch();
+      // The signal ends a hung DO call at the attempt deadline, so it cannot hold the step open (#1135).
       return stub.fetch("https://gate-runner/run-leg", {
         method: "POST",
         body: JSON.stringify(legRequest(owner, repoName, leg, { ...pr, image: leg.image })),
+        signal,
       });
     },
     planned,

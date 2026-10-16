@@ -33,6 +33,39 @@ const j = (v: unknown, status = 200) =>
 export const liveHeadSha = (env: Env) => async (repo: string, pr: number): Promise<string> =>
   getPullRequestHeadSha(await repoTokenMinter(env)(repo), repo, pr);
 
+/** The status one run id reports. A throw (an unknown id included) is the
+ *  caller's to map to a JSON error. */
+async function gateRunStatus(env: Env, runId: string): Promise<Response> {
+  const instance = await workflow(env).get(runId); // Workflows get() is async
+  // A run that handed off to its infra rerun (#1119) reports the rerun's status.
+  const status = await statusFollowingRerun(await instance.status(), async (rerunId) =>
+    (await workflow(env).get(rerunId)).status());
+  // Task 14's verdict rides in the Workflow's own output once terminal;
+  // anything not yet terminal maps to pending.
+  const out = status.output as
+    | { state?: string; description?: string; statusPostFailed?: boolean; skipped?: string; legs?: unknown[] }
+    | undefined;
+  // "terminated" is terminal too: mapping it to pending would poll forever.
+  if (status.status === "errored" || status.status === "terminated") {
+    return j({ state: "error", description: "gate workflow instance ended without a verdict" });
+  }
+  if (status.status !== "complete") {
+    return j({ state: "pending" });
+  }
+  if (out?.skipped !== undefined) {
+    // Only the "no gated paths changed" skip posted success to GitHub
+    // (workflow.ts post-skip-status). A skip from before #1132 (no gate block)
+    // posted nothing: the repo is not configured, so it is an error, never green.
+    const state = out.skipped.startsWith("no gated paths changed") ? "success" : "error";
+    return j({ state, description: `skipped: ${out.skipped}`, statusPostFailed: out.statusPostFailed });
+  }
+  if (!out?.state) {
+    return j({ state: "error", description: "gate workflow instance errored" });
+  }
+  // legs (#1049) is dropped from the JSON when the run carries none.
+  return j({ state: out.state, description: out.description, statusPostFailed: out.statusPostFailed, legs: out.legs });
+}
+
 export async function handleGateRoute(
   req: Request, env: Env, headShaOf: (repo: string, pr: number) => Promise<string> = liveHeadSha(env),
 ): Promise<Response> {
@@ -55,34 +88,17 @@ export async function handleGateRoute(
     }
     const runId = url.searchParams.get("runId");
     if (!runId) return j({ error: "runId required" }, 400);
-    const instance = await workflow(env).get(runId); // Workflows get() is async
-    // A run that handed off to its infra rerun (#1119) reports the rerun's status.
-    const status = await statusFollowingRerun(await instance.status(), async (rerunId) =>
-      (await workflow(env).get(rerunId)).status());
-    // Task 14's verdict rides in the Workflow's own output once terminal;
-    // anything not yet terminal maps to pending.
-    const out = status.output as
-      | { state?: string; description?: string; statusPostFailed?: boolean; skipped?: string; legs?: unknown[] }
-      | undefined;
-    // "terminated" is terminal too: mapping it to pending would poll forever.
-    if (status.status === "errored" || status.status === "terminated") {
-      return j({ state: "error", description: "gate workflow instance ended without a verdict" });
+    try {
+      return await gateRunStatus(env, runId);
+    } catch (err) {
+      // An id the Workflow does not know is a JSON 404 (#1144). Any other throw
+      // is a JSON 500: a bare throw reached Cloudflare's HTML error page.
+      if (/not[ _.-]?found/i.test(err instanceof Error ? err.message : String(err))) {
+        return j({ error: "no such gate run", runId }, 404);
+      }
+      console.error("gate status failed", err);
+      return j({ error: "gate status unavailable" }, 500);
     }
-    if (status.status !== "complete") {
-      return j({ state: "pending" });
-    }
-    if (out?.skipped !== undefined) {
-      // Only the "no gated paths changed" skip posted success to GitHub
-      // (workflow.ts post-skip-status). Any other skip (no gate block) posted
-      // nothing: the repo is not configured, so it is an error, never green.
-      const state = out.skipped.startsWith("no gated paths changed") ? "success" : "error";
-      return j({ state, description: `skipped: ${out.skipped}`, statusPostFailed: out.statusPostFailed });
-    }
-    if (!out?.state) {
-      return j({ state: "error", description: "gate workflow instance errored" });
-    }
-    // legs (#1049) is dropped from the JSON when the run carries none.
-    return j({ state: out.state, description: out.description, statusPostFailed: out.statusPostFailed, legs: out.legs });
   }
 
   return j({ error: "not found" }, 404);

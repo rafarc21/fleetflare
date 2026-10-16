@@ -15,6 +15,9 @@ const INFRA_CAUSE = new RegExp([
   "exceeded \\d+ min without a result",
   "no progress past its deadline",
   ": HTTP 503\\b",
+  // Workflows' own step timeout, and an AbortSignal.timeout on a leg call (#1135).
+  "[Ee]xecution timed out",
+  "operation was aborted",
 ].join("|"));
 
 /** An error leg is infra-class by its cause. A leg whose first attempt was red
@@ -25,31 +28,41 @@ export function isInfraLegFailure(result: LegResult & { redFirst?: boolean }): b
   return INFRA_CAUSE.test(result.description ?? "");
 }
 
-/** Creates the rerun instance. A create that throws "already exists" is a
- *  replayed step: the rerun is already running, so it is success. Any other
- *  failure is not started, and the caller posts the final error verdict. */
-export async function startInfraRerun(create: () => Promise<unknown>): Promise<boolean> {
+/** Creates the rerun instance. A create that throws is a replayed step when
+ *  the rerun instance exists: it is already running, so it is success. That is
+ *  asked of the instance, never of the error text, which differs by runtime
+ *  (#1135). Any failure with no instance behind it is not started, and the
+ *  caller posts the final error verdict. */
+export async function startInfraRerun(
+  create: () => Promise<unknown>, get: () => Promise<unknown>,
+): Promise<boolean> {
   try {
     await create();
     return true;
   } catch (err) {
+    try {
+      await get();
+      return true;
+    } catch {
+      // No such instance: the create really failed.
+    }
     const message = err instanceof Error ? err.message : String(err);
-    if (/already exists/i.test(message)) return true;
     console.error("gate: infra rerun create failed", message);
     return false;
   }
 }
 
 /** Points the PR's run index at the rerun, like a normal start (#1084 must see
- *  it), but only while the first run is still the latest: a newer push's run
- *  keeps the pointer, so the rerun never takes it back. */
-export async function recordInfraRerun(
+ *  it), but only while the first run still holds the pointer: one conditional
+ *  write, never a read then a write (#1135). A newer push's run keeps the
+ *  pointer, so the rerun never takes it back. Returns whether the handoff landed. */
+export function recordInfraRerun(
   index: GateRunIndex,
-  input: { repo: string; pr: number; headSha: string; runId: string; instanceId: string },
-): Promise<void> {
-  const latest = await index.latest(input.repo, input.pr);
-  if (latest?.runId !== input.instanceId) return;
-  await index.record(input.repo, input.pr, { headSha: input.headSha, runId: input.runId });
+  input: { repo: string; pr: number; headSha: string; runId: string; instanceId: string; at: number },
+): Promise<boolean> {
+  return index.handOff(input.repo, input.pr, input.instanceId, {
+    headSha: input.headSha, runId: input.runId, progressedAt: input.at,
+  });
 }
 
 /** The status a poller sees for a run that may have handed off to its infra
@@ -74,7 +87,8 @@ export function infraRerunDecision(results: LegResult[], rerunOf: string | undef
   return errors.every(isInfraLegFailure);
 }
 
-/** The status a run posts when it re-runs instead of ending with an error verdict. */
+/** The status a run posts when it re-runs instead of ending with an error verdict.
+ *  The rerun's full id, not a cut (#1144): a cut tag is shared by every rerun. */
 export function rerunStatusArgs(runId: string): { state: "pending"; description: string } {
-  return { state: "pending", description: `rerun after infra error (run ${runId.slice(0, 8)})` };
+  return { state: "pending", description: `rerun after infra error (run ${runId})` };
 }

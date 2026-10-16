@@ -2,16 +2,14 @@
 // PR's push starts one gate run per head sha; a manual `fleet gate run` of that
 // sha reuses it; drafts, other actions and ungated repos start nothing. #1082:
 // a new head sha ends the still-live run of the sha it replaces. The
-// GATE_WORKFLOW binding, the PR's run index and the fleet.json reader are fakes
-// at the boundary; the decisions themselves are pure.
+// GATE_WORKFLOW binding and the PR's run index are fakes at the boundary; the
+// decisions themselves are pure.
 import { describe, it, expect } from "bun:test";
 import {
-  autoRunPullRequest, gateRunId, pullRequestAutoRun, startGateRun, startManualGateRun,
+  autoRunPullRequest, gateRunId, GATE_STALL_MS, markRunProgress, pullRequestAutoRun, startGateRun, startManualGateRun,
   type GateRunIndex, type GateRunInstance, type GateRunRecord, type GateRunStarter, type PullRequestAutoRun,
 } from "../../src/gate/auto-run";
-import type { FleetJsonReader } from "../../src/gate/load-config";
 
-const FLEET = "acme/fleet";
 const PR_REPO = "acme/example";
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
@@ -63,20 +61,28 @@ function fakeWorkflow(opts: { createError?: Error; terminateError?: Error } = {}
   return { wf, runs, creates, terminated };
 }
 
-/** The per-PR run index in memory: the latest run recorded for each repo#pr. */
+/** The per-PR run index in memory: the latest run recorded for each repo#pr.
+ *  progress() and handOff() follow the D1 store's rules: progress only moves
+ *  the pointed run, and a handoff only lands while the pointer still names `from`. */
 function fakeIndex() {
   const heads = new Map<string, GateRunRecord>();
   const index: GateRunIndex = {
     async latest(repo, pr) { return heads.get(`${repo}#${pr}`) ?? null; },
     async record(repo, pr, run) { heads.set(`${repo}#${pr}`, run); },
+    async progress(repo, pr, runId, at) {
+      const cur = heads.get(`${repo}#${pr}`);
+      if (cur?.runId === runId) heads.set(`${repo}#${pr}`, { ...cur, progressedAt: at });
+    },
+    async handOff(repo, pr, from, run) {
+      const cur = heads.get(`${repo}#${pr}`);
+      if (cur?.runId !== from) return false;
+      heads.set(`${repo}#${pr}`, run);
+      return true;
+    },
   };
   return { index, heads };
 }
 
-/** A fleet.json reader over an in-memory repo map. A missing file reads null. */
-function reader(files: Record<string, unknown>): FleetJsonReader {
-  return async (repo, ref) => files[`${repo}@${ref}`] ?? null;
-}
 
 describe("pullRequestAutoRun: which deliveries start a run", () => {
   it("opened, synchronize and ready_for_review on a gated repo -> the PR's repo, number and both shas", () => {
@@ -282,7 +288,7 @@ describe("startManualGateRun: reattach to a live run, start fresh after a finish
     const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
     runs.get(first.runId)!.status = "complete";
     const fresh = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2);
-    expect(heads.get(`${PR_REPO}#7`)).toEqual({ headSha: HEAD, runId: fresh.runId });
+    expect(heads.get(`${PR_REPO}#7`)).toMatchObject({ headSha: HEAD, runId: fresh.runId });
     const again = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2 + 1);
     expect(again).toEqual({ runId: fresh.runId, reused: true });
   });
@@ -330,74 +336,78 @@ describe("startManualGateRun: reattach to a live run, start fresh after a finish
   });
 });
 
-describe("autoRunPullRequest: only a gated base starts a run", () => {
-  it("a base with no gate block anywhere starts nothing", async () => {
-    const { wf, creates } = fakeWorkflow();
-    const { index } = fakeIndex();
-    const out = await autoRunPullRequest(PR, {
-      fleetRepo: FLEET, readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} } }), workflow: wf, index,
-    });
-    expect(out).toBe("no-gate-block");
-    expect(creates).toHaveLength(0);
+// #1132 (refs #715): auto-run does not read the base's gate config. It starts a
+// run for every gated PR, and the Workflow decides: a base with no gate block
+// gets a visible failure on the head (gate-config.test.ts), a head that adds
+// fleet.json (#1091) gets its legs. One decision point, so auto-run and a manual
+// start can never disagree.
+describe("startManualGateRun: a live run with no progress is hung, so it is ended and never reattached (#1135)", () => {
+  const T1 = 1_700_000_000_000;
+
+  it("the gate's stall window is longer than one leg attempt (deadline 28 min + retry delay), so a healthy run is never ended", () => {
+    expect(GATE_STALL_MS).toBeGreaterThan(28 * 60_000 + 15_000);
   });
 
-  it("a PR repo whose base carries a gate block starts one run", async () => {
+  it("a live run with no progress for the stall window is ended, and a fresh run starts under a new id", async () => {
+    const { wf, runs, creates, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    runs.get(first.runId)!.status = "running";
+    const second = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1 + GATE_STALL_MS);
+    expect(terminated).toEqual([first.runId]);
+    expect(second.reused).toBe(false);
+    expect(second.runId).not.toBe(first.runId);
+    expect(creates).toHaveLength(2);
+  });
+
+  it("a progress touch inside the window keeps the live run: the manual start reattaches to it", async () => {
+    const { wf, creates, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    await markRunProgress(index, PR_REPO, 7, first.runId, T1 + GATE_STALL_MS - 60_000);
+    const second = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1 + GATE_STALL_MS);
+    expect(second).toEqual({ runId: first.runId, reused: true });
+    expect(terminated).toEqual([]);
+    expect(creates).toHaveLength(1);
+  });
+
+  it("markRunProgress never throws: a failed progress write must not fail the leg that reports it", async () => {
+    const failing = { ...fakeIndex().index, progress: async () => { throw new Error("D1 down"); } };
+    await expect(markRunProgress(failing, PR_REPO, 7, "gate-x", T1)).resolves.toBeUndefined();
+  });
+});
+
+describe("autoRunPullRequest: every gated PR starts a run; the Workflow decides (#1132)", () => {
+  it("a base with no gate block still starts one run, so the Workflow can post the visible failure", async () => {
     const { wf, creates } = fakeWorkflow();
     const { index } = fakeIndex();
-    const out = await autoRunPullRequest(PR, {
-      fleetRepo: FLEET,
-      readFleetJson: reader({
-        [`${FLEET}@HEAD`]: { gates: {} },
-        [`${PR_REPO}@${BASE}`]: { gate: BLOCK },
-      }),
-      workflow: wf,
-      index,
-    });
-    expect(out).toBe("started");
+    expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("started");
     expect(creates).toEqual([{ id: await gateRunId(PR_REPO, HEAD), params: { repo: PR_REPO, pr: 7 } }]);
   });
 
   it("the same head sha seen twice starts one run, the second reports reused", async () => {
     const { wf, runs } = fakeWorkflow();
     const { index } = fakeIndex();
-    const deps = {
-      fleetRepo: FLEET,
-      readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} }, [`${PR_REPO}@${BASE}`]: { gate: BLOCK } }),
-      workflow: wf,
-      index,
-    };
-    expect(await autoRunPullRequest(PR, deps)).toBe("started");
-    expect(await autoRunPullRequest(PR, deps)).toBe("reused");
+    expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("started");
+    expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("reused");
     expect(runs.size).toBe(1);
   });
 
   it("a synchronize on a gated PR ends the run of the sha it replaces (#1082)", async () => {
     const { wf, terminated } = fakeWorkflow();
     const { index } = fakeIndex();
-    const deps = {
-      fleetRepo: FLEET,
-      readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} }, [`${PR_REPO}@${BASE}`]: { gate: BLOCK } }),
-      workflow: wf,
-      index,
-    };
+    const deps = { workflow: wf, index };
     await autoRunPullRequest(PR, deps);
-    const out = await autoRunPullRequest({ ...PR, headSha: THIRD }, deps);
-    expect(out).toBe("started");
+    expect(await autoRunPullRequest({ ...PR, headSha: THIRD }, deps)).toBe("started");
     expect(terminated).toEqual([await gateRunId(PR_REPO, HEAD)]);
   });
 
-  it("an ungated base ends nothing: the gate block check runs before any supersede", async () => {
+  it("a PR into an ungated base still supersedes the previous sha's run: the new run gets the visible failure", async () => {
     const { wf, terminated } = fakeWorkflow();
     const { index } = fakeIndex();
-    const deps = {
-      fleetRepo: FLEET,
-      readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} }, [`${PR_REPO}@${BASE}`]: { gate: BLOCK } }),
-      workflow: wf,
-      index,
-    };
+    const deps = { workflow: wf, index };
     await autoRunPullRequest(PR, deps);
-    const ungated = { ...deps, readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} } }) };
-    expect(await autoRunPullRequest({ ...PR, headSha: THIRD }, ungated)).toBe("no-gate-block");
-    expect(terminated).toEqual([]);
+    expect(await autoRunPullRequest({ ...PR, headSha: THIRD }, deps)).toBe("started");
+    expect(terminated).toEqual([await gateRunId(PR_REPO, HEAD)]);
   });
 });
