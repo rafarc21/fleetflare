@@ -15,6 +15,7 @@ import {
   handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH, ANTHROPIC_BODY_CAP,
 } from "../src/llm/anthropic-route";
 import { GLM_LEAD_MODEL, GLM_MIN_MAX_TOKENS } from "../src/llm/translate";
+import { OSS_LEAD_CONTINUE_RULE } from "../src/llm/lead-rule";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -297,7 +298,8 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     // Incident fix (#717): no LEAD_AI_GATEWAY_ID set in this fixture env, so
     // env.AI.run is called with exactly the pre-model-pool 2-arg shape — no
     // gateway option attached.
-    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS });
+    // Issue #1112 layer 1: a lead call gets the continue-until-todos-done rule as its system message.
+    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "system", content: OSS_LEAD_CONTINUE_RULE }, { role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS });
     const body = await r.json();
     expect(body).toMatchObject({ type: "message", role: "assistant", model: good.model, content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 3, output_tokens: 2 } });
   });
@@ -338,6 +340,7 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, {
       model: GLM_LEAD_MODEL,
       messages: [
+        { role: "system", content: OSS_LEAD_CONTINUE_RULE },
         { role: "assistant", content: null, tool_calls: [{ id: "toolu_1", type: "function", function: { name: "get_weather", arguments: '{"city":"nyc"}' } }] },
         { role: "tool", tool_call_id: "toolu_1", content: "sunny" },
       ],

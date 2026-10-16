@@ -30,7 +30,8 @@ import {
   createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStreamOrError, parseSseDataLine,
   parseStreamErrorChunk, streamErrorFrame,
 } from "./translate";
-import { pickModels } from "./router";
+import { isSmallModelName, pickModels } from "./router";
+import { withOssLeadContinueRule } from "./lead-rule";
 import { getAssignedModel, getModelStates } from "./model-store";
 import { POOL, modelById, type PoolModel } from "./models";
 
@@ -685,6 +686,9 @@ export async function handleFleetAnthropicMessages(
   try { body = JSON.parse(raw); } catch { return text("bad json", 400); }
   if (!Array.isArray(body?.messages) || body.messages.length === 0) return text("messages required", 400);
   if (typeof body?.max_tokens !== "number" || !(body.max_tokens > 0)) return text("max_tokens required", 400);
+  // Issue #1112 layer 1: lead calls only. Claude Code's helper calls carry a
+  // haiku-class model name (isSmallModelName) and never get the rule.
+  if (!isSmallModelName(body.model)) body = withOssLeadContinueRule(body);
 
   const requestedModel = typeof body.model === "string" && body.model.length > 0 ? body.model : GLM_LEAD_MODEL;
   const ai = env.AI;
