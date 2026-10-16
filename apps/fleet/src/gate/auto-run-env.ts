@@ -22,16 +22,21 @@ export function d1RunIndex(db: D1Database): GateRunIndex {
         .prepare(
           "INSERT INTO gate_pr_head (repo, pr, head_sha, run_id, progressed_at) VALUES (?, ?, ?, ?, ?) "
             + "ON CONFLICT (repo, pr) DO UPDATE SET head_sha = excluded.head_sha, run_id = excluded.run_id, "
-            + "progressed_at = excluded.progressed_at",
+            + "progressed_at = excluded.progressed_at, red = 0",
         )
         .bind(repo.toLowerCase(), pr, run.headSha, run.runId, run.progressedAt ?? 0)
         .run();
     },
     async handOff(repo, pr, fromRunId, run) {
-      // One conditional write: the pointer moves only while it still names fromRunId (#1135).
+      // One conditional write: the pointer moves while it still names fromRunId, or already names
+      // the run being handed to. The second case is a replayed handoff: it succeeded on its first
+      // try, so it must not read as a lost one (#1148 review). A newer push's run matches neither.
       const result = await db
-        .prepare("UPDATE gate_pr_head SET head_sha = ?, run_id = ?, progressed_at = ? WHERE repo = ? AND pr = ? AND run_id = ?")
-        .bind(run.headSha, run.runId, run.progressedAt ?? 0, repo.toLowerCase(), pr, fromRunId)
+        .prepare(
+          "UPDATE gate_pr_head SET head_sha = ?, run_id = ?, progressed_at = ?, red = 0 "
+            + "WHERE repo = ? AND pr = ? AND run_id IN (?, ?)",
+        )
+        .bind(run.headSha, run.runId, run.progressedAt ?? 0, repo.toLowerCase(), pr, fromRunId, run.runId)
         .run();
       return result.meta.changes > 0;
     },
@@ -44,25 +49,47 @@ export function d1RunIndex(db: D1Database): GateRunIndex {
   };
 }
 
-/** The watchdog's view of the same table: the stall sweep and the unknown-stamp
- *  adoption (#1148 item 1). Capped, so a sweep stays bounded however many PRs were gated. */
+/** The stall read: the pointers stamped inside the window, oldest first. Served by
+ *  the progressed_at index (migration 0009). Capped, so a sweep stays bounded. A
+ *  finished run is retired (progressed_at -1), so it never fills this cap. */
+export const STALLED_RUNS_SQL =
+  "SELECT repo, pr, head_sha AS headSha, run_id AS runId, progressed_at AS progressedAt, red FROM gate_pr_head "
+  + "WHERE progressed_at > 0 AND progressed_at <= ? AND progressed_at >= ? ORDER BY progressed_at ASC LIMIT 20";
+
+/** The watchdog's view of the same table: the stall sweep, the retirement of a
+ *  finished run and the unknown-stamp adoption (#1148 item 1). */
 export function d1WatchdogIndex(db: D1Database): WatchdogIndex {
   return {
     ...d1RunIndex(db),
     async adoptUnknown(at) {
       await db.prepare("UPDATE gate_pr_head SET progressed_at = ? WHERE progressed_at = 0").bind(at).run();
     },
+    async retire(repo, pr, runId, progressedAt) {
+      // Only while the pointer still names the run at the stamp the sweep read (#1148 review, finding 2).
+      await db
+        .prepare("UPDATE gate_pr_head SET progressed_at = -1 WHERE repo = ? AND pr = ? AND run_id = ? AND progressed_at = ?")
+        .bind(repo.toLowerCase(), pr, runId, progressedAt)
+        .run();
+    },
     async stalled(before, notBefore) {
-      const rows = await db
-        .prepare(
-          "SELECT repo, pr, head_sha AS headSha, run_id AS runId, progressed_at AS progressedAt FROM gate_pr_head "
-            + "WHERE progressed_at > 0 AND progressed_at <= ? AND progressed_at >= ? ORDER BY progressed_at ASC LIMIT 20",
-        )
-        .bind(before, notBefore)
-        .all<StalledRun>();
+      const rows = await db.prepare(STALLED_RUNS_SQL).bind(before, notBefore).all<StalledRun>();
       return rows.results;
     },
   };
+}
+
+/** Flags the pointed run as red: one of its legs reported a red verdict (#1119).
+ *  A run no longer pointed at is left alone. Never throws: a failed flag must
+ *  not fail the leg that reports it, and the run's own verdict still posts. */
+export async function markRunRed(db: D1Database, repo: string, pr: number, runId: string): Promise<void> {
+  try {
+    await db
+      .prepare("UPDATE gate_pr_head SET red = 1 WHERE repo = ? AND pr = ? AND run_id = ?")
+      .bind(repo.toLowerCase(), pr, runId)
+      .run();
+  } catch (err) {
+    console.error("gate: red flag failed", err);
+  }
 }
 
 /** Starts the gate run for one gated PR. Logs and never throws: GitHub gets 200

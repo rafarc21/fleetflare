@@ -5,8 +5,8 @@
 // step deadline (no orphan step holds the run open).
 import { describe, it, expect } from "bun:test";
 import {
-  infraRerunDecision, isInfraLegFailure, isRerunInstance, launchInfraRerun, recordInfraRerun, rerunInstanceId,
-  rerunStatusArgs, startInfraRerun, statusFollowingRerun,
+  announceInfraRerun, infraRerunDecision, isInfraLegFailure, isRerunInstance, launchInfraRerun, recordInfraRerun,
+  rerunInstanceId, rerunStarted, rerunStatusArgs, startInfraRerun, statusFollowingRerun,
 } from "../../src/gate/infra-rerun";
 import { runLegStep, withStepDeadline, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
@@ -287,5 +287,30 @@ describe("statusFollowingRerun: a run that handed off to its rerun reports the r
   it("a run still running is its own status, even if it carries no output yet", async () => {
     const running = { status: "running" };
     expect(await statusFollowingRerun(running, async () => { throw new Error("not called"); })).toEqual(running);
+  });
+});
+
+describe("rerunStarted: a cached start result from before the outcome union still reads as started (#1148 review)", () => {
+  it("the boolean true a pre-union deploy cached is a started rerun, not a failed one", () => {
+    expect(rerunStarted(true)).toBe(true);
+  });
+
+  it("'started' is started; 'superseded', 'failed' and a replayed nothing are not", () => {
+    expect(rerunStarted("started")).toBe(true);
+    expect(rerunStarted("superseded")).toBe(false);
+    expect(rerunStarted("failed")).toBe(false);
+    expect(rerunStarted(undefined)).toBe(false);
+  });
+});
+
+describe("announceInfraRerun: progress is stamped before the rerun's pending status (#1148 review)", () => {
+  it("the touch runs before the post, so a watchdog never sees a stale stamp during the rerun's start", async () => {
+    const calls: string[] = [];
+    const posted = await announceInfraRerun({
+      touch: async () => { calls.push("touch"); },
+      post: async () => { calls.push("post"); return false; },
+    });
+    expect(calls).toEqual(["touch", "post"]);
+    expect(posted).toBe(false);
   });
 });

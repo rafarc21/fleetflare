@@ -98,6 +98,23 @@ export function recordInfraRerun(
   });
 }
 
+/** Whether a rerun's start result reads as started. The boolean true is what a deploy from
+ *  before the outcome union cached for this step: on replay it is still a started rerun (#1148 review). */
+export function rerunStarted(result: unknown): boolean {
+  return result === "started" || result === true;
+}
+
+/** The rerun's pending status, posted after the run stamps its progress. The stamp comes
+ *  first: the watchdog reads it, so a stale stamp lets it end this run in the middle of its
+ *  own rerun start (#1148 review). Returns whether the post landed. */
+export async function announceInfraRerun(deps: {
+  touch: () => Promise<void>;
+  post: () => Promise<boolean>;
+}): Promise<boolean> {
+  await deps.touch();
+  return deps.post();
+}
+
 /** The status a poller sees for a run that may have handed off to its infra
  *  rerun (#1119): a complete run with a `rerun` in its output reports the
  *  rerun's status, so `fleet gate run` waits for the rerun's own verdict. */

@@ -474,3 +474,29 @@ describe("autoRunPullRequest: every gated PR starts a run; the Workflow decides 
     expect(terminated).toEqual([await gateRunId(PR_REPO, HEAD)]);
   });
 });
+
+describe("startManualGateRun: one transient status read never ends a healthy run (#1148 review, LOW 4)", () => {
+  const T1 = 1_700_000_000_000;
+
+  it("a status read that fails once while the pointer names the live, unstalled run reattaches to it; nothing is ended", async () => {
+    const { wf, terminated, creates } = fakeWorkflow();
+    const { index, heads } = fakeIndex();
+    const baseId = await gateRunId(PR_REPO, HEAD);
+    await wf.create({ id: baseId, params: { repo: PR_REPO, pr: 7 } });
+    heads.set(`${PR_REPO}#7`, { headSha: HEAD, runId: baseId, progressedAt: T1 - 60_000 });
+    // The first status read of the run fails once: the start must not read that as "not live" and end it.
+    let blips = 1;
+    const flaky: GateRunStarter = {
+      create: (opts) => wf.create(opts),
+      async get(id) {
+        if (id === baseId && blips-- > 0) throw new Error("status blip");
+        return wf.get(id);
+      },
+    };
+    const started = await startManualGateRun(flaky, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    expect(started).toEqual({ runId: baseId, reused: true });
+    expect(terminated).toEqual([]);
+    // The setup create, then the start's create under the same id, which the engine refuses.
+    expect(creates.map((c) => c.id)).toEqual([baseId, baseId]);
+  });
+});

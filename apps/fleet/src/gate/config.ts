@@ -44,7 +44,7 @@ export const DEFAULT_LEG_TIMEOUT_MIN = 25;
  *  takes up to 180 s, so 25 min is the largest timeout that ends inside that deadline (#1148 item 5). */
 export const MAX_LEG_TIMEOUT_MIN = 25;
 
-/** A leg's deadline in minutes: the default when unset, else clamped to 1..28. */
+/** A leg's deadline in minutes: the default when unset, else clamped to 1..MAX_LEG_TIMEOUT_MIN. */
 export function legTimeoutMin(raw: number | undefined): number {
   if (raw === undefined) return DEFAULT_LEG_TIMEOUT_MIN;
   return Math.min(MAX_LEG_TIMEOUT_MIN, Math.max(1, Math.floor(raw)));
