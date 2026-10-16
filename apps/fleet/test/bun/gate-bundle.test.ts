@@ -4,7 +4,8 @@
 import { describe, it, expect } from "bun:test";
 import { bundleKeyFor, planBundleLeg, type PlannedLeg } from "../../src/gate/fanout";
 import { BUNDLE_LEG, buildLegEnvVars, gateOutboundProps } from "../../src/gate/leg-env";
-import { legRequest, runBundleStep, type BundleStepRunner } from "../../src/gate/leg-run";
+import { bundleStepEnabled, legRequest, runBundleStep, type BundleStepRunner } from "../../src/gate/leg-run";
+import { parseLegs } from "../../src/gate/config";
 import {
   GATE_R2_HOST,
   MAX_BUNDLE_BYTES,
@@ -16,8 +17,8 @@ import {
 
 const HEAD = "f".repeat(40);
 const BASE = "a".repeat(40);
-const BUNDLE_KEY = `gate/acme/example/bundles/run-a/${HEAD}.bundle`;
-const OTHER_BUNDLE_KEY = `gate/acme/example/bundles/run-b/${HEAD}.bundle`;
+const BUNDLE_KEY = `gate-bundles/acme/example/run-a/${HEAD}.bundle`;
+const OTHER_BUNDLE_KEY = `gate-bundles/acme/example/run-b/${HEAD}.bundle`;
 const RUN_KEY = "gate/acme/example/runs/7/run-a/shard-lint.json";
 
 /** A planned ordinary leg: the shape fanout.ts hands to legRequest. */
@@ -26,9 +27,12 @@ const LEG: PlannedLeg = {
   resultKey: RUN_KEY, baselineKeys: [],
 };
 
-describe("bundleKeyFor (#1080: keyed by run and head sha)", () => {
-  it("names the bundle under the repo, the run and the head sha", () => {
+describe("bundleKeyFor (#1080: keyed by run and head sha, under a top-level prefix)", () => {
+  it("names the bundle under gate-bundles, the repo, the run and the head sha", () => {
     expect(bundleKeyFor("acme", "example", "run-a", HEAD)).toBe(BUNDLE_KEY);
+  });
+  it("sits outside the gate/ prefix, so a bucket lifecycle rule can expire it", () => {
+    expect(bundleKeyFor("acme", "example", "run-a", HEAD).startsWith("gate/")).toBe(false);
   });
 });
 
@@ -37,7 +41,7 @@ describe("planBundleLeg (#1080: the one leg that builds the bundle)", () => {
     const planned = planBundleLeg({ owner: "acme", repo: "example", pr: 7, runId: "run-a", headSha: HEAD, baseSha: BASE });
     expect(planned).toEqual({
       leg: BUNDLE_LEG, commit: `${BASE}..${HEAD}`, installCmd: "", legCmd: "",
-      resultKey: "gate/acme/example/runs/7/run-a/shard-bundle.json", baselineKeys: [],
+      resultKey: "gate/acme/example/runs/7/run-a/shard-bundle.json", baselineKeys: [], timeoutMin: 5,
     });
   });
 });
@@ -78,12 +82,16 @@ describe("resolveOutboundTarget: the bundle key allow-list (#1080)", () => {
   });
 
   it("refuses a bundle key whose last segment is not a 40-hex sha", () => {
-    expect(resolveOutboundTarget("/gate/acme/example/bundles/run-a/main.bundle")).toBeNull();
-    expect(resolveOutboundTarget(`/gate/acme/example/bundles/run-a/${HEAD}0.bundle`)).toBeNull();
+    expect(resolveOutboundTarget("/gate-bundles/acme/example/run-a/main.bundle")).toBeNull();
+    expect(resolveOutboundTarget(`/gate-bundles/acme/example/run-a/${HEAD}0.bundle`)).toBeNull();
   });
 
   it("refuses a bundle key that climbs out of its run", () => {
-    expect(resolveOutboundTarget("/gate/acme/example/bundles/../../baselines/x.bundle")).toBeNull();
+    expect(resolveOutboundTarget("/gate-bundles/acme/example/../../baselines/x.bundle")).toBeNull();
+  });
+
+  it("refuses the old gate/ bundle path, so no key outside the new prefix is ever a bundle", () => {
+    expect(resolveOutboundTarget(`/gate/acme/example/bundles/run-a/${HEAD}.bundle`)).toBeNull();
   });
 });
 
@@ -167,22 +175,58 @@ describe("bundle GET and PUT are scoped to the run (#1080)", () => {
   });
 });
 
+describe("the bundle leg name is reserved (#1080: a gate block leg named bundle would share its result key)", () => {
+  it("a gate block that names a leg bundle is rejected, so it cannot shadow the bundle step's result", () => {
+    expect(parseLegs(["bundle"])).toBeNull();
+    expect(parseLegs([{ name: "bundle", cmd: "exit 1" }])).toBeNull();
+  });
+
+  it("other leg names still parse", () => {
+    expect(parseLegs(["lint"])).toEqual([{ name: "lint", cmd: "bun run lint" }]);
+  });
+});
+
+describe("bundleStepEnabled: the bundle step is behind a flag, default off (#1080 deploy skew)", () => {
+  it("is off when the flag is unset, so an old gate image never sees a bundle leg", () => {
+    expect(bundleStepEnabled(undefined)).toBe(false);
+    expect(bundleStepEnabled("")).toBe(false);
+  });
+
+  it("is on only for the exact value 1", () => {
+    expect(bundleStepEnabled("1")).toBe(true);
+    expect(bundleStepEnabled("true")).toBe(false);
+  });
+});
+
 describe("runBundleStep: the bundle step never fails the run (#1080)", () => {
-  /** A step runner that just runs the callback and records each step name. */
+  /** A step runner that just runs the callback and records each step name and config. */
   function fakeStep() {
     const names: string[] = [];
+    const configs: { retries: { limit: number } }[] = [];
     const step: BundleStepRunner = {
-      do: async (name, _config, fn) => { names.push(name); return fn(); },
+      do: async (name, config, fn) => { names.push(name); configs.push(config); return fn(); },
     };
-    return { step, names };
+    return { step, names, configs };
   }
   const PLANNED = planBundleLeg({ owner: "acme", repo: "example", pr: 7, runId: "run-a", headSha: HEAD, baseSha: BASE });
 
-  it("reports the bundle built when the bundle leg answers 200", async () => {
+  it("reports the bundle built when the bundle leg answers 200 with state success", async () => {
     const { step, names } = fakeStep();
     const built = await runBundleStep(step, async () => Response.json({ state: "success" }), PLANNED);
     expect(built).toBe(true);
     expect(names).toEqual(["build-bundle"]);
+  });
+
+  it("reports no bundle when the bundle leg answers 200 with state error (the DO answers 200 for a leg error)", async () => {
+    const { step } = fakeStep();
+    const built = await runBundleStep(step, async () => Response.json({ state: "error", description: "bundle failed" }), PLANNED);
+    expect(built).toBe(false);
+  });
+
+  it("is never retried: one attempt, then the legs clone", async () => {
+    const { step, configs } = fakeStep();
+    await runBundleStep(step, async () => new Response("{}", { status: 503 }), PLANNED);
+    expect(configs[0].retries.limit).toBe(0);
   });
 
   it("reports no bundle when the bundle leg answers 503, and does not throw", async () => {

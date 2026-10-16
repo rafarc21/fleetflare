@@ -45,9 +45,9 @@ const SEG = "[A-Za-z0-9._-]+";
 // Baselines: `<owner>/<repo>/baselines/<sha>-<lockhash>.tar` (baseline.ts baselineTarballKey).
 const RUN_RESULT_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/shard-[a-z0-9-]+(@head)?(\\.retry)?\\.json$`);
 const BASELINE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/baselines/(${SEG})\\.tar$`);
-// #1080: one git bundle per run, `bundles/<runId>/<headSha>.bundle`. Only the
-// bundle leg may write it (bundleWriter); every other leg reads its own run's.
-const BUNDLE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/bundles/(${SEG})/([0-9a-f]{40})\\.bundle$`);
+// #1080: one git bundle per run, `gate-bundles/<owner>/<repo>/<runId>/<headSha>.bundle`.
+// Only the bundle leg may write it (bundleWriter); every other leg reads its own run's.
+const BUNDLE_RE = new RegExp(`^gate-bundles/(${SEG})/(${SEG})/(${SEG})/([0-9a-f]{40})\\.bundle$`);
 /** The largest bundle the Worker buffers in one PUT. Above it the bundle leg
  *  uploads nothing and every leg clones (the fallback), so a big repo costs
  *  time, never a wrong verdict. */

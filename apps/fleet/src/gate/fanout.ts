@@ -89,10 +89,16 @@ export interface PlannedLeg {
 }
 
 /** #1080: the R2 key of one run's git bundle. Keyed by run (the run id is
- *  already one head sha, #1072), so a later run never reads an older base. */
+ *  already one head sha, #1072), so a later run never reads an older base. Under
+ *  its own top-level prefix: a bucket lifecycle rule matches a plain prefix only,
+ *  and gate/ holds results and baselines that must not expire with it. */
 export function bundleKeyFor(owner: string, repo: string, runId: string, headSha: string): string {
-  return `gate/${owner}/${repo}/bundles/${runId}/${headSha}.bundle`;
+  return `gate-bundles/${owner}/${repo}/${runId}/${headSha}.bundle`;
 }
+
+/** #1080: the bundle leg's own deadline. A bundle is one clone and one upload;
+ *  a hang past this falls back to the legs cloning, not to a 25-minute stall. */
+export const BUNDLE_LEG_TIMEOUT_MIN = 5;
 
 /** #1080: the bundle leg's plan. It takes the base..head range like every
  *  other leg, and has no install or test command: it only clones, bundles, and uploads. */
@@ -101,6 +107,7 @@ export function planBundleLeg(input: { owner: string; repo: string; pr: number; 
   return {
     leg: BUNDLE_LEG, commit: `${baseSha}..${headSha}`, installCmd: "", legCmd: "",
     resultKey: `gate/${owner}/${repo}/runs/${pr}/${runId}/shard-${BUNDLE_LEG}.json`, baselineKeys: [],
+    timeoutMin: BUNDLE_LEG_TIMEOUT_MIN,
   };
 }
 

@@ -27,7 +27,7 @@ import {
   type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
-import { gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
+import { bundleStepEnabled, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
 import { postGateStatus, type StatusPort } from "./status-post";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
@@ -147,7 +147,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // that does not build is not a run failure: the legs get no bundle key and
     // clone, as before.
     const bundleKey = bundleKeyFor(owner, repoName, event.instanceId, resolved.headSha);
-    const bundled = await runBundleStep(
+    const bundled = bundleStepEnabled(this.env.GATE_BUNDLE) && await runBundleStep(
       { do: (name, config, fn) => step.do(name, config, fn) },
       (planned) => {
         const stub = this.env.GATE_RUNNER.get(this.env.GATE_RUNNER.idFromName(gateRunnerName(event.instanceId, planned.leg, crypto.randomUUID())));

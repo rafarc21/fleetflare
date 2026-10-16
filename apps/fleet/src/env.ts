@@ -416,6 +416,8 @@ export interface Env {
   /** Phase 1 (#715): operator-set warm-pool size for GateRunnerDO keep-warm
    *  nudges. Absent/invalid = 0 = off. Never hardcoded — a cost/latency tradeoff. */
   GATE_WARM_POOL_SIZE?: string;
+  /** #1080: "1" turns on the one-bundle-per-run step. Absent or any other value: off, every leg clones. */
+  GATE_BUNDLE?: string;
   /**
    * Board #350 — THREE secrets, all optional here and ALL THREE MUST be set
    * together before this feature does anything: install-cache.ts's

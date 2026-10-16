@@ -79,7 +79,8 @@ function isStringArray(v: unknown): v is string[] {
 }
 
 function isReservedLegName(name: string): boolean {
-  return name === "merge-tree" || /^bun-\d+$/.test(name) || /^vitest-\d+$/.test(name);
+  // "bundle" is the #1080 bundle step's leg: its result key is shard-bundle.json, so a block leg of that name would share it.
+  return name === "merge-tree" || name === "bundle" || /^bun-\d+$/.test(name) || /^vitest-\d+$/.test(name);
 }
 
 /** The block's `legs`, normalised to { name, cmd, timeoutMin? }. Each entry is a

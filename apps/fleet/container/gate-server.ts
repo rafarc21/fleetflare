@@ -183,7 +183,7 @@ export async function runGate(req: GateRun, deps: GateDeps): Promise<RunOutcome>
 /** #1080: fills `workdir` from the run's bundle. True when the bundle was fetched
  *  into a repo. False (a missing or refused bundle, a bad fetch) means the caller
  *  clones instead, and the bundle path is left empty of the failed attempt. */
-async function cloneFromBundle(bundleKey: string, bundlePath: string, deps: GateDeps): Promise<boolean> {
+async function cloneFromBundle(bundleKey: string, shas: string[], bundlePath: string, deps: GateDeps): Promise<boolean> {
   const { exec: run, workdir } = deps;
   try {
     const res = await deps.fetchFn(`${R2_INTERNAL_BASE}/${bundleKey}`);
@@ -195,10 +195,16 @@ async function cloneFromBundle(bundleKey: string, bundlePath: string, deps: Gate
   }
   const init = await run("git", ["init", "--quiet", workdir], { cwd: "/workspace" });
   const fetched = init.code === 0
-    ? await run("git", ["fetch", "--quiet", bundlePath, "refs/*:refs/*"], { cwd: workdir })
+    ? await run("git", ["fetch", "--quiet", bundlePath, "refs/gate/*:refs/gate/*", "refs/remotes/origin/*:refs/remotes/origin/*"], { cwd: workdir })
     : init;
-  if (fetched.code === 0) return true;
-  console.error("gate-server: bundle fetch failed, cloning", firstLine(fetched.stderr));
+  // A bundle that unpacked but lacks the base or head commit cannot run the leg: clone instead.
+  let complete = fetched.code === 0;
+  for (const sha of shas) {
+    if (!complete) break;
+    complete = (await run("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { cwd: workdir })).code === 0;
+  }
+  if (complete) return true;
+  console.error("gate-server: bundle unusable, cloning", firstLine(fetched.stderr));
   await run("rm", ["-rf", workdir], { cwd: "/workspace" });
   return false;
 }
@@ -213,7 +219,7 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
   // Every leg but the bundle leg reads the run's bundle when it exists (#1080):
   // no clone, so no git-proxy burst. A missing bundle falls through to the clone.
   const fromBundle = !isBundleLeg && req.bundleKey !== undefined
-    && await cloneFromBundle(req.bundleKey, bundlePath, deps);
+    && await cloneFromBundle(req.bundleKey, [base, head], bundlePath, deps);
   if (!fromBundle) {
     // Blobless and without a checkout: commits and trees come down now, file
     // contents only when a step reads them. The bundle leg keeps the blobs, because its bundle must hold them.

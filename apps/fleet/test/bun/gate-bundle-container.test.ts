@@ -9,7 +9,7 @@ import { readRunEnv, runGate, type FetchFn, type GateRun } from "../../container
 import type { ExecFn } from "../../container/gate-merge-tree";
 
 const R2 = "http://gate-r2.internal/";
-const BUNDLE_KEY = `gate/acme/example/bundles/run-a/${"f".repeat(40)}.bundle`;
+const BUNDLE_KEY = `gate-bundles/acme/example/run-a/${"f".repeat(40)}.bundle`;
 const RUN_KEY = "gate/acme/example/runs/7/run-a/shard-lint.json";
 const SHA = { base: "a".repeat(40), head: "f".repeat(40), merge: "1".repeat(40), tree: "2".repeat(40) };
 
@@ -30,7 +30,7 @@ const BUNDLE_LEG: GateRun = { ...LEG, leg: "bundle", legCmd: "", installCmd: "",
 
 /** Records every exec call. Answers the verbs runSteps and resolveMergeTree use;
  *  `bundle create` writes its output file so the bundle leg has bytes to upload. */
-function fakeExec(opts: { cloneCode?: number; fetchCode?: number; createCode?: number } = {}) {
+function fakeExec(opts: { cloneCode?: number; fetchCode?: number; createCode?: number; missingAfterFetch?: boolean } = {}) {
   const calls: string[][] = [];
   const known: Record<string, string> = {
     [SHA.base]: SHA.base, [SHA.head]: SHA.head,
@@ -50,7 +50,9 @@ function fakeExec(opts: { cloneCode?: number; fetchCode?: number; createCode?: n
     }
     if (args.includes("rev-parse")) {
       const name = args[args.length - 1].replace(/\^\{commit\}$/, "");
-      const sha = known[name];
+      // missingAfterFetch: the bundle fetched but its objects are not there (a stale or partial bundle).
+      const cloned = calls.some((c) => c.includes("clone"));
+      const sha = opts.missingAfterFetch && calls.some(isBundleFetch) && !cloned ? undefined : known[name];
       return sha ? out(0, `${sha}\n`) : out(1);
     }
     if (args.includes("merge-tree")) return out(0, `${SHA.tree}\n`);
@@ -80,7 +82,7 @@ function fakeR2(table: Record<string, number> = {}) {
 
 const cloneCalls = (calls: string[][]) => calls.filter((c) => c.includes("clone"));
 const isInit = (c: string[]) => c[0] === "git" && c.includes("init");
-const isBundleFetch = (c: string[]) => c[0] === "git" && c.includes("fetch") && c.includes("refs/*:refs/*");
+const isBundleFetch = (c: string[]) => c[0] === "git" && c.includes("fetch") && c.includes("refs/gate/*:refs/gate/*");
 
 describe("readRunEnv: the bundle key rides in the container env (#1080)", () => {
   it("reads GATE_BUNDLE_KEY, and is undefined when the leg has none", () => {
@@ -115,6 +117,24 @@ describe("a leg reads the run's bundle instead of cloning (#1080)", () => {
     const out = await runGate(LEG, { exec: world.exec, fetchFn: r2.fn, workdir: join(scratch(), "repo"), bundlePath: join(scratch(), "b.bundle") });
     expect(cloneCalls(world.calls)).toHaveLength(1);
     expect(world.calls.some(isInit)).toBe(false);
+    expect(out.state).toBe("success");
+  });
+
+  it("fetches only the refs the bundle carries, never a wildcard over every ref", async () => {
+    const r2 = fakeR2({ [BUNDLE_KEY]: 200 });
+    const world = fakeExec();
+    await runGate(LEG, { exec: world.exec, fetchFn: r2.fn, workdir: join(scratch(), "repo"), bundlePath: join(scratch(), "b.bundle") });
+    const fetch = world.calls.find(isBundleFetch)!;
+    expect(fetch).toContain("refs/gate/*:refs/gate/*");
+    expect(fetch).toContain("refs/remotes/origin/*:refs/remotes/origin/*");
+    expect(fetch).not.toContain("refs/*:refs/*");
+  });
+
+  it("a bundle whose base or head is missing after unbundling is discarded and the leg clones", async () => {
+    const r2 = fakeR2({ [BUNDLE_KEY]: 200 });
+    const world = fakeExec({ missingAfterFetch: true });
+    const out = await runGate(LEG, { exec: world.exec, fetchFn: r2.fn, workdir: join(scratch(), "repo"), bundlePath: join(scratch(), "b.bundle") });
+    expect(cloneCalls(world.calls)).toHaveLength(1);
     expect(out.state).toBe("success");
   });
 
@@ -199,7 +219,7 @@ describe("real git: a bundle carries every object a leg needs (#1080)", () => {
     // A leg: init, then fetch every ref from the bundle, as cloneFromBundle does.
     const leg = join(dir, "leg");
     git(dir, "init", "-q", leg);
-    expect(git(leg, "fetch", "-q", bundle, "refs/*:refs/*").code).toBe(0);
+    expect(git(leg, "fetch", "-q", bundle, "refs/gate/*:refs/gate/*", "refs/remotes/origin/*:refs/remotes/origin/*").code).toBe(0);
 
     expect(git(leg, "cat-file", "-t", head).stdout).toBe("commit");
     expect(git(leg, "cat-file", "-t", base).stdout).toBe("commit");
