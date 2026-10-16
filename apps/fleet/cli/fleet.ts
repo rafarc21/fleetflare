@@ -17,9 +17,11 @@
  * the same routes the commands below already call. Importing this module runs
  * no CLI: `main()` is guarded by `import.meta.main` at the bottom.
  */
-import { homedir } from "node:os";
+import { constants as osConstants, homedir } from "node:os";
 import { join } from "node:path";
-import { statSync } from "node:fs";
+import { statSync, unlinkSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { parseFrame, resizeFrameFor } from "../src/studio/frames";
 import { reconnectDelayMs, nextAttempt, attachRefusal } from "./backoff";
 import { postTaskNew, taskNewFailureLine } from "./task-new-retry";
@@ -2723,23 +2725,71 @@ export function reapDeps(
   };
 }
 
+const execFileP = promisify(execFile);
+
+/** Issue #1115: a process's start time (`ps -o lstart=`), or null when it
+ *  cannot be read (no such pid, no ps). Pairs with the pid in the lock so a
+ *  reused pid reads as a different process. */
+async function processStartTime(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileP("ps", ["-o", "lstart=", "-p", String(pid)]);
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Issue #1115: is the lock's holder gone? `dead` only when the pid is gone
+ *  (ESRCH) or its start time no longer matches the one the lock recorded.
+ *  Anything it cannot prove (no recorded start time, ps unreadable) is
+ *  `unsure`, and the caller keeps the age rule: unsure refuses while fresh. */
+async function lockHolderState(pid: number, recordedStart: string | null): Promise<"dead" | "live" | "unsure"> {
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ESRCH") return "dead";
+  }
+  if (recordedStart === null) return "unsure";
+  const now = await processStartTime(pid);
+  if (now === null) return "unsure";
+  return now === recordedStart ? "live" : "dead";
+}
+
 /** Review F5: one reap per state file at a time. The lock is an exclusively
  *  created file; a second run refuses rather than racing the state or the
  *  destroys. A lock older than REAP_LOCK_STALE_MS (a crashed run) is taken over.
+ *  Issue #1115: the lock names its holder (`pid time start-time`). A dead
+ *  holder is reclaimed at once, with one log line; a live one refuses as before.
+ *  A SIGINT/SIGTERM during the run removes the lock before the process exits.
  *  `fn` gets `refresh`, which re-stamps the lock's mtime: runReap calls it once
  *  per candidate (ReapDeps.heartbeat), so a live run with several candidates
  *  never looks stale — only a run that stopped refreshing does. */
-export async function withReapLock<T>(statePath: string, fn: (refresh: () => Promise<void>) => Promise<T>): Promise<T> {
+export async function withReapLock<T>(
+  statePath: string,
+  fn: (refresh: () => Promise<void>) => Promise<T>,
+  log: (line: string) => void = (line) => console.log(line),
+): Promise<T> {
   const lock = `${statePath}.lock`;
   await mkdir(dirname(statePath), { recursive: true });
-  const take = () => writeFile(lock, `${process.pid} ${new Date().toISOString()}\n`, { flag: "wx" });
+  const ownStart = await processStartTime(process.pid);
+  const body = `${process.pid} ${new Date().toISOString()}${ownStart ? ` ${ownStart}` : ""}\n`;
+  const take = () => writeFile(lock, body, { flag: "wx" });
   try {
     await take();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    const age = Date.now() - (await stat(lock)).mtimeMs;
-    if (age < REAP_LOCK_STALE_MS) {
-      throw new Error(`another fleet reap holds ${lock} (${Math.round(age / 1000)}s old); refusing to run alongside it`);
+    const [, pidText, recordedStart] = /^(\d+) \S+(?: (.+))?$/.exec((await readFile(lock, "utf8")).trim()) ?? [];
+    const holderPid = pidText ? Number(pidText) : NaN;
+    const holder = Number.isInteger(holderPid) && holderPid > 0
+      ? await lockHolderState(holderPid, recordedStart ?? null)
+      : "unsure";
+    if (holder === "dead") {
+      log(`reclaimed reap lock from dead pid ${holderPid}`);
+    } else {
+      const age = Date.now() - (await stat(lock)).mtimeMs;
+      if (age < REAP_LOCK_STALE_MS) {
+        throw new Error(`another fleet reap holds ${lock} (${Math.round(age / 1000)}s old); refusing to run alongside it`);
+      }
     }
     await unlink(lock);
     await take();
@@ -2748,9 +2798,18 @@ export async function withReapLock<T>(statePath: string, fn: (refresh: () => Pro
     const now = new Date();
     await utimes(lock, now, now);
   };
+  // A signal's default action would skip `finally`, so the lock is removed
+  // here, synchronously, and the process exits with the shell's 128+N code.
+  const onSignal = (signal: NodeJS.Signals) => {
+    try { unlinkSync(lock); } catch { /* already gone */ }
+    process.exit(128 + osConstants.signals[signal]);
+  };
+  const signals = ["SIGINT", "SIGTERM"] as const;
+  for (const signal of signals) process.on(signal, onSignal);
   try {
     return await fn(refresh);
   } finally {
+    for (const signal of signals) process.off(signal, onSignal);
     await unlink(lock).catch(() => {});
   }
 }
