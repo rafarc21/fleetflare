@@ -5,7 +5,8 @@
 // step deadline (no orphan step holds the run open).
 import { describe, it, expect } from "bun:test";
 import {
-  infraRerunDecision, isInfraLegFailure, recordInfraRerun, rerunStatusArgs, startInfraRerun, statusFollowingRerun,
+  announceInfraRerun, infraRerunDecision, isInfraLegFailure, isRerunInstance, launchInfraRerun, recordInfraRerun,
+  rerunInstanceId, rerunStarted, rerunStatusArgs, startInfraRerun, statusFollowingRerun,
 } from "../../src/gate/infra-rerun";
 import { runLegStep, withStepDeadline, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
@@ -165,8 +166,63 @@ describe("startInfraRerun: a replayed start is success, not a failed rerun (#111
     expect(looked).toBe(2);
   });
 
-  it("a create that throws with no instance behind it is not started, so the final error verdict posts", async () => {
-    expect(await startInfraRerun(async () => { throw new Error("quota exceeded"); }, noInstance)).toBe(false);
+  it("a create that throws and a get that then fails is ambiguous: it rejects, so the step retries (#1148 item 4)", async () => {
+    // A transient get() failure after a duplicate create must not read as "not started": the rerun may be running.
+    const transient = async () => { throw new Error("D1 timeout"); };
+    await expect(startInfraRerun(async () => { throw new Error("Instance already exists"); }, transient))
+      .rejects.toThrow("Instance already exists");
+  });
+
+  it("a create that throws with no instance behind it rejects, so the step's retries run out and the caller posts the final error verdict", async () => {
+    await expect(startInfraRerun(async () => { throw new Error("quota exceeded"); }, noInstance)).rejects.toThrow("quota exceeded");
+  });
+});
+
+describe("launchInfraRerun: start, then the pointer handoff; a lost handoff ends the orphan rerun (#1148 item 3, race)", () => {
+  const inst = (overrides: Partial<Parameters<typeof launchInfraRerun>[0]> = {}) => {
+    const log: string[] = [];
+    return {
+      log,
+      deps: {
+        create: async () => { log.push("create"); return {}; },
+        get: async () => { log.push("get"); return {}; },
+        handOff: async () => { log.push("handOff"); return true; },
+        terminate: async () => { log.push("terminate"); },
+        ...overrides,
+      },
+    };
+  };
+
+  it("a started rerun that takes the pointer is started", async () => {
+    const { log, deps } = inst();
+    expect(await launchInfraRerun(deps)).toBe("started");
+    expect(log).toEqual(["create", "handOff"]);
+  });
+
+  it("a rerun that loses the pointer to a newer push is ended, and the outcome is superseded: one live run per head", async () => {
+    const { log, deps } = inst({ handOff: async () => { log.push("handOff"); return false; } });
+    expect(await launchInfraRerun(deps)).toBe("superseded");
+    expect(log).toEqual(["create", "handOff", "terminate"]);
+  });
+
+  it("a superseded rerun whose terminate also fails still reports superseded, never a started rerun", async () => {
+    const { deps } = inst({ handOff: async () => false, terminate: async () => { throw new Error("DO down"); } });
+    expect(await launchInfraRerun(deps)).toBe("superseded");
+  });
+
+  it("a start that rejects propagates, so the caller's step retries it", async () => {
+    const { log, deps } = inst({ create: async () => { throw new Error("internal workflows error"); }, get: async () => { throw new Error("nope"); } });
+    await expect(launchInfraRerun(deps)).rejects.toThrow("internal workflows error");
+    expect(log).toEqual([]);
+  });
+});
+
+describe("rerun instance naming: a rerun is recognised by its id (#1148 item 1)", () => {
+  it("the rerun id is rerun-<run id>, and only that prefix is a rerun", () => {
+    expect(rerunInstanceId("gate-abc-def")).toBe("rerun-gate-abc-def");
+    expect(isRerunInstance("rerun-gate-abc-def")).toBe(true);
+    expect(isRerunInstance("gate-abc-def")).toBe(false);
+    expect(isRerunInstance("gate-abc-def-r1f2")).toBe(false);
   });
 });
 
@@ -231,5 +287,30 @@ describe("statusFollowingRerun: a run that handed off to its rerun reports the r
   it("a run still running is its own status, even if it carries no output yet", async () => {
     const running = { status: "running" };
     expect(await statusFollowingRerun(running, async () => { throw new Error("not called"); })).toEqual(running);
+  });
+});
+
+describe("rerunStarted: a cached start result from before the outcome union still reads as started (#1148 review)", () => {
+  it("the boolean true a pre-union deploy cached is a started rerun, not a failed one", () => {
+    expect(rerunStarted(true)).toBe(true);
+  });
+
+  it("'started' is started; 'superseded', 'failed' and a replayed nothing are not", () => {
+    expect(rerunStarted("started")).toBe(true);
+    expect(rerunStarted("superseded")).toBe(false);
+    expect(rerunStarted("failed")).toBe(false);
+    expect(rerunStarted(undefined)).toBe(false);
+  });
+});
+
+describe("announceInfraRerun: progress is stamped before the rerun's pending status (#1148 review)", () => {
+  it("the touch runs before the post, so a watchdog never sees a stale stamp during the rerun's start", async () => {
+    const calls: string[] = [];
+    const posted = await announceInfraRerun({
+      touch: async () => { calls.push("touch"); },
+      post: async () => { calls.push("post"); return false; },
+    });
+    expect(calls).toEqual(["touch", "post"]);
+    expect(posted).toBe(false);
   });
 });
