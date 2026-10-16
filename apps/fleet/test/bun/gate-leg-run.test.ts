@@ -3,7 +3,7 @@
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
 import { describe, it, expect, spyOn } from "bun:test";
-import { runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
+import { gateRunnerName, runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
 
@@ -86,17 +86,16 @@ describe("runLegStep", () => {
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result.leg).toBe("lint");
     expect(result.state).toBe("error");
-    expect(result.description).toBe("lint: gate container did not start within 180 s");
+    expect(result.description).toBe("lint: gate container did not start within 180 s after 0 min");
     expect(sent).toBe(2);
   });
 
-  it("the infra cause is cut at 200 chars", async () => {
+  it("the infra cause is cut at 200 chars, then the wall time is appended", async () => {
     const step = fakeStep();
     const dispatch = async () => reply({ error: "x".repeat(300) }, 503);
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result.state).toBe("error");
-    expect(result.description).toBe(`lint: ${"x".repeat(200 - "lint: ".length)}`);
-    expect(result.description?.length).toBe(200);
+    expect(result.description).toBe(`lint: ${"x".repeat(200 - "lint: ".length)} after 0 min`);
   });
 
   it("only one step per leg, and no waitForEvent: the start step is the whole leg", async () => {
@@ -205,6 +204,103 @@ describe("runLegStep: flaky evidence and HTTP fallback (#1057)", () => {
     const step = fakeStep();
     const dispatch = async () => new Response("<html>bad gateway</html>", { status: 502 });
     const result = await runLegStep(step, dispatch, PLANNED);
-    expect(result).toMatchObject({ leg: "lint", state: "error", description: "lint: HTTP 502" });
+    expect(result).toMatchObject({ leg: "lint", state: "error", description: "lint: HTTP 502 after 0 min" });
+  });
+});
+
+// Each attempt dispatches under its own DO name, so a retry never lands on the
+// DO (and container) a previous attempt is still tearing down (#1068).
+describe("gateRunnerName: one runner DO per leg attempt (#1068)", () => {
+  it("names the DO by run instance, leg and attempt", () => {
+    expect(gateRunnerName("run-1", "lint", "a1")).toBe("run-1/lint/a1");
+  });
+
+  it("two attempts of the same leg in the same run never share a name", () => {
+    expect(gateRunnerName("run-1", "lint", "a1")).not.toBe(gateRunnerName("run-1", "lint", "a2"));
+  });
+
+  it("the same attempt id on two legs or two runs never share a name", () => {
+    expect(gateRunnerName("run-1", "lint", "a1")).not.toBe(gateRunnerName("run-1", "test", "a1"));
+    expect(gateRunnerName("run-1", "lint", "a1")).not.toBe(gateRunnerName("run-2", "lint", "a1"));
+  });
+});
+
+describe("runLegStep: every attempt dispatches under a fresh attempt id (#1068)", () => {
+  it("a start-step infra retry gets a new attempt id: the id is made inside the step callback", async () => {
+    const step = fakeStep();
+    const ids: string[] = [];
+    const dispatch = async (_p: PlannedLeg, attemptId: string) => {
+      ids.push(attemptId);
+      return reply({ error: "container not listening" }, 503);
+    };
+    await runLegStep(step, dispatch, PLANNED);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe("");
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
+  it("a flaky red leg's retry-<leg> step gets its own attempt id", async () => {
+    const step = fakeStep();
+    const ids: string[] = [];
+    const dispatch = async (_p: PlannedLeg, attemptId: string) => {
+      ids.push(attemptId);
+      return reply({ state: "failure", description: "timing" });
+    };
+    await runLegStep(step, dispatch, PLANNED);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it("start infra retry, then red, then the flaky retry: three dispatches, three distinct ids", async () => {
+    const step = fakeStep();
+    const ids: string[] = [];
+    const replies = [reply({ error: "not listening" }, 503), reply({ state: "failure", description: "timing" }), reply({ state: "success" })];
+    const dispatch = async (_p: PlannedLeg, attemptId: string) => {
+      ids.push(attemptId);
+      return replies.shift()!;
+    };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result.state).toBe("success");
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(3);
+  });
+});
+
+// Thrown attempts still count: the wall time from the callback start is put
+// into the thrown message. Date.now is pinned so the minutes are exact.
+describe("runLegStep: a thrown attempt reports its wall time (#1068)", () => {
+  it("an infra attempt that spends 4 min then throws says 'after 4 min'", async () => {
+    let now = 0;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const step = fakeStep();
+      const dispatch = async () => { now += 4 * 60_000; return reply({ error: "gate server unreachable: The container is not listening" }, 503); };
+      const result = await runLegStep(step, dispatch, PLANNED);
+      expect(result).toEqual({
+        leg: "lint", state: "error",
+        description: "lint: gate server unreachable: The container is not listening after 4 min",
+      });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("a dispatch that rejects (no reply at all) still reports its wall time", async () => {
+    let now = 0;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const step = fakeStep();
+      const dispatch = async () => { now += 2 * 60_000; throw new Error("socket reset"); };
+      const result = await runLegStep(step, dispatch, PLANNED);
+      expect(result).toEqual({ leg: "lint", state: "error", description: "socket reset after 2 min" });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("a successful attempt's description is not given a time suffix", async () => {
+    const step = fakeStep();
+    const result = await runLegStep(step, async () => reply({ state: "error", description: "container OOM" }), PLANNED);
+    expect(result.description).toBe("container OOM");
   });
 });
