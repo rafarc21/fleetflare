@@ -111,12 +111,15 @@ export const GIT_UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** #1137: one first try plus up to three retries for a rate-limited upstream. */
 export const GIT_UPSTREAM_MAX_ATTEMPTS = 4;
-/** Longest server-side wait for one retry, however large the Retry-After hint. */
-export const RETRY_WAIT_CAP_MS = 60_000;
-/** Random extra wait per retry, so legs that hit one limit do not retry in lockstep. */
+/** Smallest random spread per retry. The spread is never below half the wait, so
+ *  legs that hit one limit do not retry in lockstep. */
 export const RETRY_JITTER_MS = 1_000;
-/** Wait for a 429 with no Retry-After. Doubles on each retry from this base. */
-const RETRY_BACKOFF_BASE_MS = 1_000;
+/** GitHub's floor when a limited response names no reset: "wait for at least one
+ *  minute". Doubles on each further retry. */
+export const RETRY_NO_HINT_WAIT_MS = 60_000;
+/** A retry is taken only if at least this much of the budget remains after its
+ *  wait, so the 200 download still has time. Retry-After is never cut to fit. */
+export const RETRY_MIN_BUDGET_LEFT_MS = 5 * 60_000;
 /** A POST body up to this size is buffered so a retry resends identical bytes.
  *  A larger body streams once and is never retried. */
 export const MAX_RETRY_BODY_BYTES = 1024 * 1024;
@@ -126,22 +129,39 @@ export const MAX_RETRY_BODY_BYTES = 1024 * 1024;
 function retryAfterMs(res: Response, now: number): number | null {
   const value = res.headers.get("retry-after");
   if (value === null) return null;
-  if (/^\s*\d+\s*$/.test(value)) return Number(value) * 1000;
+  // Anything numeric that is not whole seconds is rejected here, not parsed as a
+  // date: Date.parse("1.5") reads as a 2001 date and would look retryable.
+  if (/^\s*[-+.\d]+\s*$/.test(value)) return /^\s*\d+\s*$/.test(value) ? Number(value) * 1000 : null;
   const at = Date.parse(value);
   return Number.isNaN(at) ? null : Math.max(0, at - now);
 }
 
-/** 429 always retries. 403 retries only with Retry-After, which marks a
- *  secondary limit. A plain 403 is a permission refusal, not a rate limit. */
+/** How long GitHub asks us to wait: Retry-After, else the reset instant of an
+ *  exhausted primary limit (x-ratelimit-reset, UTC epoch seconds). Null when
+ *  neither is usable. */
+function retryHintMs(res: Response, now: number): number | null {
+  const after = retryAfterMs(res, now);
+  if (after !== null) return after;
+  if (res.headers.get("x-ratelimit-remaining") === "0") {
+    const reset = Number(res.headers.get("x-ratelimit-reset"));
+    if (Number.isInteger(reset) && reset > 0) return Math.max(0, reset * 1000 - now);
+  }
+  return null;
+}
+
+/** 429 always retries. 403 retries only with a hint, which marks a secondary or
+ *  primary limit. A plain 403 is a permission refusal, not a rate limit. */
 function isRetryable(status: number, hint: number | null): boolean {
   return status === 429 || (status === 403 && hint !== null);
 }
 
-/** One retry's wait: the Retry-After hint capped, or the backoff when there is
- *  no hint, plus jitter. */
+/** One retry's wait: the hint in full (never shortened, so never before GitHub's
+ *  reset), or GitHub's one-minute floor doubling per retry when there is no hint.
+ *  Jitter adds up to half the wait, and never less than RETRY_JITTER_MS. */
 function retryWaitMs(hint: number | null, attempt: number, random: number): number {
-  const base = hint === null ? RETRY_BACKOFF_BASE_MS * 2 ** (attempt - 1) : Math.min(hint, RETRY_WAIT_CAP_MS);
-  return base + Math.floor(random * RETRY_JITTER_MS);
+  const base = hint ?? RETRY_NO_HINT_WAIT_MS * 2 ** (attempt - 1);
+  const span = Math.max(RETRY_JITTER_MS, Math.floor(base / 2));
+  return base + Math.floor(random * span);
 }
 
 /** The request body, read once so every attempt sends the same bytes. Over the
@@ -219,7 +239,10 @@ async function handleGitProxy(
   const random = git.random ?? Math.random;
   // One budget for every attempt and every wait on this request (#1137).
   const deadline = now() + GIT_UPSTREAM_TIMEOUT_MS;
-  const { body, retryable } = await bodyForAttempts(req);
+  // A body that errors mid-read (client hung up) is a failed leg, not a crash.
+  const prepared = await bodyForAttempts(req).catch(() => null);
+  if (prepared === null) return new Response("request body unreadable", { status: 502 });
+  const { body, retryable } = prepared;
 
   // GitHub git smart HTTP rejects `Bearer` (401); it takes Basic auth with the
   // installation token as the password of user `x-access-token`.
@@ -238,14 +261,14 @@ async function handleGitProxy(
         body,
         // A redirect would move the fetch to whatever repo it names. Refuse it.
         redirect: "manual",
-        signal: AbortSignal.timeout(deadline - now()),
+        signal: AbortSignal.timeout(Math.max(1, deadline - now())),
       });
     } catch {
       return new Response("upstream unavailable", { status: 502 });
     }
-    // Diagnosis for a garbled git stream (#1104): the framing headers of every
-    // upstream response. Status and encoding headers only, never the token.
-    console.log(`gate git-proxy: upstream ${res.status} content-encoding=${res.headers.get("content-encoding") ?? "-"} transfer-encoding=${res.headers.get("transfer-encoding") ?? "-"}`);
+    // Diagnosis for a garbled git stream (#1104) and for rate limits (#1137): the
+    // framing and rate-limit headers of every upstream response. Never the token.
+    console.log(`gate git-proxy: upstream ${res.status} retry-after=${res.headers.get("retry-after") ?? "-"} x-ratelimit-remaining=${res.headers.get("x-ratelimit-remaining") ?? "-"} x-ratelimit-reset=${res.headers.get("x-ratelimit-reset") ?? "-"} content-encoding=${res.headers.get("content-encoding") ?? "-"} transfer-encoding=${res.headers.get("transfer-encoding") ?? "-"}`);
     if (res.status >= 300 && res.status < 400) return new Response("upstream redirect refused", { status: 502 });
     if (res.status === 200) {
       // Only the body and content-type of a 200 reach the container. Upstream
@@ -258,13 +281,19 @@ async function handleGitProxy(
 
     // #1137: a rate-limited attempt is retried here, so every leg's container
     // does not fail on the same schedule. Budget spent: the status passes through.
-    const hint = retryAfterMs(res, now());
+    const hint = retryHintMs(res, now());
     const retry = retryable && attempt < GIT_UPSTREAM_MAX_ATTEMPTS && isRetryable(res.status, hint);
     if (!retry) return new Response(null, { status: res.status });
     const wait = retryWaitMs(hint, attempt, random());
-    if (now() + wait >= deadline) return new Response(null, { status: res.status });
+    // Budget floor: the retry must leave RETRY_MIN_BUDGET_LEFT_MS for the 200 download.
+    // Too little left: the 429 passes through now, not after a wait that cannot finish.
+    if (deadline - (now() + wait) < RETRY_MIN_BUDGET_LEFT_MS) return new Response(null, { status: res.status });
     console.log(`gate git-proxy: retry status=${res.status} wait=${wait}ms attempt=${attempt + 1}/${GIT_UPSTREAM_MAX_ATTEMPTS}`);
-    await res.body?.cancel();
+    try {
+      await res.body?.cancel();
+    } catch {
+      // The discarded 429 body is not needed; a failed cancel must not fail the leg.
+    }
     await sleep(wait);
   }
 }
