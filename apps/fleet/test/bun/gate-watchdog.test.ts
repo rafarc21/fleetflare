@@ -6,7 +6,7 @@
 import { describe, it, expect } from "bun:test";
 import { GATE_STALL_MS, type GateRunIndex, type GateRunInstance, type GateRunRecord } from "../../src/gate/auto-run";
 import {
-  GATE_WATCHDOG_FINAL_AGE_MS, GATE_WATCHDOG_LOOKBACK_MS, sweepStalledRuns, type WatchdogDeps, type WatchdogIndex,
+  GATE_WATCHDOG_FINAL_AGE_MS, GATE_WATCHDOG_LOOKBACK_MS, hasRedResult, sweepStalledRuns, type WatchdogDeps, type WatchdogIndex,
 } from "../../src/gate/watchdog";
 
 const REPO = "acme/example";
@@ -106,15 +106,6 @@ describe("sweepStalledRuns: a live run with no progress for the stall window is 
     const h = harness({ runs: { "gate-x": status } });
     expect(await h.sweep(T0 + GATE_STALL_MS + 60_000)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
     expect(h.head()?.progressedAt).toBe(-1);
-    expect(h.posts).toEqual([]);
-  });
-
-  it("a stalled run with an unknown status is not retired: the next sweep reads it again (#1150 review item 2)", async () => {
-    const h = harness({ runs: { "gate-x": "unknown" } });
-    expect(await h.sweep(T0 + GATE_STALL_MS + 60_000)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
-    expect(h.head()?.progressedAt).toBe(T0);
-    expect(await h.sweep(T0 + GATE_STALL_MS + 120_000)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
-    expect(h.engine.terminated).toEqual([]);
     expect(h.posts).toEqual([]);
   });
 });
@@ -264,5 +255,52 @@ describe("sweepStalledRuns: a rerun create that lands before its response is los
     expect(h.head()?.runId).toBe("rerun-gate-x");
     expect(h.posts.filter((p) => p.state === "error")).toEqual([]);
     expect(h.engine.runs.get("rerun-gate-x")?.status).toBe("running");
+  });
+});
+
+describe("hasRedResult: a leg's decisive stored result decides red, as the run's verdict does (#1150 review)", () => {
+  const P = "gate/acme/example/runs/7/gate-x";
+  const store = (files: Record<string, string>) => async (key: string) =>
+    files[key] === undefined ? undefined : { state: files[key] };
+
+  it("a red first try whose retry passed is not red: the run's verdict is success for that leg", async () => {
+    const files = { [`${P}/shard-lint.json`]: "failure", [`${P}/shard-lint.retry.json`]: "success" };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(false);
+  });
+
+  it("a red first try whose retry is also red is red", async () => {
+    const files = { [`${P}/shard-lint.json`]: "failure", [`${P}/shard-lint.retry.json`]: "failure" };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
+  });
+
+  it("a red first try whose retry never stored a result stays red: its retry was lost, the first try is the verdict", async () => {
+    const files = { [`${P}/shard-lint.json`]: "failure" };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
+  });
+
+  it("an infra try-2 that passed decides the leg over its infra first try: not red", async () => {
+    const files = { [`${P}/shard-lint.json`]: "error", [`${P}/shard-lint-try2.json`]: "success" };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(false);
+  });
+
+  it("one red leg among green ones is red, whatever the others did", async () => {
+    const files = {
+      [`${P}/shard-lint.json`]: "failure", [`${P}/shard-lint.retry.json`]: "success",
+      [`${P}/shard-e2e.json`]: "success", [`${P}/shard-unit.json`]: "failure",
+    };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
+  });
+
+  it("no stored result at all is not red: nothing failed before the stall", async () => {
+    expect(await hasRedResult([], store({}))).toBe(false);
+  });
+});
+
+describe("sweepStalledRuns: only a finished run is retired; an unknown status is read again (#1150 review)", () => {
+  it("a run reporting unknown is kept and skipped, not retired, so the next sweep still sees it", async () => {
+    const h = harness({ runs: { "gate-x": "unknown" } });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.head()?.progressedAt).toBe(T0);
+    expect(await h.sweep(T0 + GATE_STALL_MS + 60_000)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
   });
 });

@@ -8,27 +8,7 @@ import { repoTokenMinter } from "../github/auth";
 import { isGateRunnerRepo } from "./config";
 import { d1WatchdogIndex } from "./auto-run-env";
 import { postGateStatus, type StatusPort } from "./status-post";
-import { sweepStalledRuns, type WatchdogRun } from "./watchdog";
-
-/** The R2 archive shape the red check reads: the real R2Bucket satisfies it. */
-export interface LegArchive {
-  list(opts: { prefix: string }): Promise<{ objects: { key: string }[] }>;
-  get(key: string): Promise<{ json<T>(): Promise<T> } | null>;
-}
-
-/** Whether any leg under `prefix` ended red on its last attempt. A first try that
- *  has a retry is superseded by it, so a flaky leg that passes on retry is not red
- *  (#1150 review item 1). A red first try with no retry on record stays red (#1119). */
-export async function redLegIn(archive: LegArchive, prefix: string): Promise<boolean> {
-  const listed = await archive.list({ prefix });
-  const keys = new Set(listed.objects.map((o) => o.key));
-  for (const key of keys) {
-    if (!key.endsWith(".retry.json") && keys.has(key.replace(/(-try2)?\.json$/, ".retry.json"))) continue;
-    const stored = await archive.get(key);
-    if ((await stored?.json<{ state?: string }>())?.state === "failure") return true;
-  }
-  return false;
-}
+import { hasRedResult, sweepStalledRuns, type WatchdogRun } from "./watchdog";
 
 /** Whether any leg of the run stored a red result. The leg result keys are
  *  gate/<owner>/<repo>/runs/<pr>/<runId>/... with the repo's canonical case: R2
@@ -36,7 +16,11 @@ export async function redLegIn(archive: LegArchive, prefix: string): Promise<boo
 async function hasRedLeg(env: Env, repo: string, pr: number, runId: string): Promise<boolean> {
   const token = await repoTokenMinter(env)(repo);
   const canonical = (await getPullRequest(token, repo, pr)).repoFullName;
-  return redLegIn(env.STUDIO_ARCHIVE, `gate/${canonical}/runs/${pr}/${runId}/`);
+  const listed = await env.STUDIO_ARCHIVE.list({ prefix: `gate/${canonical}/runs/${pr}/${runId}/` });
+  return hasRedResult(listed.objects.map((o) => o.key), async (key) => {
+    const obj = await env.STUDIO_ARCHIVE.get(key);
+    return obj === null ? undefined : obj.json<{ state?: string }>();
+  });
 }
 
 /** One watchdog sweep, run by the every-minute cron. Its errors reach the caller;

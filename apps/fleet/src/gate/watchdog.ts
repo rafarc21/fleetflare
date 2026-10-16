@@ -24,6 +24,30 @@ export const GATE_WATCHDOG_LOOKBACK_MS = 2 * 60 * 60_000;
  *  verdict posts before the row leaves the sweep. */
 export const GATE_WATCHDOG_FINAL_AGE_MS = GATE_WATCHDOG_LOOKBACK_MS - 5 * 60_000;
 
+/** The stored leg-result keys that decide each leg, as the run's own verdict reads
+ *  them (leg-run.ts): a retry's result over the try-2 infra result over the first
+ *  try. A red first try whose retry passed is flaky, not red (#1150 review). */
+export function decisiveResultKeys(keys: string[]): string[] {
+  const bases = new Set(keys.map((k) => k.replace(/(\.retry\.json|-try2\.json|\.json)$/, "")));
+  const decisive: string[] = [];
+  for (const base of bases) {
+    const pick = [`${base}.retry.json`, `${base}-try2.json`, `${base}.json`].find((k) => keys.includes(k));
+    if (pick !== undefined) decisive.push(pick);
+  }
+  return decisive;
+}
+
+/** Whether any leg's decisive stored result is red. `read` gets one stored result
+ *  by key, undefined when absent. The watchdog reads the same results the run wrote. */
+export async function hasRedResult(
+  keys: string[], read: (key: string) => Promise<{ state?: string } | undefined>,
+): Promise<boolean> {
+  for (const key of decisiveResultKeys(keys)) {
+    if ((await read(key))?.state === "failure") return true;
+  }
+  return false;
+}
+
 /** The slice of the run index the watchdog reads and writes. */
 export interface WatchdogIndex extends Pick<GateRunIndex, "latest" | "handOff"> {
   /** Stamps the runs with no progress stamp (0) with `at`, so each gets a full stall window before it can be ended (#1148 item 3). */
@@ -88,7 +112,7 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
   // A failed read throws: the row is kept and the next sweep reads it again.
   const status = (await (await deps.workflow.get(runId)).status()).status;
   if (!isLiveStatus(status)) {
-    // Only a finished run is retired. "unknown" may be a blip: the next sweep reads it again (#1150 review item 2).
+    // Only a finished run is retired. "unknown" can be a blip: the next sweep reads it again.
     if (status === "complete" || status === "errored" || status === "terminated") {
       await deps.index.retire(repo, pr, runId, row.progressedAt ?? 0);
     }
