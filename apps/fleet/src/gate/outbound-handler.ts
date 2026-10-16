@@ -98,11 +98,89 @@ export interface GateOutboundProps {
  *  props is set on the upstream request only, never on anything returned. */
 export interface GitProxyDeps {
   fetch(url: string, init: RequestInit): Promise<Response>;
+  /** Clock and wait for the retry loop. The Worker uses the real ones; tests inject a fake. */
+  now?(): number;
+  sleep?(ms: number): Promise<void>;
+  random?(): number;
 }
 
-/** Upper bound on one upstream git request. A stalled GitHub connection must
- *  not hold the leg container open for the rest of its lifetime. */
+/** Upper bound on one upstream git request, retries and waits included. A
+ *  stalled GitHub connection must not hold the leg container open for the rest
+ *  of its lifetime. */
 export const GIT_UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** #1137: one first try plus up to three retries for a rate-limited upstream. */
+export const GIT_UPSTREAM_MAX_ATTEMPTS = 4;
+/** Longest server-side wait for one retry, however large the Retry-After hint. */
+export const RETRY_WAIT_CAP_MS = 60_000;
+/** Random extra wait per retry, so legs that hit one limit do not retry in lockstep. */
+export const RETRY_JITTER_MS = 1_000;
+/** Wait for a 429 with no Retry-After. Doubles on each retry from this base. */
+const RETRY_BACKOFF_BASE_MS = 1_000;
+/** A POST body up to this size is buffered so a retry resends identical bytes.
+ *  A larger body streams once and is never retried. */
+export const MAX_RETRY_BODY_BYTES = 1024 * 1024;
+
+/** Retry-After as milliseconds from `now`: delta-seconds or an HTTP date. Null
+ *  when the header is absent or unreadable. */
+function retryAfterMs(res: Response, now: number): number | null {
+  const value = res.headers.get("retry-after");
+  if (value === null) return null;
+  if (/^\s*\d+\s*$/.test(value)) return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? null : Math.max(0, at - now);
+}
+
+/** 429 always retries. 403 retries only with Retry-After, which marks a
+ *  secondary limit. A plain 403 is a permission refusal, not a rate limit. */
+function isRetryable(status: number, hint: number | null): boolean {
+  return status === 429 || (status === 403 && hint !== null);
+}
+
+/** One retry's wait: the Retry-After hint capped, or the backoff when there is
+ *  no hint, plus jitter. */
+function retryWaitMs(hint: number | null, attempt: number, random: number): number {
+  const base = hint === null ? RETRY_BACKOFF_BASE_MS * 2 ** (attempt - 1) : Math.min(hint, RETRY_WAIT_CAP_MS);
+  return base + Math.floor(random * RETRY_JITTER_MS);
+}
+
+/** The request body, read once so every attempt sends the same bytes. Over the
+ *  cap, the bytes read so far are replayed as a one-shot stream and retry is off. */
+async function bodyForAttempts(req: Request): Promise<{ body: Uint8Array | ReadableStream<Uint8Array> | null; retryable: boolean }> {
+  if (req.method !== "POST" || req.body === null) return { body: null, retryable: true };
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return { body: bytes, retryable: true };
+    }
+    chunks.push(value);
+    total += value.byteLength;
+    if (total > MAX_RETRY_BODY_BYTES) {
+      let next = 0;
+      const replay = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (next < chunks.length) {
+            controller.enqueue(chunks[next++]);
+            return;
+          }
+          const part = await reader.read();
+          if (part.done) controller.close();
+          else controller.enqueue(part.value);
+        },
+      });
+      return { body: replay, retryable: false };
+    }
+  }
+}
 
 /** The upstream URL for one allowed git fetch request, or null. Allowed:
  *  GET info/refs?service=git-upload-pack and POST git-upload-pack, both for
@@ -136,6 +214,13 @@ async function handleGitProxy(
   const upstream = resolveGitUpstream(req.method, url, props.repo);
   if (!upstream) return new Response("forbidden", { status: 403 });
 
+  const now = git.now ?? Date.now;
+  const sleep = git.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const random = git.random ?? Math.random;
+  // One budget for every attempt and every wait on this request (#1137).
+  const deadline = now() + GIT_UPSTREAM_TIMEOUT_MS;
+  const { body, retryable } = await bodyForAttempts(req);
+
   // GitHub git smart HTTP rejects `Bearer` (401); it takes Basic auth with the
   // installation token as the password of user `x-access-token`.
   const basic = btoa(`x-access-token:${props.gitToken}`);
@@ -144,30 +229,44 @@ async function handleGitProxy(
     const value = req.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
-  let res: Response;
-  try {
-    res = await git.fetch(upstream, {
-      method: req.method,
-      headers,
-      body: req.method === "POST" ? req.body : undefined,
-      // A redirect would move the fetch to whatever repo it names. Refuse it.
-      redirect: "manual",
-      signal: AbortSignal.timeout(GIT_UPSTREAM_TIMEOUT_MS),
-    });
-  } catch {
-    return new Response("upstream unavailable", { status: 502 });
+  for (let attempt = 1; ; attempt++) {
+    let res: Response;
+    try {
+      res = await git.fetch(upstream, {
+        method: req.method,
+        headers,
+        body,
+        // A redirect would move the fetch to whatever repo it names. Refuse it.
+        redirect: "manual",
+        signal: AbortSignal.timeout(deadline - now()),
+      });
+    } catch {
+      return new Response("upstream unavailable", { status: 502 });
+    }
+    // Diagnosis for a garbled git stream (#1104): the framing headers of every
+    // upstream response. Status and encoding headers only, never the token.
+    console.log(`gate git-proxy: upstream ${res.status} content-encoding=${res.headers.get("content-encoding") ?? "-"} transfer-encoding=${res.headers.get("transfer-encoding") ?? "-"}`);
+    if (res.status >= 300 && res.status < 400) return new Response("upstream redirect refused", { status: 502 });
+    if (res.status === 200) {
+      // Only the body and content-type of a 200 reach the container. Upstream
+      // headers (set-cookie, request ids) and error bodies are dropped.
+      return new Response(res.body, {
+        status: 200,
+        headers: { "content-type": res.headers.get("content-type") ?? "application/octet-stream" },
+      });
+    }
+
+    // #1137: a rate-limited attempt is retried here, so every leg's container
+    // does not fail on the same schedule. Budget spent: the status passes through.
+    const hint = retryAfterMs(res, now());
+    const retry = retryable && attempt < GIT_UPSTREAM_MAX_ATTEMPTS && isRetryable(res.status, hint);
+    if (!retry) return new Response(null, { status: res.status });
+    const wait = retryWaitMs(hint, attempt, random());
+    if (now() + wait >= deadline) return new Response(null, { status: res.status });
+    console.log(`gate git-proxy: retry status=${res.status} wait=${wait}ms attempt=${attempt + 1}/${GIT_UPSTREAM_MAX_ATTEMPTS}`);
+    await res.body?.cancel();
+    await sleep(wait);
   }
-  // Diagnosis for a garbled git stream (#1104): the framing headers of every
-  // upstream response. Status and encoding headers only, never the token.
-  console.log(`gate git-proxy: upstream ${res.status} content-encoding=${res.headers.get("content-encoding") ?? "-"} transfer-encoding=${res.headers.get("transfer-encoding") ?? "-"}`);
-  if (res.status >= 300 && res.status < 400) return new Response("upstream redirect refused", { status: 502 });
-  // Only the body and content-type of a 200 reach the container. Upstream
-  // headers (set-cookie, request ids) and error bodies are dropped.
-  if (res.status !== 200) return new Response(null, { status: res.status });
-  return new Response(res.body, {
-    status: 200,
-    headers: { "content-type": res.headers.get("content-type") ?? "application/octet-stream" },
-  });
 }
 
 /** Serves one plain container request. Every branch either uses the bucket for
