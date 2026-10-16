@@ -146,6 +146,13 @@ export const INLINE_LIMIT_HEADLINES = [
   { headline: SESSION_LIMIT_HEADLINE, line: /You've hit your session limit · resets(?:\s|$)/ },
   { headline: "You've hit your weekly limit", line: /You've hit your weekly limit · resets(?:\s|$)/ },
   { headline: "You've hit your monthly spend limit", line: /You've hit your monthly spend limit · raise it at(?:\s|$)/ },
+  // Issue #1142 review B5: the org monthly spend cap, live wording. spendCap is
+  // what makes the verdict hold until month end rather than a reset.
+  {
+    headline: "You've hit your org's monthly spend limit",
+    line: /You've hit your org's monthly spend limit · ask your admin to raise it at(?:\s|$)/,
+    spendCap: true,
+  },
   {
     headline: "You're out of usage credits.",
     line: /You're out of usage credits(?:\. Run \/usage-credits|\. \/model|\. Switch to another model| · resets )/,
@@ -163,9 +170,16 @@ const INLINE_LIMIT_LINE = new RegExp(
  * A block with NO hint row, measured on 2 of 4 real studio panes (web-studio
  * 09-24, weekly 09-17): a session or weekly headline whose row ends at its
  * reset's `(zone)`. Nothing else is accepted hint-less — a monthly-spend or
- * out-of-credits block without its hint was never seen.
+ * out-of-credits block without its hint was never seen, EXCEPT the org spend-cap
+ * line below (issue #1142 review B5), which is measured hint-less and ends at
+ * the idle input box, with no reset to wait for.
  */
 const HINTLESS_LIMIT_LINE = /^\s*⎿\s+You've hit your (?:session|weekly) limit · resets .*\)\s*$/;
+/** The org monthly spend-cap line with its own "ask your admin" tail and no
+ *  reset (issue #1142 review B5). Accepted only bottom-anchored: the line is
+ *  followed by the idle input box, the same proof the hint-less session block
+ *  relies on. Held until the next UTC month, so there is nothing to time out. */
+const SPEND_CAP_INLINE_LINE = /^\s*⎿\s+You've hit your org's monthly spend limit · ask your admin to raise it at \S+\s*$/;
 /**
  * The hint claude draws under the headline. Each is a PREFIX (the tails vary:
  * "/usage-credits to adjust your monthly spend limit.", "... to finish what
@@ -451,7 +465,11 @@ function inlineLimitBlock(lines: string[], now?: Date, sighting?: LimitSighting 
     const found = INLINE_LIMIT_HEADLINES.find((h) => text.search(h.line) === 0);
     if (!found) return null;
     const m = headlineText.match(RESETS);
-    const verdict = { kind: "modal", headline: found.headline, marker, inline: true, ...(m ? { resets: m[2] } : {}) } as const;
+    const verdict = {
+      kind: "modal", headline: found.headline, marker, inline: true,
+      ...(m ? { resets: m[2] } : {}),
+      ...("spendCap" in found ? { spendCap: true as const } : {}),
+    } as const;
     if (!now) return verdict;
     const key = limitBlockKey(verdict);
     const stale: PaneVerdict = {
@@ -461,6 +479,9 @@ function inlineLimitBlock(lines: string[], now?: Date, sighting?: LimitSighting 
     return limitKeyIsLive(key, m, now, sighting) ? verdict : stale;
   };
   if (HINTLESS_LIMIT_LINE.test(lines[at]) && RESETS.test(lines[at]) && endsInIdleInputBox(lines.slice(at + 1), "required")) {
+    return block(at + 1, "(no hint)");
+  }
+  if (SPEND_CAP_INLINE_LINE.test(lines[at]) && endsInIdleInputBox(lines.slice(at + 1), "required")) {
     return block(at + 1, "(no hint)");
   }
   for (let j = at + 1; j <= Math.min(at + UPGRADE_HINT_WINDOW, lines.length - 1); j++) {
@@ -2173,11 +2194,6 @@ export async function runAccountFailover(
   // it — an exec is what brings a container up (see do.ts's restartStudio
   // ordering comment). Nothing about an account is decidable here.
   if (existing.state === "stopped") return { kind: "skipped", reason: "studio is stopped" };
-  // Issue #1142, item 1: a glm-led row (kimi/deepseek are stored as glm too)
-  // runs its lead on the fleet LLM router with no Claude account. A limit modal
-  // on its pane is not a failover case: switching would push the NEXT Claude
-  // token into an OSS studio. Claude-led rows fall through unchanged.
-  if (existing.leadType === "glm") return { kind: "skipped", reason: "glm lead runs on the router, no Claude account to fail over" };
   const destroyLanded = await watchForDestroy(storage, deps.now);
 
   const sightings = storage as unknown as SightingStorage;
@@ -2388,7 +2404,10 @@ export async function runAccountFailover(
     // hand-back's own respawn-pane. Neither guard errors — a skipped tick
     // just leaves the studio borrowed for one more cycle, and the next tick
     // tries again.
-    if (deps.autoFailover && rowNow.borrowedAccount && deps.primary && !verdict.repainted) {
+    // Issue #1142 review F1: a glm-led row never hands back to a Claude primary
+    // — it has no Claude account to return to, and this write would put that
+    // primary's token into a router-led studio's start env.
+    if (deps.autoFailover && rowNow.borrowedAccount && rowNow.leadType !== "glm" && deps.primary && !verdict.repainted) {
       const ownPrimary = deps.accounts.find((a) => a.name === deps.primary);
       if (ownPrimary) {
         const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
@@ -2407,6 +2426,13 @@ export async function runAccountFailover(
     if (healed) return { kind: "recovered", clearedAt: healed.exhaustionClearedAt as string };
     return { kind: "no-modal", reason: verdict.reason };
   }
+  // Issue #1142, item 1 (moved after the working branch by review F1): a glm-led
+  // row (kimi/deepseek are stored as glm too) runs its lead on the fleet LLM
+  // router with no Claude account. A limit modal on its pane is not a failover
+  // case: switching would push the NEXT Claude token into an OSS studio. The
+  // working branch above still runs for it — members-ticking and a stale
+  // LIMIT clear are router-led bookkeeping too. Claude-led rows fall through.
+  if (existing.leadType === "glm") return { kind: "skipped", reason: "glm lead runs on the router, no Claude account to fail over" };
   // Issue #106, MEASURED 2026-09-24: `claude --resume` redraws a persisted
   // limit block and its hint. The lead this studio relaunched with
   // `--continue` can therefore show the very block it was switched off —

@@ -397,7 +397,7 @@ describe("fleet ls table — READY inference-silent marker (#1142)", () => {
   const working = (overrides: Partial<StudioStatus> = {}, id = "websites--web-studio"): StudioStatus =>
     row({
       id, leadType: "glm",
-      observed: { activity: { state: "working", since: NOW.toISOString(), anchored: true, observedAt: NOW.toISOString() } } as unknown as StudioStatus["observed"],
+      observed: { activity: { state: "working", since: new Date(NOW.getTime() - 10 * 60_000).toISOString(), anchored: true, observedAt: NOW.toISOString() } } as unknown as StudioStatus["observed"],
       ...overrides,
     }, id);
 

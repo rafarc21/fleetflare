@@ -5753,8 +5753,11 @@ export function opsFileFetcher(
 /** Issue #1142, item 5: the env a StudioDO boots with before its constructor's
  *  storage read resolves. Same shape as studioEnvVars, but the Claude token is
  *  the empty string, never the mapped account token: a read failure must not
- *  boot an OSS studio on a Claude account. "" is the refused-launch shape
- *  (studioEnvVars above), so it is a set variable that starts nothing. */
+ *  boot an OSS studio on a Claude account. Issue #1142 review F3: "" is a set
+ *  variable, so the container still boots — with no Claude credential, and the
+ *  lead comes up unauthenticated. Follow-up (not in this PR): refuseStart should
+ *  re-derive the launch from storage before any start when the constructor's
+ *  read failed. The placeholder only lives until that read resolves. */
 export function placeholderEnvVars(
   env: Env, studioId: string, spawnToken: string,
 ): Record<string, string> {
@@ -5775,8 +5778,8 @@ export class StudioDO extends Sandbox<Env> {
    *  can serve anything. It survives only if that storage read itself fails.
    *  Issue #1142, item 5: its Claude token is "" (placeholderEnvVars), never a
    *  mapped account token — a read failure must not boot a router-led studio
-   *  on Claude. A set-but-empty variable is the refused-launch shape, so
-   *  bring-up still never sees an unset variable. */
+   *  on Claude. Review F3: "" still boots the container without a credential
+   *  (the lead comes up unauthenticated); it is not a refused launch. */
   envVars = placeholderEnvVars(this.env, this.ctx.id.name ?? "studio", mintSpawnToken());
 
   /**

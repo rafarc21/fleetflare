@@ -163,9 +163,41 @@ export function ageSeconds(iso: string, now: Date): number {
   return Number.isNaN(at) ? 0 : Math.max(0, Math.floor((now.getTime() - at) / 1000));
 }
 
+/** Issue #1142, item 2 (the issue #911 ask), review F2: how long a lead must have
+ *  been working before silence means anything. A turn that started seconds ago
+ *  has not logged its first call yet (anthropic-route logs at completion). */
+export const INFER_SILENT_MIN_WORKING_MS = 5 * 60 * 1000;
+
+/**
+ * Issue #1142, item 2: a router-led row (glm, which kimi/deepseek are stored as
+ * too) whose lead reads "working" yet made ZERO router calls in the INFER window
+ * — the lead claims progress the router never saw. Reads the same gate fleet ls
+ * ACTIVITY reads (leadGate: a limit, a replaced row, or a stopped one is never
+ * "working"), the same freshness rule the --json `lead` field applies (a stale
+ * mirror is never "working"), and a working run long enough to have logged a
+ * call. `usageKnown` is whether the usage map answered at all: an absent answer
+ * is no data, never 0, so it can never flag. Claude-led and idle rows are never
+ * silent.
+ */
+export function isLeadInferenceSilent(
+  status: StudioStatus,
+  u: LeadInferUsage | undefined,
+  usageKnown: boolean,
+  now: Date,
+): boolean {
+  if (!usageKnown || status.leadType !== "glm") return false;
+  if (leadGate(status, now).kind !== "activity") return false;
+  const activity = status.observed?.activity;
+  if (activity?.state !== "working") return false;
+  if (ageSeconds(activity.observedAt, now) > ACTIVITY_MIRROR_STALE_SECONDS) return false;
+  if (now.getTime() - Date.parse(activity.since) < INFER_SILENT_MIN_WORKING_MS) return false;
+  return (u?.calls ?? 0) === 0;
+}
+
 /**
  * Issue #85 — READY overrides, `state: "running"` only, first match wins:
- * replaced -> unreachable -> unverified -> null (render today's formatReady).
+ * replaced -> unreachable -> mismatch (#911/#1142) -> unverified -> null (render
+ * today's formatReady).
  * A stopped or provisioning studio (the operation lock — #86/#87) never
  * gets an override: a bring-up in flight has no token yet, and a stopped
  * studio renders exactly as today. Maestro correction #11: `unreachable`
