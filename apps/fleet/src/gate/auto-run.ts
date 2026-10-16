@@ -191,7 +191,7 @@ export interface AutoRunDeps {
  *  block (the same lookup the Workflow does, at the PR's base sha). A repo with
  *  no gate block starts nothing. */
 export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDeps): Promise<AutoRunOutcome> {
-  const config = await loadGateConfig({ repo: pr.repo, fleetRepo: deps.fleetRepo, baseSha: pr.baseSha }, deps.readFleetJson);
+  const config = await loadGateConfig({ repo: pr.repo, fleetRepo: deps.fleetRepo, configSha: pr.baseSha }, deps.readFleetJson);
   if (config === null) return "no-gate-block";
   const { reused } = await startGateRun(
     deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index,
