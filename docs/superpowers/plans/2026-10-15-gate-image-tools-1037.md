@@ -13,9 +13,9 @@ A Rust-workspace repo needs a pinned Rust toolchain plus a C linker.
    rustup-init 1.28.2 (sha256-pinned) installs Rust 1.96.0
    (rustfmt, clippy, llvm-tools-preview, wasm32 target), then
    rustc/cargo/python3/pgrep --version verify.
-3. Three tests pin "no rustup/cargo" (gate-dockerfile.test.ts,
-   gate-server.test.ts) — flip to positive pins of the new layer.
-   reproducible-images.test.ts has no rustup pins (verify only).
+3. Two tests pin "no rustup/cargo" (gate-dockerfile.test.ts,
+   gate-server.test.ts) — flip to positive pins.
+   reproducible-images.test.ts has no rustup pins (verified: grep).
 4. Header comment "No Rust: fleetflare has none" updated.
 
 ## Verification

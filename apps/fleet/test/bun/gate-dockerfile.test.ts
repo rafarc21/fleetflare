@@ -7,7 +7,8 @@ import { join } from "node:path";
  * vitest lane needs node (scripts/localci/localci.sh: vitest is
  * `#!/usr/bin/env node`); the bun-test lane needs tmux and chromium at
  * /usr/local/bin/chromium (the ego-browser shim launches that exact path).
- * fleetflare has no Rust, so the rustup/cargo-nextest layer must not return.
+ * fleetflare's gate also runs Rust-workspace lanes, so the image ships a pinned
+ * Rust toolchain (#1037) that these tests pin positively.
  * Static only: a real build needs a docker daemon, which the gate lacks.
  */
 const DOCKERFILE = join(import.meta.dir, "..", "..", "container", "Dockerfile.gate");
