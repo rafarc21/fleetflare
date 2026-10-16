@@ -78,6 +78,9 @@ describe("reapDeps().loadState — parseReapState per-branch coverage (#496)", (
       // :2397 and :2398 together: two maps kept, two absent.
       ["boardRows and refusals", '{"boardRows":{"example-org/acmeclient":3},"refusals":{"acmeclient--pilot":2}}',
         () => ({ ...emptyReapState(), boardRows: { "example-org/acmeclient": 3 }, refusals: { "acmeclient--pilot": 2 } })],
+      // --nudge's budget (issue #1098) is kept, or a restart would wake a lead again.
+      ["nudge records", '{"nudgedAt":{"acmeclient--pilot":"2026-10-16T10:00:00.000Z"},"taskNudges":{"7":["2026-10-16T10:00:00.000Z"]}}',
+        () => ({ ...emptyReapState(), nudgedAt: { "acmeclient--pilot": "2026-10-16T10:00:00.000Z" }, taskNudges: { "7": ["2026-10-16T10:00:00.000Z"] } })],
       // Unknown keys are silently dropped, not a corruption.
       ["unknown key dropped", '{"unknown":1}', () => emptyReapState()],
     ];

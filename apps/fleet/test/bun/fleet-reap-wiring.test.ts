@@ -27,6 +27,11 @@ let slowBoardMs = 0;
 /** Per test: what POST /destroy and GET /status answer. null = the defaults. */
 let destroyAnswer: (() => Response) | null = null;
 let statusAnswer: (() => Response) | null = null;
+/** Issue #1098 (--nudge): an open task on ID, the lead type on its row, and the assign answer. */
+let openTasks: unknown[] | null = null;
+let leadOverride: string | null = null;
+let assignAnswer: (() => Response) | null = null;
+const assigns: string[] = [];
 
 function idleActivity(forMs: number) {
   const now = Date.now();
@@ -40,6 +45,7 @@ function row(state: StudioStatus["state"] = "running"): StudioStatus {
   return {
     id: ID, state, tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null, burn: null,
     spawnedBy: null, spawnTokenHash: null, repoSlug: REPO,
+    ...(leadOverride ? { leadType: leadOverride } : {}),
     observed: { activity: idleActivity(45 * MIN), memberAlerts: null },
   } as unknown as StudioStatus;
 }
@@ -54,9 +60,15 @@ beforeAll(() => {
       seen.push(`${req.method} ${u.pathname}${u.search}`);
       if (u.pathname === "/studio/") return Response.json([row()]);
       if (u.pathname === "/studio/board/tasks") {
-        const body = u.searchParams.has("assignedTo") ? [] : HISTORY;
+        const body = u.searchParams.has("assignedTo") ? [] : (openTasks ?? HISTORY);
         if (slowBoardMs > 0) return Bun.sleep(slowBoardMs).then(() => Response.json(body));
         return Response.json(body);
+      }
+      if (u.pathname === "/studio/board/tasks/7/assign" && req.method === "POST") {
+        return req.text().then((body) => {
+          assigns.push(body);
+          return assignAnswer ? assignAnswer() : Response.json({ number: 7, wake: { woke: true, digest: "WAKE TASK ASSIGNED #7" } });
+        });
       }
       if (u.pathname === `/studio/${ID}/rescue`) return Response.json({ ok: true, pushes: [] });
       if (u.pathname === `/studio/${ID}/inspect`) {
@@ -73,7 +85,10 @@ beforeAll(() => {
   });
 });
 afterAll(() => server.stop(true));
-beforeEach(() => { seen.length = 0; slowBoardMs = 0; destroyAnswer = null; statusAnswer = null; });
+beforeEach(() => {
+  seen.length = 0; slowBoardMs = 0; destroyAnswer = null; statusAnswer = null;
+  openTasks = null; leadOverride = null; assignAnswer = null; assigns.length = 0;
+});
 
 const NOT_UNDER_ORCA: OrcaDeps = {
   env: { TERM_PROGRAM: "Apple_Terminal" },
@@ -245,4 +260,46 @@ describe("reapDeps().destroy composition — real 409s stay refused (#80/#86)", 
     expect((await deps(lines).destroy(ID)).outcome).toBe("in-progress");
     expect(lines.join("\n")).not.toContain("destroy refused");
   });
+});
+
+// Issue #1098: `fleet reap --nudge` wakes an OSS lead idle on an open task
+// through the SAME Worker call `fleet task assign` makes (POST .../assign).
+const LEAD_TASK = {
+  number: 7, url: "", title: "t7", body: "", state: "working", labels: [`studio:${ID}`], assignee: ID,
+  milestone: null, open: true, updatedAt: new Date().toISOString(),
+};
+function openLeadTask(answer: (() => Response) | null = null) {
+  openTasks = [LEAD_TASK];
+  leadOverride = "glm";
+  assignAnswer = answer;
+}
+const NUDGE_FLAGS = { apply: true, idleMs: 30 * MIN, repo: REPO, nudge: true };
+
+test("--nudge apply: an OSS lead idle on an open task gets the assign call, and nothing is destroyed", async () => {
+  openLeadTask();
+  const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");
+  const lines: string[] = [];
+  const out = await runReap(NUDGE_FLAGS, reapDeps(creds(), REPO, statePath, (l) => lines.push(l), NOT_UNDER_ORCA));
+  expect(out.exitCode).toBe(0);
+  expect(seen).toContain("POST /studio/board/tasks/7/assign");
+  expect(seen.some((s) => s.includes("/destroy") || s.includes("/rescue"))).toBe(false);
+  expect(JSON.parse(assigns[0]!)).toEqual({ assignee: ID, repo: REPO });
+  expect(lines.some((l) => l.startsWith(`NUDGED ${ID}`) && l.includes("#7"))).toBe(true);
+});
+
+test("--nudge: the cooldown survives the state file, so a second poll inside 15m wakes nothing", async () => {
+  openLeadTask();
+  const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");
+  await runReap(NUDGE_FLAGS, reapDeps(creds(), REPO, statePath, () => {}, NOT_UNDER_ORCA));
+  await runReap(NUDGE_FLAGS, reapDeps(creds(), REPO, statePath, () => {}, NOT_UNDER_ORCA));
+  expect(assigns.length).toBe(1);
+  expect(JSON.parse(readFileSync(statePath, "utf8")).taskNudges["7"]).toHaveLength(1);
+});
+
+test("--nudge: a refusal from the Worker is logged with its reason", async () => {
+  openLeadTask(() => Response.json({ number: 7, wake: { woke: false, reason: "studio is stopped" } }));
+  const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");
+  const lines: string[] = [];
+  await runReap(NUDGE_FLAGS, reapDeps(creds(), REPO, statePath, (l) => lines.push(l), NOT_UNDER_ORCA));
+  expect(lines.some((l) => l.startsWith(`NUDGE FAILED ${ID}`) && l.includes("studio is stopped"))).toBe(true);
 });
