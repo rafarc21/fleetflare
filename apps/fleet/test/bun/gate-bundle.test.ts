@@ -147,10 +147,10 @@ describe("bundle GET and PUT are scoped to the run (#1080)", () => {
 
   it("only the bundle leg writes the bundle, once (201, then 412)", async () => {
     const { bucket, store } = fakeBucket();
-    const first = await handleGateOutbound(r2("PUT", BUNDLE_KEY, "PACK"), bucket, BUILDER_PROPS);
+    const first = await handleGateOutbound(r2("PUT", BUNDLE_KEY, "PACK", { "content-length": "4" }), bucket, BUILDER_PROPS);
     expect(first.status).toBe(201);
     expect(store.get(BUNDLE_KEY)).toBe("PACK");
-    expect((await handleGateOutbound(r2("PUT", BUNDLE_KEY, "PACK2"), bucket, BUILDER_PROPS)).status).toBe(412);
+    expect((await handleGateOutbound(r2("PUT", BUNDLE_KEY, "PACK2", { "content-length": "5" }), bucket, BUILDER_PROPS)).status).toBe(412);
   });
 
   it("an ordinary leg cannot write the bundle, even with its bundle key: 403, bucket untouched", async () => {
@@ -239,5 +239,82 @@ describe("runBundleStep: the bundle step never fails the run (#1080)", () => {
     const { step } = fakeStep();
     const built = await runBundleStep(step, async () => { throw new Error("DO unreachable"); }, PLANNED);
     expect(built).toBe(false);
+  });
+});
+
+describe("the bundle PUT streams under a declared length (#1080 HIGH 1)", () => {
+  /** A bucket that records what it was handed, so a test can tell a stream from a buffer. */
+  function recordingBucket() {
+    const got: { key: string; value: unknown }[] = [];
+    const store = new Map<string, string>();
+    const bucket: OutboundBucket = {
+      async get() { return null; },
+      async head() { return null; },
+      async put(key, value) {
+        got.push({ key, value });
+        store.set(key, await new Response(value).text());
+        return { key };
+      },
+    };
+    return { bucket, got, store };
+  }
+
+  it("a bundle PUT with no content-length is refused: 411, bucket untouched", async () => {
+    const { bucket, store } = recordingBucket();
+    const res = await handleGateOutbound(r2("PUT", BUNDLE_KEY, "PACK"), bucket, BUILDER_PROPS);
+    expect(res.status).toBe(411);
+    expect(store.size).toBe(0);
+  });
+
+  it("the bucket receives the bundle as a stream, not a buffer", async () => {
+    const { bucket, got } = recordingBucket();
+    const res = await handleGateOutbound(r2("PUT", BUNDLE_KEY, "PACK", { "content-length": "4" }), bucket, BUILDER_PROPS);
+    expect(res.status).toBe(201);
+    expect(got).toHaveLength(1);
+    expect(got[0].value).toBeInstanceOf(ReadableStream);
+  });
+
+  it("a body longer than its declared length is refused: 413, nothing stored", async () => {
+    const { bucket, store } = recordingBucket();
+    const res = await handleGateOutbound(r2("PUT", BUNDLE_KEY, "PACKPACK", { "content-length": "4" }), bucket, BUILDER_PROPS);
+    expect(res.status).toBe(413);
+    expect(store.has(BUNDLE_KEY)).toBe(false);
+  });
+
+  it("a body shorter than its declared length is refused: 400, nothing stored", async () => {
+    const { bucket, store } = recordingBucket();
+    const res = await handleGateOutbound(r2("PUT", BUNDLE_KEY, "PA", { "content-length": "4" }), bucket, BUILDER_PROPS);
+    expect(res.status).toBe(400);
+    expect(store.has(BUNDLE_KEY)).toBe(false);
+  });
+});
+
+describe("the merge base rides with the bundle key, and only then (#1080 HIGH 1)", () => {
+  const MERGE_BASE = "c".repeat(40);
+  const LEG_REQ = {
+    owner: "acme", repo: "example", commit: `${BASE}..${HEAD}`, leg: "lint",
+    installCmd: "bun install", legCmd: "bun run lint", resultKey: RUN_KEY, baselineKeys: [],
+    private: false, baseRef: "main", pr: "7",
+  };
+
+  it("a leg with a bundle key and a merge base gets GATE_MERGE_BASE in its env", () => {
+    const env = buildLegEnvVars({ ...LEG_REQ, bundleKey: BUNDLE_KEY, mergeBase: MERGE_BASE });
+    expect(env.GATE_MERGE_BASE).toBe(MERGE_BASE);
+  });
+
+  it("a leg with no bundle key gets no GATE_MERGE_BASE, so it clones and merges as before", () => {
+    const env = buildLegEnvVars({ ...LEG_REQ, mergeBase: MERGE_BASE });
+    expect(env.GATE_MERGE_BASE).toBeUndefined();
+    expect(env.GATE_BUNDLE_KEY).toBeUndefined();
+  });
+
+  it("legRequest passes the merge base through with the bundle key", () => {
+    const req = legRequest("acme", "example", LEG, { baseRef: "main", pr: "7", private: false, bundleKey: BUNDLE_KEY, mergeBase: MERGE_BASE });
+    expect(req.mergeBase).toBe(MERGE_BASE);
+  });
+
+  it("legRequest with no bundle carries no merge base", () => {
+    const req = legRequest("acme", "example", LEG, { baseRef: "main", pr: "7", private: false });
+    expect(req.mergeBase).toBeUndefined();
   });
 });

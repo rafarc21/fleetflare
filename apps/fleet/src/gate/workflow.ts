@@ -170,7 +170,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         return stub.fetch("https://gate-runner/run-leg", {
           method: "POST",
           body: JSON.stringify(legRequest(owner, repoName, planned, {
-            baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, bundleKey,
+            baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, bundleKey, mergeBase: resolved.mergeBaseSha,
           })),
         });
       },
@@ -179,7 +179,10 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
     const results = await Promise.all(
       legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName,
-        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, bundleKey: bundled ? bundleKey : undefined }, planned)),
+        {
+          baseRef: resolved.baseRef, pr: String(pr), private: resolved.private,
+          bundleKey: bundled ? bundleKey : undefined, mergeBase: bundled ? resolved.mergeBaseSha : undefined,
+        }, planned)),
     );
 
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
@@ -228,7 +231,7 @@ function bunLaneFiles(tree: Parameters<typeof laneFilesFromTree>[0], cfg: GateCo
 /** One leg: a start-<leg> step, and a retry-<leg> step when it fails red. The step's return value is the DO's LegResult. */
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
-  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean; bundleKey?: string }, planned: PlannedLeg,
+  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean; bundleKey?: string; mergeBase?: string }, planned: PlannedLeg,
 ): Promise<LegRunResult> {
   return runLegStep(
     { do: (name, config, fn) => step.do(name, config, fn) },

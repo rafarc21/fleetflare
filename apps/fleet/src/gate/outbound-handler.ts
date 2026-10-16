@@ -48,10 +48,35 @@ const BASELINE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/baselines/(${SEG})\\.tar
 // #1080: one git bundle per run, `gate-bundles/<owner>/<repo>/<runId>/<headSha>.bundle`.
 // Only the bundle leg may write it (bundleWriter); every other leg reads its own run's.
 const BUNDLE_RE = new RegExp(`^gate-bundles/(${SEG})/(${SEG})/(${SEG})/([0-9a-f]{40})\\.bundle$`);
-/** The largest bundle the Worker buffers in one PUT. Above it the bundle leg
- *  uploads nothing and every leg clones (the fallback), so a big repo costs
- *  time, never a wrong verdict. */
-export const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
+/** The largest snapshot the bundle leg may upload (#1080 HIGH 1). The Worker streams
+ *  it to R2 and never holds it whole, so this bounds storage and transfer, not memory.
+ *  Same value as BUNDLE_MAX_BYTES in container/gate-server.ts. Above it the bundle leg
+ *  uploads nothing and every leg clones, so a big repo costs time, never a wrong
+ *  verdict. Provisional until sized from a measured large repo. */
+export const MAX_BUNDLE_BYTES = 256 * 1024 * 1024;
+
+/** A bundle body whose bytes disagree with its declared length. */
+export class BundleBodyError extends Error {
+  constructor(readonly status: 400 | 413, message: string) {
+    super(message);
+  }
+}
+
+/** Passes the body through, and fails it when its bytes stop matching `declared`:
+ *  more bytes than declared is 413, fewer is 400. R2 then stores nothing. */
+export function lengthChecked(body: ReadableStream<Uint8Array> | null, declared: number): ReadableStream<Uint8Array> {
+  let seen = 0;
+  return (body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() })).pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, ctl) {
+      seen += chunk.byteLength;
+      if (seen > declared) ctl.error(new BundleBodyError(413, "body longer than declared"));
+      else ctl.enqueue(chunk);
+    },
+    flush(ctl) {
+      if (seen !== declared) ctl.error(new BundleBodyError(400, "body shorter than declared"));
+    },
+  }));
+}
 
 export interface OutboundTarget {
   bucket: "STUDIO_ARCHIVE";
@@ -84,7 +109,7 @@ export interface OutboundBucket {
   head(key: string): Promise<{ size: number } | null>;
   put(
     key: string,
-    value: ArrayBuffer,
+    value: ArrayBuffer | ReadableStream<Uint8Array>,
     opts?: { onlyIf?: { etagDoesNotMatch?: string } },
   ): Promise<unknown | null>;
 }
@@ -182,6 +207,25 @@ async function handleGitProxy(
   });
 }
 
+/** #1080 HIGH 1: a bundle is streamed to R2. It must declare its length, so the cap
+ *  is checked before any byte is read, and the bytes are checked against that length
+ *  as they pass. Never buffered whole. */
+async function putBundle(req: Request, bucket: OutboundBucket, key: string): Promise<Response> {
+  const header = req.headers.get("content-length");
+  if (header === null || !/^\d+$/.test(header)) return new Response("length required", { status: 411 });
+  const declared = Number(header);
+  if (declared > MAX_BUNDLE_BYTES) return new Response("too large", { status: 413 });
+  try {
+    // write-once, as for a result key: a bundle is created once per run, never replaced.
+    const stored = await bucket.put(key, lengthChecked(req.body, declared), { onlyIf: { etagDoesNotMatch: "*" } });
+    if (stored === null) return new Response("already written", { status: 412 });
+    return new Response(null, { status: 201 });
+  } catch (err) {
+    if (err instanceof BundleBodyError) return new Response(err.message, { status: err.status });
+    throw err;
+  }
+}
+
 /** Serves one plain container request. Every branch either uses the bucket for
  *  an allow-listed key or returns a status without touching it. A PUT needs
  *  props whose resultKey equals the requested key exactly; missing props deny
@@ -217,15 +261,14 @@ export async function handleGateOutbound(
   if (req.method === "PUT") {
     if (isBundle) {
       if (!props?.bundleWriter) return new Response("forbidden", { status: 403 });
-    } else {
-      if (!isWritableByContainer(target.key)) return new Response("forbidden", { status: 403 });
-      if (!props?.resultKey || props.resultKey !== target.key) return new Response("forbidden", { status: 403 });
+      return putBundle(req, bucket, target.key);
     }
-    const cap = isBundle ? MAX_BUNDLE_BYTES : MAX_RESULT_BYTES;
+    if (!isWritableByContainer(target.key)) return new Response("forbidden", { status: 403 });
+    if (!props?.resultKey || props.resultKey !== target.key) return new Response("forbidden", { status: 403 });
     const declared = Number(req.headers.get("content-length") ?? "0");
-    if (declared > cap) return new Response("too large", { status: 413 });
+    if (declared > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
     const body = await req.arrayBuffer();
-    if (body.byteLength > cap) return new Response("too large", { status: 413 });
+    if (body.byteLength > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
     // write-once: a leg's result key may be created once, never replaced.
     const stored = await bucket.put(target.key, body, { onlyIf: { etagDoesNotMatch: "*" } });
     if (stored === null) return new Response("already written", { status: 412 });

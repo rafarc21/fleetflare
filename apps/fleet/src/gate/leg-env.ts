@@ -28,6 +28,8 @@ export interface GateLegRequest {
   image?: string;
   /** #1080: the run's bundle key. Every leg reads it; the bundle leg writes it. Absent: clone, as before. */
   bundleKey?: string;
+  /** #1080 HIGH 1: the PR's merge base. Sent only with a bundle key: a snapshot leg merges with it. */
+  mergeBase?: string;
 }
 
 /** No token field, no URL field: the R2 keys below are plain keys, not
@@ -47,6 +49,7 @@ export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
     GATE_BASE_REF: req.baseRef,
     GATE_PR: req.pr,
     ...(req.bundleKey === undefined ? {} : { GATE_BUNDLE_KEY: req.bundleKey }),
+    ...(req.bundleKey === undefined || req.mergeBase === undefined ? {} : { GATE_MERGE_BASE: req.mergeBase }),
   };
 }
 
