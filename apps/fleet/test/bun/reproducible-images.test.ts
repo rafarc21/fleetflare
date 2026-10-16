@@ -11,7 +11,7 @@ import { join } from "node:path";
  * true after the next edit.
  */
 const CONTAINER = join(import.meta.dir, "..", "..", "container");
-const FILES = ["Dockerfile", "Dockerfile.deploy", "Dockerfile.studio", "Dockerfile.gate"];
+const FILES = ["Dockerfile", "Dockerfile.deploy", "Dockerfile.studio", "Dockerfile.gate", "Dockerfile.gate-desktop"];
 
 type Instr = { op: string; args: string; stage: number };
 
@@ -95,4 +95,16 @@ test("all images share one SOURCE_DATE_EPOCH and one APT_SNAPSHOT", () => {
     expect(values.has(undefined)).toBe(false);
     expect(values.size).toBe(1);
   }
+});
+
+test("Dockerfile.gate-desktop restores rustup's channel manifest from a sha256-pinned server copy", () => {
+  // The #1066 repro check's two cold builds differed in one file only:
+  // multirust-channel-manifest.toml. rustup writes it from a hash map, so its keys
+  // come out in a different order each run. A pinned copy of the server's own
+  // channel file is byte-stable. Removing the file instead makes every rustup proxy
+  // call re-sync from the network.
+  const src = readFileSync(join(CONTAINER, "Dockerfile.gate-desktop"), "utf8");
+  expect(src).toMatch(/curl -fsSL -o \/tmp\/channel-rust-1\.99\.1\.toml https:\/\/static\.rust-lang\.org\/dist\/channel-rust-1\.99\.1\.toml/);
+  expect(src).toMatch(/[0-9a-f]{64}\s+\/tmp\/channel-rust-1\.99\.1\.toml/);
+  expect(src).toMatch(/cp \/tmp\/channel-rust-1\.99\.1\.toml \/usr\/local\/rustup\/toolchains\/1\.99\.1-x86_64-unknown-linux-gnu\/lib\/rustlib\/multirust-channel-manifest\.toml/);
 });
