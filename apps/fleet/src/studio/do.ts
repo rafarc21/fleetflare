@@ -3840,6 +3840,11 @@ export async function recordLaunchedAccount(
 export function constructorLaunch(
   env: Env, studioId: string, spawnToken: string, row: StudioStatus | undefined,
 ): { envVars: Record<string, string>; envAccount: string | undefined } {
+  // Issue #911: a glm-led row's container restarts (DO restart, replace) on
+  // the router env, whatever account it last recorded. Without this branch the
+  // recorded Claude account below put CLAUDE_CODE_OAUTH_TOKEN back into the
+  // start env and the lead came up on Claude.
+  if (row?.leadType === "glm") return launchFields(env, studioId, spawnToken, "", "glm");
   const recorded = typeof row?.launchedAccount === "string" ? row.launchedAccount : null;
   const on = recorded === null ? undefined : resolveClaudeAccounts(env).find((a) => a.name === recorded);
   if (on !== undefined) {
