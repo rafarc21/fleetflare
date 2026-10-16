@@ -39,8 +39,10 @@ export const LEG_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
 /** One leg's deadline when its block names none: 25 min, counted from the leg's start. */
 export const DEFAULT_LEG_TIMEOUT_MIN = 25;
-/** The ceiling a block may set. The Workflows step timeout is 30 min per attempt. */
-export const MAX_LEG_TIMEOUT_MIN = 28;
+/** The ceiling a block may set. An attempt's step deadline is 28 min (leg-run.ts
+ *  legStepDeadlineMs); the leg's own timeout runs from the container start, which
+ *  takes up to 180 s, so 25 min is the largest timeout that ends inside that deadline (#1148 item 5). */
+export const MAX_LEG_TIMEOUT_MIN = 25;
 
 /** A leg's deadline in minutes: the default when unset, else clamped to 1..28. */
 export function legTimeoutMin(raw: number | undefined): number {

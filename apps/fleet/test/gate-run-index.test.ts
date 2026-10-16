@@ -3,7 +3,7 @@
 // here to end it; the pointer is overwritten by every new run.
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import { d1RunIndex } from "../src/gate/auto-run-env";
+import { d1RunIndex, d1WatchdogIndex } from "../src/gate/auto-run-env";
 
 describe("d1RunIndex: the latest gate run per PR", () => {
   it("a PR with no recorded run has no latest run", async () => {
@@ -61,5 +61,36 @@ describe("d1RunIndex: the infra handoff and the progress stamp are single condit
     expect(await index.latest("acme/progress-one", 10)).toMatchObject({ runId: "gate-run-live", progressedAt: 50 });
     await index.progress("acme/progress-one", 10, "gate-run-gone", 99);
     expect(await index.latest("acme/progress-one", 10)).toMatchObject({ runId: "gate-run-live", progressedAt: 50 });
+  });
+});
+
+describe("d1WatchdogIndex: the watchdog sweep reads stalled pointers on the real table (#1148 item 1)", () => {
+  it("stalled returns only pointers stamped inside [notBefore, before], oldest first, with the repo and PR", async () => {
+    const base = d1RunIndex(env.DB);
+    await base.record("acme/watch-old", 1, { headSha: "a".repeat(40), runId: "gate-old", progressedAt: 100 });
+    await base.record("acme/watch-mid", 2, { headSha: "a".repeat(40), runId: "gate-mid", progressedAt: 200 });
+    await base.record("acme/watch-fresh", 3, { headSha: "a".repeat(40), runId: "gate-fresh", progressedAt: 900 });
+    await base.record("acme/watch-ancient", 4, { headSha: "a".repeat(40), runId: "gate-ancient", progressedAt: 10 });
+    const rows = await d1WatchdogIndex(env.DB).stalled(500, 50);
+    const mine = rows.filter((r) => r.repo.startsWith("acme/watch-"));
+    expect(mine).toEqual([
+      { repo: "acme/watch-old", pr: 1, headSha: "a".repeat(40), runId: "gate-old", progressedAt: 100 },
+      { repo: "acme/watch-mid", pr: 2, headSha: "a".repeat(40), runId: "gate-mid", progressedAt: 200 },
+    ]);
+  });
+
+  it("stalled is inclusive at the stall edge: a pointer stamped exactly at `before` is stalled", async () => {
+    await d1RunIndex(env.DB).record("acme/watch-edge", 5, { headSha: "a".repeat(40), runId: "gate-edge", progressedAt: 300 });
+    const rows = await d1WatchdogIndex(env.DB).stalled(300, 0);
+    expect(rows.map((r) => r.runId)).toContain("gate-edge");
+  });
+
+  it("adoptUnknown stamps only the 0 stamps, so a live run from before the stamp gets a full window (#1148 item 3)", async () => {
+    const base = d1RunIndex(env.DB);
+    await base.record("acme/watch-unknown", 6, { headSha: "a".repeat(40), runId: "gate-unknown" });
+    await base.record("acme/watch-known", 7, { headSha: "a".repeat(40), runId: "gate-known", progressedAt: 42 });
+    await d1WatchdogIndex(env.DB).adoptUnknown(9_000);
+    expect(await base.latest("acme/watch-unknown", 6)).toMatchObject({ progressedAt: 9_000 });
+    expect(await base.latest("acme/watch-known", 7)).toMatchObject({ progressedAt: 42 });
   });
 });

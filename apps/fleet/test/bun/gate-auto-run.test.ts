@@ -5,6 +5,8 @@
 // GATE_WORKFLOW binding and the PR's run index are fakes at the boundary; the
 // decisions themselves are pure.
 import { describe, it, expect } from "bun:test";
+import { MAX_LEG_TIMEOUT_MIN } from "../../src/gate/config";
+import { legStepDeadlineMs } from "../../src/gate/leg-run";
 import {
   autoRunPullRequest, gateRunId, GATE_STALL_MS, markRunProgress, pullRequestAutoRun, startGateRun, startManualGateRun,
   type GateRunIndex, type GateRunInstance, type GateRunRecord, type GateRunStarter, type PullRequestAutoRun,
@@ -344,8 +346,9 @@ describe("startManualGateRun: reattach to a live run, start fresh after a finish
 describe("startManualGateRun: a live run with no progress is hung, so it is ended and never reattached (#1135)", () => {
   const T1 = 1_700_000_000_000;
 
-  it("the gate's stall window is longer than one leg attempt (deadline 28 min + retry delay), so a healthy run is never ended", () => {
-    expect(GATE_STALL_MS).toBeGreaterThan(28 * 60_000 + 15_000);
+  it("the gate's stall window is longer than one leg attempt (the default leg's step deadline + retry delay), so a healthy run is never ended", () => {
+    expect(GATE_STALL_MS).toBeGreaterThan(legStepDeadlineMs(MAX_LEG_TIMEOUT_MIN) + 15_000);
+    expect(GATE_STALL_MS).toBeGreaterThan(legStepDeadlineMs(undefined) + 15_000);
   });
 
   it("a live run with no progress for the stall window is ended, and a fresh run starts under a new id", async () => {
@@ -374,6 +377,66 @@ describe("startManualGateRun: a live run with no progress is hung, so it is ende
   it("markRunProgress never throws: a failed progress write must not fail the leg that reports it", async () => {
     const failing = { ...fakeIndex().index, progress: async () => { throw new Error("D1 down"); } };
     await expect(markRunProgress(failing, PR_REPO, 7, "gate-x", T1)).resolves.toBeUndefined();
+  });
+});
+
+describe("startManualGateRun: the manual start's edges around a live run (#1148 items 2, 3 and the handoff race)", () => {
+  const T1 = 1_700_000_000_000;
+
+  it("a stalled run that will not terminate throws: no second live run is started on the head (#1148 item 2)", async () => {
+    const { wf, creates } = fakeWorkflow({ terminateError: new Error("DO down") });
+    const { index } = fakeIndex();
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    await expect(startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1 + GATE_STALL_MS))
+      .rejects.toThrow("DO down");
+    expect(creates.map((c) => c.id)).toEqual([first.runId]);
+  });
+
+  it("a live run of the sha that the pointer does not name is untracked: its progress is unknown, so it is ended and a fresh run starts (#1148 item 2)", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    // A live run of the sha with no pointer row (the row was lost, or never written).
+    await wf.create({ id: await gateRunId(PR_REPO, HEAD), params: { repo: PR_REPO, pr: 7 } });
+    const second = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    expect(terminated).toEqual([await gateRunId(PR_REPO, HEAD)]);
+    expect(second.reused).toBe(false);
+    expect(second.runId).not.toBe(await gateRunId(PR_REPO, HEAD));
+    expect(runs.get(second.runId)?.status).toBe("running");
+  });
+
+  it("a live run with progressedAt 0 (the deploy window's unknown stamp) is reattached, not ended, however old it looks (#1148 item 3)", async () => {
+    const { wf, creates, terminated } = fakeWorkflow();
+    const { index, heads } = fakeIndex();
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => 0);
+    heads.set(`${PR_REPO}#7`, { headSha: HEAD, runId: first.runId, progressedAt: 0 });
+    const second = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1 + 200 * 60_000);
+    expect(second).toEqual({ runId: first.runId, reused: true });
+    expect(terminated).toEqual([]);
+    expect(creates).toHaveLength(1);
+  });
+
+  it("a stalled run whose pointer moved to an infra rerun during the end is reattached to that rerun: the rerun is never ended (handoff race)", async () => {
+    const { wf, terminated, creates } = fakeWorkflow();
+    const { index, heads } = fakeIndex();
+    const stalled = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    // The stalled run's own infra rerun is created and takes the pointer while the stall is being ended.
+    const rerunId = `rerun-${stalled.runId}`;
+    await wf.create({ id: rerunId, params: { repo: PR_REPO, pr: 7 } });
+    let reads = 0;
+    const racing: GateRunIndex = {
+      ...index,
+      async latest(repo, pr) {
+        reads++;
+        return reads === 1
+          ? { headSha: HEAD, runId: stalled.runId, progressedAt: T1 }
+          : { headSha: HEAD, runId: rerunId, progressedAt: T1 + GATE_STALL_MS };
+      },
+    };
+    heads.set(`${PR_REPO}#7`, { headSha: HEAD, runId: rerunId, progressedAt: T1 + GATE_STALL_MS });
+    const second = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, racing, () => T1 + GATE_STALL_MS);
+    expect(second).toEqual({ runId: rerunId, reused: true });
+    expect(terminated).toEqual([stalled.runId]);
+    expect(creates.map((c) => c.id)).toEqual([stalled.runId, rerunId]);
   });
 });
 

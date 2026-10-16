@@ -116,8 +116,15 @@ export async function gateRunId(repo: string, headSha: string): Promise<string> 
  *  terminated, unknown) is left alone. */
 const LIVE_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "paused", "waiting", "waitingForPause"]);
 
-function isLive(status: string | null): boolean {
+export function isLiveStatus(status: string | null): boolean {
   return status !== null && LIVE_STATUSES.has(status);
+}
+
+/** A live run whose progress is at least GATE_STALL_MS old. A progress stamp of
+ *  0 is unknown, never stalled: a run from before the stamp existed gets its
+ *  stamp on its next leg (#1148 item 3). */
+export function isStalled(run: GateRunRecord, now: number): boolean {
+  return run.progressedAt !== undefined && run.progressedAt > 0 && now - run.progressedAt >= GATE_STALL_MS;
 }
 
 /** Ends the run when it is still live. Returns true only when it was ended: a
@@ -134,8 +141,16 @@ async function endIfLive(wf: GateRunStarter, runId: string): Promise<boolean> {
   }
 }
 
+/** Ends a run when it is still live, and throws when the end fails. A stalled
+ *  run that stays live must never be followed by a second live run of its head
+ *  (#1148 item 2). */
+export async function endRunOrThrow(wf: Pick<GateRunStarter, "get">, runId: string): Promise<void> {
+  const instance = await wf.get(runId);
+  if (isLiveStatus((await instance.status()).status)) await instance.terminate();
+}
+
 /** The status of one instance, or null when no such instance exists. */
-async function statusOf(wf: GateRunStarter, runId: string): Promise<string | null> {
+export async function statusOf(wf: Pick<GateRunStarter, "get">, runId: string): Promise<string | null> {
   try {
     return (await (await wf.get(runId)).status()).status;
   } catch {
@@ -191,22 +206,34 @@ export async function startManualGateRun(
   const baseId = await gateRunId(input.repo, input.headSha);
   const latest = await index.latest(input.repo, input.pr);
   const params = { repo: input.repo, pr: input.pr };
-  if (latest?.headSha === input.headSha && isLive(await statusOf(wf, latest.runId))) {
-    if (now() - (latest.progressedAt ?? 0) < GATE_STALL_MS) return { runId: latest.runId, reused: true };
-    await endIfLive(wf, latest.runId);
+  const startFresh = async () => {
     const runId = `${baseId}-r${now().toString(36)}`;
     await wf.create({ id: runId, params });
     return recordRun(wf, input, index, runId, now);
+  };
+  if (latest?.headSha === input.headSha && isLiveStatus(await statusOf(wf, latest.runId))) {
+    if (!isStalled(latest, now())) return { runId: latest.runId, reused: true };
+    await endRunOrThrow(wf, latest.runId);
+    // The stalled run's own infra rerun may have taken the pointer while it was
+    // ending. The head is gated by that rerun: reattach, never a second live run (#1148 race).
+    const moved = await index.latest(input.repo, input.pr);
+    if (
+      moved?.headSha === input.headSha && moved.runId !== latest.runId
+      && isLiveStatus(await statusOf(wf, moved.runId)) && !isStalled(moved, now())
+    ) {
+      return { runId: moved.runId, reused: true };
+    }
+    return startFresh();
   }
   try {
     await wf.create({ id: baseId, params });
   } catch (err) {
     const status = await statusOf(wf, baseId);
     if (status === null) throw err;
-    if (isLive(status)) return { runId: baseId, reused: true };
-    const runId = `${baseId}-r${now().toString(36)}`;
-    await wf.create({ id: runId, params });
-    return recordRun(wf, input, index, runId, now);
+    // A live run the pointer does not name has no progress stamp anywhere, so it
+    // cannot be told from a hung run: it is ended, then a fresh run starts (#1148 item 2).
+    if (isLiveStatus(status)) await endRunOrThrow(wf, baseId);
+    return startFresh();
   }
   return recordRun(wf, input, index, baseId, now);
 }

@@ -4,6 +4,7 @@
 // the bun-test project can load it without pulling in cloudflare:workers.
 import type { Env } from "../env";
 import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
+import type { StalledRun, WatchdogIndex } from "./watchdog";
 
 /** The per-PR gate run pointer on the D1 gate_pr_head table (migrations 0007, 0008).
  *  Keyed by lowercased repo, the way gateRunId keys a run (#1082). */
@@ -39,6 +40,27 @@ export function d1RunIndex(db: D1Database): GateRunIndex {
         .prepare("UPDATE gate_pr_head SET progressed_at = ? WHERE repo = ? AND pr = ? AND run_id = ?")
         .bind(at, repo.toLowerCase(), pr, runId)
         .run();
+    },
+  };
+}
+
+/** The watchdog's view of the same table: the stall sweep and the unknown-stamp
+ *  adoption (#1148 item 1). Capped, so a sweep stays bounded however many PRs were gated. */
+export function d1WatchdogIndex(db: D1Database): WatchdogIndex {
+  return {
+    ...d1RunIndex(db),
+    async adoptUnknown(at) {
+      await db.prepare("UPDATE gate_pr_head SET progressed_at = ? WHERE progressed_at = 0").bind(at).run();
+    },
+    async stalled(before, notBefore) {
+      const rows = await db
+        .prepare(
+          "SELECT repo, pr, head_sha AS headSha, run_id AS runId, progressed_at AS progressedAt FROM gate_pr_head "
+            + "WHERE progressed_at > 0 AND progressed_at <= ? AND progressed_at >= ? ORDER BY progressed_at ASC LIMIT 20",
+        )
+        .bind(before, notBefore)
+        .all<StalledRun>();
+      return rows.results;
     },
   };
 }

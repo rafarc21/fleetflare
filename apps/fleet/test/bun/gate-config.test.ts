@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { MAX_LEG_TIMEOUT_MIN } from "../../src/gate/config";
 import {
   parseGateRunnerRepos, isGateRunnerRepo, parseGateBlock, gateMapEntry, matchesPathRules,
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR, legTimeoutMin,
@@ -71,12 +72,12 @@ describe("parseGateBlock: object legs", () => {
     const cfg = parseGateBlock({ ...BLOCK, legs: [{ name: "e2e", cmd: "make e2e", timeoutMin: 12 }] });
     expect(cfg?.legs).toEqual([{ name: "e2e", cmd: "make e2e", timeoutMin: 12 }]);
   });
-  it("a timeoutMin above 28 is clamped to 28, below 1 to 1, and a fraction rounds down", () => {
+  it("a timeoutMin above MAX_LEG_TIMEOUT_MIN (25) is clamped to it, below 1 to 1, and a fraction rounds down", () => {
     const cfg = parseGateBlock({
       ...BLOCK,
       legs: [{ name: "slow", cmd: "c", timeoutMin: 99 }, { name: "zero", cmd: "c", timeoutMin: 0 }, { name: "frac", cmd: "c", timeoutMin: 7.9 }],
     });
-    expect(cfg?.legs.map((l) => l.timeoutMin)).toEqual([28, 1, 7]);
+    expect(cfg?.legs.map((l) => l.timeoutMin)).toEqual([MAX_LEG_TIMEOUT_MIN, 1, 7]);
   });
   it("null on an object leg whose timeoutMin is not a number", () => {
     expect(parseGateBlock({ ...BLOCK, legs: [{ name: "e2e", cmd: "c", timeoutMin: "12" }] })).toBeNull();
@@ -88,7 +89,7 @@ describe("parseGateBlock: object legs", () => {
   it("legTimeoutMin: 25 when unset, the clamped value otherwise", () => {
     expect(legTimeoutMin(undefined)).toBe(25);
     expect(legTimeoutMin(3)).toBe(3);
-    expect(legTimeoutMin(40)).toBe(28);
+    expect(legTimeoutMin(40)).toBe(MAX_LEG_TIMEOUT_MIN);
     expect(legTimeoutMin(-2)).toBe(1);
   });
   it("mixes string and object legs in configured order", () => {
