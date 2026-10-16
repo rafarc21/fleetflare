@@ -466,6 +466,34 @@ describe("runDestroy", () => {
     expect(destroy).not.toHaveBeenCalled();
   });
 
+  // Board issue #1071, item 2: `--park` reaches the open-task checker as its
+  // third argument, so input_required and awaiting_merge do not refuse a park.
+  it("issue #1071: --park forwards park=true to the open-task checker", async () => {
+    const syncDeps = fakeSyncDeps();
+    const destroy = vi.fn(async () => {});
+    const checkOpenTask = vi.fn(async () => ({ ok: true as const, hasOpenTask: true, tasks: [66] }));
+
+    await runDestroy(
+      checkOpenTask, STUDIO_ID, "acme-org/websites", false,
+      syncDeps, fakeCombinedStorage(), STUDIO_ID, destroy, vi.fn(async () => {}), REPO, noopResolveMemoryRepo, noopCommit,
+      undefined, undefined, true,
+    );
+
+    expect(checkOpenTask).toHaveBeenCalledWith(STUDIO_ID, "acme-org/websites", true);
+  });
+
+  it("issue #1071: a plain destroy forwards park=false, so today's guard applies unchanged", async () => {
+    const syncDeps = fakeSyncDeps();
+    const checkOpenTask = vi.fn(async () => ({ ok: true as const, hasOpenTask: true, tasks: [66] }));
+
+    await runDestroy(
+      checkOpenTask, STUDIO_ID, "acme-org/websites", false,
+      syncDeps, fakeCombinedStorage(), STUDIO_ID, vi.fn(async () => {}), vi.fn(async () => {}), REPO, noopResolveMemoryRepo, noopCommit,
+    );
+
+    expect(checkOpenTask).toHaveBeenCalledWith(STUDIO_ID, "acme-org/websites", false);
+  });
+
   it("#124 N1: a drifted task is named as needing its labels fixed by hand", async () => {
     const destroy = vi.fn(async () => {});
     const checkOpenTask = vi.fn(async () => ({ ok: true as const, hasOpenTask: true, tasks: [90, 7], drifted: [7] }));
@@ -556,7 +584,7 @@ describe("runDestroy", () => {
       syncDeps, storage, STUDIO_ID, destroy, recordStudioFn, REPO, noopResolveMemoryRepo, noopCommit,
     );
 
-    expect(checkOpenTask).toHaveBeenCalledWith(STUDIO_ID, "acme-org/websites");
+    expect(checkOpenTask).toHaveBeenCalledWith(STUDIO_ID, "acme-org/websites", false);
     expect(destroy).toHaveBeenCalledTimes(1);
     expect(result.ok).toBe(true);
     if (result.ok) {

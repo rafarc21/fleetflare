@@ -142,10 +142,10 @@ describe("container/studio-fleet — source assertions", () => {
 // grammar without a test noticing.
 
 describe("container/studio-fleet — the board verbs (P4a-2)", () => {
-  it("task ls / show <n> / report <n> / state <n> <to> are the four, and <n> must be numeric", () => {
+  it("task ls / show <n> / report <n> / state <n> <to> / message <n> <text> are the five, and <n> must be numeric", () => {
     expect(src()).toContain('if (sub === "ls") return { kind: "task-ls" };');
     expect(src()).toContain('if (sub !== "show" && sub !== "report" && sub !== "state") {');
-    expect(src()).toContain("expected ls, show, report, state, new or assign");
+    expect(src()).toContain("expected ls, show, report, state, message, new or assign");
     expect(src()).toContain("missing or non-numeric <n>");
   });
 
@@ -205,6 +205,31 @@ describe("container/studio-fleet — the board verbs (P4a-2)", () => {
 
     it("prints the before -> after the Worker actually wrote, not the state that was asked for", () => {
       expect(src()).toContain("task ${cmd.number} is now ${moved.state ?? \"?\"}");
+    });
+  });
+
+  // Board issue #1071, item 4: `fleet task message <n> "<text>"` posts a board
+  // comment on task n AND wakes its studio's lead. The CLI only shapes the
+  // ask; the Worker gates the direction and writes the comment and the wake.
+  describe("task message <n> <text> (board issue #1071 item 4)", () => {
+    it("is a recognised verb that needs a numeric <n> and at least one word of text", () => {
+      expect(src()).toContain('if (sub === "message") {');
+      expect(src()).toContain("task message: missing or non-numeric <n>");
+      expect(src()).toContain("task message: missing <text>");
+    });
+
+    it("joins the remaining argv into one text, so an unquoted multi-word message still reaches the lead", () => {
+      expect(src()).toContain('{ kind: "task-message", number: Number(raw), text: rest.join(" ") }');
+    });
+
+    it("POSTs {text} to /fleet/tasks/<n>/message — the Worker writes the comment and the wake", () => {
+      expect(src()).toContain("buildTaskRequest(env, `/${cmd.number}/message`, JSON.stringify({ text: cmd.text }))");
+      expect(src()).not.toContain("api.github.com");
+    });
+
+    it("the help text names the verb and says it both comments and wakes the lead", () => {
+      expect(src()).toContain("fleet task message <n> <text>");
+      expect(src()).toContain("wakes its lead");
     });
   });
 

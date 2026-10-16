@@ -749,6 +749,9 @@ export function renderLineageComment(
   ].join("\n");
 }
 
+/** Task states whose reassignment wakes no lead (issue #1071, item 3). */
+const SILENT_ASSIGN_STATES: readonly BoardTaskState[] = ["awaiting_merge", "completed", "canceled"];
+
 /**
  * Points ONE studio at ONE task, whatever shape that task arrived in.
  *
@@ -870,7 +873,10 @@ export async function assignTask(
   // comment, for the same reason the comment itself is written last: a wake
   // must never announce a move that did not land. (The no-op return above
   // fires this same hook too, on the unchanged `task` — board #158.)
-  await fireOnAssigned(opts.onAssigned, to, assigned);
+  // Board issue #1071, item 3: a bookkeeping move of work already past the
+  // lead's hands (PR up, done, dropped) wakes nobody. Five bogus wakes were
+  // measured from exactly this. The write above still lands.
+  if (state === null || !SILENT_ASSIGN_STATES.includes(state)) await fireOnAssigned(opts.onAssigned, to, assigned);
   return { ok: true, value: assigned };
 }
 
@@ -1303,11 +1309,11 @@ export async function resolveLatestAssignedBrief(
  *  as its own named export anyway: it is a SEPARATE policy decision ("what
  *  earns a bring-up re-delivery wake") from LIVE_TASK_STATES's ("what counts
  *  as work still owed"), even though the two currently agree on every state. */
-export const REBRIEF_TASK_STATES: readonly BoardTaskState[] = LIVE_TASK_STATES;
+export const REBRIEF_TASK_STATES: readonly BoardTaskState[] = ["submitted", "working"];
 
 /**
  * Issue #137: every OPEN task currently assigned to `studioId` in a
- * `REBRIEF_TASK_STATES` state (`submitted`, `working`, or `input_required`)
+ * `REBRIEF_TASK_STATES` state (`submitted` or `working`)
  * — the sibling of `resolveLatestAssignedBrief`
  * above, widened from "the single newest assigned task" to "every task still
  * genuinely in flight", because a container replacement leaves a fresh pane
@@ -1370,6 +1376,9 @@ export async function findLiveAssignedTask(
   return { ok: true, value: found ?? null };
 }
 
+/** The states a `destroy --park` may pass over (issue #1071, item 2). */
+const PARK_WAIVED_STATES: readonly BoardTaskState[] = ["input_required", "awaiting_merge"];
+
 /**
  * `resolveLatestAssignedBrief`'s sibling for `fleet destroy`'s refusal gate
  * (board task #124's code review, not #118's) — deliberately NOT built by
@@ -1384,10 +1393,15 @@ export async function findLiveAssignedTask(
  * task" apart from "couldn't tell".
  */
 export async function openAssignedTasks(
-  api: BoardApi, repo: string, studioId: string,
+  api: BoardApi, repo: string, studioId: string, opts: { parking?: boolean } = {},
 ): Promise<BoardResult<{ number: number; drifted: boolean }[]>> {
   const tasks = await listTasks(api, repo, { assignedTo: studioId });
   if (!tasks.ok) return tasks;
+  // Board issue #1071, item 2 (existing issue #299): `destroy --park` keeps the
+  // lane's history alive while its lead waits on an answer (input_required) or
+  // on a merge (awaiting_merge), so neither refuses a park. Plain destroy keeps
+  // the full guard, and drift still fails closed on a park too.
+  const parking = opts.parking === true;
   // Board #55 defect A: GitHub's open/closed is NOT the board's state — a
   // terminal board state leaves the issue open until sprint close — so
   // `open` alone refused on work the board already called finished and
@@ -1402,7 +1416,11 @@ export async function openAssignedTasks(
   return {
     ok: true,
     value: tasks.value
-      .filter((t) => t.open && (t.state === null || LIVE_TASK_STATES.includes(t.state)))
+      .filter((t) => {
+        if (!t.open) return false;
+        if (t.state === null) return true;
+        return LIVE_TASK_STATES.includes(t.state) && !(parking && PARK_WAIVED_STATES.includes(t.state));
+      })
       .map((t) => ({ number: t.number, drifted: t.state === null })),
   };
 }
