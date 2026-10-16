@@ -593,12 +593,13 @@ type ModelOverflowResult =
 
 /** Code review (Standards axis, #717): extracted verbatim out of
  *  `handleFleetAnthropicMessages`'s own body — the self-contained walk over
- *  `order` (pickModels' own candidate model list), applying issue #335's
- *  same-model retry (`runAiWithRetry`) to each candidate in turn. Spec
- *  Component 4's own rule: a 429/3021, a 4002/8005 (incident #717
- *  continued — `isOverflowRoutingError`'s own doc comment), or a 504/529
- *  that already exhausted its same-model retry, moves to the next
- *  candidate; anything else (a 4xx the request
+ *  `order` (pickModels' own candidate model list). Spec Component 4's own
+ *  rule: a 429/3021, a 4002/8005 (incident #717 continued —
+ *  `isOverflowRoutingError`'s own doc comment), or a 504/529 moves to the
+ *  next candidate. #1070: a 504/529 moves on after the FIRST failure while
+ *  another candidate remains; the issue #335 same-model retry
+ *  (`runAiWithRetry`) runs only on the last candidate, where nothing else is
+ *  left to move to. Anything else (a 4xx the request
  *  itself caused, an unrecognized genuine 500) is not a failure another
  *  model would answer differently, so the walk stops there and reports it
  *  as the final failure.
@@ -619,7 +620,7 @@ async function runModelPoolOverflow(
   let usedModel = order[0];
   let lastMessage = "";
   const seen = new Set<string>();
-  for (const modelId of order) {
+  for (const [index, modelId] of order.entries()) {
     const pm = modelById(modelId) ?? POOL[0];
     usedModel = pm.id;
     const openaiBody = anthropicRequestToOpenAI(body, { id: pm.id, minMaxTokens: pm.minMaxTokens, maxMaxTokens: pm.maxMaxTokens });
@@ -628,16 +629,18 @@ async function runModelPoolOverflow(
     // `gatewayId` is actually set — `ai.run(pm.id, openaiBody)` with no
     // third argument at all otherwise, not `ai.run(pm.id, openaiBody,
     // undefined)`.
+    const run = () => (gatewayId === undefined ? ai.run(pm.id, openaiBody) : ai.run(pm.id, openaiBody, { gateway: { id: gatewayId } }));
+    // #1070: a candidate with another one still after it gets exactly one
+    // attempt — its 504/529 moves on at once instead of spending
+    // LEAD_AI_MAX_RETRIES same-model retries (~235 s each on a 3046 timeout).
+    // Only the last candidate (or the sole one) keeps the same-model retry.
+    const hasNext = index < order.length - 1;
     try {
       const r = await (backoffHere
-        ? runAiWithRateLimitBackoff(
-            () => (gatewayId === undefined ? ai.run(pm.id, openaiBody) : ai.run(pm.id, openaiBody, { gateway: { id: gatewayId } })),
-            { baseMs, ...(retryDeps ?? {}) },
-          )
-        : runAiWithRetry(
-            () => (gatewayId === undefined ? ai.run(pm.id, openaiBody) : ai.run(pm.id, openaiBody, { gateway: { id: gatewayId } })),
-            { baseMs },
-          ));
+        ? runAiWithRateLimitBackoff(run, { baseMs, ...(retryDeps ?? {}) })
+        : hasNext
+          ? run().then((value) => ({ value, attempts: 1 }))
+          : runAiWithRetry(run, { baseMs }));
       return { ok: true, upstream: r.value, usedModel, attempts: attempts + r.attempts };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

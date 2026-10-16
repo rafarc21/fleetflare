@@ -127,6 +127,14 @@ export interface SpawnParent {
    * parent comes from, and this field follows the same rule.
    */
   repoSlug?: string;
+  /**
+   * #1070: the parent's own lead type, from its registry row. A glm-led
+   * parent's members inherit the glm shape when the spawn request names no
+   * leadType — otherwise they get the Claude OAuth token and draw the
+   * Claude slot. Absent for the operator and for a claude-led or pre-#249
+   * parent, which keeps those spawns byte-identical to today.
+   */
+  leadType?: "claude" | "glm";
 }
 
 export interface SpawnDeps {
@@ -243,7 +251,10 @@ export async function resolveSpawnParent(
   // Dynamic repo selection (P4a): the child inherits the parent's own bound
   // repo. `null` (a pre-P4a row) reads as `undefined` — "the fleet default"
   // — which is exactly what that studio was cloned from.
-  return { id: row.id, repo: id.repo, role: id.role, repoSlug: row.repoSlug ?? undefined };
+  return {
+    id: row.id, repo: id.repo, role: id.role, repoSlug: row.repoSlug ?? undefined,
+    ...(row.leadType === "glm" ? { leadType: "glm" as const } : {}),
+  };
 }
 
 /**
@@ -591,6 +602,12 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
     );
   }
 
+  // #1070: an explicit `leadType` in the request always wins. Absent, a
+  // glm-led parent's member is glm-led too — its container gets no Claude
+  // OAuth token and routes through the pool like the lead does. Absent under
+  // a claude-led or operator parent, the child stays leadType-less as before.
+  const childLeadType = leadRequest?.leadType ?? (parent.leadType === "glm" ? "glm" : undefined);
+
   // Issue #269 round 2: maestro is a SINGLETON role. A repo has exactly one
   // maestro — wake-events.ts's own maestroIdFor always builds the bare
   // two-segment id, and do.ts's isMaestro() (the sweep gate) only recognizes
@@ -756,7 +773,7 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
       // `leadRequest` rides this RPC — `ProvisionConfig.leadType` has no
       // `model` field of its own; that half is assigned separately, below,
       // only once this write has actually landed.
-      ...(leadRequest === undefined ? {} : { leadType: leadRequest.leadType }),
+      ...(childLeadType === undefined ? {} : { leadType: childLeadType }),
     });
   } catch (err) {
     // A provision that threw may have left nothing but the placeholder: free
