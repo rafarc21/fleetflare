@@ -3,7 +3,7 @@
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
 import { describe, it, expect, spyOn } from "bun:test";
-import { gateRunnerName, runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
+import { gateRunnerName, legResultReader, runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
 
@@ -302,6 +302,132 @@ describe("runLegStep: a thrown attempt reports its wall time (#1068)", () => {
     const step = fakeStep();
     const result = await runLegStep(step, async () => reply({ state: "error", description: "container OOM" }), PLANNED);
     expect(result.description).toBe("container OOM");
+  });
+});
+
+// #1094: a transport loss (or a container that exited mid-leg) leaves the leg's
+// verdict with only the transport error. The leg's own R2 result, written by
+// the container before it stopped, says why: the description carries it.
+describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () => {
+  const LOST = "Network connection lost.";
+  const EXITED = { state: "failure" as const, description: "lint exited 143" };
+
+  it("transport lost, R2 has the leg's result: the description carries it, state stays error", async () => {
+    const step = fakeStep();
+    const dispatch = async () => { throw new Error(LOST); };
+    const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => EXITED });
+    expect(result).toEqual({
+      leg: "lint", state: "error",
+      description: `${LOST} after 0 min; result: lint exited 143 (container stopped?)`,
+    });
+  });
+
+  it("no R2 result for the leg: the description is the transport error alone", async () => {
+    const step = fakeStep();
+    const dispatch = async () => { throw new Error(LOST); };
+    const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => undefined });
+    expect(result.description).toBe(`${LOST} after 0 min`);
+  });
+
+  it("an R2 read that throws never masks the transport error", async () => {
+    const step = fakeStep();
+    const dispatch = async () => { throw new Error(LOST); };
+    const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => { throw new Error("r2 down"); } });
+    expect(result).toEqual({ leg: "lint", state: "error", description: `${LOST} after 0 min` });
+  });
+
+  it("no deps given: the transport error alone, as before", async () => {
+    const step = fakeStep();
+    const dispatch = async () => { throw new Error(LOST); };
+    expect((await runLegStep(step, dispatch, PLANNED)).description).toBe(`${LOST} after 0 min`);
+  });
+
+  it("the annotation is for exit 143 only: any other R2 description is quoted as is", async () => {
+    const step = fakeStep();
+    const dispatch = async () => { throw new Error(LOST); };
+    const result = await runLegStep(step, dispatch, PLANNED, {
+      readResult: async () => ({ state: "failure", description: "lint 3 errors" }),
+    });
+    expect(result.description).toBe(`${LOST} after 0 min; result: lint 3 errors`);
+  });
+
+  it("an R2 success under an infra error is still state error: only the description gains it", async () => {
+    const step = fakeStep();
+    const dispatch = async () => { throw new Error(LOST); };
+    const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => ({ state: "success" }) });
+    expect(result).toEqual({ leg: "lint", state: "error", description: `${LOST} after 0 min; result: success` });
+  });
+
+  it("a container that exited mid-leg (503) also reads R2, each try its own key", async () => {
+    const step = fakeStep();
+    const keys: string[] = [];
+    const dispatch = async () => reply({ error: "gate container exited mid-leg" }, 503);
+    const result = await runLegStep(step, dispatch, PLANNED, {
+      readResult: async (key) => { keys.push(key); return EXITED; },
+    });
+    expect(result.description).toBe("lint: gate container exited mid-leg after 0 min; result: lint exited 143 (container stopped?)");
+    expect(keys).toEqual([PLANNED.resultKey, "gate/o/r/runs/1/i/shard-lint-try2.json"]);
+  });
+
+  it("a retry that loses its transport reads the retry's own key", async () => {
+    const step = fakeStep();
+    const keys: string[] = [];
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      if (sent === 1) return reply({ state: "failure", description: "timing" });
+      throw new Error(LOST);
+    };
+    await runLegStep(step, dispatch, PLANNED, { readResult: async (key) => { keys.push(key); return undefined; } });
+    expect(keys).toContain("gate/o/r/runs/1/i/shard-lint.retry.json");
+    expect(keys).not.toContain("gate/o/r/runs/1/i/shard-lint.json");
+  });
+
+  it("the R2 cause is cut at 200 chars before the time suffix, and R2 stderr never reaches the description", async () => {
+    const step = fakeStep();
+    const dispatch = async () => { throw new Error(LOST); };
+    const big = { state: "failure" as const, description: `lint ${"x".repeat(5000)}`, stderr: "SECRET-STDERR-TAIL" };
+    const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => big });
+    expect(result.description).toBe(`${LOST} after 0 min; result: lint ${"x".repeat(195)}`);
+  });
+
+  it("R2 stderr is never quoted into the description, even when the description is short", async () => {
+    const step = fakeStep();
+    const dispatch = async () => { throw new Error(LOST); };
+    const short = { state: "failure" as const, description: "lint 3 errors", stderr: "SECRET-STDERR-TAIL" };
+    const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => short });
+    expect(result.description).toBe(`${LOST} after 0 min; result: lint 3 errors`);
+  });
+
+  it("the start step's infra retry reads its own result key, not try 1's", async () => {
+    const step = fakeStep();
+    const readKeys: string[] = [];
+    const dispatch = async () => { throw new Error(LOST); };
+    await runLegStep(step, dispatch, PLANNED, { readResult: async (key) => { readKeys.push(key); return undefined; } });
+    expect(readKeys).toEqual([PLANNED.resultKey, "gate/o/r/runs/1/i/shard-lint-try2.json"]);
+  });
+});
+
+describe("legResultReader: reads a leg's R2 result from a bucket", () => {
+  it("absent key: undefined", async () => {
+    const read = legResultReader({ get: async () => null });
+    expect(await read("gate/o/r/runs/1/i/shard-lint.json")).toBeUndefined();
+  });
+
+  it("present key: its JSON, when it carries a state", async () => {
+    const body = { state: "failure" as const, description: "lint exited 143" };
+    const read = legResultReader({ get: async () => ({ json: async () => body }) });
+    expect(await read("k")).toEqual(body);
+  });
+
+  it("a body without a known state is treated as absent", async () => {
+    const read = legResultReader({ get: async () => ({ json: async () => ({ nope: 1 }) }) });
+    expect(await read("k")).toBeUndefined();
+  });
+
+  it("a body whose state is not one of the leg states is treated as absent", async () => {
+    const read = legResultReader({ get: async () => ({ json: async () => ({ state: "bogus" }) }) });
+    expect(await read("k")).toBeUndefined();
   });
 });
 

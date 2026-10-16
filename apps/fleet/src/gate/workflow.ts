@@ -26,7 +26,7 @@ import {
   outcomeLegs, pendingStatusArgs, planUnionLegs, verdictToStatusArgs, type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { loadGateConfig } from "./load-config";
-import { gateRunnerName, legRequest, runLegStep, type LegRunResult } from "./leg-run";
+import { gateRunnerName, legRequest, legResultReader, runLegStep, type LegRunResult } from "./leg-run";
 import { postGateStatus, type StatusPort } from "./status-post";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
@@ -172,5 +172,7 @@ function runLeg(
       });
     },
     planned,
+    // The container writes its R2 result before it stops; a lost transport reads it back (#1094).
+    { readResult: legResultReader(env.STUDIO_ARCHIVE) },
   );
 }

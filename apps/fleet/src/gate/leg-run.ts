@@ -51,6 +51,15 @@ export function gateRunnerName(instanceId: string, leg: string, attemptId: strin
   return `${instanceId}/${leg}/${attemptId}`;
 }
 
+/** The Workflow-side reads a leg's R2 result by its key (#1094). Optional: a
+ *  caller without it keeps the transport error as the whole description. */
+export interface LegRunDeps {
+  readResult?: (resultKey: string) => Promise<StoredLegResult | undefined>;
+}
+
+/** A leg's result as the container wrote it to R2: state and description, no leg name. */
+export type StoredLegResult = { state: LegResult["state"]; description?: string };
+
 /** Runs one leg: a start-<leg> step, and when that returns state "failure"
  *  (a red test, possibly flaky) or an "install failed" error (#1092) a single
  *  retry-<leg> step with a fresh container. Never throws: every failure becomes
@@ -59,9 +68,14 @@ export async function runLegStep(
   step: LegStepRunner,
   dispatch: (planned: PlannedLeg, attemptId: string) => Promise<Response>,
   planned: PlannedLeg,
+  deps: LegRunDeps = {},
 ): Promise<LegRunResult> {
-  const attempt = async (name: string, target: PlannedLeg): Promise<LegRunResult> =>
-    step.do(name, LEG_STEP_CONFIG, async () => {
+  // targetFor takes the try number: the start step's infra retry gets its own
+  // result key (see infraRetryResultKey).
+  const attempt = (name: string, targetFor: (tryNo: number) => PlannedLeg): Promise<LegRunResult> => {
+    let tryNo = 0;
+    return step.do(name, LEG_STEP_CONFIG, async () => {
+      const target = targetFor(++tryNo);
       // Made inside the callback: a Workflows step retry re-runs it, so every
       // try gets its own runner DO. A replayed step returns its recorded result.
       const attemptId = crypto.randomUUID();
@@ -93,11 +107,17 @@ export async function runLegStep(
         // a failed leg's description shows real time (ms skips thrown attempts).
         const message = err instanceof Error ? err.message : String(err);
         const minutes = Math.round((Date.now() - started) / 60_000);
-        throw new Error(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min`);
+        // The container may have written its own result before it stopped (#1094).
+        const result = await resultCause(deps.readResult, target.resultKey);
+        throw new Error(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min${result === undefined ? "" : `; result: ${result}`}`);
       }
     });
+  };
 
-  const first = await attempt(`start-${planned.leg}`, planned).catch((err: unknown): LegRunResult => {
+  const first = await attempt(`start-${planned.leg}`, (tryNo) => tryNo === 1
+    ? planned
+    : { ...planned, resultKey: infraRetryResultKey(planned.resultKey) },
+  ).catch((err: unknown): LegRunResult => {
     // Retries spent (infra). The thrown message already carries the cause.
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
@@ -109,7 +129,7 @@ export async function runLegStep(
 
   // The retry writes its own log: the first attempt's shard-<leg>.json stays as evidence.
   const retryTarget: PlannedLeg = { ...planned, resultKey: retryResultKey(planned.resultKey) };
-  const retry = await attempt(`retry-${planned.leg}`, retryTarget).catch((err: unknown): LegRunResult => {
+  const retry = await attempt(`retry-${planned.leg}`, () => retryTarget).catch((err: unknown): LegRunResult => {
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
   });
@@ -137,10 +157,54 @@ export function isRetryable(first: LegRunResult): boolean {
   return first.state === "error" && (first.description ?? "").startsWith("install failed");
 }
 
+/** The minimal R2 bucket shape the reader needs: the real R2Bucket satisfies it. */
+export interface ResultBucket {
+  get(key: string): Promise<{ json(): Promise<unknown> } | null>;
+}
+
+/** The states the container writes to R2. A body with any other state is not a leg result. */
+const STORED_STATES: ReadonlySet<string> = new Set(["success", "failure", "error"]);
+
+/** Reads a leg's R2 result by key. Absent, or a body with no known state, is
+ *  undefined. Pure over the bucket it is given, so the test supplies a fake. */
+export function legResultReader(bucket: ResultBucket): (resultKey: string) => Promise<StoredLegResult | undefined> {
+  return async (resultKey) => {
+    const obj = await bucket.get(resultKey);
+    if (obj === null) return undefined;
+    const body = (await obj.json()) as Partial<StoredLegResult> | null;
+    return body !== null && typeof body === "object" && typeof body.state === "string" && STORED_STATES.has(body.state)
+      ? body as StoredLegResult
+      : undefined;
+  };
+}
+
+/** The leg's R2 result as one phrase for an infra description, or undefined when
+ *  there is none or the read fails. Exit 143 (SIGTERM) gets its likely cause named (#1094). */
+async function resultCause(
+  read: LegRunDeps["readResult"], resultKey: string,
+): Promise<string | undefined> {
+  if (read === undefined) return undefined;
+  try {
+    const result = await read(resultKey);
+    if (result === undefined) return undefined;
+    const text = (result.description ?? result.state).slice(0, MAX_INFRA_CAUSE_CHARS);
+    return /exited 143\b/.test(text) ? `${text} (container stopped?)` : text;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The retry's R2 key: the leg's own key with ".retry" before ".json", so the
  *  container still PUTs only under its leg's resultKey. */
 export function retryResultKey(resultKey: string): string {
   return resultKey.replace(/\.json$/, ".retry.json");
+}
+
+/** The start step's infra-retry key: its own, so a try 1 that wrote its result
+ *  before its transport died is never read back as try 2's. Dashes, not dots:
+ *  the container may only PUT `shard-<leg>[-…].json` (outbound-handler.ts). */
+export function infraRetryResultKey(resultKey: string): string {
+  return resultKey.replace(/\.json$/, "-try2.json");
 }
 
 /** The sum of the attempts that were timed; undefined when none was. */
