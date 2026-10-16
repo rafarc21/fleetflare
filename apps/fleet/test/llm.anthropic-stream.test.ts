@@ -2024,3 +2024,90 @@ describe("handleFleetAnthropicMessages — keepalive and client-drop accounting 
     expect(cancelled).toBe(true);
   });
 });
+
+// Issue #1147 review (maestro, 2026-10-16): the keepalive clock must follow what
+// the CLIENT last received, not the upstream. Reasoning-only upstream chunks emit
+// no client bytes, and a client that stops reading must not hold a call forever.
+describe("handleFleetAnthropicMessages — keepalive follows the client (issue #1147 review)", () => {
+  const frame = (c: unknown) => `data: ${JSON.stringify(c)}\n\n`;
+  const finishChunk = frame({ choices: [{ delta: {}, finish_reason: "stop" }] });
+  function gappedUpstream(parts: Array<{ gapMs: number; data?: string }>, onCancel?: () => void) {
+    let i = 0;
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (i >= parts.length) { controller.close(); return; }
+        const part = parts[i++];
+        if (part.gapMs === Infinity) await new Promise<void>(() => {});
+        else if (part.gapMs > 0) await new Promise<void>((r) => setTimeout(r, part.gapMs));
+        if (part.data !== undefined) controller.enqueue(new TextEncoder().encode(part.data));
+      },
+      cancel() { onCancel?.(); },
+    });
+  }
+  async function setupWith(upstream: ReadableStream<Uint8Array>, envOverrides: Partial<Env> = {}) {
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...FAST_RETRY, ...envOverrides } as unknown as Env;
+    return { token, rows, e };
+  }
+  function consume(r: Response): Promise<string> {
+    const reader = r.body!.getReader();
+    const dec = new TextDecoder();
+    return (async () => {
+      let text = "";
+      for (;;) {
+        const { value, done } = await reader.read().catch(() => ({ value: undefined, done: true }));
+        if (done) break;
+        text += dec.decode(value, { stream: true });
+      }
+      return text;
+    })();
+  }
+
+  it("reasoning-only upstream chunks still get keepalive pings: the clock tracks client silence, not upstream bytes", async () => {
+    const reasoning = (i: number) => frame({ choices: [{ delta: { reasoning_content: `r${i}` } }] });
+    const parts = [
+      ...Array.from({ length: 15 }, (_, i) => ({ gapMs: 10, data: reasoning(i) })),
+      { gapMs: 0, data: finishChunk },
+      { gapMs: 0, data: "data: [DONE]\n\n" },
+    ];
+    const { token, rows, e } = await setupWith(gappedUpstream(parts), { LEAD_STREAM_PING_MS: "40", LEAD_STREAM_IDLE_MS: "5000" } as Partial<Env>);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await consume(r);
+    expect(text.split("event: ping").length - 1).toBeGreaterThanOrEqual(2);
+    expect(text).toContain("event: message_stop");
+  });
+
+  it("a client that stops reading and then hangs up unblocks the pump at once (writes race the client's abort)", async () => {
+    let cancelled = false;
+    const upstream = gappedUpstream([{ gapMs: 0, data: frame({ choices: [{ delta: { content: "partial" } }] }) }, { gapMs: Infinity }], () => { cancelled = true; });
+    const { token, rows, e } = await setupWith(upstream, { LEAD_STREAM_IDLE_MS: "5000", LEAD_STREAM_PING_MS: "60000" } as Partial<Env>);
+    const ac = new AbortController();
+    const started = Date.now();
+    await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true }, signal: ac.signal }), e, ctx, rows);
+    // The client never reads the body. It hangs up.
+    setTimeout(() => ac.abort(), 30);
+    await ctx.drain();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(cancelled).toBe(true);
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 0, error: "client_abort" });
+  });
+
+  it("a client that stops reading during keepalive is treated as gone after one ping interval, not held to the idle deadline", async () => {
+    let cancelled = false;
+    const { token, rows, e } = await setupWith(gappedUpstream([{ gapMs: Infinity }], () => { cancelled = true; }), { LEAD_STREAM_PING_MS: "40", LEAD_STREAM_IDLE_MS: "300" } as Partial<Env>);
+    const started = Date.now();
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    // Take message_start, then never read again: every later ping write stalls.
+    await r.body!.getReader().read();
+    await ctx.drain();
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(cancelled).toBe(true);
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 0, error: "client_abort" });
+  });
+});

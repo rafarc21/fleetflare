@@ -508,7 +508,9 @@ export async function pumpAnthropicStream(
         // the error frame can no longer be written. A client that also left
         // meanwhile does not hide the stall: the reason stays idle_timeout.
         cancelUpstream();
-        await write([streamErrorFrame(`upstream stream idle timeout: no data for ${idleMs}ms`)]).catch(() => {});
+        // Bounded by the idle deadline: a client that stopped reading must not
+        // hold the call open past it (review round 2, merged from e082ef00).
+        await write([streamErrorFrame(`upstream stream idle timeout: no data for ${idleMs}ms`)], idleMs).catch(() => {});
         return end(false, `idle_timeout after ${idleMs}ms`);
       }
       const { done: readerDone, value } = step;
