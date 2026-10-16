@@ -44,7 +44,7 @@ export async function handleGateRoute(req: Request, env: Env): Promise<Response>
     // Task 14's verdict rides in the Workflow's own output once terminal;
     // anything not yet terminal maps to pending.
     const out = status.output as
-      | { state?: string; description?: string; statusPostFailed?: boolean; skipped?: string }
+      | { state?: string; description?: string; statusPostFailed?: boolean; skipped?: string; legs?: unknown[] }
       | undefined;
     // "terminated" is terminal too: mapping it to pending would poll forever.
     if (status.status === "errored" || status.status === "terminated") {
@@ -63,7 +63,8 @@ export async function handleGateRoute(req: Request, env: Env): Promise<Response>
     if (!out?.state) {
       return j({ state: "error", description: "gate workflow instance errored" });
     }
-    return j({ state: out.state, description: out.description, statusPostFailed: out.statusPostFailed });
+    // legs (#1049) is dropped from the JSON when the run carries none.
+    return j({ state: out.state, description: out.description, statusPostFailed: out.statusPostFailed, legs: out.legs });
   }
 
   return j({ error: "not found" }, 404);
