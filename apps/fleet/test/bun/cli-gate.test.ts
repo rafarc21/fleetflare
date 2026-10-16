@@ -44,7 +44,7 @@ describe("onGateWatchDeadline", () => {
       expect(process.exitCode).toBe(2);
       expect(lines[0]).toEqual(["gate watch: no verdict after 45 min (run run-abc)"]);
     } finally {
-      process.exitCode = originalExitCode;
+      process.exitCode = originalExitCode ?? 0;
       console.error = originalError;
     }
   });
