@@ -299,7 +299,12 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     // env.AI.run is called with exactly the pre-model-pool 2-arg shape — no
     // gateway option attached.
     // Issue #1112 layer 1: a lead call gets the continue-until-todos-done rule as its system message.
-    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "system", content: OSS_LEAD_CONTINUE_RULE }, { role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS });
+    // Issue #1099 (review, finding 1): the upstream call is always a stream, so the
+    // runaway scan covers the non-streaming path too; the body carries the stream flag.
+    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, {
+      model: GLM_LEAD_MODEL, messages: [{ role: "system", content: OSS_LEAD_CONTINUE_RULE }, { role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS,
+      stream: true, stream_options: { include_usage: true },
+    });
     const body = await r.json();
     expect(body).toMatchObject({ type: "message", role: "assistant", model: good.model, content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 3, output_tokens: 2 } });
   });
@@ -345,6 +350,7 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
         { role: "tool", tool_call_id: "toolu_1", content: "sunny" },
       ],
       max_tokens: GLM_MIN_MAX_TOKENS,
+      stream: true, stream_options: { include_usage: true },
     });
     const replyBody = (await r.json()) as { content: unknown };
     expect(replyBody.content).toEqual([{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "nyc" } }]);
