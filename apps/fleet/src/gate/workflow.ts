@@ -8,7 +8,7 @@
 //
 // Fan-out is one step per leg, and the step's return value is the leg's
 // result. GateRunnerDO answers /run-leg synchronously with the LegResult, so
-// the start-<leg> step is the whole leg. A red test is data (state "failure")
+// the start-<leg> step is the whole leg, and a red leg runs once more as retry-<leg>. A red test is data (state "failure")
 // and never throws. Any non-2xx from the DO is infra: the step throws, Workflows
 // retries it once, and a second failure becomes that leg's "error". Other legs
 // still finish either way.
@@ -127,7 +127,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
   }
 }
 
-/** One leg, one start-<leg> step. The step's return value is the DO's LegResult. */
+/** One leg: a start-<leg> step, and a retry-<leg> step when it fails red. The step's return value is the DO's LegResult. */
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
   owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean }, planned: PlannedLeg,
