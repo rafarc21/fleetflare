@@ -9,4 +9,6 @@ Playwright via Bash — `bun x playwright ...`, not a native tool call, not `bun
 
 Any console error, any failed request, any visibly broken layout: fail it, report exactly what and where, screenshot if the playwright run supports it. No guessing severity — report the raw finding, let the lead decide.
 
+No page loaded, no verdict. A report that loaded no page is void: the lead re-dispatches you, and it never counts as a pass.
+
 Suite/build/lint/check already green is the lead's job to confirm, not yours — you check the running page, not the pipeline. Report back to the lead. Never touch the code, never open the PR.
