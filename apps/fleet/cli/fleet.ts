@@ -69,8 +69,8 @@ import { formatTaskTable, formatTaskShow, formatAssignWake } from "./task-format
 // threshold), kept Bun/node-free so either test pool can import it — see
 // that module's own header.
 import { formatInfer, isLeadInferenceBlocked, INFER_WINDOW_MS, type LeadInferUsage } from "./infer-format";
-// Issue #1074 ask 1: the MODEL column's cell and the --json lead fields.
-import { formatLeadModelCell, leadModelOf } from "./lead-model";
+// Issue #1074 ask 1: the lead model, in the ACCOUNT cell and the --json fields.
+import { leadAccountLabel, leadModelOf, type LeadModel } from "./lead-model";
 import type { AssignWakeReport } from "../src/board/assign-wake";
 // Board issue #332: the open-prs route's answer shape — a type-only import,
 // so none of src/board's runtime graph rides into this CLI binary.
@@ -313,8 +313,11 @@ function capErrorCell(error: string | null): string {
   return flat.length <= ERROR_CELL_MAX ? flat : `${flat.slice(0, ERROR_CELL_MAX - 1)}…`;
 }
 
-/** Issue #289/#285: the ACCOUNT cell -- see formatTable's comment on it. */
-export function formatAccount(s: StudioStatus): string {
+/** Issue #289/#285: the ACCOUNT cell -- see formatTable's comment on it.
+ *  Issue #1074: a non-Claude lead runs no Claude account, so its cell names
+ *  the lead model (`glm:glm-5.3`) instead of a Claude token name. */
+export function formatAccount(s: StudioStatus, lead: LeadModel): string {
+  if (lead.leadType !== "claude") return leadAccountLabel(lead);
   if (s.launchedAccount === null) return "-";
   const name = s.claudeAccount ?? "CLAUDE_CODE_OAUTH_TOKEN";
   const shown = s.claudeAccountLabel ? `${s.claudeAccountLabel} (${name})` : name;
@@ -416,7 +419,7 @@ export function formatTable(
   // of truth, and a malformed id keeps rendering rather than crashing the
   // table.
   const headers = [
-    "ID", "REPO", "STATE", "MODEL", "RST", "WIP", "PRS", "READY", "SESSION", "ACTIVITY", "INFER", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
+    "ID", "REPO", "STATE", "RST", "WIP", "PRS", "READY", "SESSION", "ACTIVITY", "INFER", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
   ];
   const rows = studios.map((s) => {
     // Issue #934: the blocked verdict is computed before the cells below,
@@ -430,9 +433,6 @@ export function formatTable(
       // container the Worker's detector saw RUNNING — billing while the
       // registry says off — rather than the bare state word.
       formatState(s),
-      // MODEL column (issue #1074 ask 1): the lead's type and short model id,
-      // from the same pure helper the --json fields read.
-      formatLeadModelCell(leadModelOf(s, assignments)),
       // RST column (issue #56): containers replaced in the last 24h / lifetime
       // -- churn a coordinator can see without opening a container.
       formatRestartCell(s, now),
@@ -503,7 +503,7 @@ export function formatTable(
       //
       // Issue #289/#285: the account the container was LAUNCHED on, the next
       // launch's in a note when they differ; "-" after a refused launch.
-      formatAccount(s),
+      formatAccount(s, leadModelOf(s, assignments)),
       s.tailscaleHost ?? "-",
       formatBurn(s.burn),
       s.lastRefresh ?? "-",
@@ -712,7 +712,7 @@ export const PARK_WARNING_UNKNOWN_SCAN =
   "park warning: could not check unmerged PRs (the scan failed for this studio)";
 
 // ---------------------------------------------------------------------------
-// Issue #1074 ask 1: the lead-model assignments behind the MODEL column and
+// Issue #1074 ask 1: the lead-model assignments behind the ACCOUNT label and
 // `fleet ls --json`'s leadType/leadModel — one GET to /studio/models (the same
 // route `fleet models` reads), studio id -> Workers AI model id. Best-effort:
 // null on any failure, so the listing degrades (a glm lead reads plain glm)
@@ -1046,7 +1046,7 @@ export async function cmdLs(
   // route only costs this await and the degrade line below. Runs in BOTH
   // --json and table mode: it is one cheap read either way.
   const inferFetch = fetchLeadInferUsage(creds, Date.now());
-  // Issue #1074 ask 1: the MODEL column's assignments read, fired alongside
+  // Issue #1074 ask 1: the lead-model assignments read, fired alongside
   // the INFER read for the same reason (one cheap GET, overlapping the awaits).
   const assignFetch = fetchLeadAssignments(creds);
   // #332 review H2: a scan the route reports as failed prints ONE degrade

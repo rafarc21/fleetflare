@@ -578,10 +578,11 @@ describe("staleness-budget twins derive from SHIP_TRANSCRIPT_SECONDS (issue #513
 });
 
 // Issue #1074 ask 1: the lead model is verifiable without reading a screen —
-// a MODEL column plus `leadType` / `leadModel` on every `fleet ls --json` row.
-import { leadModelOf, formatLeadModelCell } from "../cli/lead-model";
+// in the ACCOUNT cell (non-Claude leads) plus `leadType` / `leadModel` on every
+// `fleet ls --json` row. No new table column (review: column shifts break scripts).
+import { leadModelOf, leadAccountLabel } from "../cli/lead-model";
 
-describe("lead model (#1074): MODEL column and --json leadType/leadModel", () => {
+describe("lead model (#1074): ACCOUNT label and --json leadType/leadModel", () => {
   const T = new Date("2026-09-25T12:00:00.000Z");
   const ASSIGN: Record<string, string> = {
     "websites--pilot": "@cf/moonshotai/kimi-k2.7-code",
@@ -607,9 +608,10 @@ describe("lead model (#1074): MODEL column and --json leadType/leadModel", () =>
       .toEqual({ leadType: "glm", leadModel: null });
   });
 
-  it("the MODEL cell is the lead type, plus the short model id when there is one", () => {
-    expect(formatLeadModelCell({ leadType: "claude", leadModel: null })).toBe("claude");
-    expect(formatLeadModelCell({ leadType: "kimi", leadModel: "kimi-k2.7-code" })).toBe("kimi kimi-k2.7-code");
+  it("the ACCOUNT label for a non-Claude lead is lead type, colon, short model id", () => {
+    expect(leadAccountLabel({ leadType: "glm", leadModel: "glm-5.3" })).toBe("glm:glm-5.3");
+    expect(leadAccountLabel({ leadType: "kimi", leadModel: "kimi-k2.7-code" })).toBe("kimi:kimi-k2.7-code");
+    expect(leadAccountLabel({ leadType: "glm", leadModel: null })).toBe("glm");
   });
 
   it("lsJsonRows carries leadType and leadModel on every row", () => {

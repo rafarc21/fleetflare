@@ -37,7 +37,12 @@ export function leadModelOf(s: StudioStatus, assignments: Record<string, string>
   return { leadType: pool?.key ?? "glm", leadModel: shortModelId(assigned) };
 }
 
-/** The MODEL column cell: the lead type, then the short model id when there is one. */
-export function formatLeadModelCell(lead: LeadModel): string {
-  return lead.leadModel === null ? lead.leadType : `${lead.leadType} ${lead.leadModel}`;
+/**
+ * The ACCOUNT cell of a non-Claude lead (#1074 review): `glm:glm-5.3`,
+ * `kimi:kimi-k2.7-code`. A glm studio runs no Claude account, so its ACCOUNT
+ * cell names the lead's model instead of a Claude token name. Claude leads
+ * never reach this (formatAccount keeps their cell).
+ */
+export function leadAccountLabel(lead: LeadModel): string {
+  return lead.leadModel === null ? lead.leadType : `${lead.leadType}:${lead.leadModel}`;
 }

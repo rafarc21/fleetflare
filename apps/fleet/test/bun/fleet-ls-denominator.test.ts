@@ -75,14 +75,24 @@ describe("formatTable — no trailing pad, capped ERROR (#205)", () => {
   // table's own output. Issue #934: same again for the INFER column
   // (between ACTIVITY and CHECKED) — a row with no lead rows in the
   // window renders "-" in it, re-transcribed from the table's own output.
-  // Issue #1074 ask 1: the MODEL column sits right after STATE; a base row
-  // (no leadType set) is claude-led, so it reads "claude" there.
   test("a base row's whole single-row table, every byte (#399)", () => {
     const t = formatTable([row()]);
     expect(t).toBe(
-      "ID                REPO     STATE    MODEL   RST  WIP  PRS  READY  SESSION     ACTIVITY  INFER  CHECKED  ROW  ACCOUNT                  HOST  BURN  REFRESHED  ERROR\n" +
-      "acme-os--maestro  acme-os  running  claude  -    -    -    ?      ? · snap ?  ?         -      never    -    CLAUDE_CODE_OAUTH_TOKEN  -     -     -          -",
+      "ID                REPO     STATE    RST  WIP  PRS  READY  SESSION     ACTIVITY  INFER  CHECKED  ROW  ACCOUNT                  HOST  BURN  REFRESHED  ERROR\n" +
+      "acme-os--maestro  acme-os  running  -    -    -    ?      ? · snap ?  ?         -      never    -    CLAUDE_CODE_OAUTH_TOKEN  -     -     -          -",
     );
+  });
+
+  // Issue #1074 (review): no new column — a non-Claude lead's model rides the
+  // ACCOUNT cell as `<lead>:<model>`, and a claude lead's ACCOUNT is unchanged.
+  test("a glm lead's ACCOUNT cell names its model; the header keeps every column (#1074)", () => {
+    const t = formatTable([row({ id: "acme-os--pilot", leadType: "glm" })], new Date(), null, undefined, undefined,
+      { "acme-os--pilot": "@cf/zai-org/glm-5.3" });
+    const [header, line] = t.split("\n");
+    expect(header.split(/\s{2,}/)).not.toContain("MODEL");
+    expect(header.split(/\s{2,}/)).toContain("ACCOUNT");
+    expect(line).toContain("glm:glm-5.3");
+    expect(line).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
   });
 });
 
