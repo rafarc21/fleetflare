@@ -8,7 +8,7 @@
  */
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
-import { chromium, errors, type Browser, type BrowserContext, type Page as PwPage } from "playwright-core";
+import { chromium, errors, type Browser, type BrowserContext, type CDPSession, type Page as PwPage } from "playwright-core";
 import { resolvePaths } from "./paths";
 import { encodeMessage, MessageFramer, type RpcRequest } from "./rpc";
 import { Registry, type FinishKeep, type TaskSpaceRecord } from "./registry";
@@ -316,6 +316,32 @@ async function pageSnapshot(pwPage: PwPage, opts: SnapshotOpts = {}): Promise<{ 
   return { scope: "only_within_viewport", snapshot };
 }
 
+// One persistent CDPSession per real Page, created lazily on first
+// page.cdp call. Persistent -- not per-call -- because chained CDP state
+// (Emulation.setDeviceMetricsOverride then clearDeviceMetricsOverride)
+// must land on the same session: override state is session-scoped, so a
+// clear sent over a different session silently no-ops and strands the
+// page in the wrong metrics. Creation is single-flighted by memoizing
+// the creation PROMISE synchronously (registry.ts resolveTarget's own
+// pattern): concurrent cold-start callers converge on one session
+// instead of racing to create two. WeakMap: entry dies with its Page.
+const cdpSessions = new WeakMap<PwPage, Promise<CDPSession>>();
+
+async function cdpSessionFor(pwPage: PwPage): Promise<CDPSession> {
+  let session = cdpSessions.get(pwPage);
+  if (!session) {
+    session = pwPage.context().newCDPSession(pwPage);
+    cdpSessions.set(pwPage, session);
+    // Rejected creation resets the entry (same shape as #276's
+    // rejected-promise reset) so a later call retries fresh; guarded so
+    // a stale rejection can never evict a newer creation.
+    session.catch(() => {
+      if (cdpSessions.get(pwPage) === session) cdpSessions.delete(pwPage);
+    });
+  }
+  return session;
+}
+
 // ---------------------------------------------------------------------------
 // RPC method dispatch table.
 // ---------------------------------------------------------------------------
@@ -411,6 +437,18 @@ const methods: Record<string, Handler> = {
       page.evaluate("({ x: window.scrollX, y: window.scrollY })"),
     ]);
     return { url, title, viewport, scroll };
+  },
+
+  async "page.setViewportSize"(params: { spaceId: number; label: string; viewportSize: { width: number; height: number } }) {
+    const page = await resolvePage(params.spaceId, params.label);
+    await page.setViewportSize(params.viewportSize);
+    return null;
+  },
+
+  async "page.cdp"(params: { spaceId: number; label: string; method: string; params?: Record<string, unknown> }) {
+    const page = await resolvePage(params.spaceId, params.label);
+    const session = await cdpSessionFor(page);
+    return session.send(params.method as never, params.params as never);
   },
 
   async "page.screenshot"(
