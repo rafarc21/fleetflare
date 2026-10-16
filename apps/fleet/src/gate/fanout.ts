@@ -2,7 +2,7 @@
 // Workflow/DO bindings — this file is what bun test can load, so
 // workflow.ts (which imports cloudflare:workers) stays a thin driver over
 // the decisions made here.
-import { legTimeoutMin, MAX_LEGS_PER_PR, type GateLeg } from "./config";
+import { DEFAULT_GATE_IMAGE, legTimeoutMin, MAX_LEGS_PER_PR, type GateLeg } from "./config";
 import { bunLaneCwd } from "./bun-lane";
 import type { LegResult, Verdict } from "./verdict";
 
@@ -155,20 +155,25 @@ export function headLegName(name: string): string {
   return shard ? `${shard[1]}@head-${shard[2]}` : `${name}@head`;
 }
 
-/** A leg's runnable content. Two legs with the same content run once. */
+/** A leg's runnable content: the install, the command, the deadline and the
+ *  image it runs on (#1091 review round 2). Two legs with the same content run
+ *  once; a leg that differs in any of them runs again as its head copy. */
 function legContent(l: PlannedLeg): string {
-  return JSON.stringify([l.installCmd, l.legCmd, legTimeoutMin(l.timeoutMin)]);
+  return JSON.stringify([l.installCmd, l.legCmd, legTimeoutMin(l.timeoutMin), l.image ?? DEFAULT_GATE_IMAGE]);
 }
 
 /** The legs of a run whose PR changes fleet.json (#1091 review). Every base
  *  leg runs in full (integrity). Each head leg whose content differs from every
  *  base leg runs too, named `<leg>@head`. Identical legs run once, under the base
- *  name. A null side has no legs: no base config, or no head config to union. */
+ *  name. A null side has no legs: no base config, or no head config to union.
+ *  merge-tree is one leg whatever the configs say: the base's copy runs, and
+ *  the head's is added only when there is no base to carry it. */
 export function planUnionLegs(base: PlanInput | null, head: PlanInput | null): PlannedLeg[] {
   const baseLegs = base === null ? [] : planLegs(base);
   if (head === null) return baseLegs;
   const seen = new Set(baseLegs.map(legContent));
-  const headLegs = planLegs({ ...head, legName: headLegName }).filter((l) => !seen.has(legContent(l)));
+  const headLegs = planLegs({ ...head, legName: headLegName })
+    .filter((l) => !seen.has(legContent(l)) && !(l.leg === "merge-tree" && baseLegs.length > 0));
   return [...baseLegs, ...headLegs];
 }
 

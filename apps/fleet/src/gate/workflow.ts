@@ -20,7 +20,7 @@ import {
 import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
-import { changesFleetJson, gateDecision, headFleetJsonFailure, type GateConfig } from "./config";
+import { decideGateRun, fleetJsonChanged, type GateConfig } from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
   outcomeLegs, pendingStatusArgs, planUnionLegs, verdictToStatusArgs, type OutcomeLeg, type PlanInput, type PlannedLeg,
@@ -66,38 +66,35 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       return { headSha, baseSha, baseRef: pull.baseRef, changedFiles: files, private: pull.baseRepoPrivate };
     });
 
-    // The gate config is read at the PR's BASE sha (never the head), so a PR
-    // cannot edit its own gate. The fleet repo's `gates` map is read at HEAD.
-    // A PR that changes fleet.json is also read at its HEAD (#1091 review): the
-    // run gates on base legs in full, plus the head's legs that differ from
-    // them. A head config that is absent or invalid fails the run, never skips.
+    // Whether the repo's own fleet.json changed is decided on CONTENT at base
+    // and head (#1091 review round 2), never on the file list: a rename shows
+    // only its new path, and the compare stops at 300 files. The gate config is
+    // read at the PR's BASE sha (never the head), so a PR cannot edit its own
+    // gate. The fleet repo's `gates` map is read at HEAD. A changed config is
+    // also read at its HEAD: the run gates on base legs in full, plus the head's
+    // legs that differ from them. A head config that is absent or invalid fails
+    // the run, never skips.
     const readFleetJson = fleetJsonReader(mintToken);
-    const changed = changesFleetJson(resolved.changedFiles);
+    const configChanged = await step.do("fleet-json-changed", async () =>
+      fleetJsonChanged(await readFleetJson(repo, resolved.baseSha), await readFleetJson(repo, resolved.headSha)));
     const base = await step.do("load-config", async () =>
       loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, configSha: resolved.baseSha }, readFleetJson));
-    const head: GateConfig | null | undefined = changed ? await step.do("load-head-config", async () =>
+    const head: GateConfig | null | undefined = configChanged ? await step.do("load-head-config", async () =>
       loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, configSha: resolved.headSha }, readFleetJson)) : undefined;
 
-    const headFailure = headFleetJsonFailure(resolved.changedFiles, head);
-    if (headFailure !== null) {
+    const decision = decideGateRun({ changedFiles: resolved.changedFiles, fleetJsonChanged: configChanged, base, head });
+    if (decision.action === "fail") {
       const statusPostFailed = await step.do("post-head-invalid", async () =>
-        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: headFailure }));
-      return { state: "failure", description: headFailure, statusPostFailed, legs: [] };
+        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: decision.description }));
+      return { state: "failure", description: decision.description, statusPostFailed, legs: [] };
     }
-
-    if (base === null && !changed) {
-      // No gate config for this repo: not a repo this gate runs for. Post
-      // nothing; the route layer (Task 12) already filters on GATE_RUNNER_REPOS.
-      return { skipped: "no gate config for this repo", statusPostFailed: false };
-    }
-
-    if (gateDecision(resolved.changedFiles, base?.pathRules ?? []) === "skip") {
-      // Nothing gated changed. Post success so the required context is not
-      // left pending forever. (A guess: localci.sh's own skip path is the model.)
+    if (decision.action === "skip") {
+      if (!decision.status) return { skipped: decision.reason, statusPostFailed: false };
+      // Post success so the required context is not left pending forever. (A guess: localci.sh's own skip path is the model.)
       const statusPostFailed = await step.do("post-skip-status", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha,
           { state: "success", description: "no gated paths changed" }));
-      return { skipped: "no gated paths changed", statusPostFailed };
+      return { skipped: decision.reason, statusPostFailed };
     }
 
     // The bun-test lane is the head's own test files under each block's root,

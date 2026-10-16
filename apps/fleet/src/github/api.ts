@@ -1093,13 +1093,23 @@ export async function commitDate(token: string, repo: string, sha: string): Prom
 export async function compareFiles(
   token: string, repo: string, base: string, head: string,
 ): Promise<{ aheadBy: number; files: string[] }> {
-  const c = await ghJson<{ ahead_by: number; files?: { filename: string }[] }>(
+  const c = await ghJson<{ ahead_by: number; files?: { filename: string; previous_filename?: string }[] }>(
     token,
     `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
     { method: "GET" },
     `read ${repo} compare ${base}...${head}`,
   );
-  return { aheadBy: c.ahead_by, files: (c.files ?? []).map((f) => f.filename) };
+  return { aheadBy: c.ahead_by, files: comparedFilePaths(c.files) };
+}
+
+/** Every path a compare touches: each file's name, and a rename's old name too
+ *  (#1091 review round 2). The compare lists a rename by its new name only, so
+ *  a file moved out of a gated path would otherwise look unchanged there. */
+export function comparedFilePaths(
+  files: { filename: string; previous_filename?: string }[] | undefined,
+): string[] {
+  return (files ?? []).flatMap((f) => (f.previous_filename === undefined
+    ? [f.filename] : [f.filename, f.previous_filename]));
 }
 
 /**
