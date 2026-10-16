@@ -31,3 +31,26 @@ export const GLM_LEAD_HOUSE_RULE = [
   "- Plan doc at most 40 lines. The PR body carries the evidence; no evidence",
   "  files.",
 ].join("\n");
+
+// Issue #1112 layer 1: an OSS lead (glm/kimi/deepseek behind the glm-lead
+// Messages route) did ONE step, printed a state line, and ended its turn with
+// TodoWrite items still pending. Each step then waited for an external wake.
+// The route appends this rule to the lead's system prompt on every lead call.
+export const OSS_LEAD_CONTINUE_RULE =
+  "Never end your turn while your todo list has pending or in_progress items, unless you need operator input or are blocked. After each step, continue with the next tool call.";
+
+type Json = any;
+
+/** Append OSS_LEAD_CONTINUE_RULE to an Anthropic Messages body's `system`. Pure: returns a new body, never mutates. Idempotent. */
+export function withOssLeadContinueRule(body: Json): Json {
+  const sys = body.system;
+  if (typeof sys === "string") {
+    if (sys.includes(OSS_LEAD_CONTINUE_RULE)) return { ...body };
+    return { ...body, system: sys.length > 0 ? `${sys}\n\n${OSS_LEAD_CONTINUE_RULE}` : OSS_LEAD_CONTINUE_RULE };
+  }
+  if (Array.isArray(sys)) {
+    if (sys.some((b) => b?.text === OSS_LEAD_CONTINUE_RULE)) return { ...body };
+    return { ...body, system: [...sys, { type: "text", text: OSS_LEAD_CONTINUE_RULE }] };
+  }
+  return { ...body, system: OSS_LEAD_CONTINUE_RULE };
+}

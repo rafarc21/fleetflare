@@ -15,6 +15,7 @@ import {
   handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH, ANTHROPIC_BODY_CAP,
 } from "../src/llm/anthropic-route";
 import { GLM_LEAD_MODEL, GLM_MIN_MAX_TOKENS } from "../src/llm/translate";
+import { OSS_LEAD_CONTINUE_RULE } from "../src/llm/lead-rule";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -297,11 +298,11 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     // Incident fix (#717): no LEAD_AI_GATEWAY_ID set in this fixture env, so
     // env.AI.run is called with exactly the pre-model-pool 2-arg shape — no
     // gateway option attached.
-    // Issue #1099 (review, finding 1): a non-streaming request is always sent
-    // upstream as a stream, so the runaway scan covers it. The 2-arg shape
-    // holds; the body carries the stream flag and its usage option.
+    // Issue #1112 layer 1: a lead call gets the continue-until-todos-done rule as its system message.
+    // Issue #1099 (review, finding 1): the upstream call is always a stream, so the
+    // runaway scan covers the non-streaming path too; the body carries the stream flag.
     expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, {
-      model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS,
+      model: GLM_LEAD_MODEL, messages: [{ role: "system", content: OSS_LEAD_CONTINUE_RULE }, { role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS,
       stream: true, stream_options: { include_usage: true },
     });
     const body = await r.json();
@@ -344,6 +345,7 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, {
       model: GLM_LEAD_MODEL,
       messages: [
+        { role: "system", content: OSS_LEAD_CONTINUE_RULE },
         { role: "assistant", content: null, tool_calls: [{ id: "toolu_1", type: "function", function: { name: "get_weather", arguments: '{"city":"nyc"}' } }] },
         { role: "tool", tool_call_id: "toolu_1", content: "sunny" },
       ],
