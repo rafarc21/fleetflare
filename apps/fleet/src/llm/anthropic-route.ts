@@ -28,7 +28,7 @@ import { insertJuniorUsage } from "../junior/usage";
 import {
   GLM_LEAD_MODEL, anthropicRequestToOpenAI, openAIResponseToAnthropic, classifyAiError,
   createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStreamOrError, parseSseDataLine, runawayErrorFrame,
-  parseStreamErrorChunk, streamErrorFrame, runawayErrorMessage, runawayTokenEstimate,
+  parseStreamErrorChunk, streamErrorFrame, streamPing, runawayErrorMessage, runawayTokenEstimate,
 } from "./translate";
 import { isSmallModelName, pickModels } from "./router";
 import { withOssLeadContinueRule } from "./lead-rule";
@@ -143,6 +143,17 @@ export const LEAD_STREAM_IDLE_MS_DEFAULT = 90_000;
  *  timeout. */
 export function leadStreamIdleMs(env: { LEAD_STREAM_IDLE_MS?: string }): number {
   return parsePositiveInt(env.LEAD_STREAM_IDLE_MS, LEAD_STREAM_IDLE_MS_DEFAULT);
+}
+
+/** Issue #1147: how long the streaming path waits on a silent upstream before
+ *  it sends one SSE `event: ping`. 15s sits well under Claude Code's own
+ *  client idle timeout and well over a normal inter-chunk gap, so a healthy
+ *  stream never sends one. `LEAD_STREAM_PING_MS` (env.ts) — same garbage-in ->
+ *  default rule as the idle timer. */
+export const LEAD_STREAM_PING_MS_DEFAULT = 15_000;
+
+export function leadStreamPingMs(env: { LEAD_STREAM_PING_MS?: string }): number {
+  return parsePositiveInt(env.LEAD_STREAM_PING_MS, LEAD_STREAM_PING_MS_DEFAULT);
 }
 
 /** Issue #335: Workers AI throws `504 3046 Request timeout` (and the 529
@@ -284,16 +295,34 @@ export async function runAiWithRateLimitBackoff<T>(
 }
 
 const IDLE = Symbol("idle");
+const PING = Symbol("ping");
+const ABORTED = Symbol("aborted");
 
-/** One `reader.read()`, raced against an idle timer. Resolves `IDLE` when the
- *  timer wins; the losing read stays pending until the caller cancels the
- *  reader (which settles it), so nothing dangles. */
-function readWithIdleTimeout(
-  reader: ReadableStreamDefaultReader<Uint8Array>, idleMs: number,
-): Promise<ReadableStreamReadResult<Uint8Array> | typeof IDLE> {
+/** Issue #1147: one pending `reader.read()`, raced against three clocks: the
+ *  idle deadline (`idleLeftMs`, counted from the last upstream byte by the
+ *  caller, so a ping never resets it), the keepalive tick (`pingMs`; 0 turns
+ *  it off), and the client's abort signal. Resolves `PING` on a keepalive
+ *  tick, `IDLE` on the deadline, `ABORTED` when the client has gone. A losing
+ *  read stays pending — the caller keeps it and races it again after a PING,
+ *  or cancels the reader, which settles it, so nothing dangles. */
+function raceUpstream(
+  read: Promise<ReadableStreamReadResult<Uint8Array>>, idleLeftMs: number, pingMs: number, signal?: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array> | typeof IDLE | typeof PING | typeof ABORTED> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const idle = new Promise<typeof IDLE>((resolve) => { timer = setTimeout(() => resolve(IDLE), idleMs); });
-  return Promise.race([reader.read(), idle]).finally(() => clearTimeout(timer));
+  let onAbort: (() => void) | undefined;
+  const clock = new Promise<typeof IDLE | typeof PING | typeof ABORTED>((resolve) => {
+    const idleFirst = pingMs <= 0 || idleLeftMs <= pingMs;
+    timer = setTimeout(() => resolve(idleFirst ? IDLE : PING), Math.max(0, idleFirst ? idleLeftMs : pingMs));
+    if (signal) {
+      onAbort = () => resolve(ABORTED);
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+  return Promise.race([read, clock]).finally(() => {
+    clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  });
 }
 
 /** Thrown by `pumpAnthropicStream`'s own `write` when the client side of the
@@ -354,7 +383,7 @@ export function failureClass(failure: string): string {
  *
  * Issue #302: two more abnormal ends, same discipline —
  *   (c) the upstream goes quiet: no chunk for `idleMs`. `reader.read()` is
- *       raced against an idle timer (readWithIdleTimeout); on timeout the
+ *       raced against an idle timer (raceUpstream); on timeout the
  *       upstream read is cancelled and an `event: error` goes out, so Claude
  *       Code retries now instead of after its own 600s client timeout.
  *   (d) the client hangs up: a `writer.write` rejects. The upstream read is
@@ -374,10 +403,19 @@ export function failureClass(failure: string): string {
  * to on a clean end, below — the SAME number `handleFleetAnthropicMessages`
  * logs into the D1 usage row, kept consistent with what the client was
  * actually told rather than the raw, possibly-inflated upstream figure.
+ *
+ * Issue #1147: `keepalive.pingMs` > 0 writes one `event: ping` each time that
+ * long passes with no upstream byte (the idle deadline is NOT reset by a
+ * ping, so a dead upstream still times out). `keepalive.signal` is the
+ * client's own request signal: an abort ends the pump as `client_abort` at
+ * once, without waiting for the next write to fail. The non-streaming path
+ * passes pingMs 0 — its reply is folded into one JSON body, so a ping has
+ * nowhere to go — but still passes the signal.
  */
 async function pumpAnthropicStream(
   upstream: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<Uint8Array>,
   id: string, model: string, requestedMaxTokens: number, idleMs: number, poolModel?: PoolModel,
+  keepalive: { pingMs: number; signal?: AbortSignal } = { pingMs: 0 },
 ): Promise<PumpResult> {
   const enc = new TextEncoder();
   const write = async (frames: string[]) => {
@@ -404,10 +442,16 @@ async function pumpAnthropicStream(
     const decoder = new TextDecoder();
     let buffer = "";
     let done = false;
+    // Issue #1147: one read stays pending across keepalive ticks; a new one is
+    // issued only after the last chunk is consumed. The idle clock runs from
+    // the last upstream byte, not from the last tick.
+    let pending = reader.read();
+    pending.catch(() => {}); // settled by the race below; this only stops an early unhandled-rejection report
+    let lastUpstreamAt = Date.now();
     while (!done) {
-      let step: ReadableStreamReadResult<Uint8Array> | typeof IDLE;
+      let step: ReadableStreamReadResult<Uint8Array> | typeof IDLE | typeof PING | typeof ABORTED;
       try {
-        step = await readWithIdleTimeout(reader, idleMs);
+        step = await raceUpstream(pending, lastUpstreamAt + idleMs - Date.now(), keepalive.pingMs, keepalive.signal);
       } catch (e) {
         // The upstream failed after message_start (and possibly a content
         // block) already reached the client — a genuine mid-stream error, not
@@ -416,6 +460,11 @@ async function pumpAnthropicStream(
         await write([streamErrorFrame(message)]);
         return end(false, failureReason("upstream_read_error", message));
       }
+      if (step === PING) {
+        await write([streamPing()]);
+        continue;
+      }
+      if (step === ABORTED) throw new ClientAbort();
       if (step === IDLE) {
         // Issue #302 (c): cancel first, so the upstream is released even if
         // the error frame can no longer be written. A client that also left
@@ -425,6 +474,8 @@ async function pumpAnthropicStream(
         return end(false, `idle_timeout after ${idleMs}ms`);
       }
       const { done: readerDone, value } = step;
+      lastUpstreamAt = Date.now();
+      if (!readerDone) { pending = reader.read(); pending.catch(() => {}); }
       if (readerDone) { done = true; buffer += decoder.decode(); } else { buffer += decoder.decode(value, { stream: true }); }
       // SSE frames are blank-line delimited; a frame can carry more than one
       // `data:` line (rare for this backend, but parseSseDataLine is run per
@@ -475,12 +526,12 @@ async function pumpAnthropicStream(
  *  and error handling (closeStreamOrError) instead of a second reassembly. */
 async function collectAnthropicFrames(
   upstream: ReadableStream<Uint8Array>, id: string, model: string, requestedMaxTokens: number,
-  idleMs: number, poolModel: PoolModel | undefined,
+  idleMs: number, poolModel: PoolModel | undefined, signal?: AbortSignal,
 ): Promise<{ result: PumpResult; sse: string }> {
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
   const sse = new Response(readable).text();
-  const result = await pumpAnthropicStream(upstream, writer, id, model, requestedMaxTokens, idleMs, poolModel)
+  const result = await pumpAnthropicStream(upstream, writer, id, model, requestedMaxTokens, idleMs, poolModel, { pingMs: 0, signal })
     .finally(() => writer.close().catch(() => {}));
   return { result, sse: await sse };
 }
@@ -873,7 +924,8 @@ export async function handleFleetAnthropicMessages(
     // rejection; what still rejects here is a bug inside the pump itself,
     // logged as `pump_error` rather than dropped without a row.
     ctx.waitUntil(
-      pumpAnthropicStream(upstream, writer, id, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel))
+      pumpAnthropicStream(upstream, writer, id, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel),
+        { pingMs: leadStreamPingMs(env), signal: req.signal })
         .then((result) => {
           const runaway = result.failure?.startsWith("runaway:") === true;
           // The aborted upstream never reports prompt tokens; estimate them (see requestInputEstimate).
@@ -911,7 +963,7 @@ export async function handleFleetAnthropicMessages(
   let collected: Awaited<ReturnType<typeof collectAnthropicFrames>>;
   try {
     collected = await collectAnthropicFrames(
-      upstream, `msg_${crypto.randomUUID().replace(/-/g, "")}`, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel),
+      upstream, `msg_${crypto.randomUUID().replace(/-/g, "")}`, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel), req.signal,
     );
   } catch (e) {
     logUsage(env, ctx, studio.id, {
@@ -921,6 +973,15 @@ export async function handleFleetAnthropicMessages(
     return json(anthropicErrorBody("api_error", "upstream stream failed"), 500);
   }
   const { result, sse } = collected;
+  // Issue #1147: the client hung up while the reply was being collected. Nobody
+  // will read the JSON, so it is a failure here, never an ok row.
+  if (result.failure === "client_abort") {
+    logUsage(env, ctx, studio.id, {
+      model: usedModel, stream: false, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ok: false,
+      failure: "client_abort", startedAt, attempts,
+    });
+    return json(anthropicErrorBody("api_error", "client disconnected"), 499);
+  }
   if (result.failure?.startsWith("runaway:") === true) {
     const reason = result.failure.slice("runaway:".length);
     logUsage(env, ctx, studio.id, {

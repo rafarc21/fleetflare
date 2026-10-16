@@ -15,7 +15,9 @@ import { env } from "cloudflare:test";
 import {
   handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH,
   handleFleetAnthropicCountTokens, ANTHROPIC_COUNT_TOKENS_PATH,
+  leadStreamPingMs,
 } from "../src/llm/anthropic-route";
+import { aggregateLeadUsage } from "../src/junior/usage";
 import { GLM_LEAD_MODEL } from "../src/llm/translate";
 import { POOL, type PoolModel } from "../src/llm/models";
 import { setAssignedModel } from "../src/llm/model-store";
@@ -91,13 +93,13 @@ async function callRoute(opts: {
   return handleFleetAnthropicMessages(req({ token, body: opts.body }), e, ctx, rows, opts.pool, opts.retryDeps);
 }
 
-function req(opts: { token?: string | null; apiKey?: string; body?: unknown; path?: string; method?: string }) {
+function req(opts: { token?: string | null; apiKey?: string; body?: unknown; path?: string; method?: string; signal?: AbortSignal }) {
   const headers: Record<string, string> = {};
   if (opts.token) headers.authorization = `Bearer ${opts.token}`;
   if (opts.apiKey) headers["x-api-key"] = opts.apiKey;
   const method = opts.method ?? "POST";
   return new Request(`https://w${opts.path ?? ANTHROPIC_MESSAGES_PATH}`, {
-    method, headers,
+    method, headers, signal: opts.signal,
     body: method === "POST" ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body ?? good)) : undefined,
   });
 }
@@ -1825,5 +1827,129 @@ describe("handleFleetAnthropicMessages — runaway review follow-ups (issue #109
     expect(seen).toHaveLength(3);
     expect(seen[2]).not.toBe(seen[0]);
     expect(seen[2]).not.toBe(seen[1]);
+  });
+});
+
+// Issue #1147: a long generation sits silent upstream (prefill of a ~120k-token
+// prompt, then a long output), and the client gets no bytes. Two defects:
+// the streaming path emits no keepalive, and a client that hangs up is only
+// noticed on the NEXT write, so a silent drop logs ok=1 (non-streaming) or
+// lingers until the idle timer (streaming). Fixtures use small ms values so
+// the suite stays on real timers, same as the #302 block above.
+describe("handleFleetAnthropicMessages — keepalive and client-drop accounting (issue #1147)", () => {
+  const frame = (c: unknown) => `data: ${JSON.stringify(c)}\n\n`;
+  const textChunk = frame({ choices: [{ delta: { content: "partial" } }] });
+  const finishChunk = frame({ choices: [{ delta: {}, finish_reason: "stop" }] });
+  /** One upstream part per pull: wait `gapMs` (Infinity = never), then emit `data`. */
+  function gappedUpstream(parts: Array<{ gapMs: number; data?: string }>, onCancel?: () => void) {
+    let i = 0;
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (i >= parts.length) { controller.close(); return; }
+        const part = parts[i++];
+        if (part.gapMs === Infinity) await new Promise<void>(() => {});
+        else if (part.gapMs > 0) await new Promise<void>((r) => setTimeout(r, part.gapMs));
+        if (part.data !== undefined) controller.enqueue(new TextEncoder().encode(part.data));
+      },
+      cancel() { onCancel?.(); },
+    });
+  }
+  async function setupWith(upstream: ReadableStream<Uint8Array>, envOverrides: Partial<Env> = {}) {
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...FAST_RETRY, ...envOverrides } as unknown as Env;
+    return { token, rows, e };
+  }
+  /** Drains the response body in the background, like the Workers runtime does
+   *  for a connected client. Without this the pump blocks on backpressure. */
+  function consume(r: Response): Promise<string> {
+    const reader = r.body!.getReader();
+    const dec = new TextDecoder();
+    return (async () => {
+      let text = "";
+      for (;;) {
+        const { value, done } = await reader.read().catch(() => ({ value: undefined, done: true }));
+        if (done) break;
+        text += dec.decode(value, { stream: true });
+      }
+      return text;
+    })();
+  }
+
+  it("the streaming path emits event: ping while the upstream is silent between chunks", async () => {
+    const upstream = gappedUpstream([{ gapMs: 0, data: textChunk }, { gapMs: 120, data: finishChunk }, { gapMs: 0, data: "data: [DONE]\n\n" }]);
+    const { token, rows, e } = await setupWith(upstream, { LEAD_STREAM_PING_MS: "20", LEAD_STREAM_IDLE_MS: "5000" } as Partial<Env>);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await consume(r);
+    const pings = text.split("event: ping\ndata: {\"type\":\"ping\"}\n\n").length - 1;
+    expect(pings).toBeGreaterThanOrEqual(2);
+    expect(text).toContain("event: message_stop");
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 1, error: null });
+  });
+
+  it("a fast stream carries no ping at all (the default interval never fires on a normal turn)", async () => {
+    const upstream = gappedUpstream([{ gapMs: 0, data: textChunk }, { gapMs: 0, data: finishChunk }, { gapMs: 0, data: "data: [DONE]\n\n" }]);
+    const { token, rows, e } = await setupWith(upstream);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await consume(r);
+    expect(text).not.toContain("event: ping");
+    expect(text).toContain("event: message_stop");
+  });
+
+  it("pings do not reset the idle clock: a permanent stall still times out at LEAD_STREAM_IDLE_MS", async () => {
+    const upstream = gappedUpstream([{ gapMs: 0, data: textChunk }, { gapMs: Infinity }]);
+    const { token, rows, e } = await setupWith(upstream, { LEAD_STREAM_PING_MS: "10", LEAD_STREAM_IDLE_MS: "80" } as Partial<Env>);
+    const started = Date.now();
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await consume(r);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(text.split("event: ping").length - 1).toBeGreaterThanOrEqual(2);
+    expect(text).toContain("upstream stream idle timeout: no data for 80ms");
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "idle_timeout after 80ms" });
+  });
+
+  it("a client that hangs up during a silent upstream is recorded as client_abort at once, not at the idle timeout", async () => {
+    let cancelled = false;
+    const upstream = gappedUpstream([{ gapMs: 0, data: textChunk }, { gapMs: Infinity }], () => { cancelled = true; });
+    const { token, rows, e } = await setupWith(upstream, { LEAD_STREAM_IDLE_MS: "5000", LEAD_STREAM_PING_MS: "60000" } as Partial<Env>);
+    const ac = new AbortController();
+    const started = Date.now();
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true }, signal: ac.signal }), e, ctx, rows);
+    const consumed = consume(r);
+    setTimeout(() => ac.abort(), 30);
+    await ctx.drain();
+    await consumed;
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(cancelled).toBe(true);
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 0, error: "client_abort" });
+  });
+
+  it("a non-streaming client that hangs up is logged ok: 0 client_abort, not ok: 1 for a reply nobody reads", async () => {
+    const upstream = gappedUpstream([{ gapMs: 0, data: textChunk }, { gapMs: 100, data: finishChunk }, { gapMs: 0, data: "data: [DONE]\n\n" }]);
+    const { token, rows, e } = await setupWith(upstream);
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 20);
+    const r = await handleFleetAnthropicMessages(req({ token, signal: ac.signal }), e, ctx, rows);
+    expect(r.status).toBe(499);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 0, error: "client_abort" });
+    // INFER/READY read SUM(ok) over these rows (junior/usage.ts aggregateLeadUsage),
+    // so a dropped call is a counted failure there too.
+    const agg = await aggregateLeadUsage(env.DB, 0);
+    expect(agg.rows.find((x) => x.studioId === ME)).toMatchObject({ calls: 1, ok: 0 });
+  });
+
+  it("the ping interval parses like the other lead timers: garbage and zero fall back to the 15s default", () => {
+    expect(leadStreamPingMs({})).toBe(15_000);
+    expect(leadStreamPingMs({ LEAD_STREAM_PING_MS: "nope" })).toBe(15_000);
+    expect(leadStreamPingMs({ LEAD_STREAM_PING_MS: "0" })).toBe(15_000);
+    expect(leadStreamPingMs({ LEAD_STREAM_PING_MS: "2500" })).toBe(2_500);
   });
 });
