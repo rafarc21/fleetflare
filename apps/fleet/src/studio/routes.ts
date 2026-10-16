@@ -1271,6 +1271,10 @@ export async function handleStudio(
       // see ProvisionConfig.cancelFreshSession's own doc comment.
       ...(wantsCancelFresh ? { cancelFreshSession: true } : {}),
       ...(wantsDiscardSession ? { discardSession: true } : {}),
+      // Issue #1074 ask 2: `?account=mapped` — same literal-"mapped" rule and
+      // same Worker-side resolution as the recycle route (see that route's
+      // own comment, routes.ts's recycle branch).
+      ...(url.searchParams.get("account") === "mapped" ? { forceMappedAccount: true } : {}),
     };
     try {
       // Issue #305: plus which account it launched on and why.

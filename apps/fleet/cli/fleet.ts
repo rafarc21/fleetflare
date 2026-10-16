@@ -69,6 +69,8 @@ import { formatTaskTable, formatTaskShow, formatAssignWake } from "./task-format
 // threshold), kept Bun/node-free so either test pool can import it — see
 // that module's own header.
 import { formatInfer, isLeadInferenceBlocked, INFER_WINDOW_MS, type LeadInferUsage } from "./infer-format";
+// Issue #1074 ask 1: the lead model, in the ACCOUNT cell and the --json fields.
+import { leadAccountLabel, leadModelOf, type LeadModel } from "./lead-model";
 import type { AssignWakeReport } from "../src/board/assign-wake";
 // Board issue #332: the open-prs route's answer shape — a type-only import,
 // so none of src/board's runtime graph rides into this CLI binary.
@@ -311,8 +313,11 @@ function capErrorCell(error: string | null): string {
   return flat.length <= ERROR_CELL_MAX ? flat : `${flat.slice(0, ERROR_CELL_MAX - 1)}…`;
 }
 
-/** Issue #289/#285: the ACCOUNT cell -- see formatTable's comment on it. */
-export function formatAccount(s: StudioStatus): string {
+/** Issue #289/#285: the ACCOUNT cell -- see formatTable's comment on it.
+ *  Issue #1074: a non-Claude lead runs no Claude account, so its cell names
+ *  the lead model (`glm:glm-5.3`) instead of a Claude token name. */
+export function formatAccount(s: StudioStatus, lead: LeadModel): string {
+  if (lead.leadType !== "claude") return leadAccountLabel(lead);
   if (s.launchedAccount === null) return "-";
   const name = s.claudeAccount ?? "CLAUDE_CODE_OAUTH_TOKEN";
   const shown = s.claudeAccountLabel ? `${s.claudeAccountLabel} (${name})` : name;
@@ -403,6 +408,7 @@ export function fullErrorLine(s: StudioStatus): string | null {
 export function formatTable(
   studios: StudioStatus[], now: Date = new Date(), orcaRows?: Map<string, string> | null,
   openPrs?: Map<string, number>, inferBy?: Map<string, LeadInferUsage>,
+  assignments?: Record<string, string>,
 ): string {
   if (studios.length === 0) return "(no studios provisioned)";
   // REPO column (operator request 2026-08-20): a studio id is
@@ -497,7 +503,7 @@ export function formatTable(
       //
       // Issue #289/#285: the account the container was LAUNCHED on, the next
       // launch's in a note when they differ; "-" after a refused launch.
-      formatAccount(s),
+      formatAccount(s, leadModelOf(s, assignments)),
       s.tailscaleHost ?? "-",
       formatBurn(s.burn),
       s.lastRefresh ?? "-",
@@ -706,6 +712,25 @@ export const PARK_WARNING_UNKNOWN_SCAN =
   "park warning: could not check unmerged PRs (the scan failed for this studio)";
 
 // ---------------------------------------------------------------------------
+// Issue #1074 ask 1: the lead-model assignments behind the ACCOUNT label and
+// `fleet ls --json`'s leadType/leadModel — one GET to /studio/models (the same
+// route `fleet models` reads), studio id -> Workers AI model id. Best-effort:
+// null on any failure, so the listing degrades (a glm lead reads plain glm)
+// and never fails.
+async function fetchLeadAssignments(creds: Credentials): Promise<Record<string, string> | null> {
+  try {
+    const res = await fetch(new URL("/studio/models", creds.workerUrl), {
+      headers: { ...accessHeaders(creds), Accept: "application/json" },
+      signal: AbortSignal.timeout(LEAD_INFER_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { assignments?: Record<string, string> };
+    return body.assignments ?? {};
+  } catch {
+    return null;
+  }
+}
+
 // Issue #934: the lead-inference read behind the INFER column. ONE route —
 // GET /studio/junior/usage/lead?since=<ms> (src/junior/usage.ts's
 // handleLeadUsageStats, this issue's step 1) — answers EVERY studio at once:
@@ -1021,6 +1046,9 @@ export async function cmdLs(
   // route only costs this await and the degrade line below. Runs in BOTH
   // --json and table mode: it is one cheap read either way.
   const inferFetch = fetchLeadInferUsage(creds, Date.now());
+  // Issue #1074 ask 1: the lead-model assignments read, fired alongside
+  // the INFER read for the same reason (one cheap GET, overlapping the awaits).
+  const assignFetch = fetchLeadAssignments(creds);
   // #332 review H2: a scan the route reports as failed prints ONE degrade
   // warning naming the studios — never a confident zero. console.error, so
   // stdout stays machine-clean in --json mode.
@@ -1039,13 +1067,19 @@ export async function cmdLs(
   // Issue #70 ask 4: machine-readable lead state, nothing else on stdout.
   // #332: openPrs rides each row when the route answered for its repo.
   // #934: infer rides each row the same way (absence = no data, never 0/0).
+  const assignments = (await assignFetch) ?? undefined;
+  if (assignments === undefined) {
+    // Stderr, one line, same degrade posture as the INFER line above: the
+    // table and the JSON still print; a glm studio simply shows no model id.
+    console.error("fleet ls: lead model status unavailable (/studio/models unreadable)");
+  }
   if (json) {
-    console.log(JSON.stringify(lsJsonRows(studios, new Date(), undefined, openPrsCounts, inferBy), null, 2));
+    console.log(JSON.stringify(lsJsonRows(studios, new Date(), undefined, openPrsCounts, inferBy, assignments), null, 2));
     return;
   }
   for (const line of formatLsHead(studios)) console.log(line);
   const orca = await readStudioRows(studios, orcaDeps);
-  console.log(formatTable(studios, new Date(), orca.rows, openPrsCounts, inferBy));
+  console.log(formatTable(studios, new Date(), orca.rows, openPrsCounts, inferBy, assignments));
   // #299: stdout, not stderr — survives `fleet ls 2>&1 | grep`-style reads.
   if (orca.footer && studios.length > 0) console.log(orca.footer);
   // Issue #53: idle studios bill with zero events; say so above the caveat.
@@ -1491,6 +1525,7 @@ async function cmdSpawn(
  */
 async function cmdProvision(
   creds: Credentials, id: string, freshSession = false, cancelFreshSession = false, discardSession = false,
+  forceMappedAccount = false,
 ): Promise<void> {
   // Dynamic repo selection (P4a): unlike spawn, this command is ADDRESSED by
   // a studio id, and that id already names a repo segment. The detected repo
@@ -1518,6 +1553,9 @@ async function cmdProvision(
   if (freshSession) provisionParams.set("fresh-session", "true");
   if (cancelFreshSession) provisionParams.set("no-fresh-session", "true");
   if (discardSession) provisionParams.set("discard-session", "true");
+  // Issue #1074 ask 2: `--account mapped`, the same query-string convention
+  // recycle's `?account=mapped` already uses (board task #131 ask 2).
+  if (forceMappedAccount) provisionParams.set("account", "mapped");
   const provisionPath = provisionParams.size > 0 ? `/provision?${provisionParams.toString()}` : "/provision";
   const res = await fetch(studioUrl(creds, id, provisionPath), {
     method: "POST",
@@ -3211,7 +3249,7 @@ async function main(): Promise<void> {
     case "spawn":
       return cmdSpawn(creds, parsed.role, parsed.newInstance, parsed.leadType);
     case "provision":
-      return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession, parsed.discardSession);
+      return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession, parsed.discardSession, parsed.forceMappedAccount === true);
     case "recycle":
       return cmdRecycle(creds, parsed.id, parsed.discardUnsynced, parsed.freshSession, parsed.forceMappedAccount === true);
     case "destroy":

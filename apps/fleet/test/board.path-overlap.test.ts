@@ -115,3 +115,24 @@ describe("formatPathOverlapWarnings", () => {
     expect(lines[1]).toContain("apps/fleet/src/board/routes.ts");
   });
 });
+
+// Issue #1074 ask 4: `task new` warned "path claim overlap" on prose slash
+// pairs (origin/staging, before/after) that are not paths at all. Only real
+// path shapes — three or more segments, or a file with an extension — count.
+describe("extractPaths — prose slash pairs are not paths", () => {
+  it("drops two-segment prose pairs such as origin/staging and before/after", () => {
+    expect(extractPaths("compare origin/staging against the before/after snapshot")).toEqual([]);
+  });
+
+  it("drops and/or and read/write style pairs", () => {
+    expect(extractPaths("read/write access, and/or retries")).toEqual([]);
+  });
+
+  it("keeps a two-segment path whose last segment has a file extension", () => {
+    expect(extractPaths("edit src/board.ts")).toEqual(["src/board.ts"]);
+  });
+
+  it("keeps a three-segment directory path with no extension", () => {
+    expect(extractPaths("claims apps/fleet/src")).toEqual(["apps/fleet/src"]);
+  });
+});

@@ -7129,6 +7129,14 @@ export class StudioDO extends Sandbox<Env> {
    */
   async provision(cfg: ProvisionConfig): Promise<StudioStatus> {
     const id = buildStudioId(cfg);
+    // Issue #1074 ask 2: `fleet provision <id> --account mapped` — the same
+    // refuse-then-clear as recycle()'s own forced-mapped step (see that call
+    // site's comment, and clearForceMappedAccount's). Refuse first, so an
+    // unlaunchable mapped slot leaves the row untouched.
+    if (cfg.forceMappedAccount) {
+      await refuseUnlessMappedAccountLaunchable(this.env, this.selfId(), this.ctx.storage, this.recordFn());
+      await clearForceMappedAccount(this.ctx.storage, this.recordFn());
+    }
     // Issue #152: ONE ctx for the whole outer operation — provisioning AND
     // the readiness check that follows it — created here, at provision()'s
     // own entry, rather than inside provisionCore: provisionWithFreshVerdict
