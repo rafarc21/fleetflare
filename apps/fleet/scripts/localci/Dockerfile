@@ -36,8 +36,10 @@ RUN curl -fsSL -o /tmp/gitleaks.tar.gz \
 # instead — inside this image, a skip means the image itself regressed, not
 # that some arbitrary dev machine lacks the tool (issue #356).
 ENV LOCALCI_IMAGE=1
-# Playwright pinned to apps/fleet/bun.lock's playwright-core. The chromium
-# dir is chrome-linux64 on amd64, chrome-linux-arm64 on arm64 — glob both.
+# Playwright pinned to ego-browser's own package.json playwright-core (the
+# pin's only source now that apps/fleet's root manifest dropped its copy).
+# The chromium dir is chrome-linux64 on amd64, chrome-linux-arm64 on arm64
+# — glob both.
 WORKDIR /opt/pw
 RUN bun x playwright@1.63.0 install chromium --with-deps \
  && rm -rf /var/lib/apt/lists/* \
