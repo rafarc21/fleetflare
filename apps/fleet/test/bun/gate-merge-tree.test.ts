@@ -80,7 +80,7 @@ describe("resolveMergeTree", () => {
     }
   });
 
-  it("error when base is not the current origin/main (stale gate refused, never silent)", async () => {
+  it("base moved mid-run: ok on the PINNED base, baseMoved carries the current origin/<baseRef> sha", async () => {
     const { dir, git } = await makeRepo();
     const oldMain = await head(git);
     await git(["checkout", "-q", "-b", "pr"]);
@@ -96,9 +96,28 @@ describe("resolveMergeTree", () => {
     await git(["update-ref", "refs/remotes/origin/main", newMain]);
 
     const result = await resolveMergeTree(realExec, dir, oldMain, prHead, "main");
-    expect(result.ok).toBe(false);
-    if (!result.ok && result.kind === "error") expect(result.message).toMatch(/stale/i);
-    else throw new Error(`expected stale error, got ${JSON.stringify(result)}`);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.baseMoved).toBe(newMain);
+    // The gate still tests PR head onto the base the run was pinned to, not the moved tip.
+    const parents = (await git(["rev-list", "--parents", "-n1", result.commit])).stdout.trim().split(" ");
+    expect(parents).toEqual([result.commit, oldMain, prHead]);
+  });
+
+  it("base unchanged: ok with no baseMoved field", async () => {
+    const { dir, git } = await makeRepo();
+    const base = await head(git);
+    await git(["update-ref", "refs/remotes/origin/main", base]);
+    await git(["checkout", "-q", "-b", "pr"]);
+    await Bun.write(join(dir, "g.txt"), "pr\n");
+    await git(["add", "g.txt"]);
+    await git(["commit", "-q", "-m", "pr"]);
+    const prHead = await head(git);
+    await git(["checkout", "-q", "main"]);
+
+    const result = await resolveMergeTree(realExec, dir, base, prHead, "main");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.baseMoved).toBeUndefined();
   });
 
   it("stale check reads origin/<baseRef>: a PR into staging is not stale when staging is current", async () => {

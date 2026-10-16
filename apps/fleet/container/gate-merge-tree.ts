@@ -18,7 +18,7 @@ export type ExecFn = (
 ) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 export type MergeTreeResult =
-  | { ok: true; commit: string }
+  | { ok: true; commit: string; baseMoved?: string }
   | { ok: false; kind: "conflict" }
   | { ok: false; kind: "error"; message: string };
 
@@ -40,17 +40,14 @@ export async function resolveMergeTree(
   if (headRes.code !== 0) return { ok: false, kind: "error", message: `unknown head ref: ${head}` };
   const headSha = headRes.stdout.trim();
 
-  // Stale gate guard: if this checkout knows the PR's base branch, the base we
-  // were handed must be that exact commit. Otherwise the gate would test a stale base.
+  // The base branch may have moved since the run was pinned. That is not a leg
+  // error: the merge still uses the pinned base, and the moved tip is reported
+  // so the leg can say which commit it tested.
+  let baseMoved: string | undefined;
   const branchRes = await exec("git", ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${baseRef}`], { cwd });
   if (branchRes.code === 0) {
     const branchSha = branchRes.stdout.trim();
-    if (branchSha !== baseSha) {
-      return {
-        ok: false, kind: "error",
-        message: `stale base: origin/${baseRef} is ${branchSha}, got ${baseSha}`,
-      };
-    }
+    if (branchSha !== baseSha) baseMoved = branchSha;
   }
 
   const mt = await exec("git", ["merge-tree", "--write-tree", baseSha, headSha], { cwd });
@@ -78,5 +75,5 @@ export async function resolveMergeTree(
     return { ok: false, kind: "error", message: `merge commit parents mismatch: ${parentsRes.stdout.trim()}` };
   }
 
-  return { ok: true, commit };
+  return baseMoved === undefined ? { ok: true, commit } : { ok: true, commit, baseMoved };
 }

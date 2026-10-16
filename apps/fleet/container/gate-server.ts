@@ -185,7 +185,12 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
     if (merged.kind === "conflict") return { state: "failure", description: `merge conflict against ${req.baseRef}` };
     return { state: "error", description: merged.message };
   }
-  if (req.leg === "merge-tree") return { state: "success", commit: merged.commit };
+  // A base that moved mid-run is info, not a leg error. The leg still tested the
+  // pinned base, so the note names both commits. It only fills a leg with no description.
+  const baseNote = merged.baseMoved === undefined
+    ? undefined
+    : `base moved: origin/${req.baseRef} now ${merged.baseMoved.slice(0, 7)}, tested ${base.slice(0, 7)}`;
+  if (req.leg === "merge-tree") return { state: "success", commit: merged.commit, description: baseNote };
 
   const checkout = await run("git", ["checkout", "--quiet", merged.commit], { cwd: workdir });
   if (checkout.code !== 0) return { state: "error", description: `checkout failed: ${firstLine(checkout.stderr)}` };
@@ -206,7 +211,7 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
   const test = await run("bash", ["-c", req.legCmd], { cwd: workdir });
   const tail = { stdout: test.stdout.slice(-OUTPUT_TAIL_CHARS), stderr: test.stderr.slice(-OUTPUT_TAIL_CHARS), limits };
   return test.code === 0
-    ? { state: "success", ...tail }
+    ? { state: "success", description: baseNote, ...tail }
     : { state: "failure", description: `${req.leg} exited ${test.code}`, ...tail };
 }
 
