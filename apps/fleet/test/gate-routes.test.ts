@@ -2,6 +2,7 @@
 // /studio/gate/status. Inner handler called directly, same convention as
 // llm.models-route.test.ts — auth lives at the handleStudio mount point.
 import { describe, it, expect, vi, type Mock } from "vitest";
+import { env as testEnv } from "cloudflare:test";
 import { handleGateRoute } from "../src/gate/routes";
 import { gateRunId } from "../src/gate/auto-run";
 import type { Env } from "../src/env";
@@ -17,6 +18,7 @@ function fakeEnv(overrides: Partial<Env> = {}): FakeEnv {
   return {
     FLEET_GATE_RUNNER: "on",
     GATE_RUNNER_REPOS: REPO,
+    DB: testEnv.DB,
     GATE_WORKFLOW: {
       create: vi.fn(async () => ({ id: "run-1" })),
       get: vi.fn(async () => ({ status: vi.fn(async () => ({ status: "running" })) })),

@@ -1,11 +1,13 @@
 // #1072 (refs #715): the gate's auto-run on a pull_request delivery. A gated
 // PR's push starts one gate run per head sha; a manual `fleet gate run` of that
-// sha reuses it; drafts, other actions and ungated repos start nothing. The
-// GATE_WORKFLOW binding and the fleet.json reader are fakes at the boundary;
-// the decisions themselves are pure.
+// sha reuses it; drafts, other actions and ungated repos start nothing. #1082:
+// a new head sha ends the still-live run of the sha it replaces. The
+// GATE_WORKFLOW binding, the PR's run index and the fleet.json reader are fakes
+// at the boundary; the decisions themselves are pure.
 import { describe, it, expect } from "bun:test";
 import {
-  autoRunPullRequest, gateRunId, pullRequestAutoRun, startGateRun, type GateRunStarter, type PullRequestAutoRun,
+  autoRunPullRequest, gateRunId, pullRequestAutoRun, startGateRun,
+  type GateRunIndex, type GateRunInstance, type GateRunRecord, type GateRunStarter, type PullRequestAutoRun,
 } from "../../src/gate/auto-run";
 import type { FleetJsonReader } from "../../src/gate/load-config";
 
@@ -13,6 +15,7 @@ const FLEET = "acme/fleet";
 const PR_REPO = "acme/example";
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
+const THIRD = "c".repeat(40);
 const BLOCK = { install: "bun install", legs: ["lint"], pathRules: ["src/**"] };
 const ON = { FLEET_GATE_RUNNER: "on", GATE_RUNNER_REPOS: PR_REPO };
 
@@ -28,25 +31,46 @@ function payload(over: { action?: string; draft?: boolean; repo?: string } = {})
 const PR: PullRequestAutoRun = { repo: PR_REPO, pr: 7, headSha: HEAD, baseSha: BASE };
 
 /** A GATE_WORKFLOW fake with Workflows' duplicate-id rule: a create under an id
- *  that already exists throws, and get() throws for an unknown id. */
-function fakeWorkflow(createError?: Error) {
-  const runs = new Map<string, { params: unknown }>();
+ *  that already exists throws, and get() throws for an unknown id. Each run
+ *  carries a status the test sets; terminate() moves it to "terminated" and is
+ *  logged, the way the binding's instance handle would end it. */
+function fakeWorkflow(opts: { createError?: Error; terminateError?: Error } = {}) {
+  const runs = new Map<string, { params: unknown; status: string }>();
   const creates: { id?: string; params: unknown }[] = [];
+  const terminated: string[] = [];
+  const instance = (id: string): GateRunInstance => ({
+    async status() { return { status: runs.get(id)!.status }; },
+    async terminate() {
+      if (opts.terminateError) throw opts.terminateError;
+      terminated.push(id);
+      runs.get(id)!.status = "terminated";
+    },
+  });
   const wf: GateRunStarter = {
-    async create(opts) {
-      creates.push(opts);
-      if (createError) throw createError;
-      if (opts.id !== undefined && runs.has(opts.id)) throw new Error(`instance ${opts.id} already exists`);
-      const id = opts.id ?? `anon-${runs.size + 1}`;
-      runs.set(id, { params: opts.params });
+    async create(create) {
+      creates.push(create);
+      if (opts.createError) throw opts.createError;
+      if (create.id !== undefined && runs.has(create.id)) throw new Error(`instance ${create.id} already exists`);
+      const id = create.id ?? `anon-${runs.size + 1}`;
+      runs.set(id, { params: create.params, status: "running" });
       return { id };
     },
     async get(id) {
       if (!runs.has(id)) throw new Error(`instance ${id} not found`);
-      return {};
+      return instance(id);
     },
   };
-  return { wf, runs, creates };
+  return { wf, runs, creates, terminated };
+}
+
+/** The per-PR run index in memory: the latest run recorded for each repo#pr. */
+function fakeIndex() {
+  const heads = new Map<string, GateRunRecord>();
+  const index: GateRunIndex = {
+    async latest(repo, pr) { return heads.get(`${repo}#${pr}`) ?? null; },
+    async record(repo, pr, run) { heads.set(`${repo}#${pr}`, run); },
+  };
+  return { index, heads };
 }
 
 /** A fleet.json reader over an in-memory repo map. A missing file reads null. */
@@ -115,39 +139,105 @@ describe("gateRunId: one instance id per repo and head sha", () => {
 describe("startGateRun: a second start for the same sha reuses the first run", () => {
   it("the first start creates the run under the sha's id", async () => {
     const { wf, creates, runs } = fakeWorkflow();
-    const out = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD });
-    expect(out).toEqual({ runId: await gateRunId(PR_REPO, HEAD), reused: false });
+    const { index } = fakeIndex();
+    const out = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(out).toEqual({ runId: await gateRunId(PR_REPO, HEAD), reused: false, supersededRunId: undefined });
     expect(creates).toEqual([{ id: out.runId, params: { repo: PR_REPO, pr: 7 } }]);
     expect(runs.size).toBe(1);
   });
 
   it("a second start for the same sha reuses the run and creates nothing new", async () => {
-    const { wf, runs } = fakeWorkflow();
-    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD });
-    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD });
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
     expect(second).toEqual({ runId: first.runId, reused: true });
     expect(runs.size).toBe(1);
+    expect(terminated).toEqual([]);
   });
 
   it("a new head sha starts a new run", async () => {
     const { wf, runs } = fakeWorkflow();
-    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD });
-    const next = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE });
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const next = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index);
     expect(next.reused).toBe(false);
     expect(runs.size).toBe(2);
   });
 
   it("a create that fails for any reason but an existing id rethrows that error", async () => {
-    const { wf } = fakeWorkflow(new Error("workflow quota exceeded"));
-    await expect(startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD })).rejects.toThrow("workflow quota exceeded");
+    const { wf } = fakeWorkflow({ createError: new Error("workflow quota exceeded") });
+    const { index } = fakeIndex();
+    await expect(startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index)).rejects.toThrow("workflow quota exceeded");
+  });
+});
+
+describe("startGateRun: a new head sha ends the still-live run of the sha it replaces (#1082)", () => {
+  it("a synchronize ends the previous sha's running run and starts the new one", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index);
+    expect(second).toEqual({ runId: await gateRunId(PR_REPO, BASE), reused: false, supersededRunId: first.runId });
+    expect(terminated).toEqual([first.runId]);
+    expect(runs.get(first.runId)!.status).toBe("terminated");
+    expect(runs.get(second.runId)!.status).toBe("running");
+  });
+
+  it("a previous run that already finished is left alone", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    runs.get(first.runId)!.status = "complete";
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index);
+    expect(second.supersededRunId).toBeUndefined();
+    expect(terminated).toEqual([]);
+    expect(runs.get(first.runId)!.status).toBe("complete");
+  });
+
+  it("only the previous run ends: a third sha ends the second, each older run ends once", async () => {
+    const { wf, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index);
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: THIRD }, index);
+    expect(terminated).toEqual([first.runId, second.runId]);
+  });
+
+  it("a re-start of the current sha ends nothing, the run it reuses is still the PR's latest", async () => {
+    const { wf, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index);
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index);
+    expect(terminated).toHaveLength(1);
+  });
+
+  it("a terminate that fails does not block the new run, and reports no superseded run", async () => {
+    const { wf, runs } = fakeWorkflow({ terminateError: new Error("instance busy") });
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index);
+    expect(second.reused).toBe(false);
+    expect(second.supersededRunId).toBeUndefined();
+    expect(runs.size).toBe(2);
+  });
+
+  it("a PR's runs are kept apart: another PR's run is never ended", async () => {
+    const { wf, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: BASE }, index);
+    expect(terminated).toEqual([]);
   });
 });
 
 describe("autoRunPullRequest: only a gated base starts a run", () => {
   it("a base with no gate block anywhere starts nothing", async () => {
     const { wf, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
     const out = await autoRunPullRequest(PR, {
-      fleetRepo: FLEET, readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} } }), workflow: wf,
+      fleetRepo: FLEET, readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} } }), workflow: wf, index,
     });
     expect(out).toBe("no-gate-block");
     expect(creates).toHaveLength(0);
@@ -155,6 +245,7 @@ describe("autoRunPullRequest: only a gated base starts a run", () => {
 
   it("a PR repo whose base carries a gate block starts one run", async () => {
     const { wf, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
     const out = await autoRunPullRequest(PR, {
       fleetRepo: FLEET,
       readFleetJson: reader({
@@ -162,6 +253,7 @@ describe("autoRunPullRequest: only a gated base starts a run", () => {
         [`${PR_REPO}@${BASE}`]: { gate: BLOCK },
       }),
       workflow: wf,
+      index,
     });
     expect(out).toBe("started");
     expect(creates).toEqual([{ id: await gateRunId(PR_REPO, HEAD), params: { repo: PR_REPO, pr: 7 } }]);
@@ -169,13 +261,45 @@ describe("autoRunPullRequest: only a gated base starts a run", () => {
 
   it("the same head sha seen twice starts one run, the second reports reused", async () => {
     const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
     const deps = {
       fleetRepo: FLEET,
       readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} }, [`${PR_REPO}@${BASE}`]: { gate: BLOCK } }),
       workflow: wf,
+      index,
     };
     expect(await autoRunPullRequest(PR, deps)).toBe("started");
     expect(await autoRunPullRequest(PR, deps)).toBe("reused");
     expect(runs.size).toBe(1);
+  });
+
+  it("a synchronize on a gated PR ends the run of the sha it replaces (#1082)", async () => {
+    const { wf, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const deps = {
+      fleetRepo: FLEET,
+      readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} }, [`${PR_REPO}@${BASE}`]: { gate: BLOCK } }),
+      workflow: wf,
+      index,
+    };
+    await autoRunPullRequest(PR, deps);
+    const out = await autoRunPullRequest({ ...PR, headSha: THIRD }, deps);
+    expect(out).toBe("started");
+    expect(terminated).toEqual([await gateRunId(PR_REPO, HEAD)]);
+  });
+
+  it("an ungated base ends nothing: the gate block check runs before any supersede", async () => {
+    const { wf, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const deps = {
+      fleetRepo: FLEET,
+      readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} }, [`${PR_REPO}@${BASE}`]: { gate: BLOCK } }),
+      workflow: wf,
+      index,
+    };
+    await autoRunPullRequest(PR, deps);
+    const ungated = { ...deps, readFleetJson: reader({ [`${FLEET}@HEAD`]: { gates: {} } }) };
+    expect(await autoRunPullRequest({ ...PR, headSha: THIRD }, ungated)).toBe("no-gate-block");
+    expect(terminated).toEqual([]);
   });
 });
