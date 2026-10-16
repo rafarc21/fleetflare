@@ -28,13 +28,40 @@ export interface GateRunStarter {
 
 /** The latest gate run recorded for one PR: the head sha it gates and its
  *  Workflows instance id. */
-export interface GateRunRecord { headSha: string; runId: string }
+export interface GateRunRecord {
+  headSha: string;
+  runId: string;
+  /** When the run last progressed (ms): a leg attempt started or an infra handoff (#1135). 0 when never. */
+  progressedAt?: number;
+}
 
 /** The per-PR pointer to the latest gate run. Workflows cannot list instances,
  *  so this is how a new head sha finds the run it supersedes (#1082). */
 export interface GateRunIndex {
   latest(repo: string, pr: number): Promise<GateRunRecord | null>;
   record(repo: string, pr: number, run: GateRunRecord): Promise<void>;
+  /** One conditional write: the pointer moves to `run` only while it still names
+   *  `fromRunId`. False when a newer run holds it (#1135). */
+  handOff(repo: string, pr: number, fromRunId: string, run: GateRunRecord): Promise<boolean>;
+  /** Stamps `at` as the progress time of the pointed run. A run no longer
+   *  pointed at is left alone (#1135). */
+  progress(repo: string, pr: number, runId: string, at: number): Promise<void>;
+}
+
+/** A live run with no progress for this long is hung (#1135). Longer than one
+ *  leg attempt: the 28 min attempt deadline plus the step's 15 s retry delay. */
+export const GATE_STALL_MS = 35 * 60_000;
+
+/** Stamps a leg's progress on the run's index row. Never throws: a failed stamp
+ *  must not fail the leg that reports it. */
+export async function markRunProgress(
+  index: GateRunIndex, repo: string, pr: number, runId: string, at: number,
+): Promise<void> {
+  try {
+    await index.progress(repo, pr, runId, at);
+  } catch (err) {
+    console.error("gate: progress stamp failed", err);
+  }
 }
 
 export interface PullRequestAutoRun {
@@ -120,9 +147,10 @@ async function statusOf(wf: GateRunStarter, runId: string): Promise<string | nul
  *  run if that one is still live (#1082). */
 async function recordRun(
   wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex, runId: string,
+  now: () => number,
 ): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
   const previous = await index.latest(input.repo, input.pr);
-  await index.record(input.repo, input.pr, { headSha: input.headSha, runId });
+  await index.record(input.repo, input.pr, { headSha: input.headSha, runId, progressedAt: now() });
   if (previous === null || previous.runId === runId) return { runId, reused: false };
   const superseded = await endIfLive(wf, previous.runId);
   return { runId, reused: false, supersededRunId: superseded ? previous.runId : undefined };
@@ -146,24 +174,30 @@ export async function startGateRun(
     }
     return { runId, reused: true };
   }
-  return recordRun(wf, input, index, runId);
+  return recordRun(wf, input, index, runId, Date.now);
 }
 
 /** #1085 (refs #715): the manual start (`fleet gate run`, /studio/gate/start).
- *  Reattaches ONLY to a live run of the sha (LIVE_STATUSES). A finished run of
- *  the sha is not reused: a fresh run starts under `<baseId>-r<base36 time>`, so
- *  a rerun after base drift or an infra flake needs no new push. The first start
- *  of a sha still uses the sha's own id, the one the auto-run dedupes on. */
+ *  Reattaches ONLY to a live run of the sha (LIVE_STATUSES) that progressed
+ *  within GATE_STALL_MS (#1135). A finished run of the sha is not reused: a fresh
+ *  run starts under `<baseId>-r<base36 time>`, so a rerun after base drift or an
+ *  infra flake needs no new push. A live run with no progress in the window is
+ *  hung: it is ended first, and the fresh run is the only live one. The first
+ *  start of a sha still uses the sha's own id, the one the auto-run dedupes on. */
 export async function startManualGateRun(
   wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex,
   now: () => number = Date.now,
 ): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
   const baseId = await gateRunId(input.repo, input.headSha);
   const latest = await index.latest(input.repo, input.pr);
-  if (latest?.headSha === input.headSha && isLive(await statusOf(wf, latest.runId))) {
-    return { runId: latest.runId, reused: true };
-  }
   const params = { repo: input.repo, pr: input.pr };
+  if (latest?.headSha === input.headSha && isLive(await statusOf(wf, latest.runId))) {
+    if (now() - (latest.progressedAt ?? 0) < GATE_STALL_MS) return { runId: latest.runId, reused: true };
+    await endIfLive(wf, latest.runId);
+    const runId = `${baseId}-r${now().toString(36)}`;
+    await wf.create({ id: runId, params });
+    return recordRun(wf, input, index, runId, now);
+  }
   try {
     await wf.create({ id: baseId, params });
   } catch (err) {
@@ -172,9 +206,9 @@ export async function startManualGateRun(
     if (isLive(status)) return { runId: baseId, reused: true };
     const runId = `${baseId}-r${now().toString(36)}`;
     await wf.create({ id: runId, params });
-    return recordRun(wf, input, index, runId);
+    return recordRun(wf, input, index, runId, now);
   }
-  return recordRun(wf, input, index, baseId);
+  return recordRun(wf, input, index, baseId, now);
 }
 
 export type AutoRunOutcome = "started" | "reused";

@@ -47,6 +47,8 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     "lint exceeded 25 min without a result",
     "lint: no progress past its deadline after 35 min",
     "lint: HTTP 503 after 0 min",
+    "lint: Execution timed out after 30 min",
+    "lint: The operation was aborted due to timeout after 28 min",
   ])("infra: %s", (description) => {
     expect(isInfraLegFailure({ leg: "lint", state: "error", description })).toBe(true);
   });
@@ -146,44 +148,71 @@ describe("runLegStep: a red first try with an infra retry is flagged redFirst, n
   });
 });
 
-describe("startInfraRerun: a replayed start is success, not a failed rerun (#1119 review)", () => {
+describe("startInfraRerun: a replayed start is success, not a failed rerun (#1119, #1135 item 1)", () => {
+  const noInstance = async () => { throw new Error("no such instance"); };
+
   it("a create that resolves starts the rerun", async () => {
-    expect(await startInfraRerun(async () => ({ id: "rerun-x" }))).toBe(true);
+    expect(await startInfraRerun(async () => ({ id: "rerun-x" }), noInstance)).toBe(true);
   });
 
-  it("an 'already exists' create (a replayed step) is success: the rerun is running", async () => {
-    expect(await startInfraRerun(async () => { throw new Error("Instance already exists: rerun-x"); })).toBe(true);
+  it("a create that throws but whose instance exists (a replayed step) is success, whatever the error text", async () => {
+    // Miniflare and the live binding word a duplicate differently: the instance itself is the signal.
+    let looked = 0;
+    const get = async () => { looked++; return { id: "rerun-x" }; };
+    for (const message of ["Instance already exists: rerun-x", "instance.already_exists"]) {
+      expect(await startInfraRerun(async () => { throw new Error(message); }, get)).toBe(true);
+    }
+    expect(looked).toBe(2);
   });
 
-  it("any other create failure is not started, so the final error verdict posts", async () => {
-    expect(await startInfraRerun(async () => { throw new Error("quota exceeded"); })).toBe(false);
+  it("a create that throws with no instance behind it is not started, so the final error verdict posts", async () => {
+    expect(await startInfraRerun(async () => { throw new Error("quota exceeded"); }, noInstance)).toBe(false);
   });
 });
 
-describe("recordInfraRerun: the rerun takes the PR's run pointer, like a normal start (#1119 review)", () => {
-  function fakeIndex(latest: { headSha: string; runId: string } | null) {
-    const records: { repo: string; pr: number; run: { headSha: string; runId: string } }[] = [];
+describe("recordInfraRerun: the rerun takes the PR's run pointer in one conditional write (#1119, #1135 item 2)", () => {
+  function fakeIndex(pointer: { headSha: string; runId: string }) {
+    const handoffs: { repo: string; pr: number; from: string; run: { headSha: string; runId: string; progressedAt?: number } }[] = [];
+    let reads = 0;
     return {
-      records,
+      handoffs,
+      reads: () => reads,
       index: {
-        latest: async () => latest,
-        record: async (repo: string, pr: number, run: { headSha: string; runId: string }) => {
-          records.push({ repo, pr, run });
+        latest: async () => { reads++; return pointer; },
+        record: async () => { throw new Error("record must not be used for a handoff"); },
+        progress: async () => {},
+        // The real store: the write lands only while the pointer still names `from`.
+        handOff: async (repo: string, pr: number, from: string, run: { headSha: string; runId: string; progressedAt?: number }) => {
+          handoffs.push({ repo, pr, from, run });
+          if (pointer.runId !== from) return false;
+          Object.assign(pointer, { headSha: run.headSha, runId: run.runId });
+          return true;
         },
       },
     };
   }
 
-  it("the first run is still the PR's latest: the rerun is recorded on the same head", async () => {
-    const { index, records } = fakeIndex({ headSha: HEAD, runId: "first" });
-    await recordInfraRerun(index, { repo: "acme/example", pr: 7, headSha: HEAD, runId: "rerun-first", instanceId: "first" });
-    expect(records).toEqual([{ repo: "acme/example", pr: 7, run: { headSha: HEAD, runId: "rerun-first" } }]);
+  it("the first run is still the PR's latest: the rerun takes the pointer on the same head", async () => {
+    const pointer = { headSha: HEAD, runId: "first" };
+    const { index, handoffs } = fakeIndex(pointer);
+    expect(await recordInfraRerun(index, { repo: "acme/example", pr: 7, headSha: HEAD, runId: "rerun-first", instanceId: "first", at: 5 }))
+      .toBe(true);
+    expect(handoffs).toEqual([{ repo: "acme/example", pr: 7, from: "first", run: { headSha: HEAD, runId: "rerun-first", progressedAt: 5 } }]);
+    expect(pointer).toEqual({ headSha: HEAD, runId: "rerun-first" });
   });
 
-  it("a newer push already took the pointer: the rerun is not recorded over it", async () => {
-    const { index, records } = fakeIndex({ headSha: NEWER, runId: "newer" });
-    await recordInfraRerun(index, { repo: "acme/example", pr: 7, headSha: HEAD, runId: "rerun-first", instanceId: "first" });
-    expect(records).toEqual([]);
+  it("a newer push already took the pointer: the handoff is refused and the newer run keeps it", async () => {
+    const pointer = { headSha: NEWER, runId: "newer" };
+    const { index } = fakeIndex(pointer);
+    expect(await recordInfraRerun(index, { repo: "acme/example", pr: 7, headSha: HEAD, runId: "rerun-first", instanceId: "first", at: 5 }))
+      .toBe(false);
+    expect(pointer).toEqual({ headSha: NEWER, runId: "newer" });
+  });
+
+  it("is a single conditional write: it never reads the pointer first (the read-then-write race of #1135 item 2)", async () => {
+    const { index, reads } = fakeIndex({ headSha: HEAD, runId: "first" });
+    await recordInfraRerun(index, { repo: "acme/example", pr: 7, headSha: HEAD, runId: "rerun-first", instanceId: "first", at: 5 });
+    expect(reads()).toBe(0);
   });
 });
 
