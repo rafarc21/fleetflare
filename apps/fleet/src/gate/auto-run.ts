@@ -2,7 +2,8 @@
 // repo (GATE_RUNNER_REPOS, FLEET_GATE_RUNNER on, not a draft) starts one gate
 // run per head sha, before the PR is final. The manual start route
 // (/studio/gate/start) keys its run the same way, so a `fleet gate run` of a
-// sha that already has a run reuses that run instead of starting a second.
+// sha with a LIVE run reattaches to it. A finished run is not reused by the
+// manual start (#1085): it starts a fresh run instead (startManualGateRun).
 //
 // Run identity is the Workflows instance id: a hash of the repo plus the head
 // sha. Creating an instance under an id that already exists is the dedupe.
@@ -89,6 +90,10 @@ export async function gateRunId(repo: string, headSha: string): Promise<string> 
  *  terminated, unknown) is left alone. */
 const LIVE_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "paused", "waiting", "waitingForPause"]);
 
+function isLive(status: string | null): boolean {
+  return status !== null && LIVE_STATUSES.has(status);
+}
+
 /** Ends the run when it is still live. Returns true only when it was ended: a
  *  run already finished, or a terminate that fails, is not a superseded run and
  *  never blocks the start of the new one. */
@@ -101,6 +106,27 @@ async function endIfLive(wf: GateRunStarter, runId: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** The status of one instance, or null when no such instance exists. */
+async function statusOf(wf: GateRunStarter, runId: string): Promise<string | null> {
+  try {
+    return (await (await wf.get(runId)).status()).status;
+  } catch {
+    return null;
+  }
+}
+
+/** Records a newly created run as the PR's latest, and ends the previous sha's
+ *  run if that one is still live (#1082). */
+async function recordRun(
+  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex, runId: string,
+): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
+  const previous = await index.latest(input.repo, input.pr);
+  await index.record(input.repo, input.pr, { headSha: input.headSha, runId });
+  if (previous === null || previous.runId === runId) return { runId, reused: false };
+  const superseded = await endIfLive(wf, previous.runId);
+  return { runId, reused: false, supersededRunId: superseded ? previous.runId : undefined };
 }
 
 /** Starts the gate run for one head sha, or reuses the run already started for
@@ -121,11 +147,35 @@ export async function startGateRun(
     }
     return { runId, reused: true };
   }
-  const previous = await index.latest(input.repo, input.pr);
-  await index.record(input.repo, input.pr, { headSha: input.headSha, runId });
-  if (previous === null || previous.runId === runId) return { runId, reused: false };
-  const superseded = await endIfLive(wf, previous.runId);
-  return { runId, reused: false, supersededRunId: superseded ? previous.runId : undefined };
+  return recordRun(wf, input, index, runId);
+}
+
+/** #1085 (refs #715): the manual start (`fleet gate run`, /studio/gate/start).
+ *  Reattaches ONLY to a live run of the sha (LIVE_STATUSES). A finished run of
+ *  the sha is not reused: a fresh run starts under `<baseId>-r<base36 time>`, so
+ *  a rerun after base drift or an infra flake needs no new push. The first start
+ *  of a sha still uses the sha's own id, the one the auto-run dedupes on. */
+export async function startManualGateRun(
+  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex,
+  now: () => number = Date.now,
+): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
+  const baseId = await gateRunId(input.repo, input.headSha);
+  const latest = await index.latest(input.repo, input.pr);
+  if (latest?.headSha === input.headSha && isLive(await statusOf(wf, latest.runId))) {
+    return { runId: latest.runId, reused: true };
+  }
+  const params = { repo: input.repo, pr: input.pr };
+  try {
+    await wf.create({ id: baseId, params });
+  } catch (err) {
+    const status = await statusOf(wf, baseId);
+    if (status === null) throw err;
+    if (isLive(status)) return { runId: baseId, reused: true };
+    const runId = `${baseId}-r${now().toString(36)}`;
+    await wf.create({ id: runId, params });
+    return recordRun(wf, input, index, runId);
+  }
+  return recordRun(wf, input, index, baseId);
 }
 
 export type AutoRunOutcome = "started" | "reused" | "no-gate-block";

@@ -64,6 +64,14 @@ async function gatedRepo(): Promise<string | null> {
   return detected.slug;
 }
 
+/** The start line `fleet gate start|run` prints (#1085): a live run reattached,
+ *  or a fresh run started. Pure. */
+export function gateStartLine(body: { runId: string; reused?: boolean }, pr: number): string {
+  return body.reused
+    ? `gate-start: reattached to live run ${body.runId} for PR #${pr}`
+    : `gate-start: started fresh run ${body.runId} for PR #${pr}`;
+}
+
 export async function cmdGateStart(creds: Credentials, pr: number): Promise<void> {
   const repo = await gatedRepo();
   if (!repo) return;
@@ -76,13 +84,13 @@ export async function cmdGateStart(creds: Credentials, pr: number): Promise<void
   } catch (err) {
     throw new Error(`fleet gate-start: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
-  const body = await res.json() as { started?: boolean; runId?: string; error?: string };
+  const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; error?: string };
   if (!res.ok || body.error) {
     console.error(`gate-start failed: ${body.error ?? res.status}`);
     process.exitCode = 2;
     return;
   }
-  console.log(`gate-start: run ${body.runId} started for PR #${pr}`);
+  console.log(gateStartLine({ runId: body.runId ?? "", reused: body.reused }, pr));
 }
 
 /** Pure — extracted so the exit-code mapping is unit-testable without a
@@ -194,17 +202,17 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
       method: "POST", headers: { ...accessHeaders(creds), "content-type": "application/json" },
       body: JSON.stringify({ repo, pr }),
     });
-    const body = await res.json() as { started?: boolean; runId?: string; error?: string };
+    const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; error?: string };
     if (!res.ok || body.error || typeof body.runId !== "string") {
       console.error(`gate-start failed: ${body.error ?? res.status}`);
       return 2;
     }
     runId = body.runId;
+    console.log(gateStartLine({ runId, reused: body.reused }, pr));
   } catch (err) {
     console.error(`fleet gate run: could not reach ${creds.workerUrl}: ${errText(err)}`);
     return 2;
   }
-  console.log(`gate-start: run ${runId} started for PR #${pr}`);
 
   const url = new URL("/studio/gate/status", creds.workerUrl);
   url.searchParams.set("repo", repo);

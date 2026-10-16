@@ -92,6 +92,12 @@ describe("handleGateRoute", () => {
       ids.add(opts.id);
       return { id: opts.id };
     }) as unknown as FakeEnv["GATE_WORKFLOW"]["create"];
+    // get() must miss for an id this test never created: the route reads the
+    // PR's latest run (kept in D1 across tests) before it creates.
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (!ids.has(id)) throw new Error("instance not found");
+      return { status: vi.fn(async () => ({ status: "running" })) };
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
     const start = (sha: string) => handleGateRoute(new Request("https://worker/studio/gate/start", {
       method: "POST", body: JSON.stringify({ repo: REPO, pr: 1 }),
     }), env, async () => sha);
@@ -123,6 +129,37 @@ describe("handleGateRoute", () => {
     const res = await handleGateRoute(req, env);
     expect(res.status).toBe(200);
     expect(env.GATE_WORKFLOW.get).toHaveBeenCalledWith("run-1");
+  });
+});
+
+// #1085 (refs #715): a manual start reuses only a LIVE run of the sha. Once the
+// sha's run has finished, the same POST starts a fresh run under a new id.
+describe("POST /studio/gate/start after the sha's run finished (#1085)", () => {
+  it("the finished run is not reused: the start returns a new run id, reused false", async () => {
+    const env = fakeEnv();
+    const ids = new Map<string, string>();
+    env.GATE_WORKFLOW.create = vi.fn(async (opts: { id: string }) => {
+      if (ids.has(opts.id)) throw new Error("instance already exists");
+      ids.set(opts.id, "running");
+      return { id: opts.id };
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["create"];
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (!ids.has(id)) throw new Error("instance not found");
+      return {
+        status: vi.fn(async () => ({ status: ids.get(id)! })),
+        terminate: vi.fn(async () => {}),
+      };
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const start = () => handleGateRoute(new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 2 }),
+    }), env, async () => "e".repeat(40));
+    const first = (await (await start()).json()) as { runId: string };
+    ids.set(first.runId, "complete");
+    const rerun = await (await start()).json() as { runId: string; reused: boolean };
+    expect(rerun.reused).toBe(false);
+    expect(rerun.runId).not.toBe(first.runId);
+    expect(rerun.runId.startsWith(`${first.runId}-r`)).toBe(true);
+    expect(ids.size).toBe(2);
   });
 });
 
