@@ -37,6 +37,10 @@ describe("parseStudioFile", () => {
     expect(s.secrets).toEqual([]);
     expect(s.mcp).toEqual([]);
   });
+  test("mcp absent -> [] (optional key, same as roles)", () => {
+    const s = parseStudioFile(VALID.replace("mcp: [playwright]\n", ""));
+    expect(s.mcp).toEqual([]);
+  });
   test("missing required field names the field", () => {
     expect(() => parseStudioFile(VALID.replace("title: Web Studio\n", ""))).toThrow(BlueprintError);
     try { parseStudioFile(VALID.replace("title: Web Studio\n", "")); } catch (e) {
