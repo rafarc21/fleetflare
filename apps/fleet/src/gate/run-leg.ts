@@ -10,6 +10,7 @@
 
 import type { GateLegRequest } from "./leg-env";
 import { buildLegEnvVars } from "./leg-env";
+import { legTimeoutMin } from "./config";
 
 export const GATE_CONTAINER_PORT = 8080;
 export const GATE_INSTANCE = "standard-4";
@@ -19,15 +20,11 @@ const PORT_RETRY_MS = 500;
 /** Live: on a host that has not pulled the (Rust-sized) gate image yet, the
  *  server took over 60 s to listen after start(). Pulls are cached per host. */
 const PORT_RETRY_BUDGET_MS = 240_000;
-/** One leg's ceiling, counted from its start. A leg past it is an error, and
- *  the finally-destroy kills its container, so nothing keeps billing. */
-export const LEG_RUN_TIMEOUT_MS = 25 * 60_000;
 /** How often a running leg is polled for its result. */
 const POLL_MS = 5_000;
 /** Ceiling on one request to the container. A request past it is a failed
- *  attempt, retried; the leg itself is bounded by LEG_RUN_TIMEOUT_MS. */
+ *  attempt, retried; the leg itself is bounded by its own deadline. */
 const REQUEST_TIMEOUT_MS = 15_000;
-const LEG_EXCEEDED = "leg exceeded 25 min";
 
 export type LegResult = { state: "success" | "failure" | "error"; description?: string };
 
@@ -110,7 +107,7 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
     if (!(await waitUntilRunning(c, now, sleep))) {
       return { kind: "infra", description: "gate container did not start within 180 s" };
     }
-    return await runOnServer(c, now, sleep);
+    return await runOnServer(c, req, now, sleep);
   } catch (err) {
     return { kind: "infra", description: `gate container failed: ${errorText(err)}` };
   } finally {
@@ -138,14 +135,20 @@ async function waitUntilRunning(
 
 /** Starts the leg in the container and polls it to its result. POST /run
  *  answers at once, so no request is held for the whole leg: the container
- *  runs the leg once, and a repeat POST never starts a second run. */
+ *  runs the leg once, and a repeat POST never starts a second run.
+ *
+ *  Two ways a polled leg ends early. A container that stopped running is infra
+ *  (503, the step retries on a fresh container). A leg past its own deadline is
+ *  a final error result (200): a retry would hang for the same deadline again. */
 async function runOnServer(
   c: GateContainer,
+  req: GateLegRequest,
   now: () => number,
   sleep: (ms: number) => Promise<void>,
 ): Promise<LegOutcome> {
   const port = c.getTcpPort(GATE_CONTAINER_PORT);
   const legStarted = now();
+  const minutes = legTimeoutMin(req.timeoutMin);
 
   // The server may bind a moment after `running` turns true. A refused
   // connection is retried every 500 ms for at most 60 s.
@@ -169,7 +172,10 @@ async function runOnServer(
   // 202 from /run: the leg is running. Poll until it answers 200.
   for (;;) {
     await sleep(POLL_MS);
-    if (now() - legStarted >= LEG_RUN_TIMEOUT_MS) return { kind: "infra", description: LEG_EXCEEDED };
+    if (!c.running) return { kind: "infra", description: "gate container exited mid-leg" };
+    if (now() - legStarted >= minutes * 60_000) {
+      return { kind: "result", result: { state: "error", description: `${req.leg} exceeded ${minutes} min without a result` } };
+    }
     try {
       const res = await port.fetch("http://container/result", { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       if (res.status === 200) return { kind: "result", result: (await res.json()) as LegResult };

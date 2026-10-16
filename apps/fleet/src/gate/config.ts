@@ -31,11 +31,24 @@ export const MAX_LEGS_PER_PR = 24;
  *  built-in lanes, so a configured leg can never shadow them. */
 export const LEG_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
-/** One configured leg. A string entry `"lint"` is `{ name: "lint", cmd: "bun run lint" }`. */
+/** One leg's deadline when its block names none: 25 min, counted from the leg's start. */
+export const DEFAULT_LEG_TIMEOUT_MIN = 25;
+/** The ceiling a block may set. The Workflows step timeout is 30 min per attempt. */
+export const MAX_LEG_TIMEOUT_MIN = 28;
+
+/** A leg's deadline in minutes: the default when unset, else clamped to 1..28. */
+export function legTimeoutMin(raw: number | undefined): number {
+  if (raw === undefined) return DEFAULT_LEG_TIMEOUT_MIN;
+  return Math.min(MAX_LEG_TIMEOUT_MIN, Math.max(1, Math.floor(raw)));
+}
+
+// One configured leg. A string entry `"lint"` is `{ name: "lint", cmd: "bun run lint" }`.
 export interface GateLeg {
   name: string;
   /** Shell command, run from the repo root after the shared install. */
   cmd: string;
+  /** The leg's own deadline in minutes, when the block sets one. Absent means the default. */
+  timeoutMin?: number;
 }
 
 export interface GateConfig {
@@ -61,9 +74,9 @@ function isReservedLegName(name: string): boolean {
   return name === "merge-tree" || /^bun-\d+$/.test(name) || /^vitest-\d+$/.test(name);
 }
 
-/** The block's `legs`, normalised to { name, cmd }. Each entry is a string
- *  (`bun run <name>`) or an object { name, cmd }. Null on any bad entry, a bad
- *  name, a reserved name or a duplicate. */
+/** The block's `legs`, normalised to { name, cmd, timeoutMin? }. Each entry is a
+ *  string (`bun run <name>`) or an object { name, cmd, timeoutMin? }. Null on any
+ *  bad entry, a bad name, a reserved name, a duplicate, or a non-number timeoutMin. */
 export function parseLegs(raw: unknown): GateLeg[] | null {
   if (!Array.isArray(raw)) return null;
   const legs: GateLeg[] = [];
@@ -74,7 +87,8 @@ export function parseLegs(raw: unknown): GateLeg[] | null {
     } else if (typeof entry === "object" && entry !== null) {
       const e = entry as Record<string, unknown>;
       if (typeof e.name !== "string" || typeof e.cmd !== "string" || e.cmd === "") return null;
-      leg = { name: e.name, cmd: e.cmd };
+      if (e.timeoutMin !== undefined && (typeof e.timeoutMin !== "number" || !Number.isFinite(e.timeoutMin))) return null;
+      leg = { name: e.name, cmd: e.cmd, ...(e.timeoutMin === undefined ? {} : { timeoutMin: legTimeoutMin(e.timeoutMin) }) };
     } else {
       return null;
     }

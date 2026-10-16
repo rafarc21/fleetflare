@@ -36,6 +36,14 @@ const reply = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 describe("runLegStep", () => {
+  it("a leg deadline (200, state error) is final: no infra retry and no flaky retry", async () => {
+    const step = fakeStep();
+    const dispatch = async () => reply({ state: "error", description: "lint exceeded 25 min without a result" });
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "error", description: "lint exceeded 25 min without a result" });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+  });
+
   it("success: returns the DO payload as the leg result", async () => {
     const step = fakeStep();
     const dispatch = async () => reply({ state: "success" });

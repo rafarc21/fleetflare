@@ -128,5 +128,6 @@ export function legRequest(
     installCmd: planned.installCmd, legCmd: planned.legCmd,
     resultKey: planned.resultKey, baselineKeys: planned.baselineKeys,
     private: pr.private, baseRef: pr.baseRef, pr: pr.pr,
+    ...(planned.timeoutMin === undefined ? {} : { timeoutMin: planned.timeoutMin }),
   };
 }
