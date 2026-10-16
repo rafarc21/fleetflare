@@ -1,7 +1,7 @@
 // Model pool for non-Claude studio leads (spec 2026-10-13-model-pool-design).
 // Per account, per model rate limits on Workers AI: each model adds its own budget.
 
-import { GLM_MAX_MAX_TOKENS, GLM_MIN_MAX_TOKENS } from "./translate";
+import { GLM_MAX_MAX_TOKENS, GLM_MIN_MAX_TOKENS, KIMI_MAX_MAX_TOKENS } from "./translate";
 
 export type ModelState = "active" | "overflow" | "demoted";
 
@@ -22,7 +22,7 @@ export interface PoolModel {
 
 export const POOL: readonly PoolModel[] = [
   { key: "glm", id: "@cf/zai-org/glm-5.3", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: true },
-  { key: "kimi", id: "@cf/moonshotai/kimi-k2.7-code", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: true },
+  { key: "kimi", id: "@cf/moonshotai/kimi-k2.7-code", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: KIMI_MAX_MAX_TOKENS, smokePassed: true },
   { key: "deepseek", id: "@cf/deepseek-ai/deepseek-v4-pro-0813", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: true },
 ];
 

@@ -447,7 +447,7 @@ async function pumpAnthropicStream(
     // normal frames — see that function's own doc comment.
     const closed = closeStreamOrError(state, requestedMaxTokens);
     await write(closed.frames);
-    return end(closed.ok, closed.ok ? undefined : "no_finish_reason");
+    return end(closed.ok, closed.ok ? undefined : closed.reason);
   } catch (e) {
     if (!(e instanceof ClientAbort)) throw e;
     // Issue #302 (d).
