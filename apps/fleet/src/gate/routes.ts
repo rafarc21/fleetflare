@@ -73,8 +73,8 @@ export async function handleGateRoute(
     }
     if (out?.skipped !== undefined) {
       // Only the "no gated paths changed" skip posted success to GitHub
-      // (workflow.ts post-skip-status). Any other skip (no gate block) posted
-      // nothing: the repo is not configured, so it is an error, never green.
+      // (workflow.ts post-skip-status). A skip from before #1132 (no gate block)
+      // posted nothing: the repo is not configured, so it is an error, never green.
       const state = out.skipped.startsWith("no gated paths changed") ? "success" : "error";
       return j({ state, description: `skipped: ${out.skipped}`, statusPostFailed: out.statusPostFailed });
     }

@@ -3,8 +3,6 @@
 // binding. Kept apart from auto-run.ts, which stays free of env/auth imports so
 // the bun-test project can load it without pulling in cloudflare:workers.
 import type { Env } from "../env";
-import { repoTokenMinter } from "../github/auth";
-import { fleetJsonReader } from "./fleet-json";
 import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
 
 /** The per-PR gate run pointer on the D1 gate_pr_head table (migration 0007).
@@ -35,8 +33,6 @@ export function d1RunIndex(db: D1Database): GateRunIndex {
 export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<void> {
   try {
     const outcome = await autoRunPullRequest(pr, {
-      fleetRepo: env.AGENT_REPO,
-      readFleetJson: fleetJsonReader(repoTokenMinter(env)),
       workflow: env.GATE_WORKFLOW,
       index: d1RunIndex(env.DB),
     });
