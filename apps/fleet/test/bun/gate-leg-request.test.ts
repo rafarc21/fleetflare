@@ -47,3 +47,15 @@ describe("legRequest", () => {
     });
   });
 });
+
+// #1066: the run's image key rides the leg request, and is absent when unset.
+describe("legRequest: image key", () => {
+  it("carries the run's image key in the request body", () => {
+    const body = legRequest("acme", "example", PLANNED, { baseRef: "main", pr: "7", private: false, image: "desktop" });
+    expect(body.image).toBe("desktop");
+  });
+  it("no image key on the body when the run names none", () => {
+    const body = legRequest("acme", "example", PLANNED, { baseRef: "main", pr: "7", private: false });
+    expect(Object.hasOwn(body, "image")).toBe(false);
+  });
+});

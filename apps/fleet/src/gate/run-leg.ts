@@ -10,7 +10,7 @@
 
 import type { GateLegRequest } from "./leg-env";
 import { buildLegEnvVars } from "./leg-env";
-import { legTimeoutMin } from "./config";
+import { DEFAULT_GATE_IMAGE, GATE_IMAGES, legTimeoutMin } from "./config";
 
 export const GATE_CONTAINER_PORT = 8080;
 export const GATE_INSTANCE = "standard-4";
@@ -89,8 +89,14 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? realSleep;
   try {
-    const image = c.images?.gate;
-    if (!image) return { kind: "infra", description: "gate image not bound (images.gate)" };
+    // The image is looked up by key, never taken from repo text: the key must be
+    // allowlisted AND an own property of the operator's images map, so an
+    // inherited name (__proto__, toString) never resolves. Unbound is infra.
+    const key = req.image ?? DEFAULT_GATE_IMAGE;
+    const image = GATE_IMAGES.has(key) && c.images !== undefined && Object.hasOwn(c.images, key)
+      ? c.images[key]
+      : undefined;
+    if (!image) return { kind: "infra", description: `gate image not bound (images.${key})` };
     // A Worker deploy can reset this DO while the container survives, leaving
     // `running` true here. start() would throw "already running" — destroy the
     // survivor first so this leg gets a fresh container.

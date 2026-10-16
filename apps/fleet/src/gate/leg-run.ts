@@ -121,7 +121,7 @@ function sumMs(...parts: (number | undefined)[]): number | undefined {
  *  private flag and the PR's own owner/repo reach the DO by a tested path. */
 export function legRequest(
   owner: string, repo: string, planned: PlannedLeg,
-  pr: { baseRef: string; pr: string; private: boolean },
+  pr: { baseRef: string; pr: string; private: boolean; image?: string },
 ): GateLegRequest {
   return {
     owner, repo, commit: planned.commit, leg: planned.leg,
@@ -129,5 +129,6 @@ export function legRequest(
     resultKey: planned.resultKey, baselineKeys: planned.baselineKeys,
     private: pr.private, baseRef: pr.baseRef, pr: pr.pr,
     ...(planned.timeoutMin === undefined ? {} : { timeoutMin: planned.timeoutMin }),
+    ...(pr.image === undefined ? {} : { image: pr.image }),
   };
 }
