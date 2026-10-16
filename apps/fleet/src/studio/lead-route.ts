@@ -2,7 +2,8 @@
 //
 // Issue #911: the mismatch rule fleet ls READY reads. Issue #1142 (item 4):
 // the (re)start paths do NOT call this — they gate on leadType directly
-// (do.ts constructorLaunch, failover's glm skip), so only READY shares it.
+// (do.ts constructorLaunch, failover's glm skip). READY calls it; the #1152
+// heal path calls it too once that lands.
 // A glm-led studio's lead runs on the fleet LLM router with no Claude OAuth
 // token. A row that is glm-led yet recorded a Claude account as the account
 // its lead launched on is a lead on the wrong account.

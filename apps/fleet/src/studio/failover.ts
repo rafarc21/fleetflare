@@ -146,13 +146,6 @@ export const INLINE_LIMIT_HEADLINES = [
   { headline: SESSION_LIMIT_HEADLINE, line: /You've hit your session limit · resets(?:\s|$)/ },
   { headline: "You've hit your weekly limit", line: /You've hit your weekly limit · resets(?:\s|$)/ },
   { headline: "You've hit your monthly spend limit", line: /You've hit your monthly spend limit · raise it at(?:\s|$)/ },
-  // Issue #1142 review B5: the org monthly spend cap, live wording. spendCap is
-  // what makes the verdict hold until month end rather than a reset.
-  {
-    headline: "You've hit your org's monthly spend limit",
-    line: /You've hit your org's monthly spend limit · ask your admin to raise it at(?:\s|$)/,
-    spendCap: true,
-  },
   {
     headline: "You're out of usage credits.",
     line: /You're out of usage credits(?:\. Run \/usage-credits|\. \/model|\. Switch to another model| · resets )/,
@@ -170,16 +163,9 @@ const INLINE_LIMIT_LINE = new RegExp(
  * A block with NO hint row, measured on 2 of 4 real studio panes (web-studio
  * 09-24, weekly 09-17): a session or weekly headline whose row ends at its
  * reset's `(zone)`. Nothing else is accepted hint-less — a monthly-spend or
- * out-of-credits block without its hint was never seen, EXCEPT the org spend-cap
- * line below (issue #1142 review B5), which is measured hint-less and ends at
- * the idle input box, with no reset to wait for.
+ * out-of-credits block without its hint was never seen.
  */
 const HINTLESS_LIMIT_LINE = /^\s*⎿\s+You've hit your (?:session|weekly) limit · resets .*\)\s*$/;
-/** The org monthly spend-cap line with its own "ask your admin" tail and no
- *  reset (issue #1142 review B5). Accepted only bottom-anchored: the line is
- *  followed by the idle input box, the same proof the hint-less session block
- *  relies on. Held until the next UTC month, so there is nothing to time out. */
-const SPEND_CAP_INLINE_LINE = /^\s*⎿\s+You've hit your org's monthly spend limit · ask your admin to raise it at \S+\s*$/;
 /**
  * The hint claude draws under the headline. Each is a PREFIX (the tails vary:
  * "/usage-credits to adjust your monthly spend limit.", "... to finish what
@@ -465,11 +451,7 @@ function inlineLimitBlock(lines: string[], now?: Date, sighting?: LimitSighting 
     const found = INLINE_LIMIT_HEADLINES.find((h) => text.search(h.line) === 0);
     if (!found) return null;
     const m = headlineText.match(RESETS);
-    const verdict = {
-      kind: "modal", headline: found.headline, marker, inline: true,
-      ...(m ? { resets: m[2] } : {}),
-      ...("spendCap" in found ? { spendCap: true as const } : {}),
-    } as const;
+    const verdict = { kind: "modal", headline: found.headline, marker, inline: true, ...(m ? { resets: m[2] } : {}) } as const;
     if (!now) return verdict;
     const key = limitBlockKey(verdict);
     const stale: PaneVerdict = {
@@ -479,9 +461,6 @@ function inlineLimitBlock(lines: string[], now?: Date, sighting?: LimitSighting 
     return limitKeyIsLive(key, m, now, sighting) ? verdict : stale;
   };
   if (HINTLESS_LIMIT_LINE.test(lines[at]) && RESETS.test(lines[at]) && endsInIdleInputBox(lines.slice(at + 1), "required")) {
-    return block(at + 1, "(no hint)");
-  }
-  if (SPEND_CAP_INLINE_LINE.test(lines[at]) && endsInIdleInputBox(lines.slice(at + 1), "required")) {
     return block(at + 1, "(no hint)");
   }
   for (let j = at + 1; j <= Math.min(at + UPGRADE_HINT_WINDOW, lines.length - 1); j++) {

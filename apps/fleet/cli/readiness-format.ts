@@ -190,7 +190,8 @@ export function isLeadInferenceSilent(
   const activity = status.observed?.activity;
   if (activity?.state !== "working") return false;
   if (ageSeconds(activity.observedAt, now) > ACTIVITY_MIRROR_STALE_SECONDS) return false;
-  if (now.getTime() - Date.parse(activity.since) < INFER_SILENT_MIN_WORKING_MS) return false;
+  const sinceMs = Date.parse(activity.since);
+  if (!Number.isFinite(sinceMs) || now.getTime() - sinceMs < INFER_SILENT_MIN_WORKING_MS) return false;
   return (u?.calls ?? 0) === 0;
 }
 

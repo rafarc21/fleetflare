@@ -2651,10 +2651,9 @@ describe("runAccountFailover — a glm-led row never switches to a Claude accoun
 });
 
 // ---------------------------------------------------------------------------
-// Issue #1142 review (F1, B5) — the glm early return used to sit BEFORE the
+// Issue #1142 review (F1) — the glm early return used to sit BEFORE the
 // pane capture, so a router-led row never ran the members-ticking write, the
-// stale-LIMIT clear, or any other working-branch bookkeeping. And the inline
-// detector must read the org spend-cap line, not call it "working".
+// stale-LIMIT clear, or any other working-branch bookkeeping.
 // ---------------------------------------------------------------------------
 
 const GLM_PANEL_RULE = "────────────────────────────────────────────────────────────────";
@@ -2718,28 +2717,5 @@ describe("glm-led row keeps working-branch bookkeeping (#1142 review F1)", () =>
     const out = await run(h);
     expect(out.kind).not.toBe("returned");
     expect(h.execs).not.toContain(accountSwitchCmd());
-  });
-});
-
-describe("org monthly spend-cap inline line is a limit, not working (#1142 review B5)", () => {
-  // Live wording as quoted in the review: an inline block with NO reset and NO
-  // upgrade hint, printed above an idle input box.
-  const SPEND_CAP_INLINE_PANE = [
-    "⏺ Read(docs/release.md)",
-    "  ⎿  Read 42 lines",
-    "",
-    "  ⎿  You've hit your org's monthly spend limit · ask your admin to raise it at claude.ai/settings/usage",
-    "",
-    "✻ Cooked for 1m 2s",
-    "",
-    GLM_PANEL_RULE,
-    "❯ ",
-    GLM_PANEL_RULE,
-  ].join("\n");
-
-  it("the inline spend-cap line reads as a spendCap limit modal", () => {
-    const v = detectRateLimitModal(captured(SPEND_CAP_INLINE_PANE), NOW);
-    expect(v.kind).toBe("modal");
-    expect(v).toMatchObject({ inline: true, spendCap: true });
   });
 });
