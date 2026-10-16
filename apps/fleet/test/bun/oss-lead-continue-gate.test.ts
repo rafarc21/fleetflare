@@ -150,8 +150,43 @@ describe("oss-lead-continue.sh — allowing", () => {
     expect(blocked(res)).toBeNull();
   });
 
+  test("an option-list question is allowed even when the question is not the last line", () => {
+    const res = run([todoWrite(OPEN_TODOS), assistantText("Should I force-push main?\n1. yes\n2. no")]);
+    expect(blocked(res)).toBeNull();
+  });
+
+  test("a numbered option list alone is allowed", () => {
+    const res = run([todoWrite(OPEN_TODOS), assistantText("Pick one:\n1) keep it\n2) drop it")]);
+    expect(blocked(res)).toBeNull();
+  });
+
   test("a question ending is detected even with trailing whitespace", () => {
     const res = run([todoWrite(OPEN_TODOS), assistantText("Should I drop the flag?  \n")]);
+    expect(blocked(res)).toBeNull();
+  });
+});
+
+describe("oss-lead-continue.sh — fail open", () => {
+  test("unwritable ~/.claude (state dir cannot be created) -> allow, never block", () => {
+    // ~/.claude as a plain file: makedirs and the counter write both fail.
+    writeFileSync(join(home, ".claude"), "not a dir");
+    const res = run([userLine("go"), todoWrite(OPEN_TODOS)]);
+    expect(res.code).toBe(0);
+    expect(blocked(res)).toBeNull();
+  });
+
+  test("unreadable existing counter -> allow, never block", () => {
+    const stateDir = join(home, ".claude", "state");
+    mkdirSync(join(stateDir, `oss-lead-continue-${SESSION}`), { recursive: true }); // a dir where the file should be
+    const res = run([userLine("go"), todoWrite(OPEN_TODOS)]);
+    expect(blocked(res)).toBeNull();
+  });
+});
+
+describe("oss-lead-continue.sh — sidechain", () => {
+  test("an open TodoWrite inside a sidechain (subagent) entry is ignored", () => {
+    const side = { ...todoWrite(OPEN_TODOS), isSidechain: true };
+    const res = run([userLine("go"), todoWrite([{ content: "x", status: "completed" }]), side]);
     expect(blocked(res)).toBeNull();
   });
 });
@@ -167,12 +202,22 @@ describe("oss-lead-continue.sh — loop guard", () => {
     expect(blocked(ninth)).toBeNull();
   });
 
-  test("a fresh turn (stop_hook_active false) resets the chain counter", () => {
+  test("a new user prompt starts a fresh chain", () => {
     const lines = [userLine("go"), todoWrite(OPEN_TODOS)];
     for (let i = 1; i <= 8; i++) run(lines, { stopHookActive: i > 1 });
-    // Chain exhausted; a new user turn starts again from zero.
-    const fresh = run(lines, { stopHookActive: false });
+    // Chain exhausted for prompt #1; prompt #2 starts again from zero.
+    const next = [...lines, userLine("next"), todoWrite(OPEN_TODOS)];
+    const fresh = run(next, { stopHookActive: false });
     expect(blocked(fresh)?.decision).toBe("block");
+  });
+
+  test("the cap holds without stop_hook_active (flag absent -> still 8 per prompt)", () => {
+    const lines = [userLine("go"), todoWrite(OPEN_TODOS)];
+    for (let i = 1; i <= 8; i++) {
+      expect(blocked(run(lines, { stopHookActive: false }))?.decision).toBe("block");
+    }
+    expect(blocked(run(lines, { stopHookActive: false }))).toBeNull();
+    expect(blocked(run(lines, { stopHookActive: false }))).toBeNull();
   });
 
   test("the counter is keyed by session: another session's chain does not exhaust this one", () => {
@@ -188,8 +233,8 @@ describe("oss-lead-continue.sh — loop guard", () => {
     run(open, { stopHookActive: false });
     run(done, { stopHookActive: true });
     const counterDir = join(home, ".claude", "state");
-    const files = existsSync(counterDir) ? readFileSync(join(counterDir, `oss-lead-continue-${SESSION}`), "utf8").trim() : "0";
-    expect(files).toBe("0");
+    const count = existsSync(counterDir) ? readFileSync(join(counterDir, `oss-lead-continue-${SESSION}`), "utf8").trim().split("\n")[1] : "0";
+    expect(count).toBe("0");
   });
 });
 
@@ -202,5 +247,38 @@ describe("studio-bringup.sh installs the Stop hook for OSS leads", () => {
   test("registers the hook on the Stop event (lead turn end; members emit SubagentStop)", () => {
     expect(BRINGUP).toContain("oss-lead-continue.sh");
     expect(BRINGUP).toMatch(/setdefault\("Stop", \[\]\)/);
+  });
+
+  test("Stop registration rides the SAME settings.json write as the lead gate (one write, all hooks or none)", () => {
+    const leadWrite = BRINGUP.indexOf("pre.append(entry)");
+    const stopReg = BRINGUP.indexOf('stop.append(');
+    expect(leadWrite).toBeGreaterThan(-1);
+    expect(stopReg).toBeGreaterThan(leadWrite);
+    // No settings.json write between the lead-gate entry and the Stop registration.
+    expect(BRINGUP.slice(leadWrite, stopReg)).not.toContain('with open(path, "w")');
+  });
+
+  test("a missing source under set -e logs and boot continues without the hook", () => {
+    const start = BRINGUP.indexOf("    if cp /opt/blueprint/gates/oss-lead-continue.sh");
+    expect(start).toBeGreaterThan(-1);
+    const end = BRINGUP.indexOf("\n    fi\n", start) + "\n    fi\n".length;
+    const block = BRINGUP.slice(start, end);
+    const bringHome = mkdtempSync(join(tmpdir(), "oss-boot-"));
+    mkdirSync(join(bringHome, ".claude", "hooks"), { recursive: true });
+    const res = runSnippet({
+      script: `set -e\n${block}\necho BOOT_CONTINUES`,
+      stdin: "",
+      shell: "bash",
+      env: { HOME: bringHome },
+      timeout: 10_000,
+    });
+    expect(res.code).toBe(0);
+    expect(res.stdout).toContain("BOOT_CONTINUES");
+    expect(res.stderr).toContain("continuing boot without it");
+    rmSync(bringHome, { recursive: true, force: true });
+  });
+
+  test("the copy is guarded: a failed cp logs and bring-up continues", () => {
+    expect(BRINGUP).toMatch(/if cp \/opt\/blueprint\/gates\/oss-lead-continue\.sh/);
   });
 });

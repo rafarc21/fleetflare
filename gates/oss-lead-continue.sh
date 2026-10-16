@@ -16,14 +16,18 @@
 # Decision (Claude Code Stop hook protocol: stdout JSON, exit 0):
 #   - last TodoWrite has no pending/in_progress item    -> allow
 #   - no TodoWrite in the transcript                    -> allow
-#   - last assistant text ends in "?" (asks operator)   -> allow
-#   - 8 consecutive blocks already in this turn chain   -> allow (loop guard)
+#   - last assistant text asks the operator (a line ending "?", a numbered
+#     option list, or approve/confirm/which/should I)   -> allow
+#   - 8 blocks already for this user prompt             -> allow (loop guard)
 #   - otherwise -> {"decision":"block","reason":"continue with <first open todo>"}
-# stop_hook_active=false marks a fresh turn and resets the chain counter. The
-# counter lives in ~/.claude/state, one file per session.
+# The loop guard counts per real user prompt (uuid, or line index), not per
+# stop_hook_active: that flag is not reliable on every CLI build. The counter
+# lives in ~/.claude/state, one file per session, as "<prompt-key>\n<count>".
+# A block is emitted only after the counter write succeeded.
 #
-# FAIL OPEN. Any error (no python3, unreadable transcript, bad JSON) allows the
-# stop. A broken hook must never wedge a lead mid-task.
+# FAIL OPEN. Any error (no python3, unreadable transcript or counter, unwritable
+# state dir, bad JSON) allows the stop. A broken hook must never wedge a lead
+# mid-task.
 
 [ -n "${STUDIO_ID:-}" ] || exit 0
 
@@ -39,63 +43,94 @@ import json, os, re, sys
 
 MAX_CHAIN = 8
 OPEN = ("pending", "in_progress")
+ASK_WORDS = re.compile(r"\b(approve|confirm|which|should i)\b", re.I)
+OPTION_LINE = re.compile(r"^\s*\d+[.)]\s+\S")
 
-def allow(state_file=None, count=0):
-    if state_file is not None:
-        try:
-            os.makedirs(os.path.dirname(state_file), exist_ok=True)
-            with open(state_file, "w") as f:
-                f.write(str(count))
-        except OSError:
-            pass
+def asks_operator(text):
+    lines = [l.rstrip() for l in text.splitlines() if l.strip()]
+    if any(l.endswith("?") for l in lines):
+        return True
+    if any(OPTION_LINE.match(l) for l in lines):
+        return True
+    return ASK_WORDS.search(text) is not None
+
+def read_count(path, key):
+    # None = counter exists but cannot be read -> caller allows the stop.
+    try:
+        with open(path) as f:
+            parts = f.read().split("\n")
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+    if len(parts) < 2 or parts[0] != key:
+        return 0
+    try:
+        return int(parts[1])
+    except ValueError:
+        return 0
+
+def write_state(path, key, count):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(key + "\n" + str(count))
+    os.replace(tmp, path)
+
+def allow(state_file, key, count):
+    try:
+        write_state(state_file, key, count)
+    except OSError:
+        pass
     sys.exit(0)
 
 payload = json.load(sys.stdin)
 sid = re.sub(r"[^A-Za-z0-9_.-]", "_", str(payload.get("session_id") or "unknown"))
 state_file = os.path.join(os.path.expanduser("~"), ".claude", "state", "oss-lead-continue-" + sid)
-active = payload.get("stop_hook_active") is True
 
-todos, last_text = None, ""
+todos, last_text, prompt_key = None, "", "none"
 with open(payload["transcript_path"]) as f:
-    for line in f:
+    for n, line in enumerate(f):
         try:
             m = json.loads(line)
         except ValueError:
             continue
-        if m.get("type") != "assistant":
+        if not isinstance(m, dict) or m.get("isSidechain") is True:
             continue
-        blocks = (m.get("message") or {}).get("content") or []
-        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        kind = m.get("type")
+        content = (m.get("message") or {}).get("content") or []
+        if kind == "user":
+            if isinstance(content, str) or not any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+            ):
+                prompt_key = str(m.get("uuid") or n)
+            continue
+        if kind != "assistant":
+            continue
+        blocks = content if isinstance(content, list) else []
+        text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
         if text.strip():
             last_text = text
         for b in blocks:
-            if b.get("type") == "tool_use" and b.get("name") == "TodoWrite":
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "TodoWrite":
                 todos = (b.get("input") or {}).get("todos") or []
 
 open_items = [t for t in (todos or []) if t.get("status") in OPEN]
 if not open_items:
-    allow(state_file, 0)
-if last_text.rstrip().endswith("?"):
-    allow(state_file, 0)
+    allow(state_file, prompt_key, 0)
+if asks_operator(last_text):
+    allow(state_file, prompt_key, 0)
 
-count = 0
-if active:
-    try:
-        with open(state_file) as f:
-            count = int(f.read().strip() or 0)
-    except (OSError, ValueError):
-        count = 0
-if count >= MAX_CHAIN:
-    allow(state_file, 0)
+count = read_count(state_file, prompt_key)
+if count is None or count >= MAX_CHAIN:
+    allow(state_file, prompt_key, count or 0)
 
-allow_block = {"decision": "block", "reason": "continue with " + str(open_items[0].get("content", "the next open todo"))}
+block = {"decision": "block", "reason": "continue with " + str(open_items[0].get("content", "the next open todo"))}
 try:
-    os.makedirs(os.path.dirname(state_file), exist_ok=True)
-    with open(state_file, "w") as f:
-        f.write(str(count + 1))
+    write_state(state_file, prompt_key, count + 1)
 except OSError:
-    pass
-sys.stdout.write(json.dumps(allow_block))
+    sys.exit(0)  # no counter, no block: fail open
+sys.stdout.write(json.dumps(block))
 PYEOF
 )
 
