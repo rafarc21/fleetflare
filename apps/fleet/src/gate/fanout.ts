@@ -28,6 +28,12 @@ export function verdictToStatusArgs(
   return { state: verdict.state, description: rosterDescription(roster) };
 }
 
+/** The run-start status (#1088): pending on the head, naming the run and how
+ *  many legs it fans out to. The verdict overwrites it when the run ends. */
+export function pendingStatusArgs(runId: string, legCount: number): { state: "pending"; description: string } {
+  return { state: "pending", description: `running (run ${runId.slice(0, 8)}) — ${legCount} legs` };
+}
+
 function rosterDescription({ expected, results, runId }: RosterInput): string {
   const byLeg = new Map(results.map((r) => [r.leg, r]));
   const red = expected.filter((leg) => byLeg.get(leg)?.state !== "success");
