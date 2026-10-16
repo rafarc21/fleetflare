@@ -13,6 +13,10 @@ import type { LegResult } from "./verdict";
  *  be near that, so it is bounded well under it. */
 const MAX_DESCRIPTION_CHARS = 2000;
 
+/** The infra-cause message ceiling: a leg's final description carries the
+ *  503 body's error, cut to this many chars so it stays a one-line cause. */
+const MAX_INFRA_CAUSE_CHARS = 200;
+
 /** The one step config a leg uses. Literal types, so the object is assignable
  *  to Workflows' WorkflowStepConfig without importing cloudflare:workers here
  *  (the check tsconfigs for test/ cannot resolve that module). */
@@ -45,7 +49,7 @@ export async function runLegStep(
       const res = await dispatch(planned);
       if (!res.ok) {
         // A non-2xx (infra, 503) carries its cause in the body's `error`
-        // field — surface it, cut to the description ceiling.
+        // field — surface it, cut to 200 chars.
         let cause = `${planned.leg}`;
         try {
           const body = await res.json() as { error?: unknown };
@@ -53,7 +57,7 @@ export async function runLegStep(
             cause = `${planned.leg}: ${body.error}`;
           }
         } catch { /* non-JSON body: keep the leg name as the cause */ }
-        throw new Error(cause.slice(0, 200));
+        throw new Error(cause.slice(0, MAX_INFRA_CAUSE_CHARS));
       }
       const normalized = normalizeLegResult(planned.leg, (await res.json()) as LegResult);
       return {
@@ -62,19 +66,19 @@ export async function runLegStep(
       };
     });
 
-  const first = await attempt(`start-${planned.leg}`).catch((err: unknown) => {
+  const first = await attempt(`start-${planned.leg}`).catch((err: unknown): LegResult => {
     // Retries spent (infra). The thrown message already carries the cause.
     const message = err instanceof Error ? err.message : String(err);
-    return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) } as LegResult;
+    return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
   });
 
   // A red test is data, but it may be a flake: run it once more on a fresh
   // container. success/error are final; only failure retries.
   if (first.state !== "failure") return first;
 
-  const retry = await attempt(`retry-${planned.leg}`).catch((err: unknown) => {
+  const retry = await attempt(`retry-${planned.leg}`).catch((err: unknown): LegResult => {
     const message = err instanceof Error ? err.message : String(err);
-    return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) } as LegResult;
+    return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
   });
 
   if (retry.state === "success") {
