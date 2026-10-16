@@ -295,14 +295,14 @@ describe("runLegInContainer: per-leg deadline", () => {
     expect(c.destroyCount).toBe(1);
   });
 
-  test("a timeoutMin above 28 is clamped to 28 min", async () => {
+  test("a timeoutMin above MAX_LEG_TIMEOUT_MIN (25) is clamped to 25 min", async () => {
     const c = new FakeContainer();
     c.portOutcomes = [running()];
     c.resultFallback = running();
     const outcome = await runLegInContainer({ ...LEG, timeoutMin: 99 }, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
-    expect(outcome).toEqual({ kind: "infra", description: "leg-a exceeded 28 min without a result" });
-    expect(c.clock.now).toBeGreaterThanOrEqual(28 * 60_000);
+    expect(outcome).toEqual({ kind: "infra", description: "leg-a exceeded 25 min without a result" });
+    expect(c.clock.now).toBeGreaterThanOrEqual(25 * 60_000);
   });
 
   test("a timeoutMin below 1 is clamped to 1 min", async () => {

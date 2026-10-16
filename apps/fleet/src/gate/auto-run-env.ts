@@ -4,6 +4,7 @@
 // the bun-test project can load it without pulling in cloudflare:workers.
 import type { Env } from "../env";
 import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
+import type { StalledRun, WatchdogIndex } from "./watchdog";
 
 /** The per-PR gate run pointer on the D1 gate_pr_head table (migrations 0007, 0008).
  *  Keyed by lowercased repo, the way gateRunId keys a run (#1082). */
@@ -27,10 +28,11 @@ export function d1RunIndex(db: D1Database): GateRunIndex {
         .run();
     },
     async handOff(repo, pr, fromRunId, run) {
-      // One conditional write: the pointer moves only while it still names fromRunId (#1135).
+      // One conditional write: the pointer moves only while it still names fromRunId (#1135), or
+      // already names run.runId: a replayed start whose handoff landed is success, not a superseded rerun (#1150).
       const result = await db
-        .prepare("UPDATE gate_pr_head SET head_sha = ?, run_id = ?, progressed_at = ? WHERE repo = ? AND pr = ? AND run_id = ?")
-        .bind(run.headSha, run.runId, run.progressedAt ?? 0, repo.toLowerCase(), pr, fromRunId)
+        .prepare("UPDATE gate_pr_head SET head_sha = ?, run_id = ?, progressed_at = ? WHERE repo = ? AND pr = ? AND run_id IN (?, ?)")
+        .bind(run.headSha, run.runId, run.progressedAt ?? 0, repo.toLowerCase(), pr, fromRunId, run.runId)
         .run();
       return result.meta.changes > 0;
     },
@@ -39,6 +41,33 @@ export function d1RunIndex(db: D1Database): GateRunIndex {
         .prepare("UPDATE gate_pr_head SET progressed_at = ? WHERE repo = ? AND pr = ? AND run_id = ?")
         .bind(at, repo.toLowerCase(), pr, runId)
         .run();
+    },
+  };
+}
+
+/** The stall read: the pointers stamped inside the window, oldest first. Served by the
+ *  progressed_at index (migration 0009). Capped, so a sweep stays bounded however many PRs were gated. */
+export const STALLED_RUNS_SQL =
+  "SELECT repo, pr, head_sha AS headSha, run_id AS runId, progressed_at AS progressedAt FROM gate_pr_head "
+  + "WHERE progressed_at > 0 AND progressed_at <= ? AND progressed_at >= ? ORDER BY progressed_at ASC LIMIT 20";
+
+/** The watchdog's view of the same table: the stall sweep and the unknown-stamp
+ *  adoption (#1148 item 1). Capped, so a sweep stays bounded however many PRs were gated. */
+export function d1WatchdogIndex(db: D1Database): WatchdogIndex {
+  return {
+    ...d1RunIndex(db),
+    async adoptUnknown(at) {
+      await db.prepare("UPDATE gate_pr_head SET progressed_at = ? WHERE progressed_at = 0").bind(at).run();
+    },
+    async retire(repo, pr, runId, progressedAt) {
+      await db
+        .prepare("UPDATE gate_pr_head SET progressed_at = -1 WHERE repo = ? AND pr = ? AND run_id = ? AND progressed_at = ?")
+        .bind(repo.toLowerCase(), pr, runId, progressedAt)
+        .run();
+    },
+    async stalled(before, notBefore) {
+      const rows = await db.prepare(STALLED_RUNS_SQL).bind(before, notBefore).all<StalledRun>();
+      return rows.results;
     },
   };
 }

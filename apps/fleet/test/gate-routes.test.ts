@@ -130,6 +130,27 @@ describe("handleGateRoute", () => {
     expect(res.status).toBe(200);
     expect(env.GATE_WORKFLOW.get).toHaveBeenCalledWith("run-1");
   });
+
+  it("a run the watchdog ended while its rerun runs reports the rerun's status, not an error (#1150 review)", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "gate-run-1") return { status: vi.fn(async () => ({ status: "terminated" })) };
+      if (id === "rerun-gate-run-1") return { status: vi.fn(async () => ({ status: "running" })) };
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const res = await handleGateRoute(new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=gate-run-1`), env);
+    expect(await res.json()).toEqual({ state: "pending" });
+  });
+
+  it("a terminated run with no rerun still reports the error: nothing else will post its verdict", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "gate-run-1") return { status: vi.fn(async () => ({ status: "terminated" })) };
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const res = await handleGateRoute(new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=gate-run-1`), env);
+    expect(await res.json()).toEqual({ state: "error", description: "gate workflow instance ended without a verdict" });
+  });
 });
 
 // #1085 (refs #715): a manual start reuses only a LIVE run of the sha. Once the
@@ -254,5 +275,27 @@ describe("GET /studio/gate/status with a run id the Workflow does not know (#114
     expect(res.status).toBe(500);
     expect(res.headers.get("content-type")).toBe("application/json");
     expect(await res.json()).toEqual({ error: "gate status unavailable" });
+  });
+});
+
+// #1148 review: a first run the watchdog ended reports its infra rerun's status, not "ended without a verdict".
+describe("GET /studio/gate/status after the watchdog ended the run for its infra rerun (#1148 review, minor)", () => {
+  it("a terminated first run whose rerun is live reports pending, not an error verdict", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => ({
+      status: vi.fn(async () => ({ status: id === "gate-first" ? "terminated" : "running" })),
+    })) as never;
+    const res = await handleGateRoute(new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=gate-first`), env, headSha);
+    expect(await res.json()).toEqual({ state: "pending" });
+  });
+
+  it("a terminated run with no rerun is still the error verdict", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "gate-first") return { status: vi.fn(async () => ({ status: "terminated" })) };
+      throw new Error("instance.not_found");
+    }) as never;
+    const res = await handleGateRoute(new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=gate-first`), env, headSha);
+    expect(await res.json()).toMatchObject({ state: "error" });
   });
 });
