@@ -123,7 +123,7 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
       process.exitCode = 2;
       return;
     }
-const parsed = parseStatusResponse(await res.text());
+    const parsed = parseStatusResponse(await res.text());
     if (!parsed.ok) {
       console.error(`fleet gate-watch: non-JSON reply from ${creds.workerUrl}: ${parsed.body}`);
       process.exitCode = 2;

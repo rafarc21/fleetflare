@@ -81,8 +81,9 @@ export interface RunLegDeps {
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Starts the gate container for one leg, posts /run, and always destroys the
- *  container afterwards. Every failure becomes an error leg, never a throw,
- *  so the Workflow gets a verdict for the leg. */
+ *  container afterwards. Every infra failure returns an infra outcome (503,
+ *  retried once by the Workflow step); a real gate-server body returns as a
+ *  result. Never a throw. */
 export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): Promise<LegOutcome> {
   const c = deps.container;
   if (!c) return { kind: "infra", description: "gate container binding missing" };
