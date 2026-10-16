@@ -2383,7 +2383,10 @@ export async function runAccountFailover(
     // hand-back's own respawn-pane. Neither guard errors — a skipped tick
     // just leaves the studio borrowed for one more cycle, and the next tick
     // tries again.
-    if (deps.autoFailover && rowNow.borrowedAccount && deps.primary && !verdict.repainted) {
+    // Issue #1142 review F1: a glm-led row never hands back to a Claude primary
+    // — it has no Claude account to return to, and this write would put that
+    // primary's token into a router-led studio's start env.
+    if (deps.autoFailover && rowNow.borrowedAccount && rowNow.leadType !== "glm" && deps.primary && !verdict.repainted) {
       const ownPrimary = deps.accounts.find((a) => a.name === deps.primary);
       if (ownPrimary) {
         const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
@@ -2402,6 +2405,13 @@ export async function runAccountFailover(
     if (healed) return { kind: "recovered", clearedAt: healed.exhaustionClearedAt as string };
     return { kind: "no-modal", reason: verdict.reason };
   }
+  // Issue #1142, item 1 (moved after the working branch by review F1): a glm-led
+  // row (kimi/deepseek are stored as glm too) runs its lead on the fleet LLM
+  // router with no Claude account. A limit modal on its pane is not a failover
+  // case: switching would push the NEXT Claude token into an OSS studio. The
+  // working branch above still runs for it — members-ticking and a stale
+  // LIMIT clear are router-led bookkeeping too. Claude-led rows fall through.
+  if (existing.leadType === "glm") return { kind: "skipped", reason: "glm lead runs on the router, no Claude account to fail over" };
   // Issue #106, MEASURED 2026-09-24: `claude --resume` redraws a persisted
   // limit block and its hint. The lead this studio relaunched with
   // `--continue` can therefore show the very block it was switched off —

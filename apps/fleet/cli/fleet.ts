@@ -62,7 +62,7 @@ import {
 import { mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
-  formatReady, formatCheckedAt, readyOverride, formatSession, formatState, formatSessionGuards,
+  formatReady, formatCheckedAt, readyOverride, isLeadInferenceSilent, formatSession, formatState, formatSessionGuards,
   formatSurvivalBriefs, formatDeadAccounts,
   formatObservedLines, formatActivity, lsJsonRows,
 } from "./readiness-format";
@@ -428,6 +428,9 @@ export function formatTable(
     // because the marker rides the READY cell while the numbers live in
     // INFER — one lookup, shared by both.
     const blocked = isLeadInferenceBlocked(inferBy?.get(s.id));
+    // Issue #1142, item 2: a router-led lead reading "working" with 0 router
+    // calls in the window. Mutually exclusive with `blocked` (needs >=10 calls).
+    const silent = isLeadInferenceSilent(s, inferBy?.get(s.id), inferBy !== undefined, now);
     return [
       s.id,
       parseStudioId(s.id)?.repo ?? "-",
@@ -467,7 +470,8 @@ export function formatTable(
       // last 30 min (isLeadInferenceBlocked, cli/infer-format.ts).
       (() => {
         const ready = readyOverride(s, now) ?? formatReady(s.readiness, s, now);
-        return blocked ? `${ready} inference-blocked` : ready;
+        if (blocked) return `${ready} inference-blocked`;
+        return silent ? `${ready} inference-silent` : ready;
       })(),
       formatSession(s, now),
       // ACTIVITY column (issue #221, PR3a): working/idle/waiting-members/limit
