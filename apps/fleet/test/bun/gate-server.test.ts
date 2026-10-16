@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { restoreBaseline, putResult, cloneUrl, runGate, readRunEnv, createRunServer, type FetchFn, type GateRun } from "../../container/gate-server";
+import { restoreBaseline, putResult, cloneUrl, runGate, readRunEnv, createRunServer, withRaisedFileLimit, type FetchFn, type GateRun } from "../../container/gate-server";
 import type { ExecFn } from "../../container/gate-merge-tree";
 
 const containerDir = join(import.meta.dir, "..", "..", "container");
@@ -124,7 +124,7 @@ const RUN: GateRun = {
 };
 const MERGE_RUN: GateRun = { ...RUN, leg: "merge-tree", installCmd: "", legCmd: "" };
 
-interface WorldOpts { cloneCode?: number; checkoutCode?: number; mergeCode?: number; legCode?: number; headPresent?: boolean }
+interface WorldOpts { cloneCode?: number; cloneErrs?: string[]; checkoutCode?: number; mergeCode?: number; legCode?: number; headPresent?: boolean }
 
 // A scripted git. Every command succeeds unless the opts fail it. `rev-parse` resolves only the
 // refs in `known`; the PR head is missing until a fetch brings it in (the fork-PR path).
@@ -147,7 +147,11 @@ function fakeWorld(opts: WorldOpts = {}) {
     // `git -c k=v commit-tree` puts its own flags first, so match the verb anywhere in argv.
     const verb = args.find((a) => ["clone", "fetch", "rev-parse", "merge-tree", "commit-tree", "rev-list", "checkout"].includes(a)) ?? args[0];
     switch (verb) {
-      case "clone": return opts.cloneCode ? fail(opts.cloneCode, "fatal: repository not found") : ok();
+      case "clone": {
+        const err = opts.cloneErrs?.shift();
+        if (err !== undefined) return fail(128, err);
+        return opts.cloneCode ? fail(opts.cloneCode, "fatal: repository not found") : ok();
+      }
       case "fetch": headPresent = true; return ok();
       case "rev-parse": {
         const name = args[args.length - 1].replace(/\^\{commit\}$/, "");
@@ -299,6 +303,51 @@ describe("readRunEnv", () => {
       repo: "owner/repo", commit: "a..b", leg: "lint", installCmd: "bun install", legCmd: "bun run lint",
       resultKey: "k", baselineKeys: [], baseRef: "staging", pr: "7", private: false,
     });
+  });
+});
+
+const RATE_LIMITED = "fatal: unable to access 'http://git-proxy.internal/owner/repo.git/': The requested URL returned error: 429";
+const noSleep = async () => {};
+const cloneCalls = (calls: string[][]) => calls.filter((c) => c[0] === "git" && c.includes("clone")).length;
+
+describe("runGate: a transient clone failure is retried (live: 429 from GitHub on concurrent legs)", () => {
+  it("retries a clone answered 429, cleans the partial dir, then runs the leg", async () => {
+    const world = fakeWorld({ cloneErrs: [RATE_LIMITED] });
+    const out = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(), sleep: noSleep });
+    expect(out.state).toBe("success");
+    expect(cloneCalls(world.calls)).toBe(2);
+    expect(world.calls.some((c) => c[0] === "rm" && c.includes("-rf"))).toBe(true);
+  });
+
+  it("gives up after 3 transient failures and reports the clone error", async () => {
+    const world = fakeWorld({ cloneErrs: [RATE_LIMITED, RATE_LIMITED, RATE_LIMITED] });
+    const out = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(), sleep: noSleep });
+    expect(out.state).toBe("error");
+    expect(out.description).toContain("429");
+    expect(cloneCalls(world.calls)).toBe(3);
+  });
+
+  it("does not retry a clone that failed for good (repository not found)", async () => {
+    const world = fakeWorld({ cloneCode: 128 });
+    const out = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(), sleep: noSleep });
+    expect(out.state).toBe("error");
+    expect(cloneCalls(world.calls)).toBe(1);
+  });
+});
+
+describe("withRaisedFileLimit (live: EMFILE in vite build and bun test)", () => {
+  it("runs the command under bash with the soft open-file limit raised to the hard limit", () => {
+    const argv = withRaisedFileLimit("git", ["clone", "x y"]);
+    expect(argv.slice(0, 2)).toEqual(["bash", "-c"]);
+    expect(argv[2]).toContain('ulimit -n "$(ulimit -Hn)"');
+    expect(argv.slice(3)).toEqual(["gate-exec", "git", "clone", "x y"]);
+  });
+
+  it("keeps the wrapped command's arguments and exit code intact", async () => {
+    const proc = Bun.spawn(withRaisedFileLimit("sh", ["-c", 'printf "%s|" "$@"; exit 3', "sh", "a b", "c"]), { stdout: "pipe" });
+    const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    expect(out).toBe("a b|c|");
+    expect(code).toBe(3);
   });
 });
 
