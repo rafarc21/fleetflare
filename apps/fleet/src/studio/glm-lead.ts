@@ -32,17 +32,26 @@ export function glmSettingsEnvCmd(): string {
   // Single-quoted `python3 -c` (no heredoc): the `&&` in glmBringupCmd must sit
   // on the same line as the step it guards, and a heredoc terminator would not.
   // The code has no single quote, so it needs no escaping.
+  // Review F2: a truncated or non-object file is replaced, not fatal. The write
+  // goes through a mode-600 temp file and an atomic rename, so a crash mid-write
+  // leaves the old file or the new one, never a half-written one.
   const code = [
     "import json, os",
     'p = os.path.expanduser("~/.claude/settings.json")',
     "os.makedirs(os.path.dirname(p), exist_ok=True)",
-    "s = json.load(open(p)) if os.path.exists(p) else {}",
-    'e = s.setdefault("env", {})',
+    "try:",
+    "    s = json.load(open(p))",
+    "except (FileNotFoundError, ValueError):",
+    "    s = {}",
+    "if not isinstance(s, dict): s = {}",
+    'e = s.get("env") if isinstance(s.get("env"), dict) else {}',
+    's["env"] = e',
     `e["ANTHROPIC_BASE_URL"] = os.environ["${GLM_BASE_URL_ENV}"]`,
     `e["ANTHROPIC_AUTH_TOKEN"] = os.environ["${FLEET_TOKEN_ENV}"]`,
-    "fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)",
+    'tmp = p + ".fleet-glm"',
+    "fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)",
     'with os.fdopen(fd, "w") as f: json.dump(s, f)',
-    "os.chmod(p, 0o600)",
+    "os.replace(tmp, p)",
   ].join("\n");
   return `python3 -c '${code}'`;
 }
@@ -66,9 +75,12 @@ export function glmCredentialPurgeCmd(): string {
  * The one command a glm bring-up runs: settings and purge first, then
  * bring-up. `&&` on the settings step is the fail-closed part: if the route
  * cannot be written, bring-up never starts and no lead launches unrouted.
+ * Review F3: bring-up runs with the token and route removed from its env, so
+ * the tmux server it starts does not keep them in its global environment.
  */
 export function glmBringupCmd(bringupCmd: string): string {
-  return `${glmCredentialPurgeCmd()}\n${glmSettingsEnvCmd()} && ${bringupCmd}`;
+  const stripped = `env -u ${OAUTH_VAR} -u ${FLEET_TOKEN_ENV} -u ${GLM_BASE_URL_ENV} ${bringupCmd}`;
+  return `${glmCredentialPurgeCmd()}\n${glmSettingsEnvCmd()} && ${stripped}`;
 }
 
 /** The env for that exec: the spawn token (tokenEnv) and the route. */
@@ -77,18 +89,18 @@ export function glmBringupEnv(spawnToken: string, baseUrl: string): Record<strin
 }
 
 export type BringupExecPlan =
-  | { kind: "run"; cmd: string; env: Record<string, string> }
+  | { kind: "run"; cmd: string; env?: Record<string, string> }
   | { kind: "refuse"; reason: string };
 
 /**
  * The Worker's decision for one exec. Only the bring-up command of a glm
- * studio is rewritten; everything else passes through byte-identical, so
- * claude-led studios and every other exec are unchanged.
+ * studio is rewritten. Everything else passes through with its env exactly as
+ * given, undefined included.
  */
 export function planBringupExec(input: {
   cmd: string;
   leadType: "claude" | "glm";
-  env: Record<string, string>;
+  env?: Record<string, string>;
   spawnToken: string | null;
   baseUrl: string;
 }): BringupExecPlan {
@@ -101,6 +113,26 @@ export function planBringupExec(input: {
   return {
     kind: "run",
     cmd: glmBringupCmd(BRINGUP_CMD),
-    env: { ...input.env, ...glmBringupEnv(input.spawnToken, input.baseUrl) },
+    env: { ...(input.env ?? {}), ...glmBringupEnv(input.spawnToken, input.baseUrl) },
+  };
+}
+
+export interface BringupRow { leadType: "claude" | "glm"; spawnToken: string | null }
+export type RawExec = (cmd: string, env?: Record<string, string>) => Promise<{ code: number; stdout: string; stderr: string }>;
+
+/**
+ * Review F1: the single wrapper every bring-up exec goes through, so the
+ * decision is testable without building a StudioDO. The row is read lazily,
+ * and only for the bring-up command.
+ */
+export function withGlmBringup(
+  readRow: () => Promise<BringupRow>, baseUrl: string, exec: RawExec,
+): RawExec {
+  return async (cmd, env) => {
+    if (cmd !== BRINGUP_CMD) return exec(cmd, env);
+    const row = await readRow();
+    const plan = planBringupExec({ cmd, leadType: row.leadType, env, spawnToken: row.spawnToken, baseUrl });
+    if (plan.kind === "refuse") return { code: 1, stdout: "", stderr: plan.reason };
+    return exec(plan.cmd, plan.env);
   };
 }
