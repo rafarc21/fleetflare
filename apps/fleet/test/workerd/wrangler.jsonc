@@ -1,0 +1,8 @@
+{
+  // Issue #1147 (review round 2): fixture for test/bun/llm-disconnect-workerd.test.ts.
+  // Flags must match wrangler.example.jsonc (the test asserts it).
+  "name": "llm-disconnect-fixture",
+  "main": "disconnect-worker.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+}

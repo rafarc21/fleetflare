@@ -15,7 +15,7 @@ import { env } from "cloudflare:test";
 import {
   handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH,
   handleFleetAnthropicCountTokens, ANTHROPIC_COUNT_TOKENS_PATH,
-  leadStreamPingMs,
+  leadStreamPingMs, pumpAnthropicStream,
 } from "../src/llm/anthropic-route";
 import { aggregateLeadUsage } from "../src/junior/usage";
 import { GLM_LEAD_MODEL } from "../src/llm/translate";
@@ -1951,5 +1951,76 @@ describe("handleFleetAnthropicMessages — keepalive and client-drop accounting 
     expect(leadStreamPingMs({ LEAD_STREAM_PING_MS: "nope" })).toBe(15_000);
     expect(leadStreamPingMs({ LEAD_STREAM_PING_MS: "0" })).toBe(15_000);
     expect(leadStreamPingMs({ LEAD_STREAM_PING_MS: "2500" })).toBe(2_500);
+  });
+
+  // Review round 2 (maestro, #1147): the ping clock must follow CLIENT silence,
+  // not upstream silence; a client abort must win over a write stuck on
+  // backpressure; a stuck ping write must not hang the pump. The pump-level
+  // cases use a fake writer so the stuck write is deterministic. Each test
+  // races the pump against a short timer, so a hang fails fast, not at 5s.
+  const reasoningChunk = frame({ choices: [{ delta: { reasoning_content: "thinking" } }] });
+  /** A writer whose N-th write (0-based) and any write `stall` picks never settles. */
+  function fakeWriter(stall: (frame: string, index: number) => boolean) {
+    const frames: string[] = [];
+    const writer = {
+      write(chunk: Uint8Array) {
+        const f = new TextDecoder().decode(chunk);
+        const index = frames.push(f) - 1;
+        return stall(f, index) ? new Promise<void>(() => {}) : Promise.resolve();
+      },
+      close: () => Promise.resolve(),
+    } as unknown as WritableStreamDefaultWriter<Uint8Array>;
+    return { writer, frames };
+  }
+  const within = <T,>(p: Promise<T>, ms: number) =>
+    Promise.race([p, new Promise<"hung">((r) => setTimeout(() => r("hung"), ms))]);
+
+  it("pings keep coming while the upstream is busy with reasoning the client never sees (ping clock = client silence)", async () => {
+    const parts = [
+      ...Array.from({ length: 30 }, () => ({ gapMs: 10, data: reasoningChunk })),
+      { gapMs: 0, data: finishChunk },
+      { gapMs: 0, data: "data: [DONE]\n\n" },
+    ];
+    const { token, rows, e } = await setupWith(gappedUpstream(parts), { LEAD_STREAM_PING_MS: "40", LEAD_STREAM_IDLE_MS: "5000" } as Partial<Env>);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await consume(r);
+    // ~300ms of upstream silence toward the client at a 40ms ping: about 7 pings.
+    expect(text.split("event: ping").length - 1).toBeGreaterThanOrEqual(3);
+  });
+
+  it("pings cover the prefill wait before the first upstream byte (guard: already true before the fix)", async () => {
+    const upstream = gappedUpstream([{ gapMs: 150, data: textChunk }, { gapMs: 0, data: finishChunk }, { gapMs: 0, data: "data: [DONE]\n\n" }]);
+    const { token, rows, e } = await setupWith(upstream, { LEAD_STREAM_PING_MS: "20", LEAD_STREAM_IDLE_MS: "5000" } as Partial<Env>);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await consume(r);
+    expect(text.split("event: ping").length - 1).toBeGreaterThanOrEqual(3);
+  });
+
+  it("a client abort wakes the pump even while a data write is stuck on backpressure", async () => {
+    let cancelled = false;
+    const upstream = gappedUpstream(Array.from({ length: 1000 }, () => ({ gapMs: 5, data: textChunk })), () => { cancelled = true; });
+    const { writer } = fakeWriter((_f, i) => i >= 1);
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    const result = await within(
+      pumpAnthropicStream(upstream, writer, "msg_test", "glm-5.3", 1000, 5_000, undefined, { pingMs: 0, signal: ac.signal }),
+      1_000,
+    );
+    expect(result).not.toBe("hung");
+    expect(result).toMatchObject({ ok: false, failure: "client_abort" });
+    expect(cancelled).toBe(true);
+  });
+
+  it("a ping write that never settles is bounded by the ping interval and ends as client_abort, not a hang", async () => {
+    let cancelled = false;
+    const upstream = gappedUpstream([{ gapMs: 0, data: textChunk }, { gapMs: Infinity }], () => { cancelled = true; });
+    const { writer } = fakeWriter((f) => f.startsWith("event: ping"));
+    const result = await within(
+      pumpAnthropicStream(upstream, writer, "msg_test", "glm-5.3", 1000, 5_000, undefined, { pingMs: 20 }),
+      1_000,
+    );
+    expect(result).not.toBe("hung");
+    expect(result).toMatchObject({ ok: false, failure: "client_abort" });
+    expect(cancelled).toBe(true);
   });
 });

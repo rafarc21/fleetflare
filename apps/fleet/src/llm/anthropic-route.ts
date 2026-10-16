@@ -145,10 +145,12 @@ export function leadStreamIdleMs(env: { LEAD_STREAM_IDLE_MS?: string }): number 
   return parsePositiveInt(env.LEAD_STREAM_IDLE_MS, LEAD_STREAM_IDLE_MS_DEFAULT);
 }
 
-/** Issue #1147: how long the streaming path waits on a silent upstream before
- *  it sends one SSE `event: ping`. 15s sits well under Claude Code's own
- *  client idle timeout and well over a normal inter-chunk gap, so a healthy
- *  stream never sends one. `LEAD_STREAM_PING_MS` (env.ts) — same garbage-in ->
+/** Issue #1147: how long the CLIENT may go without a byte before the streaming
+ *  path sends one SSE `event: ping` (the clock runs from the last byte written
+ *  to the client, not the last upstream chunk — a busy upstream whose output
+ *  the client never sees still earns pings). 15s sits well under Claude Code's
+ *  own client idle timeout and well over a normal gap, so a healthy stream
+ *  never sends one. `LEAD_STREAM_PING_MS` (env.ts) — same garbage-in ->
  *  default rule as the idle timer. */
 export const LEAD_STREAM_PING_MS_DEFAULT = 15_000;
 
@@ -300,19 +302,20 @@ const ABORTED = Symbol("aborted");
 
 /** Issue #1147: one pending `reader.read()`, raced against three clocks: the
  *  idle deadline (`idleLeftMs`, counted from the last upstream byte by the
- *  caller, so a ping never resets it), the keepalive tick (`pingMs`; 0 turns
- *  it off), and the client's abort signal. Resolves `PING` on a keepalive
- *  tick, `IDLE` on the deadline, `ABORTED` when the client has gone. A losing
- *  read stays pending — the caller keeps it and races it again after a PING,
- *  or cancels the reader, which settles it, so nothing dangles. */
+ *  caller, so a ping never resets it), the keepalive tick (`pingLeftMs`, time
+ *  left until the client's own silence reaches the ping interval; 0 turns it
+ *  off), and the client's abort signal. Resolves `PING` on a keepalive tick,
+ *  `IDLE` on the deadline, `ABORTED` when the client has gone. A losing read
+ *  stays pending — the caller keeps it and races it again after a PING, or
+ *  cancels the reader, which settles it, so nothing dangles. */
 function raceUpstream(
-  read: Promise<ReadableStreamReadResult<Uint8Array>>, idleLeftMs: number, pingMs: number, signal?: AbortSignal,
+  read: Promise<ReadableStreamReadResult<Uint8Array>>, idleLeftMs: number, pingLeftMs: number, signal?: AbortSignal,
 ): Promise<ReadableStreamReadResult<Uint8Array> | typeof IDLE | typeof PING | typeof ABORTED> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   const clock = new Promise<typeof IDLE | typeof PING | typeof ABORTED>((resolve) => {
-    const idleFirst = pingMs <= 0 || idleLeftMs <= pingMs;
-    timer = setTimeout(() => resolve(idleFirst ? IDLE : PING), Math.max(0, idleFirst ? idleLeftMs : pingMs));
+    const idleFirst = pingLeftMs <= 0 || idleLeftMs <= pingLeftMs;
+    timer = setTimeout(() => resolve(idleFirst ? IDLE : PING), Math.max(0, idleFirst ? idleLeftMs : pingLeftMs));
     if (signal) {
       onAbort = () => resolve(ABORTED);
       if (signal.aborted) onAbort();
@@ -328,6 +331,29 @@ function raceUpstream(
 /** Thrown by `pumpAnthropicStream`'s own `write` when the client side of the
  *  TransformStream is gone — the one failure that is not the upstream's. */
 class ClientAbort extends Error {}
+
+/** Issue #1147 (review round 2): `p` settles, or the client's abort signal
+ *  fires, or `boundMs` (> 0) passes — whichever comes first. The loser's
+ *  listener and timer are cleared. Signal or bound rejects with ClientAbort:
+ *  a write stuck on backpressure must not outlive a client that has gone, and
+ *  a keepalive ping the client has not read for a whole interval counts as
+ *  gone. With neither a signal nor a bound this is just `p`. */
+function settleOrGone(p: Promise<unknown>, signal: AbortSignal | undefined, boundMs: number): Promise<unknown> {
+  if (!signal && boundMs <= 0) return p;
+  let rejectGone!: (e: Error) => void;
+  const gone = new Promise<never>((_, reject) => { rejectGone = reject; });
+  const abort = () => rejectGone(new ClientAbort());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (signal) {
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  }
+  if (boundMs > 0) timer = setTimeout(abort, boundMs);
+  return Promise.race([p, gone]).finally(() => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  });
+}
 
 /** Issue #302: `<class> <anthropic error type>: <upstream message>` — the
  *  class says where it broke, the type is classifyAiError's own mapping of
@@ -405,22 +431,32 @@ export function failureClass(failure: string): string {
  * actually told rather than the raw, possibly-inflated upstream figure.
  *
  * Issue #1147: `keepalive.pingMs` > 0 writes one `event: ping` each time that
- * long passes with no upstream byte (the idle deadline is NOT reset by a
- * ping, so a dead upstream still times out). `keepalive.signal` is the
- * client's own request signal: an abort ends the pump as `client_abort` at
- * once, without waiting for the next write to fail. The non-streaming path
- * passes pingMs 0 — its reply is folded into one JSON body, so a ping has
- * nowhere to go — but still passes the signal.
+ * long passes with no byte written to the CLIENT (the idle deadline is NOT
+ * reset by a ping, so a dead upstream still times out). Review round 2: the
+ * clock follows the client, so upstream chunks the translator drops
+ * (reasoning_content, buffered think tags) do not suppress pings. `keepalive.
+ * signal` is the client's own request signal: an abort ends the pump as
+ * `client_abort` at once, even while a write is stuck on backpressure. A ping
+ * write is bounded by pingMs; a client that has not read a whole interval is
+ * treated as gone. The non-streaming path passes pingMs 0 — its reply is
+ * folded into one JSON body, so a ping has nowhere to go — but still passes
+ * the signal.
  */
-async function pumpAnthropicStream(
+export async function pumpAnthropicStream(
   upstream: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<Uint8Array>,
   id: string, model: string, requestedMaxTokens: number, idleMs: number, poolModel?: PoolModel,
   keepalive: { pingMs: number; signal?: AbortSignal } = { pingMs: 0 },
 ): Promise<PumpResult> {
   const enc = new TextEncoder();
-  const write = async (frames: string[]) => {
+  // Issue #1147 (review round 2): `lastWriteAt` is the last byte the CLIENT got.
+  // The ping clock runs from it, so a busy upstream the client never sees still
+  // earns pings. Each write races the client's signal; a ping is also bounded
+  // by the ping interval, so a client that has stopped reading counts as gone.
+  let lastWriteAt = Date.now();
+  const write = async (frames: string[], boundMs = 0) => {
     for (const f of frames) {
-      try { await writer.write(enc.encode(f)); } catch { throw new ClientAbort(); }
+      try { await settleOrGone(writer.write(enc.encode(f)), keepalive.signal, boundMs); } catch { throw new ClientAbort(); }
+      lastWriteAt = Date.now();
     }
   };
   const state = createStreamState({ thinkTags: poolModel?.thinkTags === true });
@@ -449,9 +485,11 @@ async function pumpAnthropicStream(
     pending.catch(() => {}); // settled by the race below; this only stops an early unhandled-rejection report
     let lastUpstreamAt = Date.now();
     while (!done) {
+      // The keepalive clock is the CLIENT's silence, not the upstream's.
+      const pingLeftMs = keepalive.pingMs > 0 ? Math.max(1, lastWriteAt + keepalive.pingMs - Date.now()) : 0;
       let step: ReadableStreamReadResult<Uint8Array> | typeof IDLE | typeof PING | typeof ABORTED;
       try {
-        step = await raceUpstream(pending, lastUpstreamAt + idleMs - Date.now(), keepalive.pingMs, keepalive.signal);
+        step = await raceUpstream(pending, lastUpstreamAt + idleMs - Date.now(), pingLeftMs, keepalive.signal);
       } catch (e) {
         // The upstream failed after message_start (and possibly a content
         // block) already reached the client — a genuine mid-stream error, not
@@ -461,7 +499,7 @@ async function pumpAnthropicStream(
         return end(false, failureReason("upstream_read_error", message));
       }
       if (step === PING) {
-        await write([streamPing()]);
+        await write([streamPing()], keepalive.pingMs);
         continue;
       }
       if (step === ABORTED) throw new ClientAbort();
@@ -975,6 +1013,12 @@ export async function handleFleetAnthropicMessages(
   const { result, sse } = collected;
   // Issue #1147: the client hung up while the reply was being collected. Nobody
   // will read the JSON, so it is a failure here, never an ok row.
+  // UNMEASURED IN PRODUCTION (review round 2): on workerd 1.20260730 a non-
+  // streaming request whose reply is not written yet gets no disconnect, even
+  // with keepalive pings on (test/bun/llm-disconnect-workerd.test.ts, /collect).
+  // So this branch does not run on that runtime today, and a dropped
+  // non-streaming client still logs ok=1 when its reply completes. Kept because
+  // it is correct if the runtime ever delivers the signal in that window.
   if (result.failure === "client_abort") {
     logUsage(env, ctx, studio.id, {
       model: usedModel, stream: false, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ok: false,
