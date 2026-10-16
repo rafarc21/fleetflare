@@ -490,15 +490,109 @@ interface StreamState {
   /** Only kimi's stream sets this (models.ts `thinkTags`). Off, content
    *  streams straight through as text, byte-for-byte as before #1073. */
   thinkTags: boolean;
+  /** Issue #1099: why the stream was judged a runaway, set the moment the
+   *  scan trips. The pump aborts on it; null while the output looks normal. */
+  runaway: string | null;
+  /** Counters behind `runaway` (see scanForRunaway). */
+  scan: RunawayScan;
 }
 
-export function createStreamState(opts: { thinkTags?: boolean } = {}): StreamState {
+/** Issue #1099: the running state of the runaway scan over text and
+ *  reasoning deltas. Tool-call argument deltas are never scanned. */
+interface RunawayScan {
+  /** Characters of text/reasoning seen while no tool_use had started. */
+  chars: number;
+  /** Soft cap in characters (`softCapTokens` * CHARS_PER_TOKEN); 0 = none. */
+  softCapChars: number;
+  /** Text after the last newline, not yet a complete line. */
+  partial: string;
+  /** The last complete non-blank line, and how many times in a row it came. */
+  line: string;
+  lineRun: number;
+  /** The paragraph being built (non-blank lines since the last blank one). */
+  para: string;
+  /** The last closed paragraph, and how many times in a row it came. */
+  prevPara: string;
+  paraRun: number;
+}
+
+/** Issue #1099: a run of this many identical non-blank lines in a row is a
+ *  runaway loop. Judgment values — no recorded runaway in the repo gives a
+ *  per-line count; set well above what legitimate prose or code repeats. */
+export const RUNAWAY_REPEAT_LINE_LIMIT = 20;
+/** Issue #1099: a run of this many identical paragraphs in a row is a runaway. */
+export const RUNAWAY_REPEAT_PARAGRAPH_LIMIT = 8;
+/** Issue #1099: shorter lines (`}`, `---`) repeat legitimately, so they never count. */
+const RUNAWAY_MIN_REPEAT_CHARS = 8;
+/** Issue #1099: the soft cap is in tokens (models.ts `softCapTokens`), but the
+ *  scan counts characters; this rough ratio converts it. Typical English and
+ *  code run closer to 3-4 chars per token, so the cap fires a little late
+ *  rather than early. */
+const CHARS_PER_TOKEN = 4;
+
+export function createStreamState(opts: { thinkTags?: boolean; softCapTokens?: number } = {}): StreamState {
   return {
     nextIndex: 0, textIndex: null, toolIndexByOpenAiIndex: new Map(),
     openIndex: null, openKind: null, finishReason: null, outputTokens: 0, inputTokens: 0,
     thinking: false, thinkText: "", pendingTag: "", thinkToolUses: 0, unrecoverableToolCall: false,
     thinkTags: opts.thinkTags === true,
+    runaway: null,
+    scan: {
+      chars: 0, softCapChars: (opts.softCapTokens ?? 0) * CHARS_PER_TOKEN, partial: "",
+      line: "", lineRun: 0, para: "", prevPara: "", paraRun: 0,
+    },
   };
+}
+
+/** Issue #1099: a tool_use has started in this turn (native or recovered from
+ *  a think region). Tool arguments are legitimately long, so the soft cap
+ *  stops counting once one has started. */
+function toolStarted(state: StreamState): boolean {
+  return state.toolIndexByOpenAiIndex.size > 0 || state.thinkToolUses > 0;
+}
+
+/** Issue #1099: closes the paragraph being built and counts its repeats. */
+function closeParagraph(state: StreamState): void {
+  const scan = state.scan;
+  if (scan.para === "") return;
+  if (scan.para === scan.prevPara) scan.paraRun++;
+  else { scan.prevPara = scan.para; scan.paraRun = 1; }
+  scan.para = "";
+  if (scan.paraRun >= RUNAWAY_REPEAT_PARAGRAPH_LIMIT) state.runaway = "repeat_paragraph";
+}
+
+/** Issue #1099: feeds one text or reasoning delta to the runaway scan. Trips
+ *  `state.runaway` for a soft-cap overrun (no tool_use started yet) or a
+ *  repeated line or paragraph. Never reads tool-call arguments. */
+function scanForRunaway(state: StreamState, text: string): void {
+  if (state.runaway !== null || text.length === 0) return;
+  const scan = state.scan;
+  if (!toolStarted(state)) {
+    scan.chars += text.length;
+    if (scan.softCapChars > 0 && scan.chars > scan.softCapChars) { state.runaway = "soft_cap"; return; }
+  }
+  const pieces = (scan.partial + text).split("\n");
+  scan.partial = pieces.pop() ?? "";
+  for (const line of pieces) {
+    if (line.trim() === "") { closeParagraph(state); if (state.runaway !== null) return; continue; }
+    scan.para = scan.para === "" ? line : `${scan.para}\n${line}`;
+    if (line === scan.line) scan.lineRun++;
+    else { scan.line = line; scan.lineRun = 1; }
+    if (line.trim().length >= RUNAWAY_MIN_REPEAT_CHARS && scan.lineRun >= RUNAWAY_REPEAT_LINE_LIMIT) {
+      state.runaway = "repeat_line";
+      return;
+    }
+  }
+}
+
+/** Issue #1099: the SSE error frame for an aborted runaway stream. Typed
+ *  overloaded_error (529) so Claude Code retries the turn, the same
+ *  retriable shape as the other upstream-capacity failures in this file. */
+export function runawayErrorFrame(reason: string): string {
+  return sseEvent("error", {
+    type: "error",
+    error: { type: "overloaded_error", message: `upstream output runaway (${reason}); retry the turn` },
+  });
 }
 
 /** Closes whatever content block is currently open (if any) — the one place
@@ -671,6 +765,12 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
   const events: string[] = [];
   const delta = choice.delta ?? {};
   if (choice.finish_reason !== undefined && choice.finish_reason !== null) state.finishReason = choice.finish_reason;
+
+  // Issue #1099: reasoning_content (GLM) is scanned but never forwarded, same
+  // as before. A delta that trips the scan is not emitted; the pump aborts.
+  if (typeof delta.reasoning_content === "string") scanForRunaway(state, delta.reasoning_content);
+  if (typeof delta.content === "string") scanForRunaway(state, delta.content);
+  if (state.runaway !== null) return events;
 
   if (typeof delta.content === "string" && delta.content.length > 0) {
     if (state.thinkTags) routeContent(state, delta.content, events);

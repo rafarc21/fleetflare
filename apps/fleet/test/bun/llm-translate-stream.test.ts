@@ -15,6 +15,7 @@ import {
   parseSseDataLine,
   parseStreamErrorChunk,
   streamErrorFrame,
+  runawayErrorFrame,
 } from "../../src/llm/translate";
 
 /** Splits a raw `event: X\ndata: Y\n\n` frame back into its two halves, for
@@ -499,5 +500,84 @@ describe("think tags are off for every model except kimi (issue #1073 review)", 
     const state = createStreamState();
     const frames = applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "<thi" }, finish_reason: null }] });
     expect(frames.map(parseFrame).map((f) => (f.data as { delta?: { text?: string } }).delta?.text)).toEqual([undefined, "<thi"]);
+  });
+});
+
+// Issue #1099: a degenerate upstream stream (same line or paragraph repeated,
+// or text past a per-model soft cap with no tool_use started) is aborted with
+// a retriable overloaded_error, not run to the 64k output cap.
+describe("runaway output detection (issue #1099)", () => {
+  const delta = (d: Record<string, unknown>) => ({ choices: [{ delta: d }] });
+
+  test("a line repeated many times in a row sets reason repeat_line", () => {
+    const state = createStreamState();
+    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ content: "the same looping sentence here\n" }));
+    expect(state.runaway).toBe("repeat_line");
+  });
+
+  test("a multi-line paragraph repeated many times sets reason repeat_paragraph", () => {
+    const state = createStreamState();
+    const paragraph = "alpha line one\nalpha line two\n\n";
+    for (let i = 0; i < 30; i++) applyOpenAIStreamChunk(state, delta({ content: paragraph }));
+    expect(state.runaway).toBe("repeat_paragraph");
+  });
+
+  test("repeated reasoning_content trips the same repeat check", () => {
+    const state = createStreamState();
+    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ reasoning_content: "loop loop loop loop\n" }));
+    expect(state.runaway).toBe("repeat_line");
+  });
+
+  test("text past the per-model soft cap with no tool_use sets reason soft_cap", () => {
+    const state = createStreamState({ softCapTokens: 100 });
+    let words = "";
+    for (let i = 0; words.length <= 100 * 4; i++) words += `word${i} `;
+    applyOpenAIStreamChunk(state, delta({ content: words }));
+    expect(state.runaway).toBe("soft_cap");
+  });
+
+  test("no soft cap applies when the model sets none", () => {
+    const state = createStreamState();
+    let words = "";
+    for (let i = 0; i < 5000; i++) words += `word${i} `;
+    applyOpenAIStreamChunk(state, delta({ content: words }));
+    expect(state.runaway).toBeNull();
+  });
+
+  test("once a tool_use has started, text past the soft cap is not a runaway", () => {
+    const state = createStreamState({ softCapTokens: 100 });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "Read", arguments: "{}" } }] } }] });
+    let words = "";
+    for (let i = 0; i < 300; i++) words += `word${i} `;
+    applyOpenAIStreamChunk(state, delta({ content: words }));
+    expect(state.runaway).toBeNull();
+  });
+
+  test("a long tool_use input with repeated lines passes the soft cap and the repeat check", () => {
+    const state = createStreamState({ softCapTokens: 100 });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "Write", arguments: "" } }] } }] });
+    const line = '  "row": "identical row of file content",\\n';
+    for (let i = 0; i < 200; i++) {
+      applyOpenAIStreamChunk(state, { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: line } }] } }] });
+    }
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "tool_calls" }] });
+    expect(state.runaway).toBeNull();
+  });
+
+  test("a normal short turn is untouched: no runaway, frames identical to a plain state", () => {
+    const chunks = [delta({ content: "Hello\n" }), delta({ content: "World, done.\n" })];
+    const guarded = createStreamState({ softCapTokens: 16000 });
+    const plain = createStreamState();
+    const guardedFrames = chunks.flatMap((c) => applyOpenAIStreamChunk(guarded, c));
+    const plainFrames = chunks.flatMap((c) => applyOpenAIStreamChunk(plain, c));
+    expect(guarded.runaway).toBeNull();
+    expect(guardedFrames).toEqual(plainFrames);
+  });
+
+  test("runawayErrorFrame is a retriable overloaded_error SSE error frame naming the reason", () => {
+    const frame = parseFrame(runawayErrorFrame("repeat_line"));
+    expect(frame.event).toBe("error");
+    expect(frame.data).toMatchObject({ type: "error", error: { type: "overloaded_error" } });
+    expect(JSON.stringify(frame.data)).toContain("repeat_line");
   });
 });

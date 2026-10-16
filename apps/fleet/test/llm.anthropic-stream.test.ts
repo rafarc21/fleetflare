@@ -78,6 +78,8 @@ async function callRoute(opts: {
   ai: { run: ReturnType<typeof vi.fn> };
   envOverrides?: Partial<Env>;
   pool?: readonly PoolModel[];
+  /** Issue #1099: a streaming request body (`stream: true`) for the runaway tests. */
+  body?: unknown;
   /** #767: fake sleep/random threaded through the handler's own 6th
    *  param, so a route-level test can pin the backoff schedule exactly
    *  without ever waiting a real 3s. */
@@ -86,7 +88,7 @@ async function callRoute(opts: {
   const token = mintSpawnToken();
   const rows = async () => [row(ME, await hashSpawnToken(token))];
   const e = { ...env, FLEET_JUNIOR: "on", AI: opts.ai, ...FAST_RETRY, ...(opts.envOverrides ?? {}) } as unknown as Env;
-  return handleFleetAnthropicMessages(req({ token }), e, ctx, rows, opts.pool, opts.retryDeps);
+  return handleFleetAnthropicMessages(req({ token, body: opts.body }), e, ctx, rows, opts.pool, opts.retryDeps);
 }
 
 function req(opts: { token?: string | null; apiKey?: string; body?: unknown; path?: string; method?: string }) {
@@ -1648,5 +1650,70 @@ describe("handleFleetAnthropicMessages — think-block parsing is kimi-only (iss
     expect(events.some((e) => e.event === "content_block_start" && e.data.content_block.type === "tool_use")).toBe(false);
     const visible = events.filter((e) => e.event === "content_block_delta" && e.data.delta.type === "text_delta").map((e) => e.data.delta.text).join("");
     expect(visible).toBe(THINK_TOOL_CALL);
+  });
+});
+
+// Issue #1099: a degenerate stream is aborted mid-turn with a retriable
+// overloaded_error, logged as runaway:<reason>, and the studio's next call
+// moves to another pool model (LEAD_MODEL_OVERFLOW on).
+describe("handleFleetAnthropicMessages — runaway output abort (issue #1099)", () => {
+  function sseOf(contents: string[]): ReadableStream<Uint8Array> {
+    const enc = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const content of contents) controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+  }
+
+  const looping = Array.from({ length: 60 }, () => "the same looping sentence here\n");
+  const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+
+  it("a runaway stream ends with a retriable overloaded_error, never a normal end_turn", async () => {
+    const run = vi.fn(async () => sseOf(looping));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: { ...good, stream: true } });
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    expect(text).toContain("event: error");
+    expect(text).toContain('"type":"overloaded_error"');
+    expect(text).not.toContain('"stop_reason":"end_turn"');
+    expect(text).not.toContain("event: message_stop");
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged.at(-1)).toMatchObject({ ok: 0, error: "runaway:repeat_line" });
+  });
+
+  it("after a runaway abort the studio's next call goes to a different model", async () => {
+    const seen: string[] = [];
+    const run = vi.fn(async (model: string) => {
+      seen.push(model);
+      return seen.length === 1 ? sseOf(looping) : sseOf(["fine answer"]);
+    });
+    const first = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: { ...good, stream: true } });
+    await first.text();
+    await ctx.drain();
+    const second = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: { ...good, stream: true } });
+    expect(second.status).toBe(200);
+    await second.text();
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).not.toBe(seen[0]);
+  });
+
+  it("with LEAD_MODEL_OVERFLOW=off the retry stays on the same model", async () => {
+    const seen: string[] = [];
+    const run = vi.fn(async (model: string) => {
+      seen.push(model);
+      return seen.length === 1 ? sseOf(looping) : sseOf(["fine answer"]);
+    });
+    const envOverrides = { LEAD_MODEL_POOL: "on", LEAD_MODEL_OVERFLOW: "off" } as Partial<Env>;
+    const first = await callRoute({ ai: { run }, envOverrides, pool: testPool, body: { ...good, stream: true } });
+    await first.text();
+    await ctx.drain();
+    const second = await callRoute({ ai: { run }, envOverrides, pool: testPool, body: { ...good, stream: true } });
+    await second.text();
+    expect(seen[1]).toBe(seen[0]);
   });
 });

@@ -108,3 +108,24 @@ describe("defaultModelFor", () => {
     expect(P.map((m) => m.id)).toContain(a);
   });
 });
+
+// Issue #1099: after a runaway abort the studio's next call avoids that model
+// (only when overflow is on, since overflow is what lets the retry move on).
+describe("pickModels avoid (issue #1099)", () => {
+  test("the avoided model is never first when overflow is on", () => {
+    const order = pickModels({ ...base, assigned: "@cf/b/kimi", avoid: "@cf/b/kimi", states: { ...ALL }, overflowOn: true });
+    expect(order[0]).not.toBe("@cf/b/kimi");
+    expect(order).toContain("@cf/b/kimi");
+    expect(order[order.length - 1]).toBe("@cf/b/kimi");
+  });
+
+  test("avoid is ignored when overflow is off (retry stays on the one model)", () => {
+    expect(pickModels({ ...base, assigned: "@cf/b/kimi", avoid: "@cf/b/kimi", states: { ...ALL }, overflowOn: false })).toEqual(["@cf/b/kimi"]);
+  });
+
+  test("avoid naming a model not in the candidate list changes nothing", () => {
+    const without = pickModels({ ...base, assigned: "@cf/b/kimi", states: { ...ALL }, overflowOn: true });
+    const withStale = pickModels({ ...base, assigned: "@cf/b/kimi", avoid: "@cf/gone/model", states: { ...ALL }, overflowOn: true });
+    expect(withStale).toEqual(without);
+  });
+});

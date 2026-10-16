@@ -20,6 +20,29 @@ export async function setAssignedModel(db: D1Database, studioId: string, modelId
   await setFlag(db, ASSIGN(studioId), modelId, Date.now());
 }
 
+/** Issue #1099: how long a studio avoids a model after a runaway abort. */
+export const RUNAWAY_AVOID_MS = 10 * 60_000;
+
+const AVOID = (studioId: string) => `runaway-avoid:${studioId}`;
+
+/** Records that `modelId` ran away on this studio's stream. The value
+ *  carries its own expiry (`modelId|expiresAtMs`) so no extra column is needed. */
+export async function markRunawayAvoid(db: D1Database, studioId: string, modelId: string, now: number = Date.now()): Promise<void> {
+  if (!modelById(modelId)) throw new Error(`unknown model ${modelId}`);
+  await setFlag(db, AVOID(studioId), `${modelId}|${now + RUNAWAY_AVOID_MS}`, now);
+}
+
+/** The model this studio should avoid right now, or null once it has expired. */
+export async function getRunawayAvoid(db: D1Database, studioId: string, now: number = Date.now()): Promise<string | null> {
+  const v = await getFlag(db, AVOID(studioId));
+  if (v === null) return null;
+  const bar = v.lastIndexOf("|");
+  if (bar === -1) return null;
+  const modelId = v.slice(0, bar);
+  const expiresAt = Number(v.slice(bar + 1));
+  return modelById(modelId) && expiresAt > now ? modelId : null;
+}
+
 export async function getModelStates(db: D1Database): Promise<Record<string, ModelState>> {
   const out: Record<string, ModelState> = {};
   // Read in parallel — one fleet_state row per pool model, same shape as

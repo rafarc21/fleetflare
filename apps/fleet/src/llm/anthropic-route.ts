@@ -27,11 +27,11 @@ import { parsePositiveInt } from "../ratelimit";
 import { insertJuniorUsage } from "../junior/usage";
 import {
   GLM_LEAD_MODEL, anthropicRequestToOpenAI, openAIResponseToAnthropic, classifyAiError,
-  createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStreamOrError, parseSseDataLine,
+  createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStreamOrError, parseSseDataLine, runawayErrorFrame,
   parseStreamErrorChunk, streamErrorFrame,
 } from "./translate";
 import { pickModels } from "./router";
-import { getAssignedModel, getModelStates } from "./model-store";
+import { getAssignedModel, getModelStates, getRunawayAvoid, markRunawayAvoid } from "./model-store";
 import { POOL, modelById, type PoolModel } from "./models";
 
 export const ANTHROPIC_MESSAGES_PATH = "/fleet/llm/anthropic/v1/messages";
@@ -376,7 +376,7 @@ export function failureClass(failure: string): string {
  */
 async function pumpAnthropicStream(
   upstream: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<Uint8Array>,
-  id: string, model: string, requestedMaxTokens: number, idleMs: number, thinkTags = false,
+  id: string, model: string, requestedMaxTokens: number, idleMs: number, poolModel?: PoolModel,
 ): Promise<PumpResult> {
   const enc = new TextEncoder();
   const write = async (frames: string[]) => {
@@ -384,7 +384,7 @@ async function pumpAnthropicStream(
       try { await writer.write(enc.encode(f)); } catch { throw new ClientAbort(); }
     }
   };
-  const state = createStreamState({ thinkTags });
+  const state = createStreamState({ thinkTags: poolModel?.thinkTags === true, softCapTokens: poolModel?.softCapTokens });
   const reader = upstream.getReader();
   const cancelUpstream = () => { reader.cancel().catch(() => {}); };
   const end = (ok: boolean, failure?: string): PumpResult => ({
@@ -439,6 +439,13 @@ async function pumpAnthropicStream(
             return end(false, failureReason("upstream_error_chunk", errorMessage));
           }
           await write(applyOpenAIStreamChunk(state, parsed));
+          // Issue #1099: a degenerate text/reasoning run. Abort upstream (no
+          // more tokens paid for) and end with a retriable overloaded_error.
+          if (state.runaway !== null) {
+            cancelUpstream();
+            await write([runawayErrorFrame(state.runaway)]);
+            return end(false, `runaway:${state.runaway}`);
+          }
         }
       }
     }
@@ -711,6 +718,8 @@ export async function handleFleetAnthropicMessages(
     requestedModel: body.model,
     poolOn,
     overflowOn: env.LEAD_MODEL_OVERFLOW !== "off",
+    // Issue #1099: after a runaway abort the studio's next call moves off that model.
+    avoid: poolOn && env.LEAD_MODEL_OVERFLOW !== "off" ? await getRunawayAvoid(env.DB, studio.id) : null,
     assigned: poolOn ? await getAssignedModel(env.DB, studio.id) : null,
     states: poolOn ? await getModelStates(env.DB) : {},
     ...(pool === undefined ? {} : { pool }),
@@ -786,8 +795,14 @@ export async function handleFleetAnthropicMessages(
     // rejection; what still rejects here is a bug inside the pump itself,
     // logged as `pump_error` rather than dropped without a row.
     ctx.waitUntil(
-      pumpAnthropicStream(upstream, writer, id, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel)?.thinkTags === true)
-        .then((result) => logUsage(env, ctx, studio.id, { model: usedModel, stream: true, ...result, startedAt, attempts }))
+      pumpAnthropicStream(upstream, writer, id, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel))
+        .then((result) => {
+          logUsage(env, ctx, studio.id, { model: usedModel, stream: true, ...result, startedAt, attempts });
+          // Issue #1099: the retry (a 529 the client re-sends) moves to the next model.
+          if (result.failure?.startsWith("runaway:") && poolOn && env.LEAD_MODEL_OVERFLOW !== "off") {
+            ctx.waitUntil(markRunawayAvoid(env.DB, studio.id, usedModel).catch(() => {}));
+          }
+        })
         .catch((e) => logUsage(env, ctx, studio.id, {
           model: usedModel, stream: true, inputTokens: 0, outputTokens: 0, ok: false,
           failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`, startedAt, attempts,

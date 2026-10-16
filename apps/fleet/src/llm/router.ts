@@ -39,6 +39,9 @@ export function pickModels(input: {
   pool?: readonly PoolModel[];
   poolOn: boolean;
   overflowOn: boolean;
+  /** Issue #1099: a model this studio just ran away on. Only moved to the
+   *  back of the order, and only with overflow on (so a retry can move on). */
+  avoid?: string | null;
 }): string[] {
   const pool = input.pool ?? POOL;
   if (!input.poolOn) return [pool[0].id];
@@ -58,6 +61,9 @@ export function pickModels(input: {
   if (isSmallModelName(input.requestedModel)) {
     const roleId = nextActiveAfter(main, eligible.map((m) => m.id), rank);
     if (roleId !== null) order = [roleId, main, ...order.filter((id) => id !== roleId && id !== main)];
+  }
+  if (input.avoid && order.includes(input.avoid) && order.length > 1) {
+    order = [...order.filter((id) => id !== input.avoid), input.avoid];
   }
   return order;
 }
