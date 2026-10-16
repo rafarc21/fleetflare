@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import {
   parseGateRunnerRepos, isGateRunnerRepo, parseGateBlock, gateMapEntry, matchesPathRules,
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR, legTimeoutMin,
+  GATE_IMAGES,
 } from "../../src/gate/config";
 import FLEET_JSON from "../../../../fleet.json";
 
@@ -242,5 +243,35 @@ describe("shipped fleet.json pathRules", () => {
   it("still excludes a file nothing reads", () => {
     const rules = FLEET_JSON.gate?.pathRules ?? [];
     expect(matchesPathRules(["docs/notes.md"], rules)).toBe(false);
+  });
+});
+
+// #1066: a gate block may name its container image by key. The key is an
+// allowlisted lookup into the operator's images map, never an image ref.
+describe("parseGateBlock: per-repo image key", () => {
+  it("keeps an allowlisted image key as image", () => {
+    expect(parseGateBlock({ ...BLOCK, image: "desktop" })?.image).toBe("desktop");
+  });
+  it("absent image -> no image key on the config (the default gate image applies at run time)", () => {
+    const cfg = parseGateBlock(BLOCK);
+    expect(cfg).not.toBeNull();
+    expect(Object.hasOwn(cfg ?? {}, "image")).toBe(false);
+  });
+  it("the allowlist is exactly gate and desktop", () => {
+    expect([...GATE_IMAGES].sort()).toEqual(["desktop", "gate"]);
+  });
+  it("null on a key outside the allowlist", () => {
+    expect(parseGateBlock({ ...BLOCK, image: "evil" })).toBeNull();
+  });
+  it("null on a registry ref, which is never a key", () => {
+    expect(parseGateBlock({ ...BLOCK, image: "ghcr.io/acme/desktop:latest" })).toBeNull();
+  });
+  it("null on inherited Object keys that look like allowlisted-adjacent names", () => {
+    expect(parseGateBlock({ ...BLOCK, image: "__proto__" })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, image: "constructor" })).toBeNull();
+  });
+  it("null on a non-string image and on the empty string", () => {
+    expect(parseGateBlock({ ...BLOCK, image: 7 })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, image: "" })).toBeNull();
   });
 });

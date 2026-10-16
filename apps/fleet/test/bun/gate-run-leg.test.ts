@@ -372,3 +372,55 @@ describe("legResponse: /run-leg status mapping", () => {
     expect(await res.json()).toEqual({ state: "failure", description: "3 errors" });
   });
 });
+// #1066: the leg's image key is an allowlisted lookup into images. Unbound or
+// hostile keys are infra, never a start and never a silent fallback to gate.
+describe("runLegInContainer: per-repo image key", () => {
+  const DESKTOP_IMAGES = { gate: "gate-image:v1", desktop: "desktop-image:v1" };
+
+  test("a desktop key starts the image bound as images.desktop", async () => {
+    const c = new FakeContainer();
+    c.images = { ...DESKTOP_IMAGES };
+    c.portOutcomes = [okResponse("success")];
+    const outcome = await runLegInContainer({ ...LEG, image: "desktop" }, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(outcome).toEqual({ kind: "result", result: { state: "success" } });
+    expect(c.starts[0]?.image).toBe("desktop-image:v1");
+  });
+
+  test("no key starts the default gate image, unchanged", async () => {
+    const c = new FakeContainer();
+    c.images = { ...DESKTOP_IMAGES };
+    c.portOutcomes = [okResponse("success")];
+    await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(c.starts[0]?.image).toBe("gate-image:v1");
+  });
+
+  test("an allowlisted key with no binding is infra, names the key, never starts", async () => {
+    const c = new FakeContainer();
+    c.images = { gate: "gate-image:v1" };
+    const outcome = await runLegInContainer({ ...LEG, image: "desktop" }, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(outcome).toEqual({ kind: "infra", description: "gate image not bound (images.desktop)" });
+    expect(c.starts).toHaveLength(0);
+    expect(c.destroyCount).toBe(1);
+  });
+
+  test("__proto__ as a key is infra and never starts, even though it is a property of every object", async () => {
+    const c = new FakeContainer();
+    c.images = { ...DESKTOP_IMAGES };
+    const outcome = await runLegInContainer({ ...LEG, image: "__proto__" }, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(outcome.kind).toBe("infra");
+    expect(c.starts).toHaveLength(0);
+  });
+
+  test("toString as a key is infra and never starts, never falls back to gate", async () => {
+    const c = new FakeContainer();
+    c.images = { ...DESKTOP_IMAGES };
+    const outcome = await runLegInContainer({ ...LEG, image: "toString" }, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(outcome.kind).toBe("infra");
+    expect(c.starts).toHaveLength(0);
+  });
+});

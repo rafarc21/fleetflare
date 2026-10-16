@@ -21,6 +21,12 @@ export const DEFAULT_VITEST_SHARDS = 8;
  *  under the p50 target. */
 export const DEFAULT_BUN_SHARDS = 6;
 
+/** The gate images a block may name, by key (#1066). A key is a lookup into the
+ *  operator's deployed `images` map: a repo never names an image ref. */
+export const GATE_IMAGES: ReadonlySet<string> = new Set(["gate", "desktop"]);
+/** The image a run uses when its block names none. */
+export const DEFAULT_GATE_IMAGE = "gate";
+
 /** Hard cap on legs per PR, merge-tree, gate block legs, bun and vitest shards
  *  included (#715 comment 6194310999). Each leg is a container, so this bounds
  *  cost per PR. */
@@ -64,6 +70,8 @@ export interface GateConfig {
   bunLaneRoot?: string;
   /** Lane file globs, relative to bunLaneRoot. Absent means the lane's default set. */
   bunLaneGlobs?: string[];
+  /** The block's image key (#1066). Absent means DEFAULT_GATE_IMAGE at run time. */
+  image?: string;
 }
 
 function isStringArray(v: unknown): v is string[] {
@@ -119,9 +127,16 @@ export function parseGateBlock(block: unknown): GateConfig | null {
   const bunLegs = g.bunLaneRoot === undefined ? 0 : bunShards;
   const vitestMin = g.vitestCmd === undefined ? 0 : 1;
   if (1 + legs.length + bunLegs + vitestMin > MAX_LEGS_PER_PR) return null;
+  // An image key outside the allowlist (a registry ref, "__proto__", "") is a
+  // malformed block, never a silent fallback to the default image.
+  let image: string | undefined;
+  if (g.image !== undefined) {
+    if (typeof g.image !== "string" || !GATE_IMAGES.has(g.image)) return null;
+    image = g.image;
+  }
   return {
     install: g.install, legs, vitestCmd: g.vitestCmd, pathRules: g.pathRules, vitestShards, bunShards,
-    bunLaneRoot: g.bunLaneRoot, bunLaneGlobs: g.bunLaneGlobs,
+    bunLaneRoot: g.bunLaneRoot, bunLaneGlobs: g.bunLaneGlobs, ...(image === undefined ? {} : { image }),
   };
 }
 

@@ -113,7 +113,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // and aggregateVerdict reads results in configured leg order either way.
     const results = await Promise.all(
       legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName,
-        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private }, planned)),
+        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, image: config.image }, planned)),
     );
 
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
@@ -133,7 +133,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 /** One leg: a start-<leg> step, and a retry-<leg> step when it fails red. The step's return value is the DO's LegResult. */
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
-  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean }, planned: PlannedLeg,
+  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean; image?: string }, planned: PlannedLeg,
 ): Promise<LegRunResult> {
   return runLegStep(
     { do: (name, config, fn) => step.do(name, config, fn) },

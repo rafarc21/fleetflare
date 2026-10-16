@@ -20,6 +20,8 @@ export interface GateLegRequest {
   pr: string;
   /** The leg's own deadline in minutes. Absent means the default (25). */
   timeoutMin?: number;
+  /** The run's image key (#1066), a lookup into the operator's images map. Absent means the default. */
+  image?: string;
 }
 
 /** No token field, no URL field: the R2 keys below are plain keys, not
