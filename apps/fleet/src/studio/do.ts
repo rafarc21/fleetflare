@@ -5836,6 +5836,20 @@ export function opsFileFetcher(
     fetchFile(await mint(env, opsRepo, { permissions: { contents: "read" } }), opsRepo, path, ref);
 }
 
+/** Issue #1142, item 5: the env a StudioDO boots with before its constructor's
+ *  storage read resolves. Same shape as studioEnvVars, but the Claude token is
+ *  the empty string, never the mapped account token: a read failure must not
+ *  boot an OSS studio on a Claude account. Issue #1142 review F3: "" is a set
+ *  variable, so the container still boots — with no Claude credential, and the
+ *  lead comes up unauthenticated. Follow-up (not in this PR): refuseStart should
+ *  re-derive the launch from storage before any start when the constructor's
+ *  read failed. The placeholder only lives until that read resolves. */
+export function placeholderEnvVars(
+  env: Env, studioId: string, spawnToken: string,
+): Record<string, string> {
+  return { ...studioEnvVars(env, studioId, spawnToken), CLAUDE_CODE_OAUTH_TOKEN: "" };
+}
+
 export class StudioDO extends Sandbox<Env> {
   /** Issue #136: one wake in flight per studio — see singleFlightWake (wake.ts). */
   private wakeLock = { busy: false };
@@ -5846,11 +5860,13 @@ export class StudioDO extends Sandbox<Env> {
    *  which is what makes calling it from a field initializer possible at all.
    *
    *  This value is a placeholder with a lifetime of microseconds: the
-   *  constructor below replaces it with the PERSISTED token before this DO
-   *  can serve anything. It survives only if that storage read itself fails,
-   *  which is why it is a real token shape rather than an empty string —
-   *  bring-up must never see an unset variable. */
-  envVars = studioEnvVars(this.env, this.ctx.id.name ?? "studio", mintSpawnToken());
+   *  constructor below replaces it with the PERSISTED launch before this DO
+   *  can serve anything. It survives only if that storage read itself fails.
+   *  Issue #1142, item 5: its Claude token is "" (placeholderEnvVars), never a
+   *  mapped account token — a read failure must not boot a router-led studio
+   *  on Claude. Review F3: "" still boots the container without a credential
+   *  (the lead comes up unauthenticated); it is not a refused launch. */
+  envVars = placeholderEnvVars(this.env, this.ctx.id.name ?? "studio", mintSpawnToken());
 
   /**
    * Task 6 (ruling 2): load the STORED spawn token into `this.envVars` before
@@ -7113,7 +7129,10 @@ export class StudioDO extends Sandbox<Env> {
       // old account over the failover's. Re-derive both from the new name.
       onSwitched: async (name: string) => {
         const spawnToken = await loadOrMintSpawnToken(this.ctx.storage);
-        ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, this.selfId(), spawnToken, name));
+        // Issue #1142, item 1: the row's leadType rides along, so a glm-led row
+        // keeps the router env whatever account name a switch reports.
+        const row = await this.ctx.storage.get<StudioStatus>(STATUS_KEY);
+        ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, this.selfId(), spawnToken, name, row?.leadType));
       },
       relaunch: async () => {
         const roleEnv = (await this.ctx.storage.get<RoleEnv | StudioEnv>(ROLE_ENV_KEY)) ?? null;

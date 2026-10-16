@@ -12,6 +12,7 @@
     "bunLaneRoot": "apps/fleet",
     "vitestCmd": "cd apps/fleet && bun run test --shard={i}/{n}",
     "vitestShards": 8,
-    "pathRules": ["apps/fleet/**", "skills/**", "fleet/blueprint/**", "scripts/**", "package.json", "gates/**", "fleet.json"]
+    "pathRules": ["apps/fleet/**", "skills/**", "fleet/blueprint/**", "scripts/**", "package.json", "gates/**", "fleet.json"],
+    "bundle": true
   }
 }

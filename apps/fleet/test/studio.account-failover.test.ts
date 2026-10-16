@@ -8,7 +8,7 @@ import {
 import {
   detectRateLimitModal, paneCaptureCmd, accountSwitchCmd, runAccountFailover, FLEET_TOKEN_ENV,
   exhaustedMessage, RATE_LIMIT_HEADLINES, RATE_LIMIT_MODAL_MARKERS, FLAP_GUARD_MINUTES,
-  PANE_CAPTURE_MARKER, MODAL_TAIL_LINES, deadAccountScrollbackCmd, type FailoverDeps,
+  PANE_CAPTURE_MARKER, MODAL_TAIL_LINES, deadAccountScrollbackCmd, type FailoverDeps, MEMBERS_TICKING_KEY,
 } from "../src/studio/failover";
 import { STATUS_KEY, OPERATION_KEY, OPERATION_STALE_MS, type StudioStorage } from "../src/studio/provision";
 import { syncSessionCycle, launchFields, recordLaunchedAccount, StudioDO } from "../src/studio/do";
@@ -2625,5 +2625,97 @@ describe("runAccountFailover — the in-memory start config follows a completed 
     // it, with nobody there to retry `--force` by hand.
     expect(destroyStudio).toHaveBeenCalledWith(false, false, true, true);
     expect(outcome).toEqual(REFUSAL);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1142, item 1 — a glm-led row (kimi/deepseek are stored as glm too)
+// runs its lead on the fleet LLM router with no Claude OAuth token. Failover
+// moves Claude accounts; for a glm row there is no account to move, so a
+// Claude limit modal on its pane must never produce a switch.
+// ---------------------------------------------------------------------------
+
+describe("runAccountFailover — a glm-led row never switches to a Claude account (#1142 item 1)", () => {
+  it("skips a glm row even when its pane shows the Claude limit modal: no switch exec, no relaunch, no record", async () => {
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(MODAL_PANE),
+      initial: { id: STUDIO_ID, state: "running", leadType: "glm" } as StudioStatus,
+    });
+    const out = await run(h);
+    expect(out.kind).toBe("skipped");
+    expect(h.execs).not.toContain(accountSwitchCmd());
+    expect(h.relaunches).toBe(0);
+    expect(h.recorded).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1142 review (F1) — the glm early return used to sit BEFORE the
+// pane capture, so a router-led row never ran the members-ticking write, the
+// stale-LIMIT clear, or any other working-branch bookkeeping.
+// ---------------------------------------------------------------------------
+
+const GLM_PANEL_RULE = "────────────────────────────────────────────────────────────────";
+/** A working lead with two agent-panel rows under the footer. The panel's
+ *  timers tick between captures; the lead itself does not move. */
+const glmPanel = (elapsed: string) => [
+  "⏺ Dispatched 2 subagents. Still going.",
+  "",
+  "✻ Waiting for 2 background agents",
+  "",
+  GLM_PANEL_RULE,
+  "❯ ",
+  GLM_PANEL_RULE,
+  "  ⏵⏵ bypass permissions on · ← for agents",
+  `● Agent one · working · ${elapsed}`,
+  `● Agent two · working · ${elapsed}`,
+].join("\n");
+
+const FOUR_ACCOUNTS: ClaudeAccount[] = [
+  { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 },
+  { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 },
+  { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 },
+  { name: "CLAUDE_CODE_OAUTH_TOKEN_4", token: "sk-ant-oat01-" + "d".repeat(40) },
+];
+
+describe("glm-led row keeps working-branch bookkeeping (#1142 review F1)", () => {
+  it("a ticking agent panel on a glm row still records MEMBERS_TICKING_KEY", async () => {
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(glmPanel("1m 15s"), glmPanel("1m 18s")),
+      initial: status({ leadType: "glm" }),
+    });
+    await run(h);
+    const ticking = await (h.storage as unknown as { get(k: string): Promise<unknown> }).get(MEMBERS_TICKING_KEY);
+    expect(ticking).toBe(NOW.toISOString());
+  });
+
+  it("a stale rateLimited flag on a glm row with a clean pane is cleared", async () => {
+    const seenAt = NOW.toISOString();
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(IDLE_PANE),
+      initial: status({ leadType: "glm", rateLimited: { until: null, seenAt } }),
+    });
+    await run(h);
+    expect(h.recorded.length).toBeGreaterThan(0);
+    expect(h.recorded.at(-1)!.rateLimited).toBeNull();
+  });
+
+  it("a glm row carrying a borrowedAccount never hands a Claude token back to its primary", async () => {
+    const h = harness({
+      accounts: FOUR_ACCOUNTS,
+      pane: captured(IDLE_PANE),
+      primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      primaryIsMapped: true,
+      initial: status({
+        leadType: "glm", claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
+        borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
+      }),
+    });
+    const out = await run(h);
+    expect(out.kind).not.toBe("returned");
+    expect(h.execs).not.toContain(accountSwitchCmd());
   });
 });

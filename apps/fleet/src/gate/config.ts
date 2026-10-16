@@ -72,6 +72,9 @@ export interface GateConfig {
   bunLaneRoot?: string;
   /** Lane file globs, relative to bunLaneRoot. Absent means the lane's default set. */
   bunLaneGlobs?: string[];
+  /** #1080: the repo opts into the one-bundle-per-run path. Absent means off: the legs clone. Opt in only
+   *  when no leg reads git history beyond what a snapshot holds (see docs/operations.md). */
+  bundle?: boolean;
   /** The block's image key (#1066). Absent means DEFAULT_GATE_IMAGE at run time. */
   image?: string;
 }
@@ -81,7 +84,8 @@ function isStringArray(v: unknown): v is string[] {
 }
 
 function isReservedLegName(name: string): boolean {
-  return name === "merge-tree" || /^bun-\d+$/.test(name) || /^vitest-\d+$/.test(name);
+  // "bundle" is the #1080 bundle step's leg: its result key is shard-bundle.json, so a block leg of that name would share it.
+  return name === "merge-tree" || name === "bundle" || /^bun-\d+$/.test(name) || /^vitest-\d+$/.test(name);
 }
 
 /** The block's `legs`, normalised to { name, cmd, timeoutMin? }. Each entry is a
@@ -124,6 +128,7 @@ export function parseGateBlock(block: unknown): GateConfig | null {
   if (typeof bunShards !== "number" || !Number.isInteger(bunShards) || bunShards < 1) return null;
   if (g.bunLaneRoot !== undefined && (typeof g.bunLaneRoot !== "string" || g.bunLaneRoot === "")) return null;
   if (g.bunLaneGlobs !== undefined && !isStringArray(g.bunLaneGlobs)) return null;
+  if (g.bundle !== undefined && typeof g.bundle !== "boolean") return null;
   // Bun shards only take cap room when the block has a bun lane. A vitest
   // lane, when configured, needs at least one shard of room.
   const bunLegs = g.bunLaneRoot === undefined ? 0 : bunShards;
@@ -139,7 +144,18 @@ export function parseGateBlock(block: unknown): GateConfig | null {
   return {
     install: g.install, legs, vitestCmd: g.vitestCmd, pathRules: g.pathRules, vitestShards, bunShards,
     bunLaneRoot: g.bunLaneRoot, bunLaneGlobs: g.bunLaneGlobs, ...(image === undefined ? {} : { image }),
+    ...(g.bundle === true ? { bundle: true } : {}),
   };
+}
+
+/** #1080: whether a run's legs may read the one-bundle snapshot. Every block that
+ *  runs legs must opt in (a PR that changes fleet.json runs both the base's and the
+ *  head's legs). A null or absent block runs no legs and does not count. No block
+ *  at all is never an opt-in. A repo whose legs read git history stays off until
+ *  range parity exists (docs/operations.md). */
+export function bundleOptedIn(blocks: (GateConfig | null | undefined)[]): boolean {
+  const present = blocks.filter((b): b is GateConfig => b !== null && b !== undefined);
+  return present.length > 0 && present.every((b) => b.bundle === true);
 }
 
 /** The raw `gates[repo]` entry from the fleet repo's fleet.json, matched

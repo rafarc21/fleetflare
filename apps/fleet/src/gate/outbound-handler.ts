@@ -45,6 +45,51 @@ const SEG = "[A-Za-z0-9._-]+";
 // Baselines: `<owner>/<repo>/baselines/<sha>-<lockhash>.tar` (baseline.ts baselineTarballKey).
 const RUN_RESULT_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/shard-[a-z0-9-]+(@head)?(\\.retry)?\\.json$`);
 const BASELINE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/baselines/(${SEG})\\.tar$`);
+// #1080: one git bundle per run, `gate-bundles/<owner>/<repo>/<runId>/<headSha>.bundle`.
+// Only the bundle leg may write it (bundleWriter); every other leg reads its own run's.
+const BUNDLE_RE = new RegExp(`^gate-bundles/(${SEG})/(${SEG})/(${SEG})/([0-9a-f]{40})\\.bundle$`);
+/** The largest snapshot the bundle leg may upload (#1080 HIGH 1). The Worker streams
+ *  it to R2 and never holds it whole, so this bounds storage and transfer, not memory.
+ *  Same value as BUNDLE_MAX_BYTES in container/gate-server.ts. Above it the bundle leg
+ *  uploads nothing and every leg clones, so a big repo costs time, never a wrong
+ *  verdict. Provisional until sized from a measured large repo. */
+export const MAX_BUNDLE_BYTES = 256 * 1024 * 1024;
+
+/** A bundle body whose bytes disagree with its declared length. */
+export class BundleBodyError extends Error {
+  constructor(readonly status: 400 | 413, message: string) {
+    super(message);
+  }
+}
+
+/** Passes the body through, and fails it when its bytes stop matching `declared`.
+ *  R2 stores only a stream of known length, so in the Workers runtime the body
+ *  goes through FixedLengthStream, which carries that length and fails a body
+ *  that disagrees with it (real R2, test/gate-bundle-r2.test.ts). The counting
+ *  TransformStream below is the Bun test runtime's stand-in, where no such class exists. */
+export function lengthChecked(body: ReadableStream<Uint8Array> | null, declared: number): ReadableStream<Uint8Array> {
+  const source = body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() });
+  // Read off globalThis: the Bun-typed project declares no FixedLengthStream, and Bun has none at runtime.
+  const FixedLength = (globalThis as { FixedLengthStream?: new (length: number) => TransformStream<Uint8Array, Uint8Array> }).FixedLengthStream;
+  if (FixedLength !== undefined) {
+    const fixed = new FixedLength(declared);
+    // A body that disagrees with its length errors both sides of this pipe. R2 reports the refusal on the
+    // readable side (putBundle answers 400), so this rejection is that same event: handled here, not left unhandled.
+    source.pipeTo(fixed.writable).catch(() => {});
+    return fixed.readable;
+  }
+  let seen = 0;
+  return source.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, ctl) {
+      seen += chunk.byteLength;
+      if (seen > declared) ctl.error(new BundleBodyError(413, "body longer than declared"));
+      else ctl.enqueue(chunk);
+    },
+    flush(ctl) {
+      if (seen !== declared) ctl.error(new BundleBodyError(400, "body shorter than declared"));
+    },
+  }));
+}
 
 export interface OutboundTarget {
   bucket: "STUDIO_ARCHIVE";
@@ -58,13 +103,14 @@ export interface OutboundTarget {
 export function resolveOutboundTarget(path: string): OutboundTarget | null {
   const key = path.replace(/^\/+/, "");
   if (key.split("/").some((seg) => seg === "." || seg === "..")) return null;
-  if (RUN_RESULT_RE.test(key) || BASELINE_RE.test(key)) return { bucket: "STUDIO_ARCHIVE", key };
+  if (RUN_RESULT_RE.test(key) || BASELINE_RE.test(key) || BUNDLE_RE.test(key)) return { bucket: "STUDIO_ARCHIVE", key };
   return null;
 }
 
 /** The container may write its own leg's result, never a baseline. A baseline
  *  is what every later PR's gate restores from, so PR code that could write one
- *  could poison every later verdict. */
+ *  could poison every later verdict. A bundle is written only through its own
+ *  PUT path above (bundleWriter), never here. */
 function isWritableByContainer(key: string): boolean {
   return RUN_RESULT_RE.test(key);
 }
@@ -76,7 +122,7 @@ export interface OutboundBucket {
   head(key: string): Promise<{ size: number } | null>;
   put(
     key: string,
-    value: ArrayBuffer,
+    value: ArrayBuffer | ReadableStream<Uint8Array>,
     opts?: { onlyIf?: { etagDoesNotMatch?: string } },
   ): Promise<unknown | null>;
 }
@@ -91,6 +137,10 @@ export interface GateOutboundProps {
   resultKey: string;
   repo?: string;
   gitToken?: string;
+  /** #1080: this run's bundle key. The only bundle key this container may read. */
+  bundleKey?: string;
+  /** #1080: set on the bundle leg alone. It may PUT `bundleKey`, and no other key. */
+  bundleWriter?: boolean;
 }
 
 /** The Worker's side of the git proxy: the upstream fetch. Injected so the
@@ -292,6 +342,46 @@ async function handleGitProxy(
   }
 }
 
+/** #1080 HIGH 1: a bundle is streamed to R2. It must declare its length, so the cap
+ *  is checked before any byte is read, and the bytes are checked against that length
+ *  as they pass. Never buffered whole. */
+async function putBundle(req: Request, bucket: OutboundBucket, key: string): Promise<Response> {
+  // The body is read through one explicit reader, so a refusal can cancel the
+  // request stream itself. Cancelling the piped output does not reach it (Bun, and
+  // the Workers runtime alike), and an unread body would hold the container's upload open.
+  const reader = req.body?.getReader();
+  const refuse = async (status: number, message: string) => {
+    await reader?.cancel().catch(() => {});
+    return new Response(message, { status });
+  };
+  const header = req.headers.get("content-length");
+  if (header === null || !/^\d+$/.test(header)) return refuse(411, "length required");
+  const declared = Number(header);
+  if (declared > MAX_BUNDLE_BYTES) return refuse(413, "too large");
+  const source = reader === undefined ? null : new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const part = await reader.read();
+      if (part.done) controller.close();
+      else controller.enqueue(part.value);
+    },
+    // A cancel from the length check (or a refusal) reaches the request stream.
+    cancel: (reason) => reader.cancel(reason),
+  });
+  try {
+    // write-once, as for a result key: a bundle is created once per run, never replaced.
+    const stored = await bucket.put(key, lengthChecked(source, declared), { onlyIf: { etagDoesNotMatch: "*" } });
+    if (stored === null) return refuse(412, "already written");
+    return new Response(null, { status: 201 });
+  } catch (err) {
+    if (err instanceof BundleBodyError) return refuse(err.status, err.message);
+    // R2 refused the stream: a body that disagrees with its declared length. Nothing is stored; the leg clones.
+    if (err instanceof TypeError || err instanceof Error && /length/i.test(err.message)) {
+      return refuse(400, `bundle body rejected: ${(err as Error).message}`);
+    }
+    throw err;
+  }
+}
+
 /** Serves one plain container request. Every branch either uses the bucket for
  *  an allow-listed key or returns a status without touching it. A PUT needs
  *  props whose resultKey equals the requested key exactly; missing props deny
@@ -308,6 +398,9 @@ export async function handleGateOutbound(
 
   const target = resolveOutboundTarget(url.pathname);
   if (!target) return new Response("forbidden", { status: 403 });
+  const isBundle = BUNDLE_RE.test(target.key);
+  // #1080: a bundle is read only by the run it was built for, and written only by its bundle leg.
+  if (isBundle && props?.bundleKey !== target.key) return new Response("forbidden", { status: 403 });
 
   if (req.method === "GET") {
     const obj = await bucket.get(target.key);
@@ -322,6 +415,10 @@ export async function handleGateOutbound(
   }
 
   if (req.method === "PUT") {
+    if (isBundle) {
+      if (!props?.bundleWriter) return new Response("forbidden", { status: 403 });
+      return putBundle(req, bucket, target.key);
+    }
     if (!isWritableByContainer(target.key)) return new Response("forbidden", { status: 403 });
     if (!props?.resultKey || props.resultKey !== target.key) return new Response("forbidden", { status: 403 });
     const declared = Number(req.headers.get("content-length") ?? "0");

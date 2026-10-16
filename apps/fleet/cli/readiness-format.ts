@@ -163,6 +163,38 @@ export function ageSeconds(iso: string, now: Date): number {
   return Number.isNaN(at) ? 0 : Math.max(0, Math.floor((now.getTime() - at) / 1000));
 }
 
+/** Issue #1142, item 2 (the issue #911 ask), review F2: how long a lead must have
+ *  been working before silence means anything. A turn that started seconds ago
+ *  has not logged its first call yet (anthropic-route logs at completion). */
+export const INFER_SILENT_MIN_WORKING_MS = 5 * 60 * 1000;
+
+/**
+ * Issue #1142, item 2: a router-led row (glm, which kimi/deepseek are stored as
+ * too) whose lead reads "working" yet made ZERO router calls in the INFER window
+ * — the lead claims progress the router never saw. Reads the same gate fleet ls
+ * ACTIVITY reads (leadGate: a limit, a replaced row, or a stopped one is never
+ * "working"), the same freshness rule the --json `lead` field applies (a stale
+ * mirror is never "working"), and a working run long enough to have logged a
+ * call. `usageKnown` is whether the usage map answered at all: an absent answer
+ * is no data, never 0, so it can never flag. Claude-led and idle rows are never
+ * silent.
+ */
+export function isLeadInferenceSilent(
+  status: StudioStatus,
+  u: LeadInferUsage | undefined,
+  usageKnown: boolean,
+  now: Date,
+): boolean {
+  if (!usageKnown || status.leadType !== "glm") return false;
+  if (leadGate(status, now).kind !== "activity") return false;
+  const activity = status.observed?.activity;
+  if (activity?.state !== "working") return false;
+  if (ageSeconds(activity.observedAt, now) > ACTIVITY_MIRROR_STALE_SECONDS) return false;
+  const sinceMs = Date.parse(activity.since);
+  if (!Number.isFinite(sinceMs) || now.getTime() - sinceMs < INFER_SILENT_MIN_WORKING_MS) return false;
+  return (u?.calls ?? 0) === 0;
+}
+
 /**
  * Issue #1146: what the bare-container auto-heal is doing about a replaced
  * container, for the READY column. `pending` until a heal arms for THIS
@@ -203,7 +235,8 @@ const AUTO_HEAL_RUNNING_WINDOW_MS = 25 * 60_000;
 
 /**
  * Issue #85 — READY overrides, `state: "running"` only, first match wins:
- * replaced -> unreachable -> unverified -> null (render today's formatReady).
+ * replaced -> unreachable -> mismatch (#911/#1142) -> unverified -> null (render
+ * today's formatReady).
  * A stopped or provisioning studio (the operation lock — #86/#87) never
  * gets an override: a bring-up in flight has no token yet, and a stopped
  * studio renders exactly as today. Maestro correction #11: `unreachable`
@@ -216,11 +249,6 @@ export function readyOverride(status: StudioStatus, now: Date): string | null {
   const observed = status.observed;
   if (observed?.replacedAt != null) {
     return `bare: replaced ${formatAge(ageSeconds(observed.replacedAt, now))} — auto-heal ${autoHealState(status, observed.replacedAt, now)}`;
-  }
-  // Issue #911: a glm lead recorded on a Claude account burns Claude quota and
-  // stalls on its limit. Surfaced here so fleet ls shows it, not just the row.
-  if (leadAccountMismatch(status)) {
-    return `lead on wrong account (${status.launchedAccount}) — glm lead on Claude; recycle to put it back on glm`;
   }
   // Board issue #183 — replaces the old fixed `execFailures >= 3` gate
   // (issue #85 PR1, review round 3 MUST-FIX 7) with the maestro's own
@@ -241,6 +269,14 @@ export function readyOverride(status: StudioStatus, now: Date): string | null {
       ? "loses everything unshipped (no snapshot on file)"
       : `loses work since snap ${formatAge(ageSeconds(lastSnapshotAt, now))}`;
     return `unreachable ${formatAge(ageSeconds(observed.unreachableSince, now))} — wedged; recycle ${cost}`;
+  }
+  // Issue #911: a router-led lead recorded on a Claude account burns Claude
+  // quota and stalls on its limit. Surfaced here so fleet ls shows it, not
+  // just the row. Issue #1142, item 3: below "unreachable", so a wedged row's
+  // recycle cost is never hidden behind this line. Wording is router-neutral:
+  // kimi/deepseek rows are stored glm too, so "glm" named the wrong lead.
+  if (leadAccountMismatch(status)) {
+    return `lead on wrong account (${status.launchedAccount}) — router lead on Claude; recycle to put it back on the router`;
   }
   const checkedAt = status.readiness?.checkedAt;
   if (checkedAt != null) {
