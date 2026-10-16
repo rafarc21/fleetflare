@@ -1,5 +1,15 @@
 import { describe, it, expect, afterEach, beforeEach, spyOn } from "bun:test";
-import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, runGate, formatMs, legLines, type GateStatusResponse } from "../../cli/gate";
+import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, runGate, formatMs, legLines, gateStartLine, type GateStatusResponse } from "../../cli/gate";
+
+// #1085 (refs #715): the start line says whether the run was reattached or fresh.
+describe("gateStartLine: reattached to a live run vs a fresh run (#1085)", () => {
+  it("reused (a live run of the sha) -> reattached to live run", () => {
+    expect(gateStartLine({ runId: "run-1", reused: true }, 7)).toBe("gate-start: reattached to live run run-1 for PR #7");
+  });
+  it("not reused (a fresh run) -> started fresh run", () => {
+    expect(gateStartLine({ runId: "run-2", reused: false }, 7)).toBe("gate-start: started fresh run run-2 for PR #7");
+  });
+});
 
 describe("gateWatchExitCode", () => {
   it("success -> 0", () => {
@@ -212,7 +222,7 @@ describe("runGate prints one line per leg after the verdict (#1049)", () => {
     }
     expect(code).toBe(1);
     expect(logs).toEqual([
-      "gate-start: run run-1 started for PR #7",
+      "gate-start: started fresh run run-1 for PR #7",
       "gate: failure — 1/2 green; red: vitest-1 (run 01234567)",
       ...legLines(status),
     ]);

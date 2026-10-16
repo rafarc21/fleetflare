@@ -2,13 +2,14 @@
 // src/studio/routes.ts's handleStudio, same Access-gated lane as
 // /studio/models — this module carries no auth of its own, same posture
 // handleModelsRoute's own header states. /start reads the PR's head sha (one
-// token mint) and starts the run keyed by that sha (#1072), so a manual run of
-// a sha the auto-run already started reuses it. /status reads the Workflow
+// token mint) and starts the run keyed by that sha (#1072): a manual run of a
+// sha with a live run reattaches to it, and a finished one starts a fresh run
+// (#1085). /status reads the Workflow
 // binding's OWN native instance-status API, not a second GitHub read.
 import type { Env } from "../env";
 import { getPullRequestHeadSha } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
-import { startGateRun, type GateRunParams } from "./auto-run";
+import { startManualGateRun, type GateRunParams } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import { isGateRunnerRepo } from "./config";
 
@@ -42,7 +43,7 @@ export async function handleGateRoute(
       return j({ error: "gate runner not enabled for this repo" }, 404);
     }
     const headSha = await headShaOf(body.repo, body.pr);
-    const run = await startGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha }, d1RunIndex(env.DB));
+    const run = await startManualGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha }, d1RunIndex(env.DB));
     return j({ started: true, runId: run.runId, reused: run.reused });
   }
 

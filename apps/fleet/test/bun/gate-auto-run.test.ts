@@ -6,7 +6,7 @@
 // at the boundary; the decisions themselves are pure.
 import { describe, it, expect } from "bun:test";
 import {
-  autoRunPullRequest, gateRunId, pullRequestAutoRun, startGateRun,
+  autoRunPullRequest, gateRunId, pullRequestAutoRun, startGateRun, startManualGateRun,
   type GateRunIndex, type GateRunInstance, type GateRunRecord, type GateRunStarter, type PullRequestAutoRun,
 } from "../../src/gate/auto-run";
 import type { FleetJsonReader } from "../../src/gate/load-config";
@@ -229,6 +229,104 @@ describe("startGateRun: a new head sha ends the still-live run of the sha it rep
     await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
     await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: BASE }, index);
     expect(terminated).toEqual([]);
+  });
+});
+
+// #1085 (refs #715): a manual start (`fleet gate run`, /studio/gate/start)
+// reattaches ONLY to a live run of the sha. A finished run of that sha gets a
+// fresh instance under a new id, so a rerun after base drift or an infra flake
+// is possible without a new push. The auto-run on push keeps dedupe-by-sha.
+describe("startManualGateRun: reattach to a live run, start fresh after a finished one (#1085)", () => {
+  const T1 = 1_700_000_000_000;
+  const T2 = T1 + 60_000;
+  const LIVE_STATUSES = ["queued", "running", "paused", "waiting"];
+  const FINISHED_STATUSES = ["complete", "errored", "terminated"];
+
+  it("the first manual start creates the run under the sha's id, like the auto-run", async () => {
+    const { wf, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const out = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    expect(out).toEqual({ runId: await gateRunId(PR_REPO, HEAD), reused: false, supersededRunId: undefined });
+    expect(creates).toEqual([{ id: out.runId, params: { repo: PR_REPO, pr: 7 } }]);
+  });
+
+  for (const status of LIVE_STATUSES) {
+    it(`a start while the sha's run is ${status} reattaches: creates nothing, reused`, async () => {
+      const { wf, runs, creates } = fakeWorkflow();
+      const { index } = fakeIndex();
+      const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+      runs.get(first.runId)!.status = status;
+      const second = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2);
+      expect(second).toEqual({ runId: first.runId, reused: true });
+      expect(creates).toHaveLength(1);
+    });
+  }
+
+  for (const status of FINISHED_STATUSES) {
+    it(`a start after the sha's run is ${status} starts a fresh run under a new id, not the cached one`, async () => {
+      const { wf, runs, creates } = fakeWorkflow();
+      const { index } = fakeIndex();
+      const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+      runs.get(first.runId)!.status = status;
+      const fresh = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2);
+      const expectedId = `${first.runId}-r${T2.toString(36)}`;
+      expect(fresh).toEqual({ runId: expectedId, reused: false, supersededRunId: undefined });
+      expect(creates.at(-1)).toEqual({ id: expectedId, params: { repo: PR_REPO, pr: 7 } });
+      expect(runs.get(expectedId)!.status).toBe("running");
+    });
+  }
+
+  it("the fresh run is recorded as the PR's latest, so the next manual start reattaches to it", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index, heads } = fakeIndex();
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    runs.get(first.runId)!.status = "complete";
+    const fresh = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2);
+    expect(heads.get(`${PR_REPO}#7`)).toEqual({ headSha: HEAD, runId: fresh.runId });
+    const again = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2 + 1);
+    expect(again).toEqual({ runId: fresh.runId, reused: true });
+  });
+
+  it("a rerun after a finished one gets a new id each time: the second fresh run is not the first", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    runs.get(first.runId)!.status = "complete";
+    const second = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2);
+    runs.get(second.runId)!.status = "errored";
+    const third = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2 + 1);
+    expect(new Set([first.runId, second.runId, third.runId]).size).toBe(3);
+    expect(runs.size).toBe(3);
+  });
+
+  it("a finished run of the sha, superseded by a newer sha, still gets a fresh run for the old sha", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    runs.get(first.runId)!.status = "complete";
+    await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index, () => T1);
+    const rerun = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2);
+    expect(rerun.reused).toBe(false);
+    expect(rerun.runId).toBe(`${first.runId}-r${T2.toString(36)}`);
+  });
+
+  it("a create that fails for any reason but an existing id rethrows, and nothing is recorded", async () => {
+    const { wf } = fakeWorkflow({ createError: new Error("workflow quota exceeded") });
+    const { index, heads } = fakeIndex();
+    await expect(startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1))
+      .rejects.toThrow("workflow quota exceeded");
+    expect(heads.size).toBe(0);
+  });
+
+  it("the auto-run on push still reuses a finished run of the same sha (dedupe-by-sha unchanged)", async () => {
+    const { wf, runs, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    runs.get(first.runId)!.status = "complete";
+    const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(again).toEqual({ runId: first.runId, reused: true });
+    expect(creates).toHaveLength(2);
+    expect(runs.size).toBe(1);
   });
 });
 
