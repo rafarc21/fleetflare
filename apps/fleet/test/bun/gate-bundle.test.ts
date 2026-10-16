@@ -4,8 +4,8 @@
 import { describe, it, expect } from "bun:test";
 import { bundleKeyFor, planBundleLeg, type PlannedLeg } from "../../src/gate/fanout";
 import { BUNDLE_LEG, buildLegEnvVars, gateOutboundProps } from "../../src/gate/leg-env";
-import { bundleStepEnabled, legRequest, runBundleStep, type BundleStepRunner } from "../../src/gate/leg-run";
-import { parseLegs } from "../../src/gate/config";
+import { bundleStepEnabled, bundleWanted, legRequest, runBundleStep, type BundleStepRunner } from "../../src/gate/leg-run";
+import { bundleOptedIn, parseGateBlock, parseLegs } from "../../src/gate/config";
 import {
   GATE_R2_HOST,
   MAX_BUNDLE_BYTES,
@@ -316,5 +316,91 @@ describe("the merge base rides with the bundle key, and only then (#1080 HIGH 1)
   it("legRequest with no bundle carries no merge base", () => {
     const req = legRequest("acme", "example", LEG, { baseRef: "main", pr: "7", private: false });
     expect(req.mergeBase).toBeUndefined();
+  });
+});
+
+describe("per-repo opt-in: bundle: true in the gate block (#1080 maestro decision)", () => {
+  const block = (extra: Record<string, unknown> = {}) => ({ install: "bun install", legs: ["lint"], pathRules: ["src/**"], ...extra });
+
+  it("a gate block with no bundle key parses with no opt-in", () => {
+    expect(parseGateBlock(block())?.bundle).toBeUndefined();
+  });
+
+  it("bundle: true parses to an opt-in", () => {
+    expect(parseGateBlock(block({ bundle: true }))?.bundle).toBe(true);
+  });
+
+  it("a non-boolean bundle is a malformed block, never a silent opt-in", () => {
+    expect(parseGateBlock(block({ bundle: "yes" }))).toBeNull();
+    expect(parseGateBlock(block({ bundle: 1 }))).toBeNull();
+  });
+
+  it("the bundle is used only when every block that runs legs opts in", () => {
+    const on = parseGateBlock(block({ bundle: true }));
+    const off = parseGateBlock(block());
+    expect(bundleOptedIn([on, on])).toBe(true);
+    expect(bundleOptedIn([on, off])).toBe(false);
+    expect(bundleOptedIn([off, on])).toBe(false);
+    expect(bundleOptedIn([null, on])).toBe(true);
+    expect(bundleOptedIn([undefined, off])).toBe(false);
+    expect(bundleOptedIn([null, null])).toBe(false);
+    expect(bundleOptedIn([])).toBe(false);
+  });
+
+  it("a repo without the opt-in clones as today, even with GATE_BUNDLE on", () => {
+    const off = parseGateBlock(block());
+    expect(bundleWanted("1", [off, off])).toBe(false);
+    expect(bundleWanted("1", [null, off])).toBe(false);
+  });
+
+  it("GATE_BUNDLE off is the fleet-wide kill switch, even for an opted-in repo", () => {
+    const on = parseGateBlock(block({ bundle: true }));
+    expect(bundleWanted(undefined, [on, on])).toBe(false);
+    expect(bundleWanted("0", [on, on])).toBe(false);
+  });
+
+  it("both switches on turns the bundle step on", () => {
+    const on = parseGateBlock(block({ bundle: true }));
+    expect(bundleWanted("1", [on, on])).toBe(true);
+  });
+});
+
+describe("a refused bundle upload cancels its request body (#1080 LOW)", () => {
+  /** A request body still open when the bucket refuses it, as a container mid-upload
+   *  is. It records whether anything cancelled it. A closed body has nothing to cancel. */
+  function watchedBody(text: string) {
+    const watch = { cancelled: false };
+    const body = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(new TextEncoder().encode(text)); },
+      cancel() { watch.cancelled = true; },
+    });
+    return { body, watch };
+  }
+
+  /** A bucket that refuses every put, as R2 does for a key already written (412). It never reads the stream. */
+  const refusingBucket: OutboundBucket = {
+    async get() { return null; },
+    async head() { return null; },
+    async put() { return null; },
+  };
+
+  it("a 412 (key already written) cancels the request body", async () => {
+    const { body, watch } = watchedBody("PACK");
+    const req = new Request(`https://${GATE_R2_HOST}/${BUNDLE_KEY}`, {
+      method: "PUT", body, headers: { "content-length": "4" }, duplex: "half",
+    } as RequestInit);
+    const res = await handleGateOutbound(req, refusingBucket, BUILDER_PROPS);
+    expect(res.status).toBe(412);
+    expect(watch.cancelled).toBe(true);
+  });
+
+  it("a 413 (declared length over the cap) cancels the request body without reading it", async () => {
+    const { body, watch } = watchedBody("PACK");
+    const req = new Request(`https://${GATE_R2_HOST}/${BUNDLE_KEY}`, {
+      method: "PUT", body, headers: { "content-length": String(MAX_BUNDLE_BYTES + 1) }, duplex: "half",
+    } as RequestInit);
+    const res = await handleGateOutbound(req, refusingBucket, BUILDER_PROPS);
+    expect(res.status).toBe(413);
+    expect(watch.cancelled).toBe(true);
   });
 });

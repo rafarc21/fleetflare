@@ -72,6 +72,8 @@ export interface GateConfig {
   bunLaneGlobs?: string[];
   /** The block's image key (#1066). Absent means DEFAULT_GATE_IMAGE at run time. */
   image?: string;
+  /** #1080: opt-in to the one-bundle-per-run path. Absent or false: every leg clones. */
+  bundle?: boolean;
 }
 
 function isStringArray(v: unknown): v is string[] {
@@ -135,10 +137,22 @@ export function parseGateBlock(block: unknown): GateConfig | null {
     if (typeof g.image !== "string" || !GATE_IMAGES.has(g.image)) return null;
     image = g.image;
   }
+  if (g.bundle !== undefined && typeof g.bundle !== "boolean") return null;
   return {
     install: g.install, legs, vitestCmd: g.vitestCmd, pathRules: g.pathRules, vitestShards, bunShards,
     bunLaneRoot: g.bunLaneRoot, bunLaneGlobs: g.bunLaneGlobs, ...(image === undefined ? {} : { image }),
+    ...(g.bundle === true ? { bundle: true } : {}),
   };
+}
+
+/** #1080: whether a run's legs may read the one-bundle snapshot. Every block that
+ *  runs legs must opt in (a PR that changes fleet.json runs both the base's and the
+ *  head's legs). A null or absent block runs no legs and does not count. No block
+ *  at all is never an opt-in. A repo whose legs read git history stays off until
+ *  range parity exists (docs/operations.md). */
+export function bundleOptedIn(blocks: (GateConfig | null | undefined)[]): boolean {
+  const present = blocks.filter((b): b is GateConfig => b !== null && b !== undefined);
+  return present.length > 0 && present.every((b) => b.bundle === true);
 }
 
 /** The raw `gates[repo]` entry from the fleet repo's fleet.json, matched

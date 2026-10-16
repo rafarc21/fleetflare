@@ -340,20 +340,37 @@ async function handleGitProxy(
  *  is checked before any byte is read, and the bytes are checked against that length
  *  as they pass. Never buffered whole. */
 async function putBundle(req: Request, bucket: OutboundBucket, key: string): Promise<Response> {
+  // The body is read through one explicit reader, so a refusal can cancel the
+  // request stream itself. Cancelling the piped output does not reach it (Bun, and
+  // the Workers runtime alike), and an unread body would hold the container's upload open.
+  const reader = req.body?.getReader();
+  const refuse = async (status: number, message: string) => {
+    await reader?.cancel().catch(() => {});
+    return new Response(message, { status });
+  };
   const header = req.headers.get("content-length");
-  if (header === null || !/^\d+$/.test(header)) return new Response("length required", { status: 411 });
+  if (header === null || !/^\d+$/.test(header)) return refuse(411, "length required");
   const declared = Number(header);
-  if (declared > MAX_BUNDLE_BYTES) return new Response("too large", { status: 413 });
+  if (declared > MAX_BUNDLE_BYTES) return refuse(413, "too large");
+  const source = reader === undefined ? null : new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const part = await reader.read();
+      if (part.done) controller.close();
+      else controller.enqueue(part.value);
+    },
+    // A cancel from the length check (or a refusal) reaches the request stream.
+    cancel: (reason) => reader.cancel(reason),
+  });
   try {
     // write-once, as for a result key: a bundle is created once per run, never replaced.
-    const stored = await bucket.put(key, lengthChecked(req.body, declared), { onlyIf: { etagDoesNotMatch: "*" } });
-    if (stored === null) return new Response("already written", { status: 412 });
+    const stored = await bucket.put(key, lengthChecked(source, declared), { onlyIf: { etagDoesNotMatch: "*" } });
+    if (stored === null) return refuse(412, "already written");
     return new Response(null, { status: 201 });
   } catch (err) {
-    if (err instanceof BundleBodyError) return new Response(err.message, { status: err.status });
+    if (err instanceof BundleBodyError) return refuse(err.status, err.message);
     // R2 refused the stream: a body that disagrees with its declared length. Nothing is stored; the leg clones.
     if (err instanceof TypeError || err instanceof Error && /length/i.test(err.message)) {
-      return new Response(`bundle body rejected: ${err.message}`, { status: 400 });
+      return refuse(400, `bundle body rejected: ${(err as Error).message}`);
     }
     throw err;
   }

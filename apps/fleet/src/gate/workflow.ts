@@ -27,7 +27,7 @@ import {
   type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
-import { bundleStepEnabled, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
+import { bundleWanted, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
 import { markRunProgress } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import { infraRerunDecision, recordInfraRerun, rerunStatusArgs, startInfraRerun } from "./infra-rerun";
@@ -162,9 +162,10 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // #1080: one bundle for the run, built by one leg before the others start,
     // so the legs read it instead of each cloning (the clone 429 burst). A bundle
     // that does not build is not a run failure: the legs get no bundle key and
-    // clone, as before.
+    // clone, as before. Off unless GATE_BUNDLE is on AND every block that runs legs
+    // opts in (`bundle: true`): a repo whose legs read git history never gets a snapshot.
     const bundleKey = bundleKeyFor(owner, repoName, event.instanceId, resolved.headSha);
-    const bundled = bundleStepEnabled(this.env.GATE_BUNDLE) && await runBundleStep(
+    const bundled = bundleWanted(this.env.GATE_BUNDLE, [base, head]) && await runBundleStep(
       { do: (name, config, fn) => step.do(name, config, fn) },
       (planned) => {
         const stub = this.env.GATE_RUNNER.get(this.env.GATE_RUNNER.idFromName(gateRunnerName(event.instanceId, planned.leg, crypto.randomUUID())));
