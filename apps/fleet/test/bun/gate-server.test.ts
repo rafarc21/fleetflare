@@ -283,6 +283,21 @@ describe("runGate: every leg tests the merge result", () => {
     expect(r2.puts[0].body).toMatchObject({ state: "failure", description: "lint exited 2" });
   });
 
+  it("a leg result carries the leg's open-file limits and a 32k output tail (live: CF-only failures were cut at 4000 chars)", async () => {
+    const world = fakeWorld();
+    const exec: ExecFn = async (cmd, args, opts) => {
+      if (cmd === "bash" && args[1]?.includes("ulimit -Sn")) return { code: 0, stdout: "1024 1048576\n", stderr: "" };
+      if (cmd === "bash" && args[1] === RUN.legCmd) return { code: 1, stdout: "x".repeat(40_000), stderr: "e".repeat(40_000) };
+      return world.exec(cmd, args, opts);
+    };
+    const r2 = fakeR2();
+    await runGate(RUN, { exec, fetchFn: r2.fn, workdir: workdir() });
+    const body = r2.puts[0].body as { limits?: string; stdout?: string; stderr?: string };
+    expect(body.limits).toBe("1024 1048576");
+    expect(body.stdout?.length).toBe(32_000);
+    expect(body.stderr?.length).toBe(32_000);
+  });
+
   it("writes an error result when a step throws, so no leg ends without one", async () => {
     const exec: ExecFn = async () => { throw new Error("spawn EACCES"); };
     const r2 = fakeR2();

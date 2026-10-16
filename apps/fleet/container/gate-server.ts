@@ -79,7 +79,13 @@ export interface GateBody {
   commit?: string;
   stdout?: string;
   stderr?: string;
+  /** "<soft> <hard>" open-file limit the leg ran under (EMFILE triage). */
+  limits?: string;
 }
+
+/** Tail kept of a leg's stdout and stderr in its R2 result. 4000 chars cut
+ *  every assertion message of a CF-only failure; 32k keeps them. */
+export const OUTPUT_TAIL_CHARS = 32_000;
 
 export function readRunEnv(env: Record<string, string | undefined>): GateRun {
   return {
@@ -181,11 +187,18 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
   // Restored after checkout: a baseline tar must never block the checkout.
   await restoreBaseline(req.baselineKeys, { fetchFn: deps.fetchFn, exec: run, workdir });
 
+  const limitsRun = await run("bash", ["-c", 'echo "$(ulimit -Sn) $(ulimit -Hn)"'], { cwd: workdir });
+  const limits = limitsRun.stdout.trim();
   const install = await run("bash", ["-c", req.installCmd], { cwd: workdir });
-  if (install.code !== 0) return { state: "error", description: `install failed: ${firstLine(install.stderr)}` };
+  if (install.code !== 0) {
+    return {
+      state: "error", description: `install failed: ${firstLine(install.stderr)}`,
+      stdout: install.stdout.slice(-OUTPUT_TAIL_CHARS), stderr: install.stderr.slice(-OUTPUT_TAIL_CHARS), limits,
+    };
+  }
 
   const test = await run("bash", ["-c", req.legCmd], { cwd: workdir });
-  const tail = { stdout: test.stdout.slice(-4000), stderr: test.stderr.slice(-4000) };
+  const tail = { stdout: test.stdout.slice(-OUTPUT_TAIL_CHARS), stderr: test.stderr.slice(-OUTPUT_TAIL_CHARS), limits };
   return test.code === 0
     ? { state: "success", ...tail }
     : { state: "failure", description: `${req.leg} exited ${test.code}`, ...tail };
