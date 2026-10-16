@@ -28,14 +28,29 @@ export function isInfraLegFailure(result: LegResult & { redFirst?: boolean }): b
   return INFRA_CAUSE.test(result.description ?? "");
 }
 
+/** The id prefix of an infra rerun's instance: rerun-<the first run's id> (#1119). */
+const RERUN_PREFIX = "rerun-";
+
+/** The instance id of the rerun of one run. Deterministic, so a replayed or second start names the same instance. */
+export function rerunInstanceId(runId: string): string {
+  return `${RERUN_PREFIX}${runId}`;
+}
+
+/** Whether an instance is an infra rerun. A rerun is final: it is never rerun again (#1148). */
+export function isRerunInstance(runId: string): boolean {
+  return runId.startsWith(RERUN_PREFIX);
+}
+
 /** Creates the rerun instance. A create that throws is a replayed step when
  *  the rerun instance exists: it is already running, so it is success. That is
  *  asked of the instance, never of the error text, which differs by runtime
- *  (#1135). Any failure with no instance behind it is not started, and the
- *  caller posts the final error verdict. */
+ *  (#1135). When the instance cannot be read back, the outcome is unknown: the
+ *  create's error is rethrown, so the caller's step retries (#1148 item 4). A
+ *  create that failed with no instance behind it throws too, and the caller
+ *  posts the final error verdict once its retries run out. */
 export async function startInfraRerun(
   create: () => Promise<unknown>, get: () => Promise<unknown>,
-): Promise<boolean> {
+): Promise<true> {
   try {
     await create();
     return true;
@@ -44,12 +59,30 @@ export async function startInfraRerun(
       await get();
       return true;
     } catch {
-      // No such instance: the create really failed.
+      throw err;
     }
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("gate: infra rerun create failed", message);
-    return false;
   }
+}
+
+export type InfraRerunOutcome = "started" | "superseded";
+
+/** Starts the rerun, then takes the PR's run pointer. A rerun that does not take
+ *  the pointer (a newer run already holds it) is ended, so one run stays live
+ *  per head. A start that rejects propagates, so its step retries (#1148). */
+export async function launchInfraRerun(deps: {
+  create: () => Promise<unknown>;
+  get: () => Promise<unknown>;
+  handOff: () => Promise<boolean>;
+  terminate: () => Promise<void>;
+}): Promise<InfraRerunOutcome> {
+  await startInfraRerun(deps.create, deps.get);
+  if (await deps.handOff()) return "started";
+  try {
+    await deps.terminate();
+  } catch (err) {
+    console.error("gate: superseded infra rerun not ended", err);
+  }
+  return "superseded";
 }
 
 /** Points the PR's run index at the rerun, like a normal start (#1084 must see
@@ -57,12 +90,29 @@ export async function startInfraRerun(
  *  write, never a read then a write (#1135). A newer push's run keeps the
  *  pointer, so the rerun never takes it back. Returns whether the handoff landed. */
 export function recordInfraRerun(
-  index: GateRunIndex,
+  index: Pick<GateRunIndex, "handOff">,
   input: { repo: string; pr: number; headSha: string; runId: string; instanceId: string; at: number },
 ): Promise<boolean> {
   return index.handOff(input.repo, input.pr, input.instanceId, {
     headSha: input.headSha, runId: input.runId, progressedAt: input.at,
   });
+}
+
+/** Whether a rerun's start result reads as started. The boolean true is what a deploy from
+ *  before the outcome union cached for this step: on replay it is still a started rerun (#1148 review). */
+export function rerunStarted(result: unknown): boolean {
+  return result === "started" || result === true;
+}
+
+/** The rerun's pending status, posted after the run stamps its progress. The stamp comes
+ *  first: the watchdog reads it, so a stale stamp lets it end this run in the middle of its
+ *  own rerun start (#1148 review). Returns whether the post landed. */
+export async function announceInfraRerun(deps: {
+  touch: () => Promise<void>;
+  post: () => Promise<boolean>;
+}): Promise<boolean> {
+  await deps.touch();
+  return deps.post();
 }
 
 /** The status a poller sees for a run that may have handed off to its infra
