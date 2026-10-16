@@ -78,6 +78,8 @@ async function callRoute(opts: {
   ai: { run: ReturnType<typeof vi.fn> };
   envOverrides?: Partial<Env>;
   pool?: readonly PoolModel[];
+  /** Issue #1099: a streaming request body (`stream: true`) for the runaway tests. */
+  body?: unknown;
   /** #767: fake sleep/random threaded through the handler's own 6th
    *  param, so a route-level test can pin the backoff schedule exactly
    *  without ever waiting a real 3s. */
@@ -86,7 +88,7 @@ async function callRoute(opts: {
   const token = mintSpawnToken();
   const rows = async () => [row(ME, await hashSpawnToken(token))];
   const e = { ...env, FLEET_JUNIOR: "on", AI: opts.ai, ...FAST_RETRY, ...(opts.envOverrides ?? {}) } as unknown as Env;
-  return handleFleetAnthropicMessages(req({ token }), e, ctx, rows, opts.pool, opts.retryDeps);
+  return handleFleetAnthropicMessages(req({ token, body: opts.body }), e, ctx, rows, opts.pool, opts.retryDeps);
 }
 
 function req(opts: { token?: string | null; apiKey?: string; body?: unknown; path?: string; method?: string }) {
@@ -1068,22 +1070,26 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
 // hang. These pin the route-level path end to end; the translation units
 // live in test/bun/llm-translate-*.test.ts.
 describe("handleFleetAnthropicMessages — output cap ends cleanly (#1070)", () => {
-  it("a non-streaming reply cut at the cap (finish_reason length) reaches the client as stop_reason max_tokens, 200", async () => {
-    const { token, rows, e } = await setup({
-      choices: [{ message: { role: "assistant", content: "partial answer" }, finish_reason: "length" }],
-      usage: { prompt_tokens: 40, completion_tokens: 32000 },
+  it("a non-streaming reply cut at the cap with no tool_use (finish_reason length) is a retriable 529, never a 200 max_tokens", async () => {
+    // The route always streams upstream (review round 3), so the mock is a stream.
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: "partial answer" } }] })}\n\n` +
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "length" }], usage: { prompt_tokens: 40, completion_tokens: 32000 } })}\n\n` +
+          "data: [DONE]\n\n",
+        ));
+        controller.close();
+      },
     });
+    const { token, rows, e, run } = await setup();
+    (run as unknown as { mockImplementation: (fn: () => Promise<unknown>) => void }).mockImplementation(async () => upstream);
     const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, max_tokens: 4000 } }), e, ctx, rows);
-    expect(r.status).toBe(200);
-    const replyBody = (await r.json()) as { stop_reason: string; content: { text: string }[]; usage: { output_tokens: number } };
-    expect(replyBody.stop_reason).toBe("max_tokens");
-    expect(replyBody.content[0].text).toBe("partial answer");
-    // The reported output is clamped to what the client asked for, never the
-    // raw reasoning-inflated count.
-    expect(replyBody.usage.output_tokens).toBe(4000);
+    expect(r.status).toBe(529);
+    expect(await r.json()).toMatchObject({ type: "error", error: { type: "overloaded_error" } });
   });
 
-  it("a streaming reply cut at the cap ends with message_delta stop_reason max_tokens and message_stop — no event: error", async () => {
+  it("a streaming reply cut at the cap with no tool_use ends with event: error overloaded_error, never max_tokens", async () => {
     const chunk = (c: unknown) => `data: ${JSON.stringify(c)}\n\n`;
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -1100,11 +1106,11 @@ describe("handleFleetAnthropicMessages — output cap ends cleanly (#1070)", () 
     const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true, max_tokens: 4000 } }), e, ctx, rows);
     expect(r.status).toBe(200);
     const text = await r.text();
-    expect(text).not.toContain("event: error");
-    expect(text).toContain('"stop_reason":"max_tokens"');
-    expect(text).toContain("event: message_stop");
+    expect(text).toContain("event: error");
+    expect(text).toContain('"type":"overloaded_error"');
+    expect(text).not.toContain('"stop_reason":"max_tokens"');
     await ctx.drain();
-    expect((await usageRows())[0]).toMatchObject({ ok: 1, outputTokens: 4000 });
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "runaway:length" });
   });
 
   it("a client max_tokens above the model ceiling is sent upstream clamped to GLM_MAX_MAX_TOKENS (32000), never passed through", async () => {
@@ -1648,5 +1654,176 @@ describe("handleFleetAnthropicMessages — think-block parsing is kimi-only (iss
     expect(events.some((e) => e.event === "content_block_start" && e.data.content_block.type === "tool_use")).toBe(false);
     const visible = events.filter((e) => e.event === "content_block_delta" && e.data.delta.type === "text_delta").map((e) => e.data.delta.text).join("");
     expect(visible).toBe(THINK_TOOL_CALL);
+  });
+});
+
+// Issue #1099: a degenerate stream is aborted mid-turn with a retriable
+// overloaded_error, logged as runaway:<reason>, and the studio's next call
+// moves to another pool model (LEAD_MODEL_OVERFLOW on).
+describe("handleFleetAnthropicMessages — runaway output abort (issue #1099)", () => {
+  function sseOf(contents: string[]): ReadableStream<Uint8Array> {
+    const enc = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const content of contents) controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+  }
+
+  const looping = Array.from({ length: 60 }, () => "the same looping sentence here, again and again\n");
+  const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+
+  it("a runaway stream ends with a retriable overloaded_error, never a normal end_turn", async () => {
+    const run = vi.fn(async () => sseOf(looping));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: { ...good, stream: true } });
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    expect(text).toContain("event: error");
+    expect(text).toContain('"type":"overloaded_error"');
+    expect(text).not.toContain('"stop_reason":"end_turn"');
+    expect(text).not.toContain("event: message_stop");
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged.at(-1)).toMatchObject({ ok: 0, error: "runaway:repeat_line" });
+  });
+
+  it("after a runaway abort the studio's next call goes to a different model", async () => {
+    const seen: string[] = [];
+    const run = vi.fn(async (model: string) => {
+      seen.push(model);
+      return seen.length === 1 ? sseOf(looping) : sseOf(["fine answer"]);
+    });
+    const first = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: { ...good, stream: true } });
+    await first.text();
+    await ctx.drain();
+    const second = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: { ...good, stream: true } });
+    expect(second.status).toBe(200);
+    await second.text();
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).not.toBe(seen[0]);
+  });
+
+  it("with LEAD_MODEL_OVERFLOW=off the retry stays on the same model", async () => {
+    const seen: string[] = [];
+    const run = vi.fn(async (model: string) => {
+      seen.push(model);
+      return seen.length === 1 ? sseOf(looping) : sseOf(["fine answer"]);
+    });
+    const envOverrides = { LEAD_MODEL_POOL: "on", LEAD_MODEL_OVERFLOW: "off" } as Partial<Env>;
+    const first = await callRoute({ ai: { run }, envOverrides, pool: testPool, body: { ...good, stream: true } });
+    await first.text();
+    await ctx.drain();
+    const second = await callRoute({ ai: { run }, envOverrides, pool: testPool, body: { ...good, stream: true } });
+    await second.text();
+    expect(seen[1]).toBe(seen[0]);
+  });
+});
+
+// Maestro review (#1099 follow-up): findings 1 (non-streaming path had no
+// scan — a 32k-token loop went out as a 200), 5 (cancelUpstream untested;
+// runaway usage row logged 0/0).
+describe("handleFleetAnthropicMessages — runaway review follow-ups (issue #1099)", () => {
+  const looping = Array.from({ length: 60 }, () => "the same looping sentence here, again and again\n");
+  const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+
+  function trackedStream(contents: string[], onCancel: () => void, finish = false): ReadableStream<Uint8Array> {
+    const enc = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const content of contents) controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        // A runaway is left open on purpose: a real upstream is still generating,
+        // and a closed stream never fires its cancel callback. A clean reply closes.
+        if (finish) controller.close();
+      },
+      cancel() { onCancel(); },
+    });
+  }
+
+  it("a streamed runaway cancels the upstream read (no tokens paid after the trip)", async () => {
+    let cancelled = false;
+    const run = vi.fn(async () => trackedStream(looping, () => { cancelled = true; }));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: { ...good, stream: true } });
+    await r.text();
+    await ctx.drain();
+    expect(cancelled).toBe(true);
+  });
+
+  it("a non-streaming runaway returns 529 overloaded_error before any byte, and cancels upstream", async () => {
+    let cancelled = false;
+    const run = vi.fn(async () => trackedStream(looping, () => { cancelled = true; }));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: good });
+    expect(r.status).toBe(529);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    expect(await r.json()).toMatchObject({ type: "error", error: { type: "overloaded_error" } });
+    expect(cancelled).toBe(true);
+    await ctx.drain();
+    expect((await usageRows()).at(-1)).toMatchObject({ ok: 0, error: "runaway:repeat_line" });
+  });
+
+  it("a runaway usage row records non-zero input and output counts", async () => {
+    const run = vi.fn(async () => trackedStream(looping, () => {}));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: { ...good, stream: true } });
+    await r.text();
+    await ctx.drain();
+    const row = (await usageRows()).at(-1)!;
+    expect(row.inputTokens).toBeGreaterThan(0);
+    expect(row.outputTokens).toBeGreaterThan(0);
+  });
+
+  it("a non-streaming reply with no finish_reason is an error, never a 200 end_turn", async () => {
+    const enc = new TextEncoder();
+    const run = vi.fn(async () => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "cut off mid" } }] })}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    }));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: good });
+    expect(r.status).not.toBe(200);
+    expect(await r.json()).toMatchObject({ type: "error" });
+  });
+
+  it("a non-streaming tool_use reply is rebuilt from the translator frames (text + tool block, stop_reason tool_use)", async () => {
+    const enc = new TextEncoder();
+    const run = vi.fn(async () => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "reading" } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_9", function: { name: "Read", arguments: "{\"file_path\":\"a.ts\"}" } }] } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    }));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: good });
+    expect(r.status).toBe(200);
+    const reply = (await r.json()) as { stop_reason: string; content: Array<{ type: string; text?: string; name?: string; input?: unknown }> };
+    expect(reply.stop_reason).toBe("tool_use");
+    expect(reply.content[0]).toMatchObject({ type: "text", text: "reading" });
+    expect(reply.content[1]).toMatchObject({ type: "tool_use", name: "Read", input: { file_path: "a.ts" } });
+  });
+
+  it("two runaways in a row avoid both models (the avoid set grows)", async () => {
+    const seen: string[] = [];
+    const run = vi.fn(async (model: string) => {
+      seen.push(model);
+      return seen.length <= 2 ? trackedStream(looping, () => {}) : trackedStream(["fine answer"], () => {}, true);
+    });
+    const envOverrides = { LEAD_MODEL_POOL: "on" } as Partial<Env>;
+    for (let i = 0; i < 2; i++) {
+      const r = await callRoute({ ai: { run }, envOverrides, pool: testPool, body: { ...good, stream: true } });
+      await r.text();
+      await ctx.drain();
+    }
+    const third = await callRoute({ ai: { run }, envOverrides, pool: testPool, body: { ...good, stream: true } });
+    await third.text();
+    expect(seen).toHaveLength(3);
+    expect(seen[2]).not.toBe(seen[0]);
+    expect(seen[2]).not.toBe(seen[1]);
   });
 });

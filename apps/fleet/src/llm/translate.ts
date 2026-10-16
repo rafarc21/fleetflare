@@ -490,7 +490,52 @@ interface StreamState {
   /** Only kimi's stream sets this (models.ts `thinkTags`). Off, content
    *  streams straight through as text, byte-for-byte as before #1073. */
   thinkTags: boolean;
+  /** Issue #1099: why the stream was judged a runaway, set the moment the
+   *  scan trips. The pump aborts on it; null while the output looks normal. */
+  runaway: string | null;
+  /** Counters behind `runaway` (see scanForRunaway). */
+  scan: RunawayScan;
 }
+
+/** Issue #1099: the running state of the runaway scan over text and
+ *  reasoning deltas. Tool-call argument deltas are never scanned. */
+interface RunawayScan {
+  /** Characters of text/reasoning seen so far. Feeds the usage estimate only. */
+  chars: number;
+  /** Issue #1099 (review, finding 3): true while a kimi think region carries a
+   *  tool-call payload. That text is tool arguments, not reasoning, so it is
+   *  not scanned. Cleared when the think region closes. */
+  payload: boolean;
+  /** Tail of the think text seen so far. The tool marker is matched on
+   *  tail + delta, so a marker split across deltas still latches `payload`. */
+  tail: string;
+  /** Text after the last newline, not yet a complete line. */
+  partial: string;
+  /** The last complete non-blank line, and how many times in a row it came. */
+  line: string;
+  lineRun: number;
+  /** The paragraph being built (non-blank lines since the last blank one). */
+  para: string;
+  /** The last closed paragraph, and how many times in a row it came. */
+  prevPara: string;
+  paraRun: number;
+}
+
+/** Issue #1099 (review round 3): a run of this many identical lines in a row is
+ *  a runaway loop. Conservative: only lines of RUNAWAY_MIN_REPEAT_CHARS or more
+ *  count, so short structural lines (`},`, `]`, `expect(...)`) never trip it. */
+export const RUNAWAY_REPEAT_LINE_LIMIT = 50;
+const RUNAWAY_MIN_REPEAT_CHARS = 40;
+/** Issue #1099 (review round 3): a run of this many identical paragraphs in a
+ *  row is a runaway. Only paragraphs of RUNAWAY_MIN_PARAGRAPH_CHARS or more count. */
+export const RUNAWAY_REPEAT_PARAGRAPH_LIMIT = 8;
+const RUNAWAY_MIN_PARAGRAPH_CHARS = 200;
+/** Issue #1099: a tool-call marker can span deltas, so the probe keeps this
+ *  many trailing chars of think text. Longer than any fixed marker here. */
+const PAYLOAD_PROBE_CHARS = 64;
+/** Issue #1099: chars per token, used only to estimate the output count of an
+ *  aborted runaway (its upstream usage chunk never arrives). Estimate only. */
+const CHARS_PER_TOKEN = 2.5;
 
 export function createStreamState(opts: { thinkTags?: boolean } = {}): StreamState {
   return {
@@ -498,7 +543,84 @@ export function createStreamState(opts: { thinkTags?: boolean } = {}): StreamSta
     openIndex: null, openKind: null, finishReason: null, outputTokens: 0, inputTokens: 0,
     thinking: false, thinkText: "", pendingTag: "", thinkToolUses: 0, unrecoverableToolCall: false,
     thinkTags: opts.thinkTags === true,
+    runaway: null,
+    scan: {
+      chars: 0, payload: false, tail: "", partial: "",
+      line: "", lineRun: 0, para: "", prevPara: "", paraRun: 0,
+    },
   };
+}
+
+/** Issue #1099: a tool_use has started in this turn (native or recovered from
+ *  a think region). A turn with a tool call is never a length runaway. */
+function toolStarted(state: StreamState): boolean {
+  return state.toolIndexByOpenAiIndex.size > 0 || state.thinkToolUses > 0;
+}
+
+/** Issue #1099: closes the paragraph being built and counts its repeats. Only
+ *  paragraphs of RUNAWAY_MIN_PARAGRAPH_CHARS or more count; a shorter one ends
+ *  the run. */
+function closeParagraph(state: StreamState): void {
+  const scan = state.scan;
+  if (scan.para === "") return;
+  if (scan.para.length < RUNAWAY_MIN_PARAGRAPH_CHARS) {
+    scan.prevPara = ""; scan.paraRun = 0;
+  } else {
+    if (scan.para === scan.prevPara) scan.paraRun++;
+    else { scan.prevPara = scan.para; scan.paraRun = 1; }
+    if (scan.paraRun >= RUNAWAY_REPEAT_PARAGRAPH_LIMIT) state.runaway = "repeat_paragraph";
+  }
+  scan.para = "";
+}
+
+/** Issue #1099: feeds one text or reasoning delta to the runaway scan. Trips
+ *  `state.runaway` for a repeated line or paragraph. Tool-call arguments are
+ *  never scanned: a kimi think region that carries a tool call is latched as
+ *  payload until it closes. Output length is caught by closeStreamOrError. */
+function scanForRunaway(state: StreamState, text: string): void {
+  if (state.runaway !== null || text.length === 0) return;
+  const scan = state.scan;
+  scan.chars += text.length;
+  // Issue #1099 (review, finding 3 / round 3 finding 2): kimi's tool call sits
+  // inside <think> and only registers at </think>. The marker is matched on the
+  // tail of the think text plus this delta, so a marker split across deltas
+  // still latches the payload.
+  if (state.thinking || text.includes(THINK_OPEN)) {
+    const probe = scan.tail + text;
+    if (TOOL_CALL_MARKER.test(probe)) scan.payload = true;
+    scan.tail = probe.slice(-PAYLOAD_PROBE_CHARS);
+  }
+  if (scan.payload) return;
+  const pieces = (scan.partial + text).split("\n");
+  scan.partial = pieces.pop() ?? "";
+  for (const line of pieces) {
+    if (line.trim() === "") { closeParagraph(state); if (state.runaway !== null) return; continue; }
+    scan.para = scan.para === "" ? line : `${scan.para}\n${line}`;
+    if (line === scan.line) scan.lineRun++;
+    else { scan.line = line; scan.lineRun = 1; }
+    if (line.trim().length >= RUNAWAY_MIN_REPEAT_CHARS && scan.lineRun >= RUNAWAY_REPEAT_LINE_LIMIT) {
+      state.runaway = "repeat_line";
+      return;
+    }
+  }
+}
+
+/** Issue #1099 (review, finding 5): the token count to record for an aborted
+ *  runaway. The upstream usage chunk never arrives on an abort, so this is the
+ *  scan's own estimate of the reasoning/text emitted so far, not a real count. */
+export function runawayTokenEstimate(state: StreamState): number {
+  return Math.ceil(state.scan.chars / CHARS_PER_TOKEN);
+}
+
+/** Issue #1099: the SSE error frame for an aborted runaway stream. Typed
+ *  overloaded_error (529) so Claude Code retries the turn, the same
+ *  retriable shape as the other upstream-capacity failures in this file. */
+export function runawayErrorMessage(reason: string): string {
+  return `upstream output runaway (${reason}); retry the turn`;
+}
+
+export function runawayErrorFrame(reason: string): string {
+  return sseEvent("error", { type: "error", error: { type: "overloaded_error", message: runawayErrorMessage(reason) } });
 }
 
 /** Closes whatever content block is currently open (if any) — the one place
@@ -632,6 +754,7 @@ function recoverThinkToolCalls(thinkText: string): Array<{ name: string; input: 
  *  tool-call-shaped text that could not be recovered is flagged for the
  *  error path in closeStreamOrError. */
 function finishThink(state: StreamState, events: string[]): void {
+  state.scan.payload = false;
   const calls = recoverThinkToolCalls(state.thinkText);
   if (calls.length === 0 && TOOL_CALL_MARKER.test(state.thinkText)) state.unrecoverableToolCall = true;
   state.thinkText = "";
@@ -671,6 +794,12 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
   const events: string[] = [];
   const delta = choice.delta ?? {};
   if (choice.finish_reason !== undefined && choice.finish_reason !== null) state.finishReason = choice.finish_reason;
+
+  // Issue #1099: reasoning_content (GLM) is scanned but never forwarded, same
+  // as before. A delta that trips the scan is not emitted; the pump aborts.
+  if (typeof delta.reasoning_content === "string") scanForRunaway(state, delta.reasoning_content);
+  if (typeof delta.content === "string") scanForRunaway(state, delta.content);
+  if (state.runaway !== null) return events;
 
   if (typeof delta.content === "string" && delta.content.length > 0) {
     if (state.thinkTags) routeContent(state, delta.content, events);
@@ -877,6 +1006,13 @@ export function closeStreamOrError(state: StreamState, requestedMaxTokens: numbe
   // === 0 means no block was ever opened, so no tool call was recovered either.
   if (state.unrecoverableToolCall && state.nextIndex === 0) {
     return { frames: [streamErrorFrame(UNRECOVERED_TOOL_CALL_MESSAGE)], ok: false, reason: "think_tool_call_unrecovered" };
+  }
+  // Issue #1099 (review round 3, finding 5): a turn cut at the output ceiling
+  // with no tool_use started is the runaway the repeat checks can miss (CJK with
+  // no line breaks). Retriable 529, not a clean max_tokens end. Legit lead
+  // answers past the ceiling with no tool call are not a real case.
+  if (state.finishReason === "length" && !toolStarted(state)) {
+    return { frames: [runawayErrorFrame("length")], ok: false, reason: "runaway:length" };
   }
   return { frames, ok: true };
 }
