@@ -8,7 +8,7 @@ import { repoTokenMinter } from "../github/auth";
 import { isGateRunnerRepo } from "./config";
 import { d1WatchdogIndex } from "./auto-run-env";
 import { postGateStatus, type StatusPort } from "./status-post";
-import { sweepStalledRuns, type WatchdogRun } from "./watchdog";
+import { hasRedResult, sweepStalledRuns, type WatchdogRun } from "./watchdog";
 
 /** Whether any leg of the run stored a red result. The leg result keys are
  *  gate/<owner>/<repo>/runs/<pr>/<runId>/... with the repo's canonical case: R2
@@ -17,11 +17,10 @@ async function hasRedLeg(env: Env, repo: string, pr: number, runId: string): Pro
   const token = await repoTokenMinter(env)(repo);
   const canonical = (await getPullRequest(token, repo, pr)).repoFullName;
   const listed = await env.STUDIO_ARCHIVE.list({ prefix: `gate/${canonical}/runs/${pr}/${runId}/` });
-  for (const obj of listed.objects) {
-    const stored = await env.STUDIO_ARCHIVE.get(obj.key);
-    if ((await stored?.json<{ state?: string }>())?.state === "failure") return true;
-  }
-  return false;
+  return hasRedResult(listed.objects.map((o) => o.key), async (key) => {
+    const obj = await env.STUDIO_ARCHIVE.get(key);
+    return obj === null ? undefined : obj.json<{ state?: string }>();
+  });
 }
 
 /** One watchdog sweep, run by the every-minute cron. Its errors reach the caller;
