@@ -441,13 +441,13 @@ describe("fleet rescue-all — issue #251", () => {
 // Issue #53: `fleet reap [--idle D] [--repo R] [--dry-run|--apply]`.
 describe("fleet reap — issue #53", () => {
   it("bare is a dry-run with the long default threshold and no repo override", () => {
-    expect(parseCliArgs(["reap"])).toEqual({ cmd: "reap", apply: false, idleMs: 30 * 60_000, repo: null });
+    expect(parseCliArgs(["reap"])).toEqual({ cmd: "reap", apply: false, idleMs: 30 * 60_000, repo: null, nudge: false, nudgeAfterMs: 5 * 60_000 });
   });
   it("--apply, --dry-run, --idle <d>, --idle=<d>, --repo", () => {
-    expect(parseCliArgs(["reap", "--apply"])).toEqual({ cmd: "reap", apply: true, idleMs: 30 * 60_000, repo: null });
-    expect(parseCliArgs(["reap", "--dry-run", "--idle", "5m"])).toEqual({ cmd: "reap", apply: false, idleMs: 5 * 60_000, repo: null });
+    expect(parseCliArgs(["reap", "--apply"])).toEqual({ cmd: "reap", apply: true, idleMs: 30 * 60_000, repo: null, nudge: false, nudgeAfterMs: 5 * 60_000 });
+    expect(parseCliArgs(["reap", "--dry-run", "--idle", "5m"])).toEqual({ cmd: "reap", apply: false, idleMs: 5 * 60_000, repo: null, nudge: false, nudgeAfterMs: 5 * 60_000 });
     expect(parseCliArgs(["reap", "--idle=2h", "--repo", "example-org/acmeclient", "--apply"]))
-      .toEqual({ cmd: "reap", apply: true, idleMs: 2 * 3_600_000, repo: "example-org/acmeclient" });
+      .toEqual({ cmd: "reap", apply: true, idleMs: 2 * 3_600_000, repo: "example-org/acmeclient", nudge: false, nudgeAfterMs: 5 * 60_000 });
   });
   it("a bad duration, an unknown flag, or both modes is a usage error", () => {
     expect(parseCliArgs(["reap", "--idle", "5"]).cmd).toBe("usage");
@@ -460,7 +460,7 @@ describe("fleet reap — issue #53", () => {
   it("--idle below 5m is refused (review item 6); exactly 5m is allowed", () => {
     expect(parseCliArgs(["reap", "--idle", "4m"]).cmd).toBe("usage");
     expect(parseCliArgs(["reap", "--idle", "299s"]).cmd).toBe("usage");
-    expect(parseCliArgs(["reap", "--idle", "300s"])).toEqual({ cmd: "reap", apply: false, idleMs: 5 * 60_000, repo: null });
+    expect(parseCliArgs(["reap", "--idle", "300s"])).toEqual({ cmd: "reap", apply: false, idleMs: 5 * 60_000, repo: null, nudge: false, nudgeAfterMs: 5 * 60_000 });
   });
 });
 
