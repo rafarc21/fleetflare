@@ -41,10 +41,18 @@ export interface LegStepRunner {
   do(name: string, config: LegStepConfig, fn: () => Promise<LegRunResult>): Promise<LegRunResult>;
 }
 
-const LEG_STEP_CONFIG: LegStepConfig = {
+export const LEG_STEP_CONFIG: LegStepConfig = {
   retries: { limit: 1, delay: "15 seconds", backoff: "constant" },
   timeout: "30 minutes",
 };
+
+/** LEG_STEP_CONFIG.timeout in ms. Kept in step with the literal above. */
+export const LEG_STEP_TIMEOUT_MS = 30 * 60_000;
+/** Slack the attempt deadline keeps under the step timeout, so the deadline
+ *  always ends a hung attempt first (#1135 item 3). */
+const STEP_DEADLINE_MARGIN_MS = 2 * 60_000;
+/** A stored R2 result read is bounded: a hung read must not hold the step open (#1135). */
+const R2_READ_TIMEOUT_MS = 30_000;
 
 /** The runner DO name for one attempt of one leg. Every attempt (the start
  *  step, its infra step-retry, and the retry-<leg> step) gets its own name, so
@@ -59,13 +67,24 @@ export function gateRunnerName(instanceId: string, leg: string, attemptId: strin
  *  caller without it keeps the transport error as the whole description. */
 export interface LegRunDeps {
   readResult?: (resultKey: string) => Promise<StoredLegResult | undefined>;
-  /** Overrides the step deadline (tests). Default: the leg's own timeout plus LEG_STEP_GRACE_MS. */
+  /** Overrides the step deadline (tests). Default: legStepDeadlineMs(planned.timeoutMin). */
   stepDeadlineMs?: number;
 }
 
 /** Slack past the leg's own timeout before its step gives up on a dispatch that
  *  never answered: covers the DO's readiness wait (180 s) and port-retry budget (240 s). */
 const LEG_STEP_GRACE_MS = 10 * 60_000;
+
+/** The per-attempt deadline for one leg: its timeout plus grace, capped under the
+ *  step timeout. #1135: the old deadline (35 min) sat past the 30 min step
+ *  timeout, so a hung attempt was never ended by it. Now every attempt ends
+ *  before Workflows' own timeout fires, and the run is bounded. */
+export function legStepDeadlineMs(timeoutMin: number | undefined): number {
+  return Math.min(
+    legTimeoutMin(timeoutMin) * 60_000 + LEG_STEP_GRACE_MS,
+    LEG_STEP_TIMEOUT_MS - STEP_DEADLINE_MARGIN_MS,
+  );
+}
 
 /** Ends a step whose work has no progress past its deadline (#1119): the work is
  *  abandoned and the step rejects, so no orphan step holds the run open. */
@@ -86,13 +105,13 @@ export type StoredLegResult = { state: LegResult["state"]; description?: string 
  *  this leg's LegResult, so the other legs still finish. */
 export async function runLegStep(
   step: LegStepRunner,
-  dispatch: (planned: PlannedLeg, attemptId: string) => Promise<Response>,
+  dispatch: (planned: PlannedLeg, attemptId: string, signal: AbortSignal) => Promise<Response>,
   planned: PlannedLeg,
   deps: LegRunDeps = {},
 ): Promise<LegRunResult> {
   // targetFor takes the try number: the start step's infra retry gets its own
   // result key (see infraRetryResultKey).
-  const deadlineMs = deps.stepDeadlineMs ?? legTimeoutMin(planned.timeoutMin) * 60_000 + LEG_STEP_GRACE_MS;
+  const deadlineMs = deps.stepDeadlineMs ?? legStepDeadlineMs(planned.timeoutMin);
   const attempt = (name: string, targetFor: (tryNo: number) => PlannedLeg): Promise<LegRunResult> => {
     let tryNo = 0;
     return step.do(name, LEG_STEP_CONFIG, async () => {
@@ -103,9 +122,12 @@ export async function runLegStep(
       // Timed inside the callback: a Workflow replay returns the recorded ms
       // instead of timing the replay.
       const started = Date.now();
+      // The dispatch call carries its own signal, so a hung DO call is aborted
+      // at the deadline, not just abandoned by the race below (#1135).
+      const signal = AbortSignal.timeout(deadlineMs);
       try {
         const res = await withStepDeadline(
-          dispatch(target, attemptId), deadlineMs, `${planned.leg}: no progress past its deadline`,
+          dispatch(target, attemptId, signal), deadlineMs, `${planned.leg}: no progress past its deadline`,
         );
         if (!res.ok) {
           // A non-2xx (infra, 503) carries its cause in the body's `error`
@@ -132,7 +154,11 @@ export async function runLegStep(
         if (stored !== undefined) return { leg: planned.leg, ms: Date.now() - started, ...stored };
         // A thrown attempt still counts: its wall time rides in the message, so
         // a failed leg's description shows real time (ms skips thrown attempts).
-        const message = err instanceof Error ? err.message : String(err);
+        // Our own deadline's abort reads as the deadline message, whatever the
+        // runtime's abort wording is (#1135).
+        const message = signal.aborted
+          ? `${planned.leg}: no progress past its deadline`
+          : err instanceof Error ? err.message : String(err);
         const minutes = Math.round((Date.now() - started) / 60_000);
         throw new Error(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min`);
       }
@@ -212,11 +238,11 @@ export function legResultReader(bucket: ResultBucket): (resultKey: string) => Pr
  *  that names where it came from. Only the state and description are read, never
  *  stderr. Undefined when there is no reader, no known state, or the read throws. */
 export async function storedLegResult(
-  read: LegRunDeps["readResult"], resultKey: string,
+  read: LegRunDeps["readResult"], resultKey: string, timeoutMs = R2_READ_TIMEOUT_MS,
 ): Promise<StoredLegResult & { description: string } | undefined> {
   if (read === undefined) return undefined;
   try {
-    const stored = await read(resultKey);
+    const stored = await withStepDeadline(read(resultKey), timeoutMs, "result read timed out");
     if (stored === undefined) return undefined;
     const text = stored.description ?? stored.state;
     return {

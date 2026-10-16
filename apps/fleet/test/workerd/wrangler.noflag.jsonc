@@ -1,0 +1,9 @@
+{
+  // Issue #1147 (review round 2): CONTROL config for test/bun/llm-disconnect-workerd.test.ts.
+  // Same worker as wrangler.jsonc without enable_request_signal: shows the bounded
+  // keepalive write detects a dropped client on its own.
+  "name": "llm-disconnect-fixture-noflag",
+  "main": "disconnect-worker.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+}

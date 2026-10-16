@@ -5,13 +5,13 @@
 import type { Env } from "../env";
 import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
 
-/** The per-PR gate run pointer on the D1 gate_pr_head table (migration 0007).
+/** The per-PR gate run pointer on the D1 gate_pr_head table (migrations 0007, 0008).
  *  Keyed by lowercased repo, the way gateRunId keys a run (#1082). */
 export function d1RunIndex(db: D1Database): GateRunIndex {
   return {
     async latest(repo, pr) {
       const row = await db
-        .prepare("SELECT head_sha AS headSha, run_id AS runId FROM gate_pr_head WHERE repo = ? AND pr = ?")
+        .prepare("SELECT head_sha AS headSha, run_id AS runId, progressed_at AS progressedAt FROM gate_pr_head WHERE repo = ? AND pr = ?")
         .bind(repo.toLowerCase(), pr)
         .first<GateRunRecord>();
       return row ?? null;
@@ -19,10 +19,25 @@ export function d1RunIndex(db: D1Database): GateRunIndex {
     async record(repo, pr, run) {
       await db
         .prepare(
-          "INSERT INTO gate_pr_head (repo, pr, head_sha, run_id) VALUES (?, ?, ?, ?) "
-            + "ON CONFLICT (repo, pr) DO UPDATE SET head_sha = excluded.head_sha, run_id = excluded.run_id",
+          "INSERT INTO gate_pr_head (repo, pr, head_sha, run_id, progressed_at) VALUES (?, ?, ?, ?, ?) "
+            + "ON CONFLICT (repo, pr) DO UPDATE SET head_sha = excluded.head_sha, run_id = excluded.run_id, "
+            + "progressed_at = excluded.progressed_at",
         )
-        .bind(repo.toLowerCase(), pr, run.headSha, run.runId)
+        .bind(repo.toLowerCase(), pr, run.headSha, run.runId, run.progressedAt ?? 0)
+        .run();
+    },
+    async handOff(repo, pr, fromRunId, run) {
+      // One conditional write: the pointer moves only while it still names fromRunId (#1135).
+      const result = await db
+        .prepare("UPDATE gate_pr_head SET head_sha = ?, run_id = ?, progressed_at = ? WHERE repo = ? AND pr = ? AND run_id = ?")
+        .bind(run.headSha, run.runId, run.progressedAt ?? 0, repo.toLowerCase(), pr, fromRunId)
+        .run();
+      return result.meta.changes > 0;
+    },
+    async progress(repo, pr, runId, at) {
+      await db
+        .prepare("UPDATE gate_pr_head SET progressed_at = ? WHERE repo = ? AND pr = ? AND run_id = ?")
+        .bind(at, repo.toLowerCase(), pr, runId)
         .run();
     },
   };
