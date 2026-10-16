@@ -77,6 +77,19 @@ export function isDoneRecordComment(body: string): boolean {
 }
 
 /**
+ * Board issue #1071, item 4: the first line of every `fleet task message`
+ * comment (src/board/task-message.ts). The message already woke the assignee
+ * itself, so its own comment must never wake it a second time. ABSOLUTE, like
+ * a completion record: nothing, not even a /wake in the text, overrides it.
+ */
+export const MESSAGE_COMMENT_MARKER = "<!-- fleet:message -->";
+
+/** True when this comment is a `fleet task message` comment. */
+export function isMessageComment(body: string): boolean {
+  return firstLine(body) === MESSAGE_COMMENT_MARKER;
+}
+
+/**
  * True only for a real §6 structured envelope (src/board/envelope.ts) --
  * the exact shape a studio's own result/status comment takes, and a shape a
  * human typing an unblock in plain English will not produce by accident.
@@ -138,6 +151,7 @@ export function qualifiesForCommentWake(
 ): boolean {
   if (isEnvelopeComment(commentBody)) return false;
   if (isDoneRecordComment(commentBody)) return false;
+  if (isMessageComment(commentBody)) return false;
   if (hasWakeMarker(commentBody)) return true;
   if (isBotComment(authorLogin)) return false;
   return taskState === "input_required";

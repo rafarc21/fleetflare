@@ -320,6 +320,53 @@ describe("handleFleetBoard — a lead moves its own task", () => {
   });
 });
 
+// Board issue #1071, item 4: `fleet task message <n> "<text>"` from a studio.
+// The route posts the comment and attempts the lead's wake; the wake's own
+// gates are proven in test/board.task-message.test.ts, so here the question is
+// only who may send: a studio may message a task whose holder it directs.
+describe("handleFleetBoard — a studio messages a task (issue #1071 item 4)", () => {
+  // A maestro directs the web-studio lead that holds the task; nobody else.
+  const MAESTRO = "websites--maestro";
+  const directsWebStudio = async () => ({ org: { edges: { maestro: ["web-studio"] }, gates: {} }, roles: [] });
+
+  it("posts the message as a comment on the task, stamped with the maestro's id, and answers with it", async () => {
+    const { token, rows } = await tokenFor(MAESTRO);
+    const api = fakeApi();
+    const res = await handleFleetBoard(
+      req("/fleet/tasks/71/message", token, { method: "POST", body: JSON.stringify({ text: "rebase first" }) }),
+      testEnv, api, rows, directsWebStudio,
+    );
+    expect(res.status).toBe(200);
+    expect(api.createComment).toHaveBeenCalledTimes(1);
+    const comment = vi.mocked(api.createComment).mock.calls[0][2];
+    expect(comment).toContain(`Message from \`${MAESTRO}\``);
+    expect(comment).toContain("rebase first");
+    expect(await res.json()).toHaveProperty("wake");
+  });
+
+  it("refuses a task held by a studio the maestro does not direct, and posts nothing", async () => {
+    const { token, rows } = await tokenFor(MAESTRO);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ labels: ["submitted", studioLabel(THEIRS)], assignee: THEIRS })) });
+    const res = await handleFleetBoard(
+      req("/fleet/tasks/71/message", token, { method: "POST", body: JSON.stringify({ text: "hi" }) }),
+      testEnv, api, rows, directsWebStudio,
+    );
+    expect(res.status).toBe(403);
+    expect(api.createComment).not.toHaveBeenCalled();
+  });
+
+  it("400s an empty message before any comment is written", async () => {
+    const { token, rows } = await tokenFor(MAESTRO);
+    const api = fakeApi();
+    const res = await handleFleetBoard(
+      req("/fleet/tasks/71/message", token, { method: "POST", body: JSON.stringify({ text: "  " }) }),
+      testEnv, api, rows, directsWebStudio,
+    );
+    expect(res.status).toBe(400);
+    expect(api.createComment).not.toHaveBeenCalled();
+  });
+});
+
 describe("handleFleetBoard — scope", () => {
   it("lists only this studio's tasks, filtered at GitHub", async () => {
     const { token, rows } = await tokenFor(MINE);

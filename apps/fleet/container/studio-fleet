@@ -98,6 +98,9 @@ const HELP = `usage: fleet spawn <role>[--<n>] [--instance <n>|next]
 
   fleet task ls         The tasks assigned to THIS studio. Nobody else's.
   fleet task show <n>   One of them, with its brief and every comment.
+  fleet task message <n> <text>
+                        Post <text> on task <n> AND wakes its lead with it.
+                        Use this instead of typing into the lead's terminal.
   fleet task report <n> Post your §6 envelope as a comment on task <n>.
                         The envelope JSON comes from STDIN:
 
@@ -232,6 +235,8 @@ export type Command =
   | { kind: "task-report"; number: number }
   // Board issue #41, half two: a lead moves the state of its own task.
   | { kind: "task-state"; number: number; to: string }
+  // Board issue #1071, item 4: a comment on the task plus a wake of its lead.
+  | { kind: "task-message"; number: number; text: string }
   // P5 §9's memory pass, at sprint close. Release Studio's verb.
   | { kind: "memory-ls" }
   | { kind: "memory-compact" }
@@ -317,8 +322,20 @@ export function parseTaskArgs(argv: string[]): Command {
     }
     return { kind: "usage-error", message: "task assign: expected <n> <studio-id> [--why <text>]" };
   }
+  // Board issue #1071, item 4: `message <n> <text...>` — the text is the rest
+  // of argv, so an unquoted multi-word message still reaches the lead whole.
+  if (sub === "message") {
+    if (raw === undefined || !/^[0-9]+$/.test(raw)) {
+      return { kind: "usage-error", message: "task message: missing or non-numeric <n> (the board issue number)" };
+    }
+    const rest = argv.slice(2);
+    if (rest.join(" ").trim() === "") {
+      return { kind: "usage-error", message: 'task message: missing <text> — fleet task message <n> "<text>"' };
+    }
+    return { kind: "task-message", number: Number(raw), text: rest.join(" ") };
+  }
   if (sub !== "show" && sub !== "report" && sub !== "state") {
-    return { kind: "usage-error", message: `unknown task command "${sub ?? ""}" — expected ls, show, report, state, new or assign` };
+    return { kind: "usage-error", message: `unknown task command "${sub ?? ""}" — expected ls, show, report, state, message, new or assign` };
   }
   if (raw === undefined || !/^[0-9]+$/.test(raw)) {
     return { kind: "usage-error", message: `task ${sub}: missing or non-numeric <n> (the board issue number)` };
@@ -729,6 +746,10 @@ async function buildRequest(
     const body = JSON.stringify({ assignee: cmd.studio, ...(cmd.why === undefined ? {} : { why: cmd.why }) });
     const { url, init } = buildTaskRequest(env, `/${cmd.number}/assign`, body);
     return { what: "task assign", url, init, render: () => `task ${cmd.number} assigned to ${cmd.studio}` };
+  }
+  if (cmd.kind === "task-message") {
+    const { url, init } = buildTaskRequest(env, `/${cmd.number}/message`, JSON.stringify({ text: cmd.text }));
+    return { what: "task message", url, init, render: () => `task ${cmd.number} message posted; its lead was woken` };
   }
   if (cmd.kind === "task-ls") {
     const { url, init } = buildTaskRequest(env, "");

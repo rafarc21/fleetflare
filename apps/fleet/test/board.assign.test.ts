@@ -850,6 +850,20 @@ describe("assignTask / createTask — the onAssigned hook (board issue #41)", ()
     expect(onAssigned.mock.calls[0][2]).toBeUndefined();
   });
 
+  // Board issue #1071, item 3: a bookkeeping reassign of a task whose work is
+  // already past the lead's hands must wake nobody (5 bogus wakes measured).
+  it.each(["awaiting_merge", "completed", "canceled"] as const)(
+    "does NOT fire when reassigning a %s task — a bookkeeping move wakes nobody", async (state) => {
+      const api = fakeApi({
+        getIssue: vi.fn(async () => task({ number: 42, labels: [state, studioLabel("websites--release-studio")] })),
+      });
+      const onAssigned = vi.fn(async (_studioId: string, _task: BoardTask) => {});
+      const res = await assignTask(api, "o/r", 42, { assignee: WEB }, { mode: "reassign", at: AT, onAssigned });
+      expect(res.ok).toBe(true);
+      expect(onAssigned).not.toHaveBeenCalled();
+    },
+  );
+
   it("does NOT fire on a refusal — no assignment, no wake", async () => {
     const api = fakeApi({
       getIssue: vi.fn(async () => task({ number: 42, labels: ["working", "failed"], state: null })),
@@ -1253,6 +1267,43 @@ describe("openAssignedTasks — the destroy guard's board read (#55 defect A)", 
     expect(await openAssignedTasks(api, "o/r", MINE)).toEqual({ ok: true, value: [{ number: 7, drifted: true }] });
   });
 
+  // Board issue #1071, item 2 (existing issue #299): `destroy --park` must not
+  // be blocked by a studio waiting on an answer or on a merge — a parked lane
+  // exists precisely to keep its history alive while it waits. Plain destroy
+  // keeps the guard above unchanged.
+  describe("parking (issue #1071 item 2)", () => {
+    const PARK = { parking: true };
+
+    it("--park is NOT blocked by an input_required task — the lead is waiting on an answer", async () => {
+      const api = fakeApi({ listIssues: vi.fn(async () => [mine(66, "input_required")]) });
+      expect(await openAssignedTasks(api, "o/r", MINE, PARK)).toEqual({ ok: true, value: [] });
+    });
+
+    it("--park is NOT blocked by an awaiting_merge task either", async () => {
+      const api = fakeApi({ listIssues: vi.fn(async () => [mine(7, "awaiting_merge")]) });
+      expect(await openAssignedTasks(api, "o/r", MINE, PARK)).toEqual({ ok: true, value: [] });
+    });
+
+    it("plain destroy (no park) is STILL blocked by input_required — today's guard is unchanged", async () => {
+      const api = fakeApi({ listIssues: vi.fn(async () => [mine(66, "input_required")]) });
+      expect(await openAssignedTasks(api, "o/r", MINE)).toEqual({ ok: true, value: [{ number: 66, drifted: false }] });
+    });
+
+    it("--park still blocks on submitted and working — only the two parked states are waived", async () => {
+      const api = fakeApi({
+        listIssues: vi.fn(async () => [mine(90, "working"), mine(85, "submitted"), mine(66, "input_required")]),
+      });
+      expect(await openAssignedTasks(api, "o/r", MINE, PARK)).toEqual({ ok: true, value: [
+        { number: 90, drifted: false }, { number: 85, drifted: false },
+      ] });
+    });
+
+    it("--park still fails closed on a drifted task — a parked state is never guessed from two labels", async () => {
+      const api = fakeApi({ listIssues: vi.fn(async () => [mine(7, null)]) });
+      expect(await openAssignedTasks(api, "o/r", MINE, PARK)).toEqual({ ok: true, value: [{ number: 7, drifted: true }] });
+    });
+  });
+
   // Board issue #110: awaiting_merge is neither terminal nor live — the
   // three-way split. `destroy` must NOT be refused for it, unlike the still-
   // live states below (regression coverage for the existing behaviour).
@@ -1323,7 +1374,7 @@ describe("openTasksNeedingRebrief — bring-up re-delivery's board read (issue #
     vi.restoreAllMocks();
   });
 
-  it("submitted/working/input_required qualify — awaiting_merge and terminal states are excluded", async () => {
+  it("submitted and working qualify — input_required, awaiting_merge and terminal states get no bring-up wake (issue #1071 item 3)", async () => {
     const api = fakeApi({
       listIssues: vi.fn(async () => [
         mine(1, "submitted"), mine(2, "working"), mine(3, "input_required"),
@@ -1331,7 +1382,7 @@ describe("openTasksNeedingRebrief — bring-up re-delivery's board read (issue #
       ]),
     });
     const result = await openTasksNeedingRebrief(api, "o/r", MINE);
-    expect(result.map((t) => t.taskNumber).sort()).toEqual([1, 2, 3]);
+    expect(result.map((t) => t.taskNumber).sort()).toEqual([1, 2]);
   });
 
   // Reviewer fix-first on #143/#137: `wakeOnAssign` (assign-wake.ts) refuses
@@ -1361,7 +1412,7 @@ describe("openTasksNeedingRebrief — bring-up re-delivery's board read (issue #
     const api = fakeApi({
       listIssues: vi.fn(async () => [
         mine(10, "working", "Older", "2026-09-20T00:00:00Z"),
-        mine(11, "input_required", "Newest", "2026-09-29T00:00:00Z"),
+        mine(11, "submitted", "Newest", "2026-09-29T00:00:00Z"),
         mine(12, "working", "Middle", "2026-09-24T00:00:00Z"),
       ]),
     });
@@ -1373,9 +1424,29 @@ describe("openTasksNeedingRebrief — bring-up re-delivery's board read (issue #
     ]);
   });
 
-  it("REBRIEF_TASK_STATES is exactly submitted + working + input_required — same as LIVE_TASK_STATES", () => {
-    expect(REBRIEF_TASK_STATES).toEqual(["submitted", "working", "input_required"]);
-    expect(REBRIEF_TASK_STATES).toEqual(LIVE_TASK_STATES);
+  // Board issue #1071, item 3: provision/recycle wake a lead only for work it
+  // is actively holding. A task parked at input_required, awaiting_merge,
+  // completed or canceled gets NO bring-up wake — one maestro hand-completed
+  // eight stale tasks and every bring-up re-woke them.
+  it("REBRIEF_TASK_STATES is exactly submitted + working (issue #1071 item 3)", () => {
+    expect(REBRIEF_TASK_STATES).toEqual(["submitted", "working"]);
+  });
+
+  it("a bring-up re-brief skips input_required, awaiting_merge, completed and canceled — no stale wakes", async () => {
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [
+        mine(1, "input_required"), mine(2, "awaiting_merge"), mine(3, "completed"), mine(4, "canceled"),
+      ]),
+    });
+    expect(await openTasksNeedingRebrief(api, "o/r", MINE)).toEqual([]);
+  });
+
+  it("a bring-up re-brief still delivers a submitted and a working task", async () => {
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [mine(5, "working"), mine(6, "submitted"), mine(7, "awaiting_merge")]),
+    });
+    const got = (await openTasksNeedingRebrief(api, "o/r", MINE)).map((t) => t.taskNumber).sort();
+    expect(got).toEqual([5, 6]);
   });
 });
 
