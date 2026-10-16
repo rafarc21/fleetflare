@@ -20,12 +20,12 @@ import {
 import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
-import { decideGateRun, fleetJsonChanged, type GateConfig } from "./config";
+import { decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
   outcomeLegs, pendingStatusArgs, planUnionLegs, verdictToStatusArgs, type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
-import { loadGateConfig } from "./load-config";
+import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
 import { gateRunnerName, legRequest, legResultReader, runLegStep, type LegRunResult } from "./leg-run";
 import { postGateStatus, type StatusPort } from "./status-post";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
@@ -61,28 +61,40 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // The PR's own base branch, not the default branch: a PR into a
       // non-default branch must be gated against that branch.
       const baseSha = await getBranchSha(token, repo, pull.baseRef);
-      const { files } = await compareFiles(token, repo, baseSha, headSha);
+      const compare = await compareFiles(token, repo, baseSha, headSha);
       // A private base repo clones through the git proxy in its leg.
-      return { headSha, baseSha, baseRef: pull.baseRef, changedFiles: files, private: pull.baseRepoPrivate };
+      return {
+        headSha, baseSha, mergeBaseSha: compare.mergeBaseSha, baseRef: pull.baseRef,
+        changedFiles: compare.files, truncated: compare.truncated, private: pull.baseRepoPrivate,
+      };
     });
 
-    // Whether the repo's own fleet.json changed is decided on CONTENT at base
-    // and head (#1091 review round 2), never on the file list: a rename shows
-    // only its new path, and the compare stops at 300 files. The gate config is
+    // Whether the repo's own fleet.json changed is decided on CONTENT (#1091
+    // review round 2), never on the file list: a rename shows only its new path.
+    // It is compared between the PR's MERGE-BASE and its head (#1095 round 3),
+    // not the base tip, so a base-only change since the PR branched does not put
+    // a PR that never touched fleet.json on the union path. The gate config is
     // read at the PR's BASE sha (never the head), so a PR cannot edit its own
-    // gate. The fleet repo's `gates` map is read at HEAD. A changed config is
-    // also read at its HEAD: the run gates on base legs in full, plus the head's
-    // legs that differ from them. A head config that is absent or invalid fails
-    // the run, never skips.
+    // gate. The fleet repo's `gates` map is read at HEAD, and at the config sha
+    // too for the fleet repo itself. A changed config is also read at its HEAD:
+    // the run gates on base legs in full, plus the head's legs that differ from
+    // them. A head config that is absent or invalid, or a head gates map with an
+    // invalid entry, fails the run, never skips.
     const readFleetJson = fleetJsonReader(mintToken);
     const configChanged = await step.do("fleet-json-changed", async () =>
-      fleetJsonChanged(await readFleetJson(repo, resolved.baseSha), await readFleetJson(repo, resolved.headSha)));
+      prConfigChanged(readFleetJson, repo, resolved.mergeBaseSha, resolved.headSha));
     const base = await step.do("load-config", async () =>
       loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, configSha: resolved.baseSha }, readFleetJson));
     const head: GateConfig | null | undefined = configChanged ? await step.do("load-head-config", async () =>
       loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, configSha: resolved.headSha }, readFleetJson)) : undefined;
+    const headGatesInvalid = configChanged && isFleetRepo(repo, this.env.AGENT_REPO)
+      ? await step.do("head-gates-map", async () => gateMapHasInvalidEntry(await readFleetJson(repo, resolved.headSha)))
+      : false;
 
-    const decision = decideGateRun({ changedFiles: resolved.changedFiles, fleetJsonChanged: configChanged, base, head });
+    const decision = decideGateRun({
+      changedFiles: resolved.changedFiles, fleetJsonChanged: configChanged, base, head,
+      truncated: resolved.truncated, headGatesInvalid,
+    });
     if (decision.action === "fail") {
       const statusPostFailed = await step.do("post-head-invalid", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: decision.description }));

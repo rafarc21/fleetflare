@@ -3,6 +3,7 @@ import {
   parseGateRunnerRepos, isGateRunnerRepo, parseGateBlock, gateMapEntry, matchesPathRules,
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR, legTimeoutMin,
   GATE_IMAGES, fleetJsonChanged, gateDecision, decideGateRun, headFleetJsonFailure,
+  gateMapHasInvalidEntry,
 } from "../../src/gate/config";
 import FLEET_JSON from "../../../../fleet.json";
 
@@ -354,5 +355,57 @@ describe("decideGateRun (#1091 review round 2)", () => {
   it("a pathRule match runs the gate", () => {
     expect(decideGateRun({ changedFiles: ["apps/fleet/src/x.ts"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined }))
       .toEqual({ action: "run" });
+  });
+});
+
+// #1095 round 3 (item 2): the compare API lists at most 300 files. A list cut at
+// the cap cannot prove that no gated path changed, so the run gates.
+describe("truncated compare list gates (#1095 round 3)", () => {
+  const cfg = parseGateBlock(BLOCK)!;
+  const rules = ["apps/fleet/**"];
+  it("a list cut at the cap runs the gate even when no pathRule matches", () => {
+    expect(decideGateRun({ changedFiles: ["notes/a.md"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined, truncated: true }))
+      .toEqual({ action: "run" });
+  });
+  it("an untruncated list with no pathRule match still skips", () => {
+    expect(decideGateRun({ changedFiles: ["notes/a.md"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined, truncated: false }))
+      .toEqual({ action: "skip", reason: "no gated paths changed", status: true });
+  });
+});
+
+// #1095 round 3 (item 3): a head gates map holding an invalid entry fails the run.
+describe("gateMapHasInvalidEntry (#1095 round 3)", () => {
+  it("false when there is no gates map, or every entry is a valid block", () => {
+    expect(gateMapHasInvalidEntry({})).toBe(false);
+    expect(gateMapHasInvalidEntry({ gates: { "acme/example": BLOCK } })).toBe(false);
+  });
+  it("true when any entry is malformed: an empty object, or an image key outside the allowlist", () => {
+    expect(gateMapHasInvalidEntry({ gates: { "acme/example": {} } })).toBe(true);
+    expect(gateMapHasInvalidEntry({ gates: { "acme/a": BLOCK, "acme/b": { ...BLOCK, image: "registry.example/x" } } })).toBe(true);
+  });
+  it("true when gates is present but not an object", () => {
+    expect(gateMapHasInvalidEntry({ gates: "nope" })).toBe(true);
+    expect(gateMapHasInvalidEntry({ gates: [] })).toBe(true);
+  });
+  it("false for a fleet.json that is not an object: nothing to validate", () => {
+    expect(gateMapHasInvalidEntry(null)).toBe(false);
+  });
+});
+
+describe("headFleetJsonFailure with a bad head gates map (#1095 round 3)", () => {
+  const HEAD = parseGateBlock(BLOCK);
+  it("a changed config with a valid head block still fails when the head gates map has an invalid entry", () => {
+    expect(headFleetJsonFailure(true, HEAD, true)).toBe("head fleet.json invalid");
+  });
+  it("an unchanged config never consults the gates map", () => {
+    expect(headFleetJsonFailure(false, HEAD, true)).toBeNull();
+  });
+});
+
+describe("decideGateRun with a bad head gates map (#1095 round 3)", () => {
+  const cfg = parseGateBlock(BLOCK)!;
+  it("fails the run when the config changed and the head gates map is invalid", () => {
+    expect(decideGateRun({ changedFiles: ["fleet.json"], fleetJsonChanged: true, base: cfg, head: cfg, headGatesInvalid: true }))
+      .toEqual({ action: "fail", description: "head fleet.json invalid" });
   });
 });

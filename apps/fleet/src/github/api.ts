@@ -1090,16 +1090,42 @@ export async function commitDate(token: string, repo: string, sha: string): Prom
 }
 
 /** `head` against `base`: commits ahead, and every file the diff touches. */
+/** The most files one compare call lists. A list at this cap may be cut short, so
+ *  it cannot prove that nothing gated changed (#1095 round 3). */
+export const COMPARE_FILE_CAP = 300;
+
 export async function compareFiles(
   token: string, repo: string, base: string, head: string,
-): Promise<{ aheadBy: number; files: string[] }> {
-  const c = await ghJson<{ ahead_by: number; files?: { filename: string; previous_filename?: string }[] }>(
+): Promise<{ aheadBy: number; files: string[]; mergeBaseSha: string; truncated: boolean }> {
+  const c = await ghJson<CompareResponse>(
     token,
     `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
     { method: "GET" },
     `read ${repo} compare ${base}...${head}`,
   );
-  return { aheadBy: c.ahead_by, files: comparedFilePaths(c.files) };
+  return compareSummary(c);
+}
+
+/** The compare response fields the gate reads. */
+export interface CompareResponse {
+  ahead_by: number;
+  merge_base_commit?: { sha: string };
+  files?: { filename: string; previous_filename?: string }[];
+}
+
+/** What the gate takes from one compare response (#1095 round 3). `mergeBaseSha`
+ *  is the commit the PR branched from: the PR's own config is compared there, not
+ *  at the base tip. `truncated` is set when the list hit COMPARE_FILE_CAP. A
+ *  response with no merge base throws, so the step retries rather than guessing. */
+export function compareSummary(c: CompareResponse): { aheadBy: number; files: string[]; mergeBaseSha: string; truncated: boolean } {
+  const mergeBaseSha = c.merge_base_commit?.sha;
+  if (!mergeBaseSha) throw new Error("compare response has no merge_base_commit");
+  return {
+    aheadBy: c.ahead_by,
+    files: comparedFilePaths(c.files),
+    mergeBaseSha,
+    truncated: (c.files?.length ?? 0) >= COMPARE_FILE_CAP,
+  };
 }
 
 /** Every path a compare touches: each file's name, and a rename's old name too
