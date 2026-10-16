@@ -2566,6 +2566,8 @@ const REAP_STATE_PATH = join(homedir(), ".fleet", "reap-state.json");
 /** Review F1: every plain read reap makes is bounded. A hung read must never
  *  sit between the last live read and a destroy, nor stall a poll. */
 const REAP_READ_TIMEOUT_MS = 20_000;
+/** `--nudge` (issue #1098): one assign call, whose wake the Worker runs. */
+const REAP_NUDGE_TIMEOUT_MS = 60_000;
 /** A lock file older than this is a crashed run's, and is taken over. */
 export const REAP_LOCK_STALE_MS = 15 * 60_000;
 
@@ -2577,6 +2579,11 @@ async function fetchJson(url: string, headers: Record<string, string>, timeoutMs
 
 function isStringMap(v: unknown): v is Record<string, string> {
   return typeof v === "object" && v !== null && !Array.isArray(v) && Object.values(v).every((x) => typeof x === "string");
+}
+
+function isStringListMap(v: unknown): v is Record<string, string[]> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+    && Object.values(v).every((x) => Array.isArray(x) && x.every((y) => typeof y === "string"));
 }
 
 function isCountMap(v: unknown): v is Record<string, number> {
@@ -2600,6 +2607,8 @@ function parseReapState(raw: string): ReapState | null {
   if (p.stallAlarmAt !== undefined) { if (!isStringMap(p.stallAlarmAt)) return null; out.stallAlarmAt = p.stallAlarmAt; }
   if (p.boardRows !== undefined) { if (!isCountMap(p.boardRows)) return null; out.boardRows = p.boardRows; }
   if (p.refusals !== undefined) { if (!isCountMap(p.refusals)) return null; out.refusals = p.refusals; }
+  if (p.nudgedAt !== undefined) { if (!isStringMap(p.nudgedAt)) return null; out.nudgedAt = p.nudgedAt; }
+  if (p.taskNudges !== undefined) { if (!isStringListMap(p.taskNudges)) return null; out.taskNudges = p.taskNudges; }
   return out;
 }
 
@@ -2675,6 +2684,20 @@ export function reapDeps(
       if (report.status?.state === "stopped") return { outcome: "destroyed" };
       if (race !== null) return { outcome: race };
       return { outcome: report.kind === "http-error" ? "refused" : "unknown", message: report.lines.join(" ") || report.kind };
+    },
+    // Issue #1098, review #1103: the lead's own wake (the same route the
+    // maestro and the sweep use), with zero board writes. A `task assign` on a
+    // working task would reset it to submitted and write a comment.
+    nudge: async (id, taskNumber) => {
+      const res = await fetch(studioUrl(creds, id, "/wake"), {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: `continue task #${taskNumber}; check your todo list` }),
+        signal: AbortSignal.timeout(REAP_NUDGE_TIMEOUT_MS),
+      });
+      if (!res.ok) return { woke: false, reason: `${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}` };
+      const out = (await res.json()) as { ok?: boolean; error?: string };
+      return out.ok === true ? { woke: true } : { woke: false, reason: out.error ?? "wake refused" };
     },
     loadState: async () => {
       let raw: string;
@@ -3300,7 +3323,10 @@ async function main(): Promise<void> {
     case "rescue-all":
       return cmdRescueAll(creds, { repo: parsed.repo, dryRun: parsed.dryRun });
     case "reap":
-      return cmdReap(creds, { apply: parsed.apply, idleMs: parsed.idleMs, repo: parsed.repo });
+      return cmdReap(creds, {
+        apply: parsed.apply, idleMs: parsed.idleMs, repo: parsed.repo,
+        nudge: parsed.nudge, nudgeAfterMs: parsed.nudgeAfterMs,
+      });
     case "memory-ls":
       return cmdMemoryLs(creds);
     case "memory-compact":

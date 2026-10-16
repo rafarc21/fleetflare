@@ -433,6 +433,52 @@ describe("legResultReader: reads a leg's R2 result from a bucket", () => {
 
 // #1092: an "install failed" error is an infra-class flake (a tarball fetch
 // that died), so it gets the same one retry as a red leg, on a fresh container.
+// #1104: a "clone failed" error (a git smart-HTTP stream garbled through the
+// outbound proxy) is an infra-class flake too: one retry on a fresh container.
+describe("runLegStep: clone failure retries once (#1104)", () => {
+  const CLONE = "clone failed: fatal: remote-curl: bad line length character";
+
+  it("clone failed, then success on a fresh container: success, first cause noted", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "error", description: CLONE }) : reply({ state: "success" }); };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "success", description: `flaky: passed on retry; first: ${CLONE}` });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(sent).toBe(2);
+  });
+
+  it("clone failed twice: the second clone failure is final, and its description notes the first cause", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const second = "clone failed: fatal: unable to access 'http:/'";
+    const dispatch = async () => { sent++; return reply({ state: "error", description: sent === 1 ? CLONE : second }); };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toEqual({
+      ms: expect.any(Number), leg: "lint", state: "error",
+      description: `${second}; first: ${CLONE}`,
+    });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(sent).toBe(2);
+  });
+
+  it("the clone retry runs under retry-<leg> with the .retry.json evidence key", async () => {
+    const step = fakeStep();
+    const keys: string[] = [];
+    let sent = 0;
+    const dispatch = async (p: PlannedLeg) => {
+      keys.push(p.resultKey);
+      sent++;
+      return sent === 1 ? reply({ state: "error", description: CLONE }) : reply({ state: "success" });
+    };
+    await runLegStep(step, dispatch, PLANNED);
+    expect(keys).toEqual([
+      "gate/o/r/runs/1/i/shard-lint.json",
+      "gate/o/r/runs/1/i/shard-lint.retry.json",
+    ]);
+  });
+});
+
 describe("runLegStep: install failure retries once (#1092)", () => {
   const INSTALL = 'install failed: error: Fail extracting tarball for "wrangler"';
 
@@ -489,7 +535,6 @@ describe("runLegStep: install failure retries once (#1092)", () => {
   });
 
   it.each([
-    ["clone failed: repository not found"],
     ["fetch failed: fatal: couldn't find remote ref"],
     ["checkout failed: error: pathspec"],
     ["gate-server: boom"],

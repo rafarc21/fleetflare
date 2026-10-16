@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import {
   GIT_PROXY_HOST,
   handleGateOutbound,
@@ -316,5 +316,49 @@ describe("git proxy: the token never reaches the container", () => {
     const res = await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, OWN, git.deps);
     expect(res.status).toBe(502);
     expect(await res.text()).not.toContain(TOKEN);
+  });
+});
+
+// #1104: a "clone failed: bad line length" means the git stream desynced through
+// the outbound proxy. The upstream response's framing headers are logged so the
+// next occurrence shows what GitHub sent. The token never reaches the log.
+describe("git proxy: upstream response headers are logged for diagnosis (#1104)", () => {
+  it("each upstream git response logs its status, content-encoding and transfer-encoding", async () => {
+    const logged: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.join(" ")); });
+    try {
+      const deps: GitProxyDeps = {
+        async fetch() {
+          return new Response(ADVERT, {
+            status: 200,
+            headers: { "content-type": "application/x-git-upload-pack-advertisement", "content-encoding": "gzip", "transfer-encoding": "chunked" },
+          });
+        },
+      };
+      await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, OWN, deps);
+      const line = logged.find((l) => l.includes("upstream"));
+      expect(line).toBeDefined();
+      expect(line).toContain("200");
+      expect(line).toContain("content-encoding=gzip");
+      expect(line).toContain("transfer-encoding=chunked");
+      expect(logged.join("\n")).not.toContain(TOKEN);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a header the upstream did not send logs as '-', not as undefined", async () => {
+    const logged: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.join(" ")); });
+    try {
+      const git = fakeGit();
+      await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, OWN, git.deps);
+      const line = logged.find((l) => l.includes("upstream")) ?? "";
+      expect(line).toContain("content-encoding=-");
+      expect(line).toContain("transfer-encoding=-");
+      expect(line).not.toContain("undefined");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

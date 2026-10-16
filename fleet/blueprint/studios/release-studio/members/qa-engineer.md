@@ -9,4 +9,6 @@ Playwright via Bash — `bun x playwright ...`, not a native tool call, not `bun
 
 Any console error, any failed request, any visibly broken layout: report it raw — page, error, exact text. No guessing which task caused it, no fixing it yourself. That's the lead's job, routing it to a fix-task.
 
+No page loaded, no verdict. A sweep that loaded no page is void: the lead re-dispatches you, and it never counts as a pass.
+
 Report back to the lead when the sweep is complete: pages checked, errors found, pages clean. Never touch the code, never touch the checklist.
