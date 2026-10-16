@@ -19,7 +19,7 @@ import { DurableObject, exports as workerExports } from "cloudflare:workers";
 import type { Env } from "../env";
 import { mintPrivateCloneToken } from "../github/auth";
 import { gateOutboundProps, legGitToken, type GateLegRequest } from "./leg-env";
-import { runLegInContainer, type LegResult } from "./run-leg";
+import { legResponse, runLegInContainer, type LegResult } from "./run-leg";
 
 /** The one refusal a PAT-served private leg gets. Named so it reaches the leg. */
 const PAT_ONLY_REFUSAL = "private clone needs the GitHub App on this owner";
@@ -47,7 +47,7 @@ export class GateRunnerDO extends DurableObject<Env> {
       // and, for a private leg, its one repo and minted token.
       const outbound = workerExports.GateOutbound({ props: gateOutboundProps(body, gitToken) });
       const result = await runLegInContainer(body, { container: this.ctx.container, outbound });
-      return Response.json(result);
+      return legResponse(result);
     }
     return new Response("not found", { status: 404 });
   }
