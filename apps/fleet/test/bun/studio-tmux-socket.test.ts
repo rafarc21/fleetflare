@@ -53,6 +53,14 @@ class TwoServers {
     if (!realTmux || !realSleep) throw new Error("needs tmux and sleep on PATH");
     mkdirSync(this.bin, { recursive: true });
     mkdirSync(join(this.dir, "home"), { recursive: true });
+    // #1058: tmux's bare new-session starts default-shell as a LOGIN shell,
+    // and a login shell on the gate image reads /etc/profile, which resets
+    // PATH and drops this bin off the pane's PATH — the fake claude is then
+    // never found. $HOME/.profile runs after /etc/profile, so it restores it.
+    writeFileSync(
+      join(this.dir, "home", ".profile"),
+      `PATH=${JSON.stringify(this.bin)}:$PATH; export PATH\n`,
+    );
     writeFileSync(
       join(this.bin, "tmux"),
       "#!/bin/sh\n" +
@@ -190,7 +198,8 @@ REAL("#117 — the studio session lives on `tmux -L fleet-studio`, never the def
     expect(b.sh(`set -euo pipefail\n${SESSION()}`).code).toBe(0);
     const probe = join(b.dir, "pane-claude-probe");
     b.sh(`tmux -L ${STUDIO_TMUX_SOCKET} send-keys -t studio:claude -- ${JSON.stringify(`command -v claude > ${probe}`)} Enter`);
-    expect(b.waitFor(() => existsSync(probe) && readFileSync(probe, "utf8") === join(b.bin, "claude"))).toBe(true);
+    // command -v prints the path with a trailing newline — trim before the exact-content check.
+    expect(b.waitFor(() => existsSync(probe) && readFileSync(probe, "utf8").trim() === join(b.bin, "claude"))).toBe(true);
   }, T);
 
   test("the Worker's withStudioTmux (the real function) reaches the lead's pane in the new layout", () => {
