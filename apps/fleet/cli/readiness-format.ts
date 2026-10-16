@@ -170,15 +170,26 @@ export function ageSeconds(iso: string, now: Date): number {
  * lands; `failed: <reason>` when that verdict is still bare. An unattempted
  * heal is never rendered as `running`.
  */
-function autoHealState(status: StudioStatus, replacedAt: string): string {
+function autoHealState(status: StudioStatus, replacedAt: string, now: Date): string {
+  // Issue #1152 review: an OSS lead is never healed (decideHeal), so "pending"
+  // would promise a heal that will not come.
+  if (status.leadType === "glm") return "skipped: OSS lead";
   const attempted = status.observed?.healAttemptedAt ?? null;
   if (attempted === null || Date.parse(attempted) < Date.parse(replacedAt)) return "pending";
   const r = status.readiness;
   if (r?.kind === "bare" && Date.parse(r.checkedAt) > Date.parse(attempted)) {
     return `failed: ${r.reason.replace(/\s+/g, " ")}`;
   }
+  // Issue #1152 review: "running" only inside the window a restart needs to
+  // produce a verdict. Past it, with no verdict, the attempt has failed quietly.
+  if (now.getTime() - Date.parse(attempted) > AUTO_HEAL_RUNNING_WINDOW_MS) {
+    return "failed: no verdict since the attempt";
+  }
   return "running";
 }
+
+/** Issue #1152 review: how long READY keeps saying `auto-heal running`. */
+const AUTO_HEAL_RUNNING_WINDOW_MS = 10 * 60_000;
 
 /**
  * Issue #85 — READY overrides, `state: "running"` only, first match wins:
@@ -194,7 +205,7 @@ export function readyOverride(status: StudioStatus, now: Date): string | null {
   if (status.state !== "running") return null;
   const observed = status.observed;
   if (observed?.replacedAt != null) {
-    return `bare: replaced ${formatAge(ageSeconds(observed.replacedAt, now))} — auto-heal ${autoHealState(status, observed.replacedAt)}`;
+    return `bare: replaced ${formatAge(ageSeconds(observed.replacedAt, now))} — auto-heal ${autoHealState(status, observed.replacedAt, now)}`;
   }
   // Issue #911: a glm lead recorded on a Claude account burns Claude quota and
   // stalls on its limit. Surfaced here so fleet ls shows it, not just the row.

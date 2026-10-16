@@ -2808,11 +2808,34 @@ export function decideHeal(
   // nothing else ever clears it (incarnationPatch leaves the marker alone), so
   // without this a studio healed once stayed bare for good after its next
   // replacement.
-  if (marker?.armed && !armedForAnEarlierIncarnation(marker, replacedAt)) {
-    return { kind: "stand-down", why: `already healed once at ${marker.attemptedAt}, still bare` };
+  // Issue #1152 review: an OSS (glm) lead is not healed here. restartUngated
+  // applies the router env only when the container is NOT running, and a
+  // replaced container is always running, so a heal would bring the lead up on
+  // the Claude env the container was started with. The router restart needs a
+  // destroy-and-start path that does not exist yet; until it does, say so.
+  if (status.leadType === "glm") {
+    return { kind: "stand-down", why: "OSS lead: a heal would bring it up on the Claude env; router restart not automated" };
+  }
+  if (marker?.armed) {
+    if (!armedForAnEarlierIncarnation(marker, replacedAt)) {
+      return { kind: "stand-down", why: `already healed once at ${marker.attemptedAt}, still bare` };
+    }
+    // Issue #1152 review: replacements in a burst each get a fresh episode, so
+    // a cooldown caps the heals one studio can take in a short window.
+    const sinceAttempt = (now ?? new Date()).getTime() - new Date(marker.attemptedAt).getTime();
+    if (Number.isFinite(sinceAttempt) && sinceAttempt >= 0 && sinceAttempt < HEAL_COOLDOWN_MS) {
+      return { kind: "stand-down", why: `cooling down: last heal at ${marker.attemptedAt}, within ${HEAL_COOLDOWN_MS / 60_000} min` };
+    }
   }
   return { kind: "heal", reason: readiness.reason };
 }
+
+/** Issue #1152 review: how soon the sync tick runs after a replace is seen,
+ *  instead of the regular SYNC_SESSION_SECONDS wait. */
+export const HEAL_AFTER_REPLACE_SECONDS = 15;
+
+/** Issue #1152 review: the minimum gap between two heals of one studio. */
+export const HEAL_COOLDOWN_MS = 30 * 60_000;
 
 /** Issue #1146: true when an armed marker was set before this container's
  *  `replacedAt`, so it is an earlier container's marker and does not bind
@@ -2836,7 +2859,7 @@ export function replacementEvent(
   const project = parseStudioId(id)?.repo ?? id;
   return makeEvent({
     from: id, to: "board", kind: "report", project, ref: id,
-    body: `studio ${id} replaced at ${replacedAt}: incarnation ${oldToken ?? "none"} -> ${newToken || "no incarnation"}; cause unknown; auto-heal runs on the next tick`,
+    body: `studio ${id} replaced at ${replacedAt}: incarnation ${oldToken ?? "none"} -> ${newToken || "no incarnation"}; cause unknown; auto-heal runs in the next sync tick if still bare`,
   }, nowMs, rand);
 }
 
@@ -8348,7 +8371,16 @@ export class StudioDO extends Sandbox<Env> {
             () => this.notifyStaleBackgroundShell(),
             // Issue #1146: one board event per replace, on the same D1 the
             // board reads. A throw here is caught by the tick's own handler.
-            (ev) => appendEvent(this.env.DB, ev).then(() => undefined),
+            // Issue #1152 review: the heal runs in the sync tick (300 s), so a
+            // replace pulls that tick forward. The rearm runs even if the
+            // event write fails: the heal must not wait on the log.
+            async (ev) => {
+              try {
+                await appendEvent(this.env.DB, ev);
+              } finally {
+                await this.rearm("syncSession", HEAL_AFTER_REPLACE_SECONDS);
+              }
+            },
           );
         } catch (err) {
           console.error(`studio ${this.selfId()}: transcript ship tick failed`, err);

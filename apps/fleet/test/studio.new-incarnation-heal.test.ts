@@ -138,3 +138,63 @@ describe("replacementEvent — one board event per replace", () => {
     expect(ev.body).toContain("cause unknown");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #1152 review (maestro, 2026-10-16). Three changes the review asked for
+// that can be pinned without a live studio:
+//   1. An OSS (glm) lead is never healed. A replaced container is already
+//      running, so restartUngated's router env is never applied to it
+//      (do.ts restartUngated: `if (!container.running)` gates the await), and
+//      the bring-up would run on the Claude env the container was started with.
+//   2. A cooldown caps heals across replacements: one heal per 30 min.
+//   3. READY says `failed` once the attempt window passes with no verdict,
+//      instead of `running` forever when later checks are inconclusive.
+// ---------------------------------------------------------------------------
+
+describe("review #1152 — an OSS lead is never healed onto a Claude-env container", () => {
+  it("a glm row stands down with a reason that names the OSS lead", () => {
+    const d = decideHeal(status({ leadType: "glm" }), bare(), undefined);
+    expect(d.kind).toBe("stand-down");
+    expect(d.kind === "stand-down" && d.why).toContain("OSS lead");
+  });
+
+  it("READY says the heal is skipped for an OSS lead, not 'pending'", () => {
+    const s = status({
+      leadType: "glm",
+      observed: { ...emptyObserved(), replacedAt: REPLACED_AT },
+      readiness: bare("2026-10-16T16:39:10.000Z"),
+    });
+    expect(readyOverride(s, NOW)).toBe("bare: replaced 1m — auto-heal skipped: OSS lead");
+  });
+});
+
+describe("review #1152 — cooldown caps heals across replacements", () => {
+  it("an earlier container's heal armed 20 min ago is still cooling down: stand down", () => {
+    const d = decideHeal(
+      status(), bare(), armed({ attemptedAt: "2026-10-16T16:20:03.000Z" }), null, NOW, null, REPLACED_AT,
+    );
+    expect(d.kind).toBe("stand-down");
+    expect(d.kind === "stand-down" && d.why).toContain("cooling down");
+  });
+
+  it("an earlier container's heal armed 35 min ago is outside the cooldown: heal", () => {
+    const d = decideHeal(
+      status(), bare(), armed({ attemptedAt: "2026-10-16T16:05:03.000Z" }), null, NOW, null, REPLACED_AT,
+    );
+    expect(d.kind).toBe("heal");
+  });
+});
+
+describe("review #1152 — READY stops saying 'running' once the attempt window passes", () => {
+  it("an attempt 15 min old with no verdict since reads failed, not running", () => {
+    const s = status({
+      observed: {
+        ...emptyObserved(), replacedAt: REPLACED_AT, healAttemptedAt: "2026-10-16T16:39:40.000Z",
+      },
+      readiness: bare("2026-10-16T16:39:10.000Z"),
+    });
+    expect(readyOverride(s, new Date("2026-10-16T16:55:00.000Z"))).toBe(
+      "bare: replaced 15m — auto-heal failed: no verdict since the attempt",
+    );
+  });
+});
