@@ -22,14 +22,14 @@ import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import { matchesPathRules } from "./config";
 import { fleetJsonReader } from "./fleet-json";
-import { outcomeLegs, planLegs, verdictToStatusArgs, type OutcomeLeg, type PlannedLeg } from "./fanout";
+import { outcomeLegs, pendingStatusArgs, planLegs, verdictToStatusArgs, type OutcomeLeg, type PlannedLeg } from "./fanout";
 import { loadGateConfig } from "./load-config";
 import { gateRunnerName, legRequest, runLegStep, type LegRunResult } from "./leg-run";
+import { postGateStatus, type StatusPort } from "./status-post";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
 export interface GateWorkflowParams { repo: string; pr: number }
 
-const GATE_STATUS_CONTEXT = "gate/verdict";
 // Vitest shard count comes from the fleet.json gate block (default 8, capped by
 // planLegs at MAX_LEGS_PER_PR). vitestCmd's {i}/{n} renders as i/n per shard.
 
@@ -38,6 +38,12 @@ export type GateRunOutcome =
   | { skipped: string; statusPostFailed: boolean };
 
 export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
+  /** The real GitHub calls behind every gate/verdict post in this run. */
+  private statusPort(): StatusPort {
+    const mintToken = repoTokenMinter(this.env);
+    return { mintToken, postCommitStatus };
+  }
+
   async run(event: WorkflowEvent<GateWorkflowParams>, step: WorkflowStep): Promise<GateRunOutcome> {
     const { repo, pr } = event.payload;
     const [owner, repoName] = repo.split("/");
@@ -74,7 +80,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // Nothing gated changed. Post success so the required context is not
       // left pending forever. (A guess: localci.sh's own skip path is the model.)
       const statusPostFailed = await step.do("post-skip-status", async () =>
-        postWithRetry(mintToken, repo, resolved.headSha,
+        postGateStatus(this.statusPort(), repo, resolved.headSha,
           { state: "success", description: "no gated paths changed" }));
       return { skipped: "no gated paths changed", statusPostFailed };
     }
@@ -101,6 +107,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
     // Promise.all over step-backed legs: each leg's own steps are independent,
     // and aggregateVerdict reads results in configured leg order either way.
+    // The run has a leg plan, so say it is running before any leg starts (#1088).
+    // A reattach starts no instance and never reaches here, so it posts nothing.
+    // A failed POST is reported to the log only and never blocks the run.
+    await step.do("post-pending", async () =>
+      postGateStatus(this.statusPort(), repo, resolved.headSha, pendingStatusArgs(event.instanceId, legs.length)));
+
     const results = await Promise.all(
       legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName,
         { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, image: config.image }, planned)),
@@ -112,7 +124,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
     // Wrapped in a step so a Workflow replay never posts the status twice.
     const statusPostFailed = await step.do("post-verdict", async () =>
-      postWithRetry(mintToken, repo, resolved.headSha, verdictToStatusArgs(final, {
+      postGateStatus(this.statusPort(), repo, resolved.headSha, verdictToStatusArgs(final, {
         expected: legs.map((l) => l.leg), results, runId: event.instanceId,
       })));
     // Per-leg output (#1049) rides in the final result, in plan order.
@@ -139,24 +151,4 @@ function runLeg(
     },
     planned,
   );
-}
-
-/** Posts the terminal status with two attempts. Returns true when both fail,
- *  kept apart from the verdict state so a failed POST is never read as a
- *  red leg. Callers wrap this in step.do; the attempt loop sits inside the
- *  step, so a failed POST is not retried by Workflows' own infra retry. */
-async function postWithRetry(
-  mintToken: (repo: string) => Promise<string>, repo: string, sha: string,
-  args: { state: "success" | "failure" | "error"; description: string },
-): Promise<boolean> {
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const token = await mintToken(repo);
-      await postCommitStatus(token, repo, sha, args.state, GATE_STATUS_CONTEXT, args.description);
-      return false;
-    } catch (err) {
-      console.error(`gate/verdict POST attempt ${attempt} failed`, err);
-    }
-  }
-  return true;
 }
