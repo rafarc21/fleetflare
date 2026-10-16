@@ -11,6 +11,7 @@
 import type { GateLegRequest } from "./leg-env";
 import { buildLegEnvVars } from "./leg-env";
 import { DEFAULT_GATE_IMAGE, GATE_IMAGES, legTimeoutMin } from "./config";
+import { storedLegResult, type StoredLegResult } from "./leg-run";
 
 export const GATE_CONTAINER_PORT = 8080;
 export const GATE_INSTANCE = "standard-4";
@@ -73,6 +74,9 @@ export interface RunLegDeps {
   /** The Worker-side outbound entrypoint (outbound-entrypoint.ts), already
    *  scoped to this leg's resultKey. Registered before start. */
   outbound: OutboundBinding;
+  /** Reads the leg's own R2 result. A transport loss reads it before the port-retry
+   *  budget is spent: a known state there is the leg's result (#1122). */
+  readResult?: (resultKey: string) => Promise<StoredLegResult | undefined>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -113,7 +117,7 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
     if (!(await waitUntilRunning(c, now, sleep))) {
       return { kind: "infra", description: "gate container did not start within 180 s" };
     }
-    return await runOnServer(c, req, now, sleep);
+    return await runOnServer(c, req, now, sleep, deps.readResult);
   } catch (err) {
     return { kind: "infra", description: `gate container failed: ${errorText(err)}` };
   } finally {
@@ -152,19 +156,27 @@ async function runOnServer(
   req: GateLegRequest,
   now: () => number,
   sleep: (ms: number) => Promise<void>,
+  readResult: RunLegDeps["readResult"],
 ): Promise<LegOutcome> {
   const port = c.getTcpPort(GATE_CONTAINER_PORT);
   const legStarted = now();
   const minutes = legTimeoutMin(req.timeoutMin);
 
   // The server may bind a moment after `running` turns true. A refused
-  // connection is retried every 500 ms for at most 60 s.
+  // connection is retried every 500 ms for at most 60 s. Its first failure reads
+  // the leg's R2 result before any retry spends the budget (#1122).
   const postStarted = now();
+  let checkedR2 = false;
   for (;;) {
     let res: Response;
     try {
       res = await port.fetch("http://container/run", { method: "POST", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     } catch (err) {
+      if (!checkedR2) {
+        checkedR2 = true;
+        const stored = await storedLegResult(readResult, req.resultKey);
+        if (stored !== undefined) return { kind: "result", result: stored };
+      }
       if (now() - postStarted >= PORT_RETRY_BUDGET_MS) {
         return { kind: "infra", description: `gate server unreachable: ${errorText(err)}` };
       }
@@ -179,7 +191,11 @@ async function runOnServer(
   // 202 from /run: the leg is running. Poll until it answers 200.
   for (;;) {
     await sleep(POLL_MS);
-    if (!c.running) return { kind: "infra", description: "gate container exited mid-leg" };
+    // A stopped container may have written its result first (#1122).
+    if (!c.running) {
+      const stored = await storedLegResult(readResult, req.resultKey);
+      return stored !== undefined ? { kind: "result", result: stored } : { kind: "infra", description: "gate container exited mid-leg" };
+    }
     if (now() - legStarted >= minutes * 60_000) {
       return { kind: "infra", description: `${req.leg} exceeded ${minutes} min without a result` };
     }
@@ -188,7 +204,10 @@ async function runOnServer(
       if (res.status === 200) return { kind: "result", result: (await res.json()) as LegResult };
       // 202: still running. Any other status is retried like a thrown poll.
     } catch {
-      // A failed poll is retried; only the leg deadline ends the leg.
+      // A transport loss reads R2 for the leg's own result (#1122). Otherwise the
+      // poll is retried; only the leg deadline ends the leg.
+      const stored = await storedLegResult(readResult, req.resultKey);
+      if (stored !== undefined) return { kind: "result", result: stored };
     }
   }
 }
