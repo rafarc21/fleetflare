@@ -20,13 +20,14 @@ import {
 import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
-import { decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
+import { bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
-  outcomeLegs, pendingStatusArgs, planUnionLegs, verdictToStatusArgs, type OutcomeLeg, type PlanInput, type PlannedLeg,
+  bundleKeyFor, outcomeLegs, pendingStatusArgs, planBundleLeg, planUnionLegs, verdictToStatusArgs,
+  type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
-import { gateRunnerName, legRequest, legResultReader, runLegStep, type LegRunResult } from "./leg-run";
+import { bundleStepEnabled, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
 import { markRunProgress } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import {
@@ -160,13 +161,36 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     await step.do("post-pending", async () =>
       postGateStatus(this.statusPort(), repo, resolved.headSha, pendingStatusArgs(event.instanceId, legs.length)));
 
+    // #1080: one bundle for the run, built by one leg before the others start,
+    // so the legs read it instead of each cloning (the clone 429 burst). A bundle
+    // that does not build is not a run failure: the legs get no bundle key and
+    // clone, as before. Off unless GATE_BUNDLE is on AND every block that runs legs
+    // opts in (`bundle: true`): a repo whose legs read git history never gets a snapshot.
+    const bundleKey = bundleKeyFor(owner, repoName, event.instanceId, resolved.headSha);
+    const bundled = bundleStepEnabled(this.env.GATE_BUNDLE, bundleOptedIn([base, head])) && await runBundleStep(
+      { do: (name, config, fn) => step.do(name, config, fn) },
+      (planned) => {
+        const stub = this.env.GATE_RUNNER.get(this.env.GATE_RUNNER.idFromName(gateRunnerName(event.instanceId, planned.leg, crypto.randomUUID())));
+        return stub.fetch("https://gate-runner/run-leg", {
+          method: "POST",
+          body: JSON.stringify(legRequest(owner, repoName, planned, {
+            baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, bundleKey, mergeBase: resolved.mergeBaseSha,
+          })),
+        });
+      },
+      planBundleLeg({ owner, repo: repoName, pr, runId: event.instanceId, headSha: resolved.headSha, baseSha: resolved.baseSha }),
+    );
+
     // Every leg attempt stamps the run's progress, so a live run that stops
     // progressing is hung to a manual start (#1135). A failed stamp never fails the leg.
     const touch = (): Promise<void> =>
       markRunProgress(d1RunIndex(this.env.DB), repo, pr, event.instanceId, Date.now());
     const results = await Promise.all(
       legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName,
-        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private }, planned, touch)),
+        {
+          baseRef: resolved.baseRef, pr: String(pr), private: resolved.private,
+          bundleKey: bundled ? bundleKey : undefined, mergeBase: bundled ? resolved.mergeBaseSha : undefined,
+        }, planned, touch)),
     );
 
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
@@ -224,7 +248,7 @@ function bunLaneFiles(tree: Parameters<typeof laneFilesFromTree>[0], cfg: GateCo
 /** One leg: a start-<leg> step, and a retry-<leg> step when it fails red. The step's return value is the DO's LegResult. */
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
-  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean }, planned: PlannedLeg,
+  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean; bundleKey?: string; mergeBase?: string }, planned: PlannedLeg,
   touch: () => Promise<void>,
 ): Promise<LegRunResult> {
   return runLegStep(

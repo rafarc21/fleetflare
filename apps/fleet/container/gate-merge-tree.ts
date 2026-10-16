@@ -29,8 +29,20 @@ const firstLine = (s: string) => s.split("\n")[0].trim();
 // carried on the call itself is enough.
 const GATE_IDENTITY = ["-c", "user.name=fleet gate", "-c", "user.email=gate@fleet.invalid"];
 
+/** #1080: `git merge-tree --write-tree --merge-base=` first shipped in git 2.40.
+ *  True when `git --version` output names a git that has it. Anything unparsed is false. */
+export function gitSupportsMergeBase(versionOutput: string): boolean {
+  const m = /git version (\d+)\.(\d+)/.exec(versionOutput);
+  if (m === null) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 2 || (major === 2 && minor >= 40);
+}
+
+/** `mergeBase`, when given, names the merge base instead of letting git find it.
+ *  A snapshot leg (#1080) has no history to find it in, so it passes it. */
 export async function resolveMergeTree(
-  exec: ExecFn, cwd: string, base: string, head: string, baseRef: string,
+  exec: ExecFn, cwd: string, base: string, head: string, baseRef: string, mergeBase?: string,
 ): Promise<MergeTreeResult> {
   const baseRes = await exec("git", ["rev-parse", "--verify", "--quiet", `${base}^{commit}`], { cwd });
   if (baseRes.code !== 0) return { ok: false, kind: "error", message: `unknown base ref: ${base}` };
@@ -50,7 +62,8 @@ export async function resolveMergeTree(
     if (branchSha !== baseSha) baseMoved = branchSha;
   }
 
-  const mt = await exec("git", ["merge-tree", "--write-tree", baseSha, headSha], { cwd });
+  const mergeBaseArg = mergeBase === undefined ? [] : [`--merge-base=${mergeBase}`];
+  const mt = await exec("git", ["merge-tree", "--write-tree", ...mergeBaseArg, baseSha, headSha], { cwd });
   if (mt.code === 1) return { ok: false, kind: "conflict" };
   if (mt.code !== 0) {
     return { ok: false, kind: "error", message: firstLine(mt.stderr) || `git merge-tree exited ${mt.code}` };
