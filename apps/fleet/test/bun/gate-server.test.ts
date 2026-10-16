@@ -124,7 +124,7 @@ const RUN: GateRun = {
 };
 const MERGE_RUN: GateRun = { ...RUN, leg: "merge-tree", installCmd: "", legCmd: "" };
 
-interface WorldOpts { cloneCode?: number; cloneErrs?: string[]; checkoutCode?: number; mergeCode?: number; legCode?: number; headPresent?: boolean; legOutput?: { stdout: string; stderr: string }; installCode?: number }
+interface WorldOpts { cloneCode?: number; cloneErrs?: string[]; checkoutCode?: number; mergeCode?: number; legCode?: number; headPresent?: boolean; baseMovedTo?: string; legOutput?: { stdout: string; stderr: string }; installCode?: number }
 
 // A scripted git. Every command succeeds unless the opts fail it. `rev-parse` resolves only the
 // refs in `known`; the PR head is missing until a fetch brings it in (the fork-PR path).
@@ -133,7 +133,7 @@ function fakeWorld(opts: WorldOpts = {}) {
   let headPresent = opts.headPresent ?? true;
   const known: Record<string, string> = {
     [SHA.base]: SHA.base, [SHA.head]: SHA.head,
-    "refs/remotes/origin/main": SHA.base, "refs/remotes/origin/staging": SHA.base,
+    "refs/remotes/origin/main": opts.baseMovedTo ?? SHA.base, "refs/remotes/origin/staging": SHA.base,
   };
   const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
   const fail = (code: number, stderr: string) => ({ code, stdout: "", stderr });
@@ -216,6 +216,22 @@ describe("runGate: every leg tests the merge result", () => {
     expect(world.calls.some((c) => c[0] === "bash")).toBe(false);
     expect(r2.puts).toHaveLength(1);
     expect(r2.puts[0].body).toMatchObject({ state: "success", commit: SHA.merge });
+  });
+
+  it("base moved mid-run is info: the leg still succeeds on the pinned base and its description names both commits", async () => {
+    const moved = "e".repeat(40);
+    const world = fakeWorld({ baseMovedTo: moved });
+    const r2 = fakeR2();
+    const outcome = await runGate(MERGE_RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    const note = `base moved: origin/main now eeeeeee, tested ${SHA.base.slice(0, 7)}`;
+    expect(outcome).toMatchObject({ state: "success", description: note });
+    expect(r2.puts[0].body).toMatchObject({ state: "success", commit: SHA.merge, description: note });
+  });
+
+  it("a leg with its own description keeps it; the base-moved note never overwrites a failure's reason", async () => {
+    const world = fakeWorld({ baseMovedTo: "e".repeat(40), legCode: 2 });
+    const outcome = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir() });
+    expect(outcome).toMatchObject({ state: "failure", description: "lint exited 2" });
   });
 
   it("a conflict reports failure against the base branch and installs nothing", async () => {
