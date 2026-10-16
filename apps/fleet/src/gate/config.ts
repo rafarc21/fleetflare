@@ -202,15 +202,25 @@ export function gateMapHasInvalidEntry(fleetJson: unknown): boolean {
   return Object.values(gates).some((entry) => parseGateBlock(entry) === null);
 }
 
+/** The verdict a gated repo's PR fails with when its base sha has no gate block
+ *  and the PR does not add one (#1132). Visible on the head, never a success:
+ *  the description names the base and the fix. GitHub caps a description at 140. */
+export function noGateBlockFailure(baseSha: string): string {
+  return `no gate block at base ${baseSha.slice(0, 8)}: merge gated base into branch`;
+}
+
 /** What the gate Workflow does with one PR, decided from its inputs alone (#1091
- *  review round 2): fail on a bad head config, skip (posting success only when
- *  a gated repo's paths did not change), or run the legs. */
+ *  review round 2, #1132): fail on a bad head config or a base with no gate
+ *  block, skip (the workflow posts success) when a gated repo's paths did not
+ *  change, or run the legs. */
 export type GateRunDecision =
   | { action: "fail"; description: string }
-  | { action: "skip"; reason: string; status: boolean }
+  | { action: "skip"; reason: string }
   | { action: "run" };
 
 export function decideGateRun(input: {
+  /** The PR's base sha, named in the failure description when the base has no gate block. */
+  baseSha: string;
   changedFiles: string[];
   fleetJsonChanged: boolean;
   base: GateConfig | null;
@@ -220,14 +230,15 @@ export function decideGateRun(input: {
   /** The head's fleet repo `gates` map holds an invalid entry (#1095 round 3). */
   headGatesInvalid?: boolean;
 }): GateRunDecision {
-  const { changedFiles, fleetJsonChanged: configChanged, base, head, truncated = false, headGatesInvalid = false } = input;
+  const { baseSha, changedFiles, fleetJsonChanged: configChanged, base, head, truncated = false, headGatesInvalid = false } = input;
   const failure = headFleetJsonFailure(configChanged, head, headGatesInvalid);
   if (failure !== null) return { action: "fail", description: failure };
-  // No gate config for this repo: not a repo this gate runs for. Post nothing.
-  if (base === null && !configChanged) return { action: "skip", reason: "no gate config for this repo", status: false };
-  // Nothing gated changed: post success so the required context is not left pending forever.
+  // #1132: no gate block at the base and the PR adds none. A silent skip here let
+  // a PR merge with no verdict, so the head is failed with the fix named.
+  if (base === null && !configChanged) return { action: "fail", description: noGateBlockFailure(baseSha) };
+  // Nothing gated changed: the workflow posts success so the required context is not left pending forever.
   if (gateDecision(changedFiles, base?.pathRules ?? [], configChanged, truncated) === "skip") {
-    return { action: "skip", reason: "no gated paths changed", status: true };
+    return { action: "skip", reason: "no gated paths changed" };
   }
   return { action: "run" };
 }

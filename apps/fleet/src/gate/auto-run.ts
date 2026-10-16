@@ -8,7 +8,6 @@
 // Run identity is the Workflows instance id: a hash of the repo plus the head
 // sha. Creating an instance under an id that already exists is the dedupe.
 import { isGateRunnerRepo } from "./config";
-import { loadGateConfig, type FleetJsonReader } from "./load-config";
 
 /** The params a gate run is created with: the GateWorkflow's own payload shape
  *  (workflow.ts GateWorkflowParams), restated here so this module never imports
@@ -178,21 +177,18 @@ export async function startManualGateRun(
   return recordRun(wf, input, index, baseId);
 }
 
-export type AutoRunOutcome = "started" | "reused" | "no-gate-block";
+export type AutoRunOutcome = "started" | "reused";
 
 export interface AutoRunDeps {
-  fleetRepo: string;
-  readFleetJson: FleetJsonReader;
   workflow: GateRunStarter;
   index: GateRunIndex;
 }
 
-/** Starts the gate run for a gated PR, but only when its base carries a gate
- *  block (the same lookup the Workflow does, at the PR's base sha). A repo with
- *  no gate block starts nothing. */
+/** Starts the gate run for a gated PR. No precheck of the base's gate config
+ *  (#1132): the Workflow decides, the one place that reads both the base block
+ *  and the #1091 head path. A base with no block gets a visible failure on the
+ *  head from that run, never silence. */
 export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDeps): Promise<AutoRunOutcome> {
-  const config = await loadGateConfig({ repo: pr.repo, fleetRepo: deps.fleetRepo, configSha: pr.baseSha }, deps.readFleetJson);
-  if (config === null) return "no-gate-block";
   const { reused } = await startGateRun(
     deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index,
   );

@@ -92,16 +92,16 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       : false;
 
     const decision = decideGateRun({
-      changedFiles: resolved.changedFiles, fleetJsonChanged: configChanged, base, head,
+      baseSha: resolved.baseSha, changedFiles: resolved.changedFiles, fleetJsonChanged: configChanged, base, head,
       truncated: resolved.truncated, headGatesInvalid,
     });
+    // A failure posts on the head: a bad head config, or a base with no gate block (#1132).
     if (decision.action === "fail") {
       const statusPostFailed = await step.do("post-head-invalid", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: decision.description }));
       return { state: "failure", description: decision.description, statusPostFailed, legs: [] };
     }
     if (decision.action === "skip") {
-      if (!decision.status) return { skipped: decision.reason, statusPostFailed: false };
       // Post success so the required context is not left pending forever. (A guess: localci.sh's own skip path is the model.)
       const statusPostFailed = await step.do("post-skip-status", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha,
