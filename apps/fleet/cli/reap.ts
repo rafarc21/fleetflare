@@ -274,21 +274,28 @@ function isOssLead(s: StudioStatus): boolean {
   return s.leadType !== undefined && s.leadType !== "claude";
 }
 
-/** Nudges this task received inside the last hour. */
-function nudgesInWindow(state: ReapState, taskNumber: number, now: Date): number {
-  return (state.taskNudges[String(taskNumber)] ?? [])
-    .filter((iso) => now.getTime() - Date.parse(iso) < NUDGE_WINDOW_MS).length;
+/** A nudge budget key: the same task number in two repos is two tasks. */
+function nudgeKey(repo: string, taskNumber: number): string {
+  return `${repo}#${taskNumber}`;
 }
 
-/** Which open task a nudge goes to, or why none does: "cooling" while the
- *  studio's last nudge is under NUDGE_EVERY_MS old, "spent" when every open
- *  task has used its hourly cap. The lowest task number with budget left wins. */
-type NudgePick = { task: BoardTask } | "cooling" | "spent";
-function pickNudgeTask(state: ReapState, studioId: string, live: BoardTask[], now: Date): NudgePick {
+/** Nudges this task received inside the last hour. */
+function nudgesInWindow(state: ReapState, key: string, now: Date): number {
+  return (state.taskNudges[key] ?? []).filter((iso) => now.getTime() - Date.parse(iso) < NUDGE_WINDOW_MS).length;
+}
+
+/** Which task a nudge goes to, or why none does. Only a `working` task is
+ *  nudged (review #1103): input_required, submitted, awaiting_merge and a
+ *  drifted task are held. "cooling" while the studio's last nudge is under
+ *  NUDGE_EVERY_MS old; "none" when no task is working; "spent" when every
+ *  working task has used its hourly cap. The lowest task number wins. */
+type NudgePick = { task: BoardTask } | "cooling" | "none" | "spent";
+function pickNudgeTask(state: ReapState, studioId: string, repo: string, live: BoardTask[], now: Date): NudgePick {
   const last = Date.parse(state.nudgedAt[studioId] ?? "");
   if (Number.isFinite(last) && now.getTime() - last < NUDGE_EVERY_MS) return "cooling";
-  const open = [...live].sort((a, b) => a.number - b.number);
-  const task = open.find((t) => nudgesInWindow(state, t.number, now) < NUDGE_CAP_PER_TASK);
+  const working = live.filter((t) => t.state === "working").sort((a, b) => a.number - b.number);
+  if (working.length === 0) return "none";
+  const task = working.find((t) => nudgesInWindow(state, nudgeKey(repo, t.number), now) < NUDGE_CAP_PER_TASK);
   return task ? { task } : "spent";
 }
 
@@ -377,7 +384,7 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
     if (live.length > 0) {
       const tasks = live.map((t) => `#${t.number}`).join(", ");
       // --nudge (issue #1098): only an OSS lead is woken; a claude lead keeps the STALL line alone.
-      const pick: NudgePick | null = flags.nudge && isOssLead(s) ? pickNudgeTask(state, s.id, live, now) : null;
+      const pick: NudgePick | null = flags.nudge && isOssLead(s) ? pickNudgeTask(state, s.id, repo, live, now) : null;
       if (idleMs >= STALL_AFTER_MS) {
         const last = Date.parse(state.stallAlarmAt[s.id] ?? "");
         if (!Number.isFinite(last) || now.getTime() - last >= STALL_ALARM_EVERY_MS) {
@@ -500,7 +507,7 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
   // read says it is idle right now (an operator's unsent text or a running
   // turn holds it). The budget is spent on the attempt, so a refused or
   // thrown wake cannot turn into a retry storm.
-  for (const { s, idleMs, task } of nudges) {
+  for (const { s, idleMs } of nudges) {
     try {
       await deps.heartbeat?.();
     } catch (err) {
@@ -508,18 +515,27 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
       return exit(1);
     }
     try {
+      // Review #1103: a fresh per-studio read, so a task that left `working`
+      // since the listing is never woken.
+      const fresh = await deps.studioTasks(s.id);
+      const pick = pickNudgeTask(state, s.id, repo, liveTasksOf(s.id, fresh), deps.now());
+      if (typeof pick !== "object") { deps.log(`skip ${s.id}: no working task on fresh read — ${pick}`); continue; }
+      const { task } = pick;
       const held = await liveRead(s.id, flags.nudgeAfterMs ?? DEFAULT_NUDGE_AFTER_MS);
       if (held) { deps.log(`skip ${s.id}: nudge held — ${held}`); continue; }
       if (!deps.nudge) { deps.log(`skip ${s.id}: nudge unavailable`); continue; }
       const stamp = deps.now().toISOString();
-      const key = String(task.number);
+      const key = nudgeKey(repo, task.number);
       state.nudgedAt[s.id] = stamp;
       state.taskNudges[key] = [...(state.taskNudges[key] ?? []), stamp];
+      // Review #1103: the budget is on disk BEFORE the wake, so a run killed
+      // after the wake cannot wake the same task again.
+      await deps.saveState(state);
       const out = await deps.nudge(s.id, task.number);
       if (out.woke) deps.log(`NUDGED ${s.id}: task #${task.number}, ${idleWord(idleMs)}, woke on its open task`);
       else deps.log(`NUDGE FAILED ${s.id}: task #${task.number} — ${out.reason}`);
     } catch (err) {
-      deps.log(`NUDGE FAILED ${s.id}: task #${task.number} — ${errText(err)}`);
+      deps.log(`NUDGE FAILED ${s.id}: ${errText(err)}`);
     }
   }
   return exit(0);

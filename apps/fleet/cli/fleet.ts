@@ -2683,19 +2683,19 @@ export function reapDeps(
       if (race !== null) return { outcome: race };
       return { outcome: report.kind === "http-error" ? "refused" : "unknown", message: report.lines.join(" ") || report.kind };
     },
-    // Issue #1098: the SAME call `fleet task assign` makes (POST .../assign). A
-    // same-studio re-assign lands no board write and still wakes the lead (#158).
+    // Issue #1098, review #1103: the lead's own wake (the same route the
+    // maestro and the sweep use), with zero board writes. A `task assign` on a
+    // working task would reset it to submitted and write a comment.
     nudge: async (id, taskNumber) => {
-      const res = await fetch(boardUrl(creds, `/tasks/${taskNumber}/assign`), {
+      const res = await fetch(studioUrl(creds, id, "/wake"), {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ assignee: id, repo }),
+        body: JSON.stringify({ prompt: `continue task #${taskNumber}; check your todo list` }),
         signal: AbortSignal.timeout(REAP_NUDGE_TIMEOUT_MS),
       });
       if (!res.ok) return { woke: false, reason: `${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}` };
-      const task = (await res.json()) as { wake?: AssignWakeReport };
-      if (task.wake?.woke === true) return { woke: true };
-      return { woke: false, reason: task.wake?.woke === false ? task.wake.reason : "no wake report" };
+      const out = (await res.json()) as { ok?: boolean; error?: string };
+      return out.ok === true ? { woke: true } : { woke: false, reason: out.error ?? "wake refused" };
     },
     loadState: async () => {
       let raw: string;

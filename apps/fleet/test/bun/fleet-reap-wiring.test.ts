@@ -32,6 +32,9 @@ let openTasks: unknown[] | null = null;
 let leadOverride: string | null = null;
 let assignAnswer: (() => Response) | null = null;
 const assigns: string[] = [];
+/** The studio wake the nudge posts (review #1103: a wake, not a board assign). */
+let wakeAnswer: (() => Response) | null = null;
+const wakes: string[] = [];
 
 function idleActivity(forMs: number) {
   const now = Date.now();
@@ -60,9 +63,15 @@ beforeAll(() => {
       seen.push(`${req.method} ${u.pathname}${u.search}`);
       if (u.pathname === "/studio/") return Response.json([row()]);
       if (u.pathname === "/studio/board/tasks") {
-        const body = u.searchParams.has("assignedTo") ? [] : (openTasks ?? HISTORY);
+        const body = openTasks ?? (u.searchParams.has("assignedTo") ? [] : HISTORY);
         if (slowBoardMs > 0) return Bun.sleep(slowBoardMs).then(() => Response.json(body));
         return Response.json(body);
+      }
+      if (u.pathname === `/studio/${ID}/wake` && req.method === "POST") {
+        return req.text().then((body) => {
+          wakes.push(body);
+          return wakeAnswer ? wakeAnswer() : Response.json({ ok: true });
+        });
       }
       if (u.pathname === "/studio/board/tasks/7/assign" && req.method === "POST") {
         return req.text().then((body) => {
@@ -88,6 +97,7 @@ afterAll(() => server.stop(true));
 beforeEach(() => {
   seen.length = 0; slowBoardMs = 0; destroyAnswer = null; statusAnswer = null;
   openTasks = null; leadOverride = null; assignAnswer = null; assigns.length = 0;
+  wakeAnswer = null; wakes.length = 0;
 });
 
 const NOT_UNDER_ORCA: OrcaDeps = {
@@ -271,7 +281,7 @@ const LEAD_TASK = {
 function openLeadTask(answer: (() => Response) | null = null) {
   openTasks = [LEAD_TASK];
   leadOverride = "glm";
-  assignAnswer = answer;
+  wakeAnswer = answer;
 }
 const NUDGE_FLAGS = { apply: true, idleMs: 30 * MIN, repo: REPO, nudge: true };
 
@@ -281,9 +291,9 @@ test("--nudge apply: an OSS lead idle on an open task gets the assign call, and 
   const lines: string[] = [];
   const out = await runReap(NUDGE_FLAGS, reapDeps(creds(), REPO, statePath, (l) => lines.push(l), NOT_UNDER_ORCA));
   expect(out.exitCode).toBe(0);
-  expect(seen).toContain("POST /studio/board/tasks/7/assign");
-  expect(seen.some((s) => s.includes("/destroy") || s.includes("/rescue"))).toBe(false);
-  expect(JSON.parse(assigns[0]!)).toEqual({ assignee: ID, repo: REPO });
+  expect(seen).toContain(`POST /studio/${ID}/wake`);
+  expect(seen.some((s) => s.includes("/assign") || s.includes("/destroy") || s.includes("/rescue"))).toBe(false);
+  expect(JSON.parse(wakes[0]!)).toEqual({ prompt: "continue task #7; check your todo list" });
   expect(lines.some((l) => l.startsWith(`NUDGED ${ID}`) && l.includes("#7"))).toBe(true);
 });
 
@@ -292,12 +302,12 @@ test("--nudge: the cooldown survives the state file, so a second poll inside 15m
   const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");
   await runReap(NUDGE_FLAGS, reapDeps(creds(), REPO, statePath, () => {}, NOT_UNDER_ORCA));
   await runReap(NUDGE_FLAGS, reapDeps(creds(), REPO, statePath, () => {}, NOT_UNDER_ORCA));
-  expect(assigns.length).toBe(1);
-  expect(JSON.parse(readFileSync(statePath, "utf8")).taskNudges["7"]).toHaveLength(1);
+  expect(wakes.length).toBe(1);
+  expect(JSON.parse(readFileSync(statePath, "utf8")).taskNudges[`${REPO}#7`]).toHaveLength(1);
 });
 
 test("--nudge: a refusal from the Worker is logged with its reason", async () => {
-  openLeadTask(() => Response.json({ number: 7, wake: { woke: false, reason: "studio is stopped" } }));
+  openLeadTask(() => Response.json({ ok: false, skipped: true, error: "studio is stopped" }));
   const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");
   const lines: string[] = [];
   await runReap(NUDGE_FLAGS, reapDeps(creds(), REPO, statePath, (l) => lines.push(l), NOT_UNDER_ORCA));
