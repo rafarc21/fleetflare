@@ -3,9 +3,12 @@
 // llm.models-route.test.ts — auth lives at the handleStudio mount point.
 import { describe, it, expect, vi, type Mock } from "vitest";
 import { handleGateRoute } from "../src/gate/routes";
+import { gateRunId } from "../src/gate/auto-run";
 import type { Env } from "../src/env";
 
 const REPO = "acme/example";
+const HEAD = "c".repeat(40);
+const headSha = async () => HEAD;
 
 // GATE_WORKFLOW joins Env in Task 14; the fake carries it until then.
 type FakeEnv = Env & { GATE_WORKFLOW: { create: Mock; get: Mock } };
@@ -43,15 +46,57 @@ describe("handleGateRoute", () => {
     expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
   });
 
-  it("POST /studio/gate/start -> creates a workflow instance for a gated-in repo", async () => {
+  it("POST /studio/gate/start -> creates a workflow instance for a gated-in repo, under the head sha's id", async () => {
     const env = fakeEnv();
     const req = new Request("https://worker/studio/gate/start", {
       method: "POST", body: JSON.stringify({ repo: REPO, pr: 1 }),
     });
-    const res = await handleGateRoute(req, env);
+    const res = await handleGateRoute(req, env, headSha);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ started: true, runId: "run-1" });
+    expect(await res.json()).toEqual({ started: true, runId: await gateRunId(REPO, HEAD), reused: false });
     expect(env.GATE_WORKFLOW.create).toHaveBeenCalledOnce();
+    expect(env.GATE_WORKFLOW.create).toHaveBeenCalledWith({ id: await gateRunId(REPO, HEAD), params: { repo: REPO, pr: 1 } });
+  });
+
+  // #1072: a manual `fleet gate run` of a sha the auto-run already started
+  // reuses that run. The fake keeps Workflows' duplicate-id rule.
+  it("POST /studio/gate/start twice for one head sha -> one run; the second reuses it", async () => {
+    const env = fakeEnv();
+    const ids = new Set<string>();
+    env.GATE_WORKFLOW.create = vi.fn(async (opts: { id: string }) => {
+      if (ids.has(opts.id)) throw new Error("instance already exists");
+      ids.add(opts.id);
+      return { id: opts.id };
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["create"];
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (!ids.has(id)) throw new Error("instance not found");
+      return { status: vi.fn(async () => ({ status: "running" })) };
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const start = () => handleGateRoute(new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 1 }),
+    }), env, headSha);
+    const first = (await (await start()).json()) as { runId: string };
+    const second = await (await start()).json();
+    expect(first).toEqual({ started: true, runId: await gateRunId(REPO, HEAD), reused: false });
+    expect(second).toEqual({ started: true, runId: first.runId, reused: true });
+    expect(ids.size).toBe(1);
+  });
+
+  it("POST /studio/gate/start for a new head sha starts a new run", async () => {
+    const env = fakeEnv();
+    const ids = new Set<string>();
+    env.GATE_WORKFLOW.create = vi.fn(async (opts: { id: string }) => {
+      if (ids.has(opts.id)) throw new Error("instance already exists");
+      ids.add(opts.id);
+      return { id: opts.id };
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["create"];
+    const start = (sha: string) => handleGateRoute(new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 1 }),
+    }), env, async () => sha);
+    await start(HEAD);
+    const later = (await (await start("d".repeat(40))).json()) as { reused: boolean };
+    expect(later.reused).toBe(false);
+    expect(ids.size).toBe(2);
   });
 
   it("GET /studio/gate/status -> 404 when FLEET_GATE_RUNNER is off, before touching the workflow", async () => {

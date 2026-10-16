@@ -15,14 +15,15 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listRepoTree, postCommitStatus,
+  compareFiles, getBranchSha, getPullRequest, getPullRequestHeadSha, listRepoTree, postCommitStatus,
 } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import { matchesPathRules } from "./config";
+import { fleetJsonReader } from "./fleet-json";
 import { outcomeLegs, planLegs, verdictToStatusArgs, type OutcomeLeg, type PlannedLeg } from "./fanout";
-import { loadGateConfig, type FleetJsonReader } from "./load-config";
+import { loadGateConfig } from "./load-config";
 import { gateRunnerName, legRequest, runLegStep, type LegRunResult } from "./leg-run";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
@@ -59,18 +60,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
     // The config is read at the PR's BASE sha (never the head), so a PR cannot
     // edit its own gate. The fleet repo's `gates` map is read at HEAD.
-    const readFleetJson: FleetJsonReader = async (repoSlug, ref) => {
-      const token = await mintToken(repoSlug);
-      let text: string;
-      try {
-        text = await fetchRepoFile(token, repoSlug, "fleet.json", ref);
-      } catch (err) {
-        // No fleet.json at this ref: not a gated repo. Any other error is infra and retries.
-        if (err instanceof Error && /\(404\)/.test(err.message)) return null;
-        throw err;
-      }
-      try { return JSON.parse(text) as unknown; } catch { return null; }
-    };
+    const readFleetJson = fleetJsonReader(mintToken);
     const config = await step.do("load-config", async () =>
       loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, baseSha: resolved.baseSha }, readFleetJson));
 

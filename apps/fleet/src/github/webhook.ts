@@ -11,6 +11,8 @@ import { listStudios } from "../studio/registry";
 import { logWakeOutcome } from "../studio/wake";
 import { getStudioStub } from "../studio/profile";
 import { repoTokenMinter } from "./auth";
+import { pullRequestAutoRun } from "../gate/auto-run";
+import { autoRunFromEnv } from "../gate/auto-run-env";
 import {
   getDefaultBranch, listPullsForCommit, closingIssuesForPull, listPullCommits, getPullRequest,
   pullsWithClosingIssuesForCommits,
@@ -614,6 +616,14 @@ export async function handleGithubWebhook(
    */
   const event = req.headers.get("x-github-event");
   if (event !== "push") {
+    // #1072: a gated PR's push starts its gate run here, before the PR is
+    // final. pullRequestAutoRun is the whole decision (draft, action, repo,
+    // gate runner); anything it rejects queues nothing. The run itself is
+    // waitUntil work, off GitHub's 10s delivery budget.
+    if (event === "pull_request") {
+      const run = pullRequestAutoRun(body, env);
+      if (run) ctx.waitUntil(autoRunFromEnv(env, run));
+    }
     // Issue #41: the revoke FIRST. GitHub cancels a delivery after 10s and
     // the maestro wake below can outlast that; a cancelled request must not
     // take the revoke with it.
