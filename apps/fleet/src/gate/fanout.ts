@@ -14,7 +14,7 @@ export interface RosterInput {
   /** Every planned leg name, in plan order. A leg with no result counts as red. */
   expected: string[];
   results: LegResult[];
-  /** The Workflow instance id; the roster shows its first 8 chars. */
+  /** The Workflow instance id; the roster names the run by its full id (#1144). */
   runId: string;
 }
 
@@ -29,9 +29,11 @@ export function verdictToStatusArgs(
 }
 
 /** The run-start status (#1088): pending on the head, naming the run and how
- *  many legs it fans out to. The verdict overwrites it when the run ends. */
+ *  many legs it fans out to. The verdict overwrites it when the run ends. The
+ *  run is named by its full id (#1144): a short tag is not an id `fleet gate
+ *  watch` can look up, and two reruns would share it. */
 export function pendingStatusArgs(runId: string, legCount: number): { state: "pending"; description: string } {
-  return { state: "pending", description: `running (run ${runId.slice(0, 8)}) — ${legCount} legs` };
+  return { state: "pending", description: `running (run ${runId}) — ${legCount} legs` };
 }
 
 function rosterDescription({ expected, results, runId }: RosterInput): string {
@@ -39,7 +41,7 @@ function rosterDescription({ expected, results, runId }: RosterInput): string {
   const red = expected.filter((leg) => byLeg.get(leg)?.state !== "success");
   const total = expected.length;
   const green = total - red.length;
-  const runTag = `(run ${runId.slice(0, 8)})`;
+  const runTag = `(run ${runId})`;
   if (red.length > 0) return withLegList(`${green}/${total} green; red: `, red, ` ${runTag}`);
   const flaky = expected.filter((leg) => byLeg.get(leg)?.description?.startsWith("flaky:"));
   if (flaky.length === 0) return `${total}/${total} green ${runTag}`;

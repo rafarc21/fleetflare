@@ -128,6 +128,22 @@ export function parseStatusResponse(text: string): ParsedStatus {
   }
 }
 
+/** The one line a failed status poll prints (#1144): the HTTP status, and the
+ *  route's own error text when the reply is JSON. The raw body never prints, so
+ *  a Cloudflare HTML error page cannot reach the terminal. */
+export function gateServiceErrorLine(httpStatus: number, body: string): string {
+  const head = `fleet gate-watch: HTTP ${httpStatus} gate service error`;
+  try {
+    const v = JSON.parse(body) as { error?: unknown } | null;
+    if (v !== null && typeof v === "object" && typeof v.error === "string") {
+      return `${head}: ${v.error.slice(0, 200)}`;
+    }
+  } catch {
+    // not JSON: fall through to the bare line
+  }
+  return `${head} (non-JSON reply)`;
+}
+
 export type GateWatchDecision =
   | { kind: "terminal"; status: GateStatusResponse }
   | { kind: "continue" }
@@ -165,9 +181,10 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
       process.exitCode = 2;
       return;
     }
-    const parsed = parseStatusResponse(await res.text());
-    if (!parsed.ok) {
-      console.error(`fleet gate-watch: non-JSON reply from ${creds.workerUrl}: ${parsed.body}`);
+    const text = await res.text();
+    const parsed = parseStatusResponse(text);
+    if (!res.ok || !parsed.ok) {
+      console.error(gateServiceErrorLine(res.status, text));
       process.exitCode = 2;
       return;
     }

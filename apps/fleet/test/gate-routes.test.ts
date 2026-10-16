@@ -232,3 +232,27 @@ describe("GET /studio/gate/status per-leg output (#1049)", () => {
     expect(await res.json()).toEqual(output);
   });
 });
+
+// #1144: an unknown run id is a JSON 404, and any other throw a JSON 500. A
+// raw throw reached Cloudflare's HTML error page (1101) before this.
+describe("GET /studio/gate/status with a run id the Workflow does not know (#1144)", () => {
+  it("an unknown run id -> JSON 404 naming the run, never an HTML error page", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => { throw new Error("instance.not_found"); });
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=rerun-ga`);
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(404);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(await res.json()).toEqual({ error: "no such gate run", runId: "rerun-ga" });
+  });
+
+  it("any other throw -> JSON 500, never an uncaught error", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => { throw new Error("workflow binding unavailable"); });
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(await res.json()).toEqual({ error: "gate status unavailable" });
+  });
+});
