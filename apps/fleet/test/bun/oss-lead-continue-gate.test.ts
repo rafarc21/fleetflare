@@ -45,6 +45,18 @@ function userLine(text: string) {
   return { type: "user", message: { role: "user", content: text } };
 }
 
+// The entry Claude Code appends after every Stop block: a meta user line, not
+// an operator prompt.
+function stopFeedbackLine(reason: string) {
+  return { type: "user", isMeta: true, message: { role: "user", content: `Stop hook feedback:\n${reason}` } };
+}
+
+function toolResultLine() {
+  return { type: "user", message: { role: "user", content: [
+    { type: "tool_result", tool_use_id: "tu_1", content: "ok" },
+  ] } };
+}
+
 function writeTranscript(lines: unknown[]): string {
   const path = join(base, "transcript.jsonl");
   writeFileSync(path, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
@@ -227,6 +239,31 @@ describe("oss-lead-continue.sh — loop guard", () => {
     expect(blocked(other)?.decision).toBe("block");
   });
 
+  test("live loop: the isMeta Stop-feedback entry after each block does not reset the cap (<= 8 blocks)", () => {
+    // Real loop, not a frozen transcript: every block appends the feedback
+    // entry and the lead's next TodoWrite, the way Claude Code grows the file.
+    const transcript: unknown[] = [userLine("go"), todoWrite(OPEN_TODOS)];
+    let blocks = 0;
+    for (let i = 0; i < 30; i++) {
+      if (blocked(run(transcript, { stopHookActive: true })) === null) break;
+      blocks++;
+      transcript.push(stopFeedbackLine("continue with Wire the route"), todoWrite(OPEN_TODOS));
+    }
+    expect(blocks).toBeLessThanOrEqual(8);
+    expect(blocks).toBe(8);
+  });
+
+  test("tool_result entries between blocks do not start a new chain (live loop, <= 8 blocks)", () => {
+    const transcript: unknown[] = [userLine("go"), todoWrite(OPEN_TODOS)];
+    let blocks = 0;
+    for (let i = 0; i < 30; i++) {
+      if (blocked(run(transcript, {})) === null) break;
+      blocks++;
+      transcript.push(toolResultLine(), todoWrite(OPEN_TODOS));
+    }
+    expect(blocks).toBe(8);
+  });
+
   test("an allowed stop clears the counter so the next chain starts fresh", () => {
     const open = [userLine("go"), todoWrite(OPEN_TODOS)];
     const done = [userLine("go"), todoWrite([{ content: "x", status: "completed" }])];
@@ -235,6 +272,33 @@ describe("oss-lead-continue.sh — loop guard", () => {
     const counterDir = join(home, ".claude", "state");
     const count = existsSync(counterDir) ? readFileSync(join(counterDir, `oss-lead-continue-${SESSION}`), "utf8").trim().split("\n")[1] : "0";
     expect(count).toBe("0");
+  });
+});
+
+describe("studio-bringup.sh lead-gate settings write — OSS Stop registration fails open", () => {
+  test("happy path: one settings write registers the OSS Stop hook and the lead-gate PreToolUse", () => {
+    mkdirSync(join(home, ".claude", "hooks"), { recursive: true });
+    writeFileSync(join(home, ".claude", "hooks", "oss-lead-continue.sh"), "#!/usr/bin/env bash\n");
+    const region = extractRegion(BRINGUP, "lead-gate-settings-merge");
+    const res = runSnippet({ script: region, shell: "bash", env: { HOME: home }, timeout: 10_000 });
+    expect(res.code).toBe(0);
+    const cfg = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+    expect(JSON.stringify(cfg.hooks.Stop)).toContain("oss-lead-continue.sh");
+    expect(JSON.stringify(cfg.hooks.PreToolUse)).toContain("lead-gate.sh");
+  });
+
+  test("Stop as a non-list does not abort the settings write: PreToolUse still lands, exit 0", () => {
+    const claudeDir = join(home, ".claude");
+    mkdirSync(join(claudeDir, "hooks"), { recursive: true });
+    writeFileSync(join(claudeDir, "hooks", "oss-lead-continue.sh"), "#!/usr/bin/env bash\n");
+    // Stop as a string: the Stop registration cannot merge into it.
+    writeFileSync(join(claudeDir, "settings.json"), JSON.stringify({ hooks: { Stop: "not-a-list" } }));
+    const region = extractRegion(BRINGUP, "lead-gate-settings-merge");
+    const res = runSnippet({ script: region, shell: "bash", env: { HOME: home }, timeout: 10_000 });
+    expect(res.code).toBe(0);
+    expect(res.stderr).toContain("oss-lead-continue");
+    const cfg = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf8"));
+    expect(JSON.stringify(cfg.hooks.PreToolUse)).toContain("lead-gate.sh");
   });
 });
 

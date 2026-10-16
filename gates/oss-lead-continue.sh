@@ -21,7 +21,9 @@
 #   - 8 blocks already for this user prompt             -> allow (loop guard)
 #   - otherwise -> {"decision":"block","reason":"continue with <first open todo>"}
 # The loop guard counts per real user prompt (uuid, or line index), not per
-# stop_hook_active: that flag is not reliable on every CLI build. The counter
+# stop_hook_active: that flag is not reliable on every CLI build. Tool results
+# and isMeta entries (the "Stop hook feedback" line after each block) do not
+# start a new prompt. The counter
 # lives in ~/.claude/state, one file per session, as "<prompt-key>\n<count>".
 # A block is emitted only after the counter write succeeded.
 #
@@ -100,6 +102,10 @@ with open(payload["transcript_path"]) as f:
         kind = m.get("type")
         content = (m.get("message") or {}).get("content") or []
         if kind == "user":
+            # isMeta: Claude Code's own "Stop hook feedback" line after a block.
+            # It is not an operator prompt, so it must not reset the chain.
+            if m.get("isMeta") is True:
+                continue
             if isinstance(content, str) or not any(
                 isinstance(b, dict) and b.get("type") == "tool_result" for b in content
             ):

@@ -1010,6 +1010,7 @@ for fn, b64 in bundle.items():
     # (old matcher, baked path, no fail-closed guard) sitting beside the new
     # one -- the exact shape this fix exists to remove.
     mkdir -p ~/.claude
+# >>> lead-gate-settings-merge >>>
     python3 -c '
 import json, os
 path = os.path.expanduser("~/.claude/settings.json")
@@ -1061,14 +1062,20 @@ pt.append({
 # OSS-lead continue hook (issue #1112, layer 2): Stop entry, registered in
 # this SAME write so one bring-up installs the lead gate and this hook together.
 # Only when the copy above landed; otherwise drop any prior entry and continue.
+# A failure here is logged and skipped: the lead-gate entries above still land
+# and bring-up continues without this hook (fail open).
 oss = os.path.expanduser("~/.claude/hooks/oss-lead-continue.sh")
-stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])
-stop[:] = [e for e in stop if "oss-lead-continue.sh" not in json.dumps(e)]
-if os.path.isfile(oss):
-    stop.append({"hooks": [{"type": "command", "command": "S=\"$HOME/.claude/hooks/oss-lead-continue.sh\"; [ -x \"$S\" ] && exec \"$S\" || exit 0"}]})
+try:
+    stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])
+    stop[:] = [e for e in stop if "oss-lead-continue.sh" not in json.dumps(e)]
+    if os.path.isfile(oss):
+        stop.append({"hooks": [{"type": "command", "command": "S=\"$HOME/.claude/hooks/oss-lead-continue.sh\"; [ -x \"$S\" ] && exec \"$S\" || exit 0"}]})
+except Exception as e:
+    os.write(2, ("studio-bringup: oss-lead-continue Stop hook not registered (%s) -- continuing without it\n" % e).encode())
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
 '
+# <<< lead-gate-settings-merge <<<
 
   fi
 
