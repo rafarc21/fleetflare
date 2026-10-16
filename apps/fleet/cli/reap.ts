@@ -45,7 +45,7 @@
 // dies with an unconfirmed error (issue #62).
 import type { StudioStatus } from "../src/studio/types";
 import type { Activity } from "../src/studio/activity";
-import { readActivityFrame, agentPanelRows } from "../src/studio/activity";
+import { readActivityFrame, agentPanelRows, BACKGROUND_COUNTER } from "../src/studio/activity";
 import type { BoardTask } from "../src/board/types";
 import { studioLabel, LIVE_TASK_STATES } from "../src/board/types";
 import { footerAtBottom, aboveAgentPanel, RULE_LINE } from "../src/studio/failover";
@@ -240,19 +240,34 @@ function liveReadRefusal(read: ReapInspect, idleMs: number, now: Date): string |
 /** Words in claude's chrome that mean something still runs under the lead. */
 const RUNNING_WORDS = /running|background|shells?\b|monitors?\b|tasks?\b|agents? working/i;
 
+/** Issue #1110: chrome hints that are never work. Dropped from the footer
+ *  before any check runs, so `ctrl+t to hide tasks` (a todo list is on
+ *  screen) and `PR #4343` (an open PR) no longer block a nudge or a reap. */
+const FOOTER_CHROME_HINT = [
+  /^⏵⏵ bypass permissions on \(shift\+tab to cycle\)$/,
+  /^ctrl\+t to (?:hide|show) tasks$/i,
+  /^← for agents$/,
+  /^PR #\d+$/,
+];
+
 /**
  * Review F2/F3: the chrome around the input box. The input box must hold ONLY
  * an empty `❯` row (typed-but-unsent text is an operator mid-sentence). The
- * footer must carry no counter at all (`7 shells`, `2 monitors`, anything
- * with a digit — an unknown counter is unknown, so skip), and neither the
- * footer nor the last status row may mention running/background work.
+ * footer is read by its `·` segments (#1110): known chrome hints drop out,
+ * then the footer is refused on `esc to interrupt`, a background counter
+ * (activity.ts BACKGROUND_COUNTER: `7 shells`, `2 monitors`), `still running`,
+ * or any other segment carrying a digit (an unknown counter is unknown, so
+ * skip). The last status row may not mention running/background work.
  */
-function chromeRefusal(tail: string): string | null {
+export function chromeRefusal(tail: string): string | null {
   const lines = tail.replace(/\s+$/, "").split("\n");
   const footer = footerAtBottom(lines);
   if (footer < 0) return "live pane footer not found";
-  if (/\d/.test(lines[footer]) || RUNNING_WORDS.test(lines[footer])) {
-    return `live pane footer carries a counter: ${lines[footer].trim()}`;
+  for (const seg of lines[footer].split("·").map((x) => x.trim())) {
+    if (seg === "" || FOOTER_CHROME_HINT.some((re) => re.test(seg))) continue;
+    if (/esc to interrupt/i.test(seg) || BACKGROUND_COUNTER.test(seg) || /still running/i.test(seg) || /\d/.test(seg)) {
+      return `live pane footer carries running work: ${lines[footer].trim()}`;
+    }
   }
   const head = aboveAgentPanel(lines.join("\n")).split("\n");
   const status = [...head].reverse().find((l) => /^\s*✻ /.test(l));
