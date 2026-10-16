@@ -12,6 +12,7 @@ import { SHIP_TRANSCRIPT_SECONDS } from "../src/studio/ship-cadence";
 import { SYNC_SESSION_SECONDS } from "../src/studio/session-sync";
 import { formatRateLimited, type RateLimitObservation } from "../src/studio/rate-limit";
 import { isUnreachable, type Observed } from "../src/studio/observed";
+import { leadAccountMismatch } from "../src/studio/lead-route";
 import type { Activity } from "../src/studio/activity";
 import type { MemberAlert } from "../src/studio/member-alerts";
 // Issue #934: the INFER decoration's value shape — a TYPE-ONLY import so this
@@ -177,6 +178,11 @@ export function readyOverride(status: StudioStatus, now: Date): string | null {
   const observed = status.observed;
   if (observed?.replacedAt != null) {
     return `replaced ${formatAge(ageSeconds(observed.replacedAt, now))} ago — not brought up`;
+  }
+  // Issue #911: a glm lead recorded on a Claude account burns Claude quota and
+  // stalls on its limit. Surfaced here so fleet ls shows it, not just the row.
+  if (leadAccountMismatch(status)) {
+    return `lead on wrong account (${status.launchedAccount}) — glm lead on Claude; recycle to put it back on glm`;
   }
   // Board issue #183 — replaces the old fixed `execFailures >= 3` gate
   // (issue #85 PR1, review round 3 MUST-FIX 7) with the maestro's own
