@@ -3,6 +3,7 @@
 // own AbortSignal below the Workflows step timeout, so a hung attempt ends
 // without the step timeout ever firing. Pure: a fake step engine with retries.
 import { describe, it, expect } from "bun:test";
+import { MAX_LEG_TIMEOUT_MIN } from "../../src/gate/config";
 import { infraRerunDecision, isInfraLegFailure } from "../../src/gate/infra-rerun";
 import { legStepDeadlineMs, runLegStep, storedLegResult, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
@@ -64,6 +65,11 @@ describe("legStepDeadlineMs: the per-attempt deadline always ends before the ste
     expect(legStepDeadlineMs(undefined)).toBe(28 * 60_000);
   });
 
+  it("the largest configurable leg, plus the container's <= 180 s start, ends inside the step deadline: the cap is reachable (#1148 item 5)", () => {
+    expect(legStepDeadlineMs(MAX_LEG_TIMEOUT_MIN)).toBeGreaterThanOrEqual(MAX_LEG_TIMEOUT_MIN * 60_000 + 180_000);
+    expect(legStepDeadlineMs(MAX_LEG_TIMEOUT_MIN)).toBeLessThan(STEP_TIMEOUT_MS);
+  });
+
   it("a short leg keeps its own timeout plus grace, so it is not held to the cap", () => {
     expect(legStepDeadlineMs(5)).toBe(15 * 60_000);
   });
@@ -71,7 +77,7 @@ describe("legStepDeadlineMs: the per-attempt deadline always ends before the ste
 
 describe("infra text the Workflows and AbortSignal timeouts really produce (#1135 item 3)", () => {
   it.each([
-    "lint: Execution timed out after 30 min",
+    "lint: Execution timed out after 1800000ms",
     "lint: The operation was aborted due to timeout after 28 min",
     "lint: no progress past its deadline after 28 min",
   ])("infra: %s", (description) => {

@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { sweepGateRunsFromEnv } from "./gate/watchdog-env";
 import { handleTelegramWebhook } from "./telegram/webhook";
 import { handleGithubWebhook } from "./github/webhook";
 import { AGENTS, telegramConfig } from "./agents/registry";
@@ -196,6 +197,13 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, url: U
 }
 
 async function handleScheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  // #1148 (refs #1135): the gate run watchdog. A live run with no progress for
+  // GATE_STALL_MS is hung: it is ended, and rerun once (or takes the final error verdict).
+  try {
+    await sweepGateRunsFromEnv(env);
+  } catch (err) {
+    console.error("gate watchdog sweep failed", err);
+  }
   // Board #334: the AgentDO watchdog is part of the legacy Telegram
   // surface — off, nobody polls AgentDO (its container never starts).
   // The studio container-watch below runs either way.

@@ -933,6 +933,13 @@ export function streamErrorFrame(message: string): string {
   return sseEvent("error", { type: "error", error: { type, message: override ?? message } });
 }
 
+/** Issue #1147: Anthropic's own keepalive frame. Sent while the upstream is
+ *  silent so an idle-timed client does not give up during a long prefill or a
+ *  long gap between chunks. Carries no content and no usage. */
+export function streamPing(): string {
+  return sseEvent("ping", { type: "ping" });
+}
+
 /**
  * Board issue #284 (b): some OpenAI-compatible backends emit a chunk shaped
  * `{"error": {...}}` (or, less commonly, `{"error": "plain string"}`)
