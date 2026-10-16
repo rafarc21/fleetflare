@@ -28,7 +28,7 @@ import {
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
 import { gateRunnerName, legRequest, legResultReader, runLegStep, type LegRunResult } from "./leg-run";
 import { markRunProgress } from "./auto-run";
-import { d1RunIndex, markRunRed } from "./auto-run-env";
+import { d1RunIndex } from "./auto-run-env";
 import {
   announceInfraRerun, infraRerunDecision, launchInfraRerun, recordInfraRerun, rerunInstanceId, rerunStarted, rerunStatusArgs,
 } from "./infra-rerun";
@@ -166,12 +166,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       markRunProgress(d1RunIndex(this.env.DB), repo, pr, event.instanceId, Date.now());
     const results = await Promise.all(
       legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName,
-        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private }, planned, touch)
-        .then(async (result) => {
-          // A red leg is final (#1119): the watchdog reads this flag and never reruns a red run, even a stalled one.
-          if (result.state === "failure") await markRunRed(this.env.DB, repo, pr, event.instanceId);
-          return result;
-        })),
+        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private }, planned, touch)),
     );
 
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
@@ -202,10 +197,11 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
           repo, pr, headSha: resolved.headSha, runId: rerunId, instanceId: event.instanceId, at: Date.now(),
         }),
         terminate: async () => (await this.env.GATE_WORKFLOW.get(rerunId)).terminate(),
-      })).catch((err) => {
-        console.error(`gate: infra rerun of run ${event.instanceId} did not start`, err);
+      })).catch((err: unknown) => {
+        console.error("gate: infra rerun start failed", err);
         return "failed" as const;
       });
+      // A step result cached before the outcome became a string replays as `true` (#1150 review).
       if (rerunStarted(started)) return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results) };
     }
 

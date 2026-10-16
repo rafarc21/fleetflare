@@ -3,8 +3,8 @@
 // here to end it; the pointer is overwritten by every new run.
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
-import { d1RunIndex, d1WatchdogIndex, markRunRed, STALLED_RUNS_SQL } from "../src/gate/auto-run-env";
-import { GATE_STALL_MS, type GateRunInstance } from "../src/gate/auto-run";
+import { d1RunIndex, d1WatchdogIndex, STALLED_RUNS_SQL } from "../src/gate/auto-run-env";
+import type { GateRunInstance } from "../src/gate/auto-run";
 import { launchInfraRerun, recordInfraRerun } from "../src/gate/infra-rerun";
 import { sweepStalledRuns, type WatchdogWorkflow } from "../src/gate/watchdog";
 
@@ -77,8 +77,8 @@ describe("d1WatchdogIndex: the watchdog sweep reads stalled pointers on the real
     const rows = await d1WatchdogIndex(env.DB).stalled(500, 50);
     const mine = rows.filter((r) => r.repo.startsWith("acme/watch-"));
     expect(mine).toEqual([
-      { repo: "acme/watch-old", pr: 1, headSha: "a".repeat(40), runId: "gate-old", progressedAt: 100, red: 0 },
-      { repo: "acme/watch-mid", pr: 2, headSha: "a".repeat(40), runId: "gate-mid", progressedAt: 200, red: 0 },
+      { repo: "acme/watch-old", pr: 1, headSha: "a".repeat(40), runId: "gate-old", progressedAt: 100 },
+      { repo: "acme/watch-mid", pr: 2, headSha: "a".repeat(40), runId: "gate-mid", progressedAt: 200 },
     ]);
   });
 
@@ -156,32 +156,17 @@ describe("the watchdog sweep on the real table: finished runs never starve a hun
       },
     };
     const post = async () => true;
-    const first = await sweepStalledRuns({ index: d1WatchdogIndex(env.DB), workflow, post, now: () => now });
+    const first = await sweepStalledRuns({ index: d1WatchdogIndex(env.DB), workflow, post, hasRedLeg: async () => false, now: () => now });
     expect(first.filter((r) => r.runId.startsWith("gate-fin-")).every((r) => r.outcome === "skipped")).toBe(true);
-    const second = await sweepStalledRuns({ index: d1WatchdogIndex(env.DB), workflow, post, now: () => now });
+    const second = await sweepStalledRuns({ index: d1WatchdogIndex(env.DB), workflow, post, hasRedLeg: async () => false, now: () => now });
     expect(second.find((r) => r.runId === "gate-hung")).toEqual({ runId: "gate-hung", outcome: "rerun" });
     expect(await index.latest("acme/starve-hung", 1)).toMatchObject({ runId: "rerun-gate-hung" });
-    void GATE_STALL_MS;
   });
 });
 
 describe("d1WatchdogIndex: the stall read is served by an index on progressed_at (#1148 review, minor)", () => {
   it("the stalled query plan searches the progress index, not a full table scan", async () => {
     const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${STALLED_RUNS_SQL}`).bind(1, 0).all<{ detail: string }>();
-    expect(plan.results.map((r) => r.detail).join("\n")).toContain("gate_pr_head_progressed_at");
-  });
-});
-
-describe("markRunRed: a red leg flags the pointed run, so the watchdog never reruns it (#1119 red stays final)", () => {
-  it("flags only the pointed run, the stalled read carries the flag, and the next run's record clears it", async () => {
-    const index = d1RunIndex(env.DB);
-    await index.record("acme/red-one", 13, { headSha: "a".repeat(40), runId: "gate-red-live", progressedAt: 500 });
-    await markRunRed(env.DB, "acme/red-one", 13, "gate-red-gone");
-    await markRunRed(env.DB, "acme/red-one", 13, "gate-red-live");
-    const flagged = (await d1WatchdogIndex(env.DB).stalled(500, 0)).find((r) => r.repo === "acme/red-one");
-    expect(flagged).toMatchObject({ runId: "gate-red-live", red: 1 });
-    await index.record("acme/red-one", 13, { headSha: "b".repeat(40), runId: "gate-red-new", progressedAt: 500 });
-    const cleared = (await d1WatchdogIndex(env.DB).stalled(500, 0)).find((r) => r.repo === "acme/red-one");
-    expect(cleared).toMatchObject({ runId: "gate-red-new", red: 0 });
+    expect(plan.results.map((r) => r.detail).join("\n")).toContain("gate_pr_head_progressed");
   });
 });

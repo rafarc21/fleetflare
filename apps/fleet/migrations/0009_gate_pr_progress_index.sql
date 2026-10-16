@@ -1,3 +1,3 @@
--- #1148 review: the watchdog's stall read and the unknown-stamp adoption both
--- filter on progressed_at. Without an index each minute's sweep scans every PR row.
-CREATE INDEX IF NOT EXISTS gate_pr_head_progressed_at ON gate_pr_head (progressed_at);
+-- #1148 (refs #1135, #1150 review): the watchdog sweeps the progress stamp every minute.
+-- Without this index both of its statements scan the whole per-PR table.
+CREATE INDEX IF NOT EXISTS gate_pr_head_progressed ON gate_pr_head (progressed_at);

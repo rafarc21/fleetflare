@@ -231,8 +231,7 @@ export async function startManualGateRun(
     const status = await statusOf(wf, baseId);
     if (status === null) throw err;
     if (isLiveStatus(status)) {
-      // The pointer names this live run and its progress is inside the window: it is healthy.
-      // A status read that failed once is not a dead run, so the start reattaches (#1148 review, LOW 4).
+      // The pointer's own run, read again after a transient status failure (#1150 item 4): healthy, reattach.
       if (latest?.runId === baseId && !isStalled(latest, now())) return { runId: baseId, reused: true };
       // A live run the pointer does not name has no progress stamp anywhere, so it
       // cannot be told from a hung run: it is ended, then a fresh run starts (#1148 item 2).

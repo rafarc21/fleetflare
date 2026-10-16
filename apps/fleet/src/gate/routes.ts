@@ -33,24 +33,18 @@ const j = (v: unknown, status = 200) =>
 export const liveHeadSha = (env: Env) => async (repo: string, pr: number): Promise<string> =>
   getPullRequestHeadSha(await repoTokenMinter(env)(repo), repo, pr);
 
-/** The status of a run's infra rerun, or null when none exists (#1148). */
-async function rerunStatusOrNull(env: Env, runId: string): Promise<{ status: string; output?: unknown } | null> {
-  try {
-    return await (await workflow(env).get(rerunInstanceId(runId))).status();
-  } catch {
-    return null;
-  }
-}
-
 /** The status one run id reports. A throw (an unknown id included) is the
  *  caller's to map to a JSON error. */
 async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   const instance = await workflow(env).get(runId); // Workflows get() is async
-  const own = await instance.status();
-  // A first run the watchdog ended (#1148) hands its verdict to its infra rerun, the way a complete run does (#1119).
-  const rerunOwn = own.status === "terminated" || own.status === "errored" ? await rerunStatusOrNull(env, runId) : null;
+  let first = await instance.status();
+  // The watchdog ends a first run once its rerun has taken over (#1148): the run then reports that rerun (#1150 review).
+  if (first.status === "terminated") {
+    const rerun = await workflow(env).get(rerunInstanceId(runId)).catch(() => undefined);
+    if (rerun !== undefined) first = await rerun.status();
+  }
   // A run that handed off to its infra rerun (#1119) reports the rerun's status.
-  const status = rerunOwn ?? await statusFollowingRerun(own, async (rerunId) =>
+  const status = await statusFollowingRerun(first, async (rerunId) =>
     (await workflow(env).get(rerunId)).status());
   // Task 14's verdict rides in the Workflow's own output once terminal;
   // anything not yet terminal maps to pending.
