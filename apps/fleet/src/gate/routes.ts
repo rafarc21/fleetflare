@@ -12,7 +12,7 @@ import { repoTokenMinter } from "../github/auth";
 import { startManualGateRun, type GateRunParams } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import { isGateRunnerRepo } from "./config";
-import { statusFollowingRerun } from "./infra-rerun";
+import { rerunInstanceId, statusFollowingRerun } from "./infra-rerun";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
 // Env; until then this cast keeps this module typechecking. Drop it then.
@@ -37,8 +37,14 @@ export const liveHeadSha = (env: Env) => async (repo: string, pr: number): Promi
  *  caller's to map to a JSON error. */
 async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   const instance = await workflow(env).get(runId); // Workflows get() is async
+  let first = await instance.status();
+  // The watchdog ends a first run once its rerun has taken over (#1148): the run then reports that rerun (#1150 review).
+  if (first.status === "terminated") {
+    const rerun = await workflow(env).get(rerunInstanceId(runId)).catch(() => undefined);
+    if (rerun !== undefined) first = await rerun.status();
+  }
   // A run that handed off to its infra rerun (#1119) reports the rerun's status.
-  const status = await statusFollowingRerun(await instance.status(), async (rerunId) =>
+  const status = await statusFollowingRerun(first, async (rerunId) =>
     (await workflow(env).get(rerunId)).status());
   // Task 14's verdict rides in the Workflow's own output once terminal;
   // anything not yet terminal maps to pending.

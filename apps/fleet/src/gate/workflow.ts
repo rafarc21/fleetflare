@@ -29,7 +29,9 @@ import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
 import { gateRunnerName, legRequest, legResultReader, runLegStep, type LegRunResult } from "./leg-run";
 import { markRunProgress } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
-import { infraRerunDecision, recordInfraRerun, rerunStatusArgs, startInfraRerun } from "./infra-rerun";
+import {
+  announceInfraRerun, infraRerunDecision, launchInfraRerun, recordInfraRerun, rerunInstanceId, rerunStarted, rerunStatusArgs,
+} from "./infra-rerun";
 import { postGateStatus, type StatusPort } from "./status-post";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
@@ -176,26 +178,31 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // cannot be overwritten by this run's. A failed start falls through to the
     // final error verdict below.
     if (final.state === "error" && infraRerunDecision(results, event.payload.rerunOf)) {
-      const rerunId = `rerun-${event.instanceId}`;
-      const statusPostFailed = await step.do("post-infra-rerun", async () =>
-        postGateStatus(this.statusPort(), repo, resolved.headSha, rerunStatusArgs(event.instanceId)));
-      const started = await step.do("start-infra-rerun", async () => {
-        const ok = await startInfraRerun(
-          () => this.env.GATE_WORKFLOW.create({
-            id: rerunId, params: { repo, pr, headSha: resolved.headSha, rerunOf: event.instanceId },
-          }),
-          () => this.env.GATE_WORKFLOW.get(rerunId),
-        );
+      const rerunId = rerunInstanceId(event.instanceId);
+      // The progress stamp goes first, so the watchdog never reads this run as stalled mid-start (#1148 review).
+      const statusPostFailed = await step.do("post-infra-rerun", async () => announceInfraRerun({
+        touch,
+        post: () => postGateStatus(this.statusPort(), repo, resolved.headSha, rerunStatusArgs(event.instanceId)),
+      }));
+      // The start retries its step while the rerun's state is unknown (#1148 item 4). Once the retries
+      // run out, the outcome is "failed" and the final error verdict posts below.
+      const started = await step.do("start-infra-rerun", async () => launchInfraRerun({
+        create: () => this.env.GATE_WORKFLOW.create({
+          id: rerunId, params: { repo, pr, headSha: resolved.headSha, rerunOf: event.instanceId },
+        }),
+        get: () => this.env.GATE_WORKFLOW.get(rerunId),
         // The rerun takes the PR's run pointer, so a manual start finds it (#1084).
         // One conditional handoff: a newer push's pointer is never taken back (#1135).
-        if (ok) {
-          await recordInfraRerun(d1RunIndex(this.env.DB), {
-            repo, pr, headSha: resolved.headSha, runId: rerunId, instanceId: event.instanceId, at: Date.now(),
-          });
-        }
-        return ok;
+        handOff: () => recordInfraRerun(d1RunIndex(this.env.DB), {
+          repo, pr, headSha: resolved.headSha, runId: rerunId, instanceId: event.instanceId, at: Date.now(),
+        }),
+        terminate: async () => (await this.env.GATE_WORKFLOW.get(rerunId)).terminate(),
+      })).catch((err: unknown) => {
+        console.error("gate: infra rerun start failed", err);
+        return "failed" as const;
       });
-      if (started) return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results) };
+      // A step result cached before the outcome became a string replays as `true` (#1150 review).
+      if (rerunStarted(started)) return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results) };
     }
 
     // Wrapped in a step so a Workflow replay never posts the status twice.
