@@ -5,6 +5,7 @@
 // That return value is the step result. A red test is data (state "failure"),
 // never a throw. Any non-2xx is infra: the step throws, Workflows retries it
 // once, and a second failure becomes this leg's "error".
+import type { GateLegRequest } from "./leg-env";
 import { normalizeLegResult, type PlannedLeg } from "./fanout";
 import type { LegResult } from "./verdict";
 
@@ -52,4 +53,18 @@ export async function runLegStep(
     // Retries spent or a bad body. Infra: error, never a silent pass.
     return { leg: planned.leg, state: "error", description: `${planned.leg} did not report a result` };
   }
+}
+
+/** The /run-leg request body for one planned leg of one PR. Pure, so the
+ *  private flag and the PR's own owner/repo reach the DO by a tested path. */
+export function legRequest(
+  owner: string, repo: string, planned: PlannedLeg,
+  pr: { baseRef: string; pr: string; private: boolean },
+): GateLegRequest {
+  return {
+    owner, repo, commit: planned.commit, leg: planned.leg,
+    installCmd: planned.installCmd, legCmd: planned.legCmd,
+    resultKey: planned.resultKey, baselineKeys: planned.baselineKeys,
+    private: pr.private, baseRef: pr.baseRef, pr: pr.pr,
+  };
 }

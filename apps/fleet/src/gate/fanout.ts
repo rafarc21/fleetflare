@@ -2,7 +2,7 @@
 // Workflow/DO bindings — this file is what bun test can load, so
 // workflow.ts (which imports cloudflare:workers) stays a thin driver over
 // the decisions made here.
-import { MAX_LEGS_PER_PR } from "./config";
+import { MAX_LEGS_PER_PR, type GateLeg } from "./config";
 import { bunLaneCwd } from "./bun-lane";
 import type { LegResult, Verdict } from "./verdict";
 
@@ -10,7 +10,9 @@ export function verdictToStatusArgs(
   verdict: Exclude<Verdict, { state: "pending" }>,
 ): { state: "success" | "failure" | "error"; description: string } {
   if (verdict.state === "success") return { state: "success", description: "all legs green" };
-  return { state: verdict.state, description: verdict.description };
+  // GitHub 422s a commit-status description over 140 chars, which would
+  // silently drop the verdict entirely — truncate instead.
+  return { state: verdict.state, description: verdict.description.slice(0, 140) };
 }
 
 export interface PlanInput {
@@ -19,12 +21,13 @@ export interface PlanInput {
    *  writes its own result keys (a write-once key would 412 otherwise). */
   runId: string;
   headSha: string; baseSha: string;
-  install: string; legs: string[];
+  install: string; legs: GateLeg[];
   /** The bun-test lane, already packed: one array of lane files per leg. */
   bunShards: string[][];
   /** The block's bunLaneRoot: each bun leg enters this directory first. */
   bunLaneRoot: string;
-  vitestCmd: string; vitestShards: number;
+  /** Absent means the block has no vitest lane: zero vitest legs. */
+  vitestCmd?: string; vitestShards: number;
   baselineKeys: string[];
 }
 
@@ -55,21 +58,21 @@ export function bunLegs(shards: string[][], root: string): { leg: string; legCmd
 }
 
 /** Every leg of one run, in configured order: merge-tree first (it is the
- *  cheap one that proves the PR merges at all), then fleet.json's legs, then
+ *  cheap one that proves the PR merges at all), then the block's legs, then
  *  the bun-test shards, then vitest shards. aggregateVerdict reads this order,
  *  so "first failing leg" is deterministic regardless of which container
  *  reports first.
  *
  *  The vitest shard count is clamped so the whole plan never exceeds
- *  MAX_LEGS_PER_PR. Bun shards count against that cap too; parseGateConfig
- *  already rejects configs that leave no room for one vitest shard, so the
- *  floor of 1 holds. */
+ *  MAX_LEGS_PER_PR. Bun shards count against that cap too; parseGateBlock
+ *  already rejects blocks that leave no room for one vitest shard when a
+ *  vitest lane is configured, so the floor of 1 holds. */
 export function planLegs(input: PlanInput): PlannedLeg[] {
   const {
     owner, repo, pr, runId, headSha, baseSha, install, legs, bunShards, bunLaneRoot, vitestCmd, vitestShards, baselineKeys,
   } = input;
   const keyFor = (leg: string) => `gate/${owner}/${repo}/runs/${pr}/${runId}/shard-${leg}.json`;
-  const fixedLegs = 1 + legs.length + bunShards.length; // merge-tree + fleet.json legs + bun shards
+  const fixedLegs = 1 + legs.length + bunShards.length; // merge-tree + block legs + bun shards
   const shards = Math.max(1, Math.min(vitestShards, MAX_LEGS_PER_PR - fixedLegs));
   const leg = (name: string, commit: string, installCmd: string, legCmd: string, keys: string[]): PlannedLeg => ({
     leg: name, commit, installCmd, legCmd, resultKey: keyFor(name), baselineKeys: keys,
@@ -80,9 +83,10 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   const range = `${baseSha}..${headSha}`;
   return [
     leg("merge-tree", range, "", "", []),
-    ...legs.map((name) => leg(name, range, install, `bun run ${name}`, baselineKeys)),
+    ...legs.map((l) => leg(l.name, range, install, l.cmd, baselineKeys)),
     ...bunLegs(bunShards, bunLaneRoot).map((b) => leg(b.leg, range, install, b.legCmd, baselineKeys)),
-    ...vitestLegs(vitestCmd, shards).map((v) => leg(v.leg, range, install, v.legCmd, baselineKeys)),
+    ...(vitestCmd === undefined ? [] : vitestLegs(vitestCmd, shards))
+      .map((v) => leg(v.leg, range, install, v.legCmd, baselineKeys)),
   ];
 }
 

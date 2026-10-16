@@ -2,10 +2,10 @@ import { describe, it, expect, vi } from "vitest";
 import {
   runScheduledTick, disarmStudioTicks, STUDIO_TICKS, syncSessionCycle, checkAndRecordReadiness, StudioDO,
 } from "../src/studio/do";
-import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
+import { STATUS_KEY } from "../src/studio/provision";
 import type { SessionSyncDeps } from "../src/studio/session-sync";
 import type { StudioStatus, StudioState } from "../src/studio/types";
-import { fakeStorage as doStorage } from "./helpers/do-storage";
+import { statusStorage } from "./helpers/do-storage";
 
 // ---------------------------------------------------------------------------
 // A stopped studio stays stopped.
@@ -31,11 +31,6 @@ function status(state: StudioState): StudioStatus {
   return { id: STUDIO_ID, state, tailscaleHost: null, lastRefresh: null, error: null } as StudioStatus;
 }
 
-function fakeStorage(seed?: StudioStatus) {
-  const s = doStorage(seed ? { [STATUS_KEY]: seed } : undefined);
-  return s as unknown as StudioStorage & { map: Map<string, unknown> };
-}
-
 function execDeps() {
   const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
   const deps = {
@@ -52,7 +47,7 @@ function execDeps() {
 
 describe("runScheduledTick — a stopped studio's tick never touches the container", () => {
   it("a stopped studio's syncSession tick execs nothing and does not re-arm", async () => {
-    const s = fakeStorage(status("stopped"));
+    const s = statusStorage(status("stopped"));
     const { exec, deps } = execDeps();
     const rearm = vi.fn(async () => {});
 
@@ -65,7 +60,7 @@ describe("runScheduledTick — a stopped studio's tick never touches the contain
   // getStatus answers "stopped" for a DO with no stored status; a tick has
   // no more business booting a never-provisioned container than a stopped one.
   it("a studio with no stored status is treated as stopped", async () => {
-    const s = fakeStorage();
+    const s = statusStorage();
     const tick = vi.fn(async () => {});
     const rearm = vi.fn(async () => {});
 
@@ -78,7 +73,7 @@ describe("runScheduledTick — a stopped studio's tick never touches the contain
   it.each<StudioState>(["running", "degraded", "provisioning"])(
     "a %s studio's tick runs and re-arms exactly as before",
     async (state) => {
-      const s = fakeStorage(status(state));
+      const s = statusStorage(status(state));
       const { exec, deps } = execDeps();
       const rearm = vi.fn(async () => {});
 
@@ -92,7 +87,7 @@ describe("runScheduledTick — a stopped studio's tick never touches the contain
   // Same guarantee refreshToken()'s own doc comment gives: one unguarded
   // throw must not end a running studio's loop.
   it("a running studio's tick that throws still re-arms, and the throw propagates", async () => {
-    const s = fakeStorage(status("running"));
+    const s = statusStorage(status("running"));
     const rearm = vi.fn(async () => {});
 
     await expect(
@@ -104,7 +99,7 @@ describe("runScheduledTick — a stopped studio's tick never touches the contain
   // A tick already in flight when `fleet destroy` lands must not re-arm the
   // loop the destroy just cancelled.
   it("a tick whose studio was stopped while it ran does not re-arm", async () => {
-    const s = fakeStorage(status("running"));
+    const s = statusStorage(status("running"));
     const rearm = vi.fn(async () => {});
 
     await runScheduledTick(s as never, async () => { await s.put(STATUS_KEY, status("stopped")); }, rearm);
@@ -135,7 +130,7 @@ describe("disarmStudioTicks — destroy cancels every loop", () => {
 describe("checkAndRecordReadiness — a stopped studio is not probed", () => {
   it("answers the stored row without an exec or a registry write", async () => {
     const stopped = status("stopped");
-    const s = fakeStorage(stopped);
+    const s = statusStorage(stopped);
     const { exec, deps } = execDeps();
     const record = vi.fn(async () => {});
 
@@ -147,7 +142,7 @@ describe("checkAndRecordReadiness — a stopped studio is not probed", () => {
   });
 
   it("a running studio is still probed", async () => {
-    const s = fakeStorage(status("running"));
+    const s = statusStorage(status("running"));
     const { exec, deps } = execDeps();
 
     await checkAndRecordReadiness(deps, s as never, STUDIO_ID, async () => {});

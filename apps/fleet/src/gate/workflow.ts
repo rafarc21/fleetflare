@@ -1,6 +1,7 @@
-// #715 Phase 1: the Workflow `gate`. Resolves PR head + base -> reads
-// fleet.json from the FLEET's repo -> fans one GateRunnerDO leg per container
-// out -> fans in to one gate/verdict commit status. The ONLY file in the gate
+// #715 Phase 1: the Workflow `gate`. Resolves PR head + base -> reads the gate
+// config (load-config.ts: the fleet repo's `gates` map, else the PR repo's own
+// fleet.json at the base sha) -> fans one GateRunnerDO leg per container out ->
+// fans in to one gate/verdict commit status. The ONLY file in the gate
 // runner that mints a GitHub token and posts a real commit status; every
 // decision it makes (leg plan, status mapping, leg-result normalisation) lives
 // in fanout.ts / leg-run.ts / verdict.ts / config.ts, unit-tested under bun test.
@@ -19,9 +20,10 @@ import {
 import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
-import { matchesPathRules, parseGateConfig } from "./config";
+import { matchesPathRules } from "./config";
 import { planLegs, verdictToStatusArgs, type PlannedLeg } from "./fanout";
-import { runLegStep } from "./leg-run";
+import { loadGateConfig, type FleetJsonReader } from "./load-config";
+import { legRequest, runLegStep } from "./leg-run";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
 export interface GateWorkflowParams { repo: string; pr: number }
@@ -40,28 +42,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     const [owner, repoName] = repo.split("/");
     const mintToken = repoTokenMinter(this.env);
 
-    // Only the SHAs and file list leave this step. The token is minted inside
-    // each step and never returned, because step results persist in Workflow state.
-    // fleet.json is read from the FLEET's own repo (env.AGENT_REPO), never
-    // from `repo`: a gated repo must not be able to weaken its own gate. The
-    // config is loaded first: its bun lane root decides which tree to list.
-    const config = await step.do("load-config", async () => {
-      const agentRepo = this.env.AGENT_REPO;
-      const token = await mintToken(agentRepo);
-      const text = await fetchRepoFile(token, agentRepo, "fleet.json", "HEAD");
-      let parsed: unknown = null;
-      try { parsed = JSON.parse(text); } catch { return null; }
-      // The PR's repo picks its `gates` entry; the `gate` block is the
-      // fallback for the fleet's own repo only.
-      return parseGateConfig(parsed, repo, agentRepo);
-    });
-
-    if (config === null) {
-      // No gate block for this repo: not a repo this gate runs for. Post
-      // nothing; the route layer (Task 12) already filters on GATE_RUNNER_REPOS.
-      return { skipped: "no gate config for this repo", statusPostFailed: false };
-    }
-
+    // Only the SHAs, file list and private flag leave the resolve step. The token
+    // is minted inside each step and never returned, because step results persist
+    // in Workflow state.
     const resolved = await step.do("resolve-pr", async () => {
       const token = await mintToken(repo);
       const pull = await getPullRequest(token, repo, pr);
@@ -70,15 +53,32 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // non-default branch must be gated against that branch.
       const baseSha = await getBranchSha(token, repo, pull.baseRef);
       const { files } = await compareFiles(token, repo, baseSha, headSha);
-      // The branch name rides along to the container, which checks the base against it.
-      // The bun-test lane is the head's own test files under the block's root,
-      // not a list baked into this Worker, so a new test file is picked up on
-      // its next run. A block with no bun lane lists nothing.
-      const bunFiles = config.bunLaneRoot === undefined
-        ? []
-        : laneFilesFromTree(await listRepoTree(token, repo, headSha), config.bunLaneRoot, config.bunLaneGlobs);
-      return { headSha, baseSha, baseRef: pull.baseRef, changedFiles: files, bunFiles };
+      // A private base repo clones through the git proxy in its leg.
+      return { headSha, baseSha, baseRef: pull.baseRef, changedFiles: files, private: pull.baseRepoPrivate };
     });
+
+    // The config is read at the PR's BASE sha (never the head), so a PR cannot
+    // edit its own gate. The fleet repo's `gates` map is read at HEAD.
+    const readFleetJson: FleetJsonReader = async (repoSlug, ref) => {
+      const token = await mintToken(repoSlug);
+      let text: string;
+      try {
+        text = await fetchRepoFile(token, repoSlug, "fleet.json", ref);
+      } catch (err) {
+        // No fleet.json at this ref: not a gated repo. Any other error is infra and retries.
+        if (err instanceof Error && /\(404\)/.test(err.message)) return null;
+        throw err;
+      }
+      try { return JSON.parse(text) as unknown; } catch { return null; }
+    };
+    const config = await step.do("load-config", async () =>
+      loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, baseSha: resolved.baseSha }, readFleetJson));
+
+    if (config === null) {
+      // No gate config for this repo: not a repo this gate runs for. Post
+      // nothing; the route layer (Task 12) already filters on GATE_RUNNER_REPOS.
+      return { skipped: "no gate config for this repo", statusPostFailed: false };
+    }
 
     if (!matchesPathRules(resolved.changedFiles, config.pathRules)) {
       // Nothing gated changed. Post success so the required context is not
@@ -89,12 +89,22 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       return { skipped: "no gated paths changed", statusPostFailed };
     }
 
+    // The bun-test lane is the head's own test files under the block's root,
+    // not a list baked into this Worker, so a new test file is picked up on
+    // its next run. A block with no bun lane lists nothing.
+    const bunRoot = config.bunLaneRoot;
+    const bunGlobs = config.bunLaneGlobs;
+    const bunFiles = bunRoot === undefined ? [] : await step.do("list-bun-lane", async () => {
+      const token = await mintToken(repo);
+      return laneFilesFromTree(await listRepoTree(token, repo, resolved.headSha), bunRoot, bunGlobs);
+    });
+
     const legs = planLegs({
       owner, repo: repoName, pr, runId: event.instanceId,
       headSha: resolved.headSha, baseSha: resolved.baseSha,
       install: config.install, legs: config.legs,
-      bunShards: planBunShards(resolved.bunFiles, BUN_SHARD_TIMINGS.timings, config.bunShards),
-      bunLaneRoot: config.bunLaneRoot ?? "",
+      bunShards: planBunShards(bunFiles, BUN_SHARD_TIMINGS.timings, config.bunShards),
+      bunLaneRoot: bunRoot ?? "",
       vitestCmd: config.vitestCmd, vitestShards: config.vitestShards,
       baselineKeys: [], // lockfile baseline keys are not wired yet; each leg installs from scratch
     });
@@ -102,7 +112,8 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // Promise.all over step-backed legs: each leg's own steps are independent,
     // and aggregateVerdict reads results in configured leg order either way.
     const results = await Promise.all(
-      legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName, { baseRef: resolved.baseRef, pr: String(pr) }, planned)),
+      legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName,
+        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private }, planned)),
     );
 
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
@@ -119,7 +130,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 /** One leg, one start-<leg> step. The step's return value is the DO's LegResult. */
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
-  owner: string, repoName: string, pr: { baseRef: string; pr: string }, planned: PlannedLeg,
+  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean }, planned: PlannedLeg,
 ): Promise<LegResult> {
   return runLegStep(
     { do: (name, config, fn) => step.do(name, config, fn) },
@@ -129,12 +140,7 @@ function runLeg(
       const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(`${instanceId}/${leg.leg}`));
       return stub.fetch("https://gate-runner/run-leg", {
         method: "POST",
-        body: JSON.stringify({
-          owner, repo: repoName, commit: leg.commit, leg: leg.leg,
-          installCmd: leg.installCmd, legCmd: leg.legCmd,
-          resultKey: leg.resultKey, baselineKeys: leg.baselineKeys,
-          baseRef: pr.baseRef, pr: pr.pr,
-        }),
+        body: JSON.stringify(legRequest(owner, repoName, leg, pr)),
       });
     },
     planned,

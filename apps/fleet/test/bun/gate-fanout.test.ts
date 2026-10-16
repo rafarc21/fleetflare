@@ -5,11 +5,16 @@ import { bunLegs, normalizeLegResult, planLegs, vitestLegs } from "../../src/gat
 import { MAX_LEGS_PER_PR } from "../../src/gate/config";
 import { resolveOutboundTarget } from "../../src/gate/outbound-handler";
 
+const LEGS = [
+  { name: "typecheck", cmd: "bun run typecheck" },
+  { name: "lint", cmd: "bun run lint" },
+];
+
 const BASE = {
   owner: "acme", repo: "example", pr: 7, runId: "run-a",
   headSha: "h".repeat(40), baseSha: "b".repeat(40),
   install: "bun install --frozen-lockfile",
-  legs: ["typecheck", "lint"],
+  legs: LEGS,
   vitestCmd: "bun run test --shard={i}/{n}",
   vitestShards: 2,
   bunShards: [],
@@ -82,7 +87,7 @@ describe("planLegs with bun shards", () => {
   });
   it("bun shards count toward MAX_LEGS_PER_PR: vitest shards shrink to fit", () => {
     const bunShards = Array.from({ length: 6 }, (_, i) => [`test/bun/s${i}.test.ts`]);
-    const legs = planLegs({ ...BASE, legs: ["typecheck", "lint"], bunShards, vitestShards: 30 });
+    const legs = planLegs({ ...BASE, legs: LEGS, bunShards, vitestShards: 30 });
     expect(legs.length).toBe(MAX_LEGS_PER_PR);
     expect(legs.filter((l) => l.leg.startsWith("vitest-")).length).toBe(MAX_LEGS_PER_PR - 1 - 2 - 6);
   });
@@ -102,9 +107,25 @@ describe("planLegs", () => {
   });
   it("every leg carries the base..head merge range, never the bare PR head", () => {
     const range = `${BASE.baseSha}..${BASE.headSha}`;
-    const legs = planLegs({ ...BASE, legs: ["typecheck", "lint"], bunShards: BUN_SHARDS });
+    const legs = planLegs({ ...BASE, legs: LEGS, bunShards: BUN_SHARDS });
     expect(legs.length).toBeGreaterThan(1);
     for (const l of legs) expect(l.commit).toBe(range);
+  });
+  it("a leg's own cmd is its command, verbatim, after the shared install", () => {
+    const legs = planLegs({ ...BASE, legs: [{ name: "e2e", cmd: "cd apps/web && bun run e2e -- --bail" }] });
+    const e2e = legs.find((l) => l.leg === "e2e")!;
+    expect(e2e.legCmd).toBe("cd apps/web && bun run e2e -- --bail");
+    expect(e2e.installCmd).toBe(BASE.install);
+  });
+  it("vitest absent -> zero vitest legs; the plan is merge-tree, configured legs, bun shards", () => {
+    const legs = planLegs({ ...BASE, vitestCmd: undefined, bunShards: BUN_SHARDS });
+    expect(legs.map((l) => l.leg)).toEqual(["merge-tree", "typecheck", "lint", "bun-1", "bun-2"]);
+    expect(legs.some((l) => l.leg.startsWith("vitest-"))).toBe(false);
+  });
+  it("vitest absent -> the cap admits 23 configured legs: merge-tree + 23 = 24", () => {
+    const many = Array.from({ length: 23 }, (_, i) => ({ name: `leg-${i}`, cmd: `echo ${i}` }));
+    const legs = planLegs({ ...BASE, legs: many, vitestCmd: undefined, bunShards: [] });
+    expect(legs.length).toBe(MAX_LEGS_PER_PR);
   });
   it("configured legs run `bun run <name>` after the shared install", () => {
     const lint = planLegs(BASE)[2];
@@ -130,12 +151,12 @@ describe("planLegs", () => {
     }
   });
   it("total legs per PR never exceed MAX_LEGS_PER_PR, even when the shard count asks for more", () => {
-    const legs = planLegs({ ...BASE, legs: ["typecheck", "lint"], vitestShards: 30 });
+    const legs = planLegs({ ...BASE, legs: LEGS, vitestShards: 30 });
     expect(legs.length).toBe(MAX_LEGS_PER_PR);
     expect(legs.filter((l) => l.leg.startsWith("vitest-")).length).toBe(MAX_LEGS_PER_PR - 1 - 2);
   });
   it("a shard count under the cap is honored as asked", () => {
-    const legs = planLegs({ ...BASE, legs: ["typecheck"], vitestShards: 8 });
+    const legs = planLegs({ ...BASE, legs: [LEGS[0]], vitestShards: 8 });
     expect(legs.filter((l) => l.leg.startsWith("vitest-")).length).toBe(8);
     expect(legs.length).toBe(10);
   });

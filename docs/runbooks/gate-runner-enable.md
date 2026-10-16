@@ -54,7 +54,7 @@ This policy takes `images`, not `image`, and rejects `instance_type` and
   "class_name": "GateRunnerDO",
   "scheduling_policy": "durable_object",
   "images": {
-    "gate": { "dockerfile": "./container/Dockerfile.gate", "build_context": "." }
+    "gate": { "dockerfile": "./container/Dockerfile.gate", "build_context": "./container" }
   }
 }
 ```
@@ -96,15 +96,58 @@ fleet gate watch <pr> <runId>    # polls to a verdict; exit 0 green, 1 red, 2 er
 Or one command, exit 0 green, 1 red, 2 error or gate off:
 
 ```sh
-apps/fleet/scripts/gate/maestro-gate.sh <pr>
+fleet gate run <pr>
 ```
+
+`fleet gate run` is `gate start` then `gate watch` on the run id it prints. It
+reads the repo from the folder's own `origin`, so it runs from any clone of a
+gated repo. `apps/fleet/scripts/gate/maestro-gate.sh <pr>` wraps it and keeps
+the same exit codes.
 
 Expect a `gate/verdict` status on the PR head. This repo's gate fans out 13
 containers per PR: merge-tree, 4 lane legs, 8 vitest shards. Check each leg
 finished and the verdict matches local lanes.
 
-## 5. Rollback
+## 5. Enable another repo
+
+Config for a repo lives in that repo, not in the fleet. Three steps:
+
+1. In the target repo's root `fleet.json`, on its default branch, add a `gate`
+   block. The gate reads it at the PR's base sha, so a PR cannot edit its own
+   gate. Example for `acme/example`:
+
+   ```json
+   "gate": {
+     "install": "bun install --frozen-lockfile",
+     "legs": ["lint", { "name": "e2e", "cmd": "cd apps/web && bun run e2e" }],
+     "vitestCmd": "bun run test --shard={i}/{n}",
+     "vitestShards": 4,
+     "pathRules": ["apps/web/**", "package.json"]
+   }
+   ```
+
+   A string leg `"lint"` runs `bun run lint`. An object leg runs its own `cmd`
+   from the repo root. Leg names match `^[a-z0-9][a-z0-9-]{0,39}$`, are unique,
+   and cannot be `merge-tree`, `bun-N` or `vitest-N`. `vitestCmd` is optional:
+   without it the repo gets no vitest legs. The total legs per PR, merge-tree
+   included, cap at 24.
+
+2. Operator config: add the slug to `GATE_RUNNER_REPOS` in live `vars`
+   (comma-separated, next to `rafarc21/fleetflare`), then redeploy. Only the
+   fleet operator sets this. A repo cannot add itself.
+
+3. From a clone of that repo, on an open PR whose head changes a `pathRules`
+   path:
+
+   ```sh
+   fleet gate run <pr>
+   ```
+
+A repo with no `gate` block, or one that is malformed, is skipped: the gate
+posts no status and runs no legs.
+
+## 6. Rollback
 
 Set `FLEET_GATE_RUNNER` to `"off"` in live `vars`, redeploy. New starts refuse
-(404); `maestro-gate.sh` exits 2. Keep the `GateRunnerDO` class and migration.
+(404); `fleet gate run` and `maestro-gate.sh` exit 2. Keep the `GateRunnerDO` class and migration.
 Deleting the class destroys its Durable Object storage, so never remove it to roll back.

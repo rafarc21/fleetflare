@@ -1,4 +1,4 @@
-// apps/fleet/cli/gate.ts — `fleet gate start <pr>` / `fleet gate watch <pr> <runId>`
+// apps/fleet/cli/gate.ts — `fleet gate run <pr>` (start + watch, the one-shot verb), `fleet gate start <pr>` / `fleet gate watch <pr> <runId>`
 // (#715 Phase 1). Same request-building shape cli/models.ts already uses —
 // one POST to kick a run off, one GET per poll, a thrown Error on anything
 // but a 2xx. No GitHub token here: both routes are Access-JWT-authenticated
@@ -67,6 +67,25 @@ export function gateWatchExitCode(status: GateStatusResponse): number {
   }
 }
 
+/** Pure parse of one status-poll reply body. A non-JSON body (Cloudflare's
+ *  own 500 HTML page) must not surface as an unhandled throw — the CLI
+ *  prints its first 200 chars and exits 2, never 1 (never RED). */
+export type ParsedStatus =
+  | { ok: true; status: GateStatusResponse }
+  | { ok: false; body: string };
+
+export function parseStatusResponse(text: string): ParsedStatus {
+  try {
+    const v = JSON.parse(text) as GateStatusResponse;
+    if (v === null || typeof v !== "object" || typeof v.state !== "string") {
+      return { ok: false, body: text.slice(0, 200) };
+    }
+    return { ok: true, status: v };
+  } catch {
+    return { ok: false, body: text.slice(0, 200) };
+  }
+}
+
 export type GateWatchDecision =
   | { kind: "terminal"; status: GateStatusResponse }
   | { kind: "continue" }
@@ -104,8 +123,13 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
       process.exitCode = 2;
       return;
     }
-    const status = await res.json() as GateStatusResponse;
-    const decision = gateWatchDecision(status, Date.now() - started);
+const parsed = parseStatusResponse(await res.text());
+    if (!parsed.ok) {
+      console.error(`fleet gate-watch: non-JSON reply from ${creds.workerUrl}: ${parsed.body}`);
+      process.exitCode = 2;
+      return;
+    }
+    const decision = gateWatchDecision(parsed.status, Date.now() - started);
     if (decision.kind === "terminal") {
       console.log(`gate: ${decision.status.state}${decision.status.description ? ` — ${decision.status.description}` : ""}`);
       process.exitCode = gateWatchExitCode(decision.status);
@@ -118,3 +142,61 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
     await new Promise((r) => setTimeout(r, POLL_MS));
   }
 }
+
+export interface GateRunOptions {
+  /** Poll interval. Tests shorten it; the CLI keeps the 5s default. */
+  pollMs?: number;
+}
+
+/** `fleet gate run <pr>`: start the run, then poll its run id to a verdict.
+ *  Exit 0 green, 1 red, 2 error or gate off. Any other exit code (a status
+ *  POST that failed twice) reads as 2: a stale verdict is still not green. The
+ *  repo is passed in, so a caller in any repo's checkout names it the same way. */
+export async function runGate(creds: Credentials, repo: string, pr: number, opts: GateRunOptions = {}): Promise<number> {
+  let runId: string;
+  try {
+    const res = await fetch(new URL("/studio/gate/start", creds.workerUrl), {
+      method: "POST", headers: { ...accessHeaders(creds), "content-type": "application/json" },
+      body: JSON.stringify({ repo, pr }),
+    });
+    const body = await res.json() as { started?: boolean; runId?: string; error?: string };
+    if (!res.ok || body.error || typeof body.runId !== "string") {
+      console.error(`gate-start failed: ${body.error ?? res.status}`);
+      return 2;
+    }
+    runId = body.runId;
+  } catch (err) {
+    console.error(`fleet gate run: could not reach ${creds.workerUrl}: ${errText(err)}`);
+    return 2;
+  }
+  console.log(`gate-start: run ${runId} started for PR #${pr}`);
+
+  const url = new URL("/studio/gate/status", creds.workerUrl);
+  url.searchParams.set("repo", repo);
+  url.searchParams.set("pr", String(pr));
+  url.searchParams.set("runId", runId);
+  for (;;) {
+    let status: GateStatusResponse;
+    try {
+      const res = await fetch(url, { headers: accessHeaders(creds) });
+      status = await res.json() as GateStatusResponse;
+    } catch (err) {
+      console.error(`fleet gate run: could not reach ${creds.workerUrl}: ${errText(err)}`);
+      return 2;
+    }
+    if (status.state !== "pending") {
+      console.log(`gate: ${status.state}${status.description ? ` — ${status.description}` : ""}`);
+      const code = gateWatchExitCode(status);
+      return code === 0 || code === 1 ? code : 2;
+    }
+    await new Promise((r) => setTimeout(r, opts.pollMs ?? POLL_MS));
+  }
+}
+
+/** The CLI entry: the repo comes from the folder's own origin, as every repo-scoped verb does. */
+export async function cmdGateRun(creds: Credentials, pr: number): Promise<void> {
+  const repo = await gatedRepo();
+  if (!repo) return;
+  process.exitCode = await runGate(creds, repo, pr);
+}
+

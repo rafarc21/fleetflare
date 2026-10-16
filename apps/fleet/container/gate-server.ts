@@ -24,8 +24,15 @@ export function cloneUrl(repo: string, privateRepo: boolean): string {
   return privateRepo ? `${GIT_PROXY_BASE}/${repo}.git` : `https://github.com/${repo}.git`;
 }
 
+/** Live: vite builds and bun test died with EMFILE (too many open files): the
+ *  container's soft open-file limit is low. Every spawned command runs with the
+ *  soft limit raised to the hard limit; `exec "$@"` keeps its argv and exit code. */
+export function withRaisedFileLimit(cmd: string, args: string[]): string[] {
+  return ["bash", "-c", 'ulimit -n "$(ulimit -Hn)" 2>/dev/null; exec "$@"', "gate-exec", cmd, ...args];
+}
+
 const exec: ExecFn = async (cmd, args, opts) => {
-  const proc = Bun.spawn([cmd, ...args], { cwd: opts.cwd, stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(withRaisedFileLimit(cmd, args), { cwd: opts.cwd, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
   ]);
@@ -57,7 +64,14 @@ export interface GateDeps {
   exec: ExecFn;
   fetchFn: FetchFn;
   workdir: string;
+  /** Backoff between clone attempts; tests pass a no-op. */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/** Live: concurrent legs got HTTP 429 from GitHub on clone. A rate limit or a
+ *  5xx is worth another try; anything else (repository not found) is not. */
+const TRANSIENT_CLONE = /returned error: (429|5\d\d)\b/;
+const CLONE_ATTEMPTS = 3;
 
 export interface GateBody {
   state: "success" | "failure" | "error";
@@ -65,7 +79,13 @@ export interface GateBody {
   commit?: string;
   stdout?: string;
   stderr?: string;
+  /** "<soft> <hard>" open-file limit the leg ran under (EMFILE triage). */
+  limits?: string;
 }
+
+/** Tail kept of a leg's stdout and stderr in its R2 result. 4000 chars cut
+ *  every assertion message of a CF-only failure; 32k keeps them. */
+export const OUTPUT_TAIL_CHARS = 32_000;
 
 export function readRunEnv(env: Record<string, string | undefined>): GateRun {
   return {
@@ -135,7 +155,15 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
 
   // Blobless and without a checkout: commits and trees come down now, file
   // contents only when a step reads them.
-  const clone = await run("git", ["clone", "--filter=blob:none", "--no-checkout", "--quiet", cloneUrl(repo, req.private === true), workdir], { cwd: "/workspace" });
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const cloneArgs = ["clone", "--filter=blob:none", "--no-checkout", "--quiet", cloneUrl(repo, req.private === true), workdir];
+  let clone = await run("git", cloneArgs, { cwd: "/workspace" });
+  for (let attempt = 2; clone.code !== 0 && attempt <= CLONE_ATTEMPTS && TRANSIENT_CLONE.test(clone.stderr); attempt++) {
+    // A failed clone can leave a partial directory that the next clone refuses.
+    await run("rm", ["-rf", workdir], { cwd: "/workspace" });
+    await sleep(2_000 * (attempt - 1));
+    clone = await run("git", cloneArgs, { cwd: "/workspace" });
+  }
   if (clone.code !== 0) return { state: "error", description: `clone failed: ${firstLine(clone.stderr)}` };
 
   // A fork PR's head is not on any branch of the base repo, so the clone lacks it.
@@ -159,11 +187,18 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
   // Restored after checkout: a baseline tar must never block the checkout.
   await restoreBaseline(req.baselineKeys, { fetchFn: deps.fetchFn, exec: run, workdir });
 
+  const limitsRun = await run("bash", ["-c", 'echo "$(ulimit -Sn) $(ulimit -Hn)"'], { cwd: workdir });
+  const limits = limitsRun.stdout.trim();
   const install = await run("bash", ["-c", req.installCmd], { cwd: workdir });
-  if (install.code !== 0) return { state: "error", description: `install failed: ${firstLine(install.stderr)}` };
+  if (install.code !== 0) {
+    return {
+      state: "error", description: `install failed: ${firstLine(install.stderr)}`,
+      stdout: install.stdout.slice(-OUTPUT_TAIL_CHARS), stderr: install.stderr.slice(-OUTPUT_TAIL_CHARS), limits,
+    };
+  }
 
   const test = await run("bash", ["-c", req.legCmd], { cwd: workdir });
-  const tail = { stdout: test.stdout.slice(-4000), stderr: test.stderr.slice(-4000) };
+  const tail = { stdout: test.stdout.slice(-OUTPUT_TAIL_CHARS), stderr: test.stderr.slice(-OUTPUT_TAIL_CHARS), limits };
   return test.code === 0
     ? { state: "success", ...tail }
     : { state: "failure", description: `${req.leg} exited ${test.code}`, ...tail };
