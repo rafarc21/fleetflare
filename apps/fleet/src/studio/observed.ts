@@ -622,6 +622,10 @@ export interface ObservedStorage {
   put(key: typeof OBSERVED_KEY, value: Observed): Promise<void>;
 }
 
+/** Issue #1152 review: the minimum gap between two heals of one studio. Lives
+ *  here (a pure module) so READY can show when the next heal may run. */
+export const HEAL_COOLDOWN_MS = 30 * 60_000;
+
 export function emptyObserved(): Observed {
   return {
     incarnation: null, replacedAt: null, execFailures: 0, unreachableSince: null,

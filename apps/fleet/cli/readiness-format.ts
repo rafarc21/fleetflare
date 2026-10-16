@@ -11,7 +11,7 @@ import type { StudioStatus } from "../src/studio/types";
 import { SHIP_TRANSCRIPT_SECONDS } from "../src/studio/ship-cadence";
 import { SYNC_SESSION_SECONDS } from "../src/studio/session-sync";
 import { formatRateLimited, type RateLimitObservation } from "../src/studio/rate-limit";
-import { isUnreachable, type Observed } from "../src/studio/observed";
+import { isUnreachable, HEAL_COOLDOWN_MS, type Observed } from "../src/studio/observed";
 import { leadAccountMismatch } from "../src/studio/lead-route";
 import type { Activity } from "../src/studio/activity";
 import type { MemberAlert } from "../src/studio/member-alerts";
@@ -171,11 +171,19 @@ export function ageSeconds(iso: string, now: Date): number {
  * heal is never rendered as `running`.
  */
 function autoHealState(status: StudioStatus, replacedAt: string, now: Date): string {
-  // Issue #1152 review: an OSS lead is never healed (decideHeal), so "pending"
-  // would promise a heal that will not come.
-  if (status.leadType === "glm") return "skipped: OSS lead";
+  // Issue #1152 review: a Claude-booted OSS lead is never healed (decideHeal),
+  // so "pending" would promise a heal that will not come.
+  if (leadAccountMismatch(status)) return "skipped: OSS lead";
   const attempted = status.observed?.healAttemptedAt ?? null;
-  if (attempted === null || Date.parse(attempted) < Date.parse(replacedAt)) return "pending";
+  if (attempted === null || Date.parse(attempted) < Date.parse(replacedAt)) {
+    // Issue #1152 review: an earlier attempt still inside the cooldown holds the
+    // next heal back; say until when, not "pending".
+    if (attempted !== null && now.getTime() < Date.parse(attempted) + HEAL_COOLDOWN_MS) {
+      const until = new Date(Date.parse(attempted) + HEAL_COOLDOWN_MS).toISOString().slice(11, 16);
+      return `cooling down until ${until}`;
+    }
+    return "pending";
+  }
   const r = status.readiness;
   if (r?.kind === "bare" && Date.parse(r.checkedAt) > Date.parse(attempted)) {
     return `failed: ${r.reason.replace(/\s+/g, " ")}`;
@@ -188,8 +196,10 @@ function autoHealState(status: StudioStatus, replacedAt: string, now: Date): str
   return "running";
 }
 
-/** Issue #1152 review: how long READY keeps saying `auto-heal running`. */
-const AUTO_HEAL_RUNNING_WINDOW_MS = 10 * 60_000;
+/** Issue #1152 review: how long READY keeps saying `auto-heal running`. A
+ *  worst-case restart is two 600 s bring-ups (~20 min), so 25 min leaves
+ *  margin before READY calls the attempt failed. */
+const AUTO_HEAL_RUNNING_WINDOW_MS = 25 * 60_000;
 
 /**
  * Issue #85 — READY overrides, `state: "running"` only, first match wins:

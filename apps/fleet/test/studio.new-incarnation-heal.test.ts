@@ -4,6 +4,7 @@ import { HEAL_ATTEMPT_KEY, STATUS_KEY, type HealAttempt } from "../src/studio/pr
 import { OBSERVED_KEY, emptyObserved, type Observed } from "../src/studio/observed";
 import type { StudioStatus, StudioReadiness } from "../src/studio/types";
 import { readyOverride } from "../cli/readiness-format";
+import { replaceHealDelaySeconds } from "../src/studio/do";
 import { fakeStorage as doStorage } from "./helpers/do-storage";
 
 // ---------------------------------------------------------------------------
@@ -151,20 +152,37 @@ describe("replacementEvent — one board event per replace", () => {
 //      instead of `running` forever when later checks are inconclusive.
 // ---------------------------------------------------------------------------
 
-describe("review #1152 — an OSS lead is never healed onto a Claude-env container", () => {
-  it("a glm row stands down with a reason that names the OSS lead", () => {
-    const d = decideHeal(status({ leadType: "glm" }), bare(), undefined);
+describe("review #1152 — an OSS lead booted on Claude is never healed onto Claude", () => {
+  // A glm row that recorded a Claude account is a container that booted on the
+  // Claude env (leadAccountMismatch). Healing it would bring the lead up there.
+  it("a glm row whose container booted on Claude stands down, naming the OSS lead", () => {
+    const d = decideHeal(status({ leadType: "glm", launchedAccount: "claude-a" }), bare(), undefined);
     expect(d.kind).toBe("stand-down");
     expect(d.kind === "stand-down" && d.why).toContain("OSS lead");
   });
 
-  it("READY says the heal is skipped for an OSS lead, not 'pending'", () => {
+  // Main heals OSS leads today onto the router: no recorded Claude account
+  // means the container booted on the router env. Keep that heal.
+  it("a glm row with no recorded Claude account still heals (router env, as on main)", () => {
+    expect(decideHeal(status({ leadType: "glm", launchedAccount: null }), bare(), undefined).kind).toBe("heal");
+  });
+
+  it("READY says the heal is skipped for a Claude-booted OSS lead, not 'pending'", () => {
     const s = status({
-      leadType: "glm",
+      leadType: "glm", launchedAccount: "claude-a",
       observed: { ...emptyObserved(), replacedAt: REPLACED_AT },
       readiness: bare("2026-10-16T16:39:10.000Z"),
     });
     expect(readyOverride(s, NOW)).toBe("bare: replaced 1m — auto-heal skipped: OSS lead");
+  });
+
+  it("READY keeps 'pending' for an OSS lead on the router env", () => {
+    const s = status({
+      leadType: "glm", launchedAccount: null,
+      observed: { ...emptyObserved(), replacedAt: REPLACED_AT },
+      readiness: bare("2026-10-16T16:39:10.000Z"),
+    });
+    expect(readyOverride(s, NOW)).toBe("bare: replaced 1m — auto-heal pending");
   });
 });
 
@@ -186,7 +204,19 @@ describe("review #1152 — cooldown caps heals across replacements", () => {
 });
 
 describe("review #1152 — READY stops saying 'running' once the attempt window passes", () => {
-  it("an attempt 15 min old with no verdict since reads failed, not running", () => {
+  it("an attempt 31 min old with no verdict since reads failed, not running", () => {
+    const s = status({
+      observed: {
+        ...emptyObserved(), replacedAt: REPLACED_AT, healAttemptedAt: "2026-10-16T16:39:40.000Z",
+      },
+      readiness: bare("2026-10-16T16:39:10.000Z"),
+    });
+    expect(readyOverride(s, new Date("2026-10-16T17:10:00.000Z"))).toBe(
+      "bare: replaced 30m — auto-heal failed: no verdict since the attempt",
+    );
+  });
+
+  it("an attempt 15 min old with no verdict yet still reads running: a worst-case restart takes ~20 min", () => {
     const s = status({
       observed: {
         ...emptyObserved(), replacedAt: REPLACED_AT, healAttemptedAt: "2026-10-16T16:39:40.000Z",
@@ -194,7 +224,32 @@ describe("review #1152 — READY stops saying 'running' once the attempt window 
       readiness: bare("2026-10-16T16:39:10.000Z"),
     });
     expect(readyOverride(s, new Date("2026-10-16T16:55:00.000Z"))).toBe(
-      "bare: replaced 15m — auto-heal failed: no verdict since the attempt",
+      "bare: replaced 15m — auto-heal running",
     );
+  });
+
+  it("during the cooldown READY says when the next heal may run", () => {
+    const s = status({
+      observed: {
+        ...emptyObserved(), replacedAt: REPLACED_AT, healAttemptedAt: "2026-10-16T16:20:03.000Z",
+      },
+      readiness: bare("2026-10-16T16:39:10.000Z"),
+    });
+    expect(readyOverride(s, NOW)).toBe("bare: replaced 1m — auto-heal cooling down until 16:50");
+  });
+});
+
+describe("review #1152 — the fast sync is jittered across a fleet-wide rollout", () => {
+  it("the delay spans 15 s to 135 s", () => {
+    expect(replaceHealDelaySeconds(() => 0)).toBe(15);
+    expect(replaceHealDelaySeconds(() => 0.999)).toBe(134);
+  });
+
+  it("uses Math.random by default, always inside the window", () => {
+    for (let i = 0; i < 50; i++) {
+      const d = replaceHealDelaySeconds();
+      expect(d).toBeGreaterThanOrEqual(15);
+      expect(d).toBeLessThanOrEqual(134);
+    }
   });
 });

@@ -119,6 +119,7 @@ import { DONE_RECORD_COMMENT_MARKER } from "../board/comment-wake";
 import {
   getObserved, mergeObserved, isIncarnationToken, computeAdoptedVerdict,
   type Observed, type ObservedSession, type ObservedStorage, type BringupVia,
+  HEAL_COOLDOWN_MS,
 } from "./observed";
 import { recycleRefusal, recycleRescueFailedRefusal, recycleRescueUnconfirmedRefusal, recycleCostLine, RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
 import { sessionLatestKey } from "./archive";
@@ -183,6 +184,7 @@ import { LIVE_TASK_STATES, TERMINAL_TASK_STATES } from "../board/types";
 import { assignDigest } from "../board/assign-wake";
 import { observeContainer } from "./container-watch";
 import { makeEvent, shortId, type FleetEvent } from "../events/schema";
+import { leadAccountMismatch } from "./lead-route";
 import { appendEvent } from "../events/log";
 // A studio has no chatId of its own, so its alerts address the one human
 // operator directly. Board #334: operator and token come from
@@ -2813,8 +2815,8 @@ export function decideHeal(
   // replaced container is always running, so a heal would bring the lead up on
   // the Claude env the container was started with. The router restart needs a
   // destroy-and-start path that does not exist yet; until it does, say so.
-  if (status.leadType === "glm") {
-    return { kind: "stand-down", why: "OSS lead: a heal would bring it up on the Claude env; router restart not automated" };
+  if (leadAccountMismatch(status)) {
+    return { kind: "stand-down", why: "OSS lead booted on the Claude env: a heal would bring it up there; router restart not automated" };
   }
   if (marker?.armed) {
     if (!armedForAnEarlierIncarnation(marker, replacedAt)) {
@@ -2831,11 +2833,13 @@ export function decideHeal(
 }
 
 /** Issue #1152 review: how soon the sync tick runs after a replace is seen,
- *  instead of the regular SYNC_SESSION_SECONDS wait. */
-export const HEAL_AFTER_REPLACE_SECONDS = 15;
-
-/** Issue #1152 review: the minimum gap between two heals of one studio. */
-export const HEAL_COOLDOWN_MS = 30 * 60_000;
+ *  instead of the regular SYNC_SESSION_SECONDS wait. Jittered across 15 s to
+ *  134 s: a fleet-wide rollout replaces every studio at once, and a fixed
+ *  delay would start ~30 clones, restores and token mints in the same second
+ *  (clone 429 bursts, and a failed clone leaves the studio bare). */
+export function replaceHealDelaySeconds(random: () => number = Math.random): number {
+  return 15 + Math.floor(random() * 120);
+}
 
 /** Issue #1146: true when an armed marker was set before this container's
  *  `replacedAt`, so it is an earlier container's marker and does not bind
@@ -8378,7 +8382,7 @@ export class StudioDO extends Sandbox<Env> {
               try {
                 await appendEvent(this.env.DB, ev);
               } finally {
-                await this.rearm("syncSession", HEAL_AFTER_REPLACE_SECONDS);
+                await this.rearm("syncSession", replaceHealDelaySeconds());
               }
             },
           );
