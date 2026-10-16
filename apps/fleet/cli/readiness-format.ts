@@ -179,11 +179,6 @@ export function readyOverride(status: StudioStatus, now: Date): string | null {
   if (observed?.replacedAt != null) {
     return `replaced ${formatAge(ageSeconds(observed.replacedAt, now))} ago — not brought up`;
   }
-  // Issue #911: a glm lead recorded on a Claude account burns Claude quota and
-  // stalls on its limit. Surfaced here so fleet ls shows it, not just the row.
-  if (leadAccountMismatch(status)) {
-    return `lead on wrong account (${status.launchedAccount}) — glm lead on Claude; recycle to put it back on glm`;
-  }
   // Board issue #183 — replaces the old fixed `execFailures >= 3` gate
   // (issue #85 PR1, review round 3 MUST-FIX 7) with the maestro's own
   // time-based rule: >=2 consecutive failed ship ticks AND >=90s elapsed
@@ -203,6 +198,14 @@ export function readyOverride(status: StudioStatus, now: Date): string | null {
       ? "loses everything unshipped (no snapshot on file)"
       : `loses work since snap ${formatAge(ageSeconds(lastSnapshotAt, now))}`;
     return `unreachable ${formatAge(ageSeconds(observed.unreachableSince, now))} — wedged; recycle ${cost}`;
+  }
+  // Issue #911: a router-led lead recorded on a Claude account burns Claude
+  // quota and stalls on its limit. Surfaced here so fleet ls shows it, not
+  // just the row. Issue #1142, item 3: below "unreachable", so a wedged row's
+  // recycle cost is never hidden behind this line. Wording is router-neutral:
+  // kimi/deepseek rows are stored glm too, so "glm" named the wrong lead.
+  if (leadAccountMismatch(status)) {
+    return `lead on wrong account (${status.launchedAccount}) — router lead on Claude; recycle to put it back on the router`;
   }
   const checkedAt = status.readiness?.checkedAt;
   if (checkedAt != null) {

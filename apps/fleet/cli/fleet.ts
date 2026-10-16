@@ -70,7 +70,7 @@ import { formatTaskTable, formatTaskShow, formatAssignWake } from "./task-format
 // Issue #934: the INFER column's pure half (the cell format + the blocked
 // threshold), kept Bun/node-free so either test pool can import it — see
 // that module's own header.
-import { formatInfer, isLeadInferenceBlocked, INFER_WINDOW_MS, type LeadInferUsage } from "./infer-format";
+import { formatInfer, isLeadInferenceBlocked, isLeadInferenceSilent, INFER_WINDOW_MS, type LeadInferUsage } from "./infer-format";
 // Issue #1074 ask 1: the lead model, in the ACCOUNT cell and the --json fields.
 import { leadAccountLabel, leadModelOf, type LeadModel } from "./lead-model";
 import type { AssignWakeReport } from "../src/board/assign-wake";
@@ -428,6 +428,9 @@ export function formatTable(
     // because the marker rides the READY cell while the numbers live in
     // INFER — one lookup, shared by both.
     const blocked = isLeadInferenceBlocked(inferBy?.get(s.id));
+    // Issue #1142, item 2: a router-led lead reading "working" with 0 router
+    // calls in the window. Mutually exclusive with `blocked` (needs >=10 calls).
+    const silent = isLeadInferenceSilent(s, inferBy?.get(s.id), inferBy !== undefined);
     return [
       s.id,
       parseStudioId(s.id)?.repo ?? "-",
@@ -467,7 +470,8 @@ export function formatTable(
       // last 30 min (isLeadInferenceBlocked, cli/infer-format.ts).
       (() => {
         const ready = readyOverride(s, now) ?? formatReady(s.readiness, s, now);
-        return blocked ? `${ready} inference-blocked` : ready;
+        if (blocked) return `${ready} inference-blocked`;
+        return silent ? `${ready} inference-silent` : ready;
       })(),
       formatSession(s, now),
       // ACTIVITY column (issue #221, PR3a): working/idle/waiting-members/limit

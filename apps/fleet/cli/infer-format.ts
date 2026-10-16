@@ -18,6 +18,8 @@
 // inference call (mode: "lead", written by anthropic-route.ts's logUsage);
 // this module is the rendering half of the CLI read of that table.
 
+import type { StudioStatus } from "../src/studio/types";
+
 /** One studio's lead-inference traffic in the INFER window (issue #934):
  *  total lead calls and how many of them returned ok. The shape of
  *  /studio/junior/usage/lead's per-row answer (aggregateLeadUsage's
@@ -39,6 +41,22 @@ export const INFER_WINDOW_MS = 30 * 60 * 1000;
  *  under: too few calls means the studio has not been trying (idle or
  *  Claude-led), which is a different fact from trying and failing. */
 export const INFER_BLOCKED_MIN_CALLS = 10;
+
+/** Issue #1142, item 2 (the issue #911 ask): a router-led row (glm, which
+ *  kimi/deepseek are stored as too) whose lead reads "working" yet made ZERO
+ *  router calls in the INFER window is silent — the lead claims progress the
+ *  router never saw. `usageKnown` is whether the usage map answered at all:
+ *  an absent answer is no data, never 0, so it can never flag. Claude-led,
+ *  idle, and stopped rows are never silent. */
+export function isLeadInferenceSilent(
+  status: Pick<StudioStatus, "leadType" | "state" | "observed">,
+  u: LeadInferUsage | undefined,
+  usageKnown: boolean,
+): boolean {
+  if (!usageKnown || status.leadType !== "glm" || status.state !== "running") return false;
+  if (status.observed?.activity?.state !== "working") return false;
+  return (u?.calls ?? 0) === 0;
+}
 
 export function isLeadInferenceBlocked(u: LeadInferUsage | undefined): boolean {
   // calls <= 0 cannot happen off a real route row (a GROUP BY only answers

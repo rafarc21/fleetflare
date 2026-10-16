@@ -1,6 +1,8 @@
 // apps/fleet/src/studio/lead-route.ts
 //
-// Issue #911: the one rule every (re)start path and fleet ls READY share.
+// Issue #911: the mismatch rule fleet ls READY reads. Issue #1142 (item 4):
+// the (re)start paths do NOT call this — they gate on leadType directly
+// (do.ts constructorLaunch, failover's glm skip), so only READY shares it.
 // A glm-led studio's lead runs on the fleet LLM router with no Claude OAuth
 // token. A row that is glm-led yet recorded a Claude account as the account
 // its lead launched on is a lead on the wrong account.

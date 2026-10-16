@@ -1367,6 +1367,15 @@ describe("StudioDO start config — one derivation everywhere, failover included
     expect(block).toContain(ASSIGN);
   });
 
+  // Issue #1142, item 1: the switch hook must pass the row's leadType, so a
+  // glm-led row rebuilds the router env after a switch, never a Claude one.
+  it("failoverDeps onSwitched passes the row's leadType into the same derivation (#1142 item 1)", () => {
+    const start = doSrc.indexOf("private failoverDeps(): FailoverDeps {");
+    const end = doSrc.indexOf("\n  }\n", start);
+    const block = doSrc.slice(start, end);
+    expect(block).toContain(`${ASSIGN}this.env, this.selfId(), spawnToken, name, row?.leadType))`);
+  });
+
   it("provision, restart and recycle set the start config through the same one assignment, from launch.name (claude) or the glm stand-in (glm)", () => {
     const uses = doSrc.split(ASSIGN).length - 1;
     // failover(1) + [provisionUngated, restartUngated, recycle's awaitReady

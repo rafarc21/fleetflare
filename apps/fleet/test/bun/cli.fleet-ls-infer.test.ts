@@ -389,3 +389,30 @@ describe("constants, pinned through behavior (#934)", () => {
     expect(isLeadInferenceBlocked({ calls: 9, ok: 1 })).toBe(false);
   });
 });
+
+// Issue #1142, item 2 — READY flags a router-led lead that reads "working"
+// yet made 0 router calls in the INFER window (issue #911 ask). Pinned on the
+// rendered READY cell, same as the blocked marker above.
+describe("fleet ls table — READY inference-silent marker (#1142)", () => {
+  const working = (overrides: Partial<StudioStatus> = {}, id = "websites--web-studio"): StudioStatus =>
+    row({
+      id, leadType: "glm",
+      observed: { activity: { state: "working", since: NOW.toISOString(), anchored: true, observedAt: NOW.toISOString() } } as unknown as StudioStatus["observed"],
+      ...overrides,
+    }, id);
+
+  test("a working router-led row with a map and no entry reads 'inference-silent' in READY", () => {
+    const [header, line] = tableLines(formatTable([working()], NOW, null, undefined, new Map()));
+    expect(readyCell(header, line)).toContain("inference-silent");
+  });
+
+  test("no usage map (route unavailable): no silent marker", () => {
+    const [header, line] = tableLines(formatTable([working()], NOW));
+    expect(readyCell(header, line)).not.toContain("inference-silent");
+  });
+
+  test("a Claude-led working row: no silent marker", () => {
+    const [header, line] = tableLines(formatTable([working({ leadType: "claude" })], NOW, null, undefined, new Map()));
+    expect(readyCell(header, line)).not.toContain("inference-silent");
+  });
+});

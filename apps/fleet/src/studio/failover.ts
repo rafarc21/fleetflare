@@ -2173,6 +2173,11 @@ export async function runAccountFailover(
   // it — an exec is what brings a container up (see do.ts's restartStudio
   // ordering comment). Nothing about an account is decidable here.
   if (existing.state === "stopped") return { kind: "skipped", reason: "studio is stopped" };
+  // Issue #1142, item 1: a glm-led row (kimi/deepseek are stored as glm too)
+  // runs its lead on the fleet LLM router with no Claude account. A limit modal
+  // on its pane is not a failover case: switching would push the NEXT Claude
+  // token into an OSS studio. Claude-led rows fall through unchanged.
+  if (existing.leadType === "glm") return { kind: "skipped", reason: "glm lead runs on the router, no Claude account to fail over" };
   const destroyLanded = await watchForDestroy(storage, deps.now);
 
   const sightings = storage as unknown as SightingStorage;

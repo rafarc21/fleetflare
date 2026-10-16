@@ -2627,3 +2627,25 @@ describe("runAccountFailover — the in-memory start config follows a completed 
     expect(outcome).toEqual(REFUSAL);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #1142, item 1 — a glm-led row (kimi/deepseek are stored as glm too)
+// runs its lead on the fleet LLM router with no Claude OAuth token. Failover
+// moves Claude accounts; for a glm row there is no account to move, so a
+// Claude limit modal on its pane must never produce a switch.
+// ---------------------------------------------------------------------------
+
+describe("runAccountFailover — a glm-led row never switches to a Claude account (#1142 item 1)", () => {
+  it("skips a glm row even when its pane shows the Claude limit modal: no switch exec, no relaunch, no record", async () => {
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(MODAL_PANE),
+      initial: { id: STUDIO_ID, state: "running", leadType: "glm" } as StudioStatus,
+    });
+    const out = await run(h);
+    expect(out.kind).toBe("skipped");
+    expect(h.execs).not.toContain(accountSwitchCmd());
+    expect(h.relaunches).toBe(0);
+    expect(h.recorded).toHaveLength(0);
+  });
+});
