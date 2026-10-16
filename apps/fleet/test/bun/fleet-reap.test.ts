@@ -7,7 +7,7 @@
 // bun:test lane (CLI code, same reason rescue-all-scope.test.ts gives).
 import { test, expect, describe } from "bun:test";
 import {
-  runReap, formatIdleAlarm, parseIdleDuration, emptyReapState, destroyRaceOutcome,
+  runReap, formatIdleAlarm, parseIdleDuration, emptyReapState, destroyRaceOutcome, chromeRefusal,
   REAP_BACKOFF_MS, STALL_ALARM_EVERY_MS, STALL_AFTER_MS, REAP_LIVE_READ_MAX_MS,
   type ReapDeps, type ReapFlags, type ReapInspect, type ReapState, type ReapDestroyResult, type NudgeOutcome,
 } from "../../cli/reap";
@@ -492,6 +492,39 @@ describe("reap — F2/F3: live pane chrome", () => {
     const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_BG_TASK }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
+  });
+});
+
+// Issue #1110: the footer hint text (`ctrl+t to hide tasks`, `PR #4343`) is
+// chrome, not work. chromeRefusal reads the footer by its `·` segments: known
+// chrome hints drop out, then the rest is checked (running words, counters,
+// unknown-with-digit = skip).
+describe("reap — #1110: footer segments and chrome hints", () => {
+  const withFooter = (footer: string) => CLEAN_IDLE.replace(/^ *⏵⏵ .*$/m, footer);
+
+  test("the measured footer (bypass + ctrl+t hint + agents hint) -> no refusal", () => {
+    const tail = withFooter("  ⏵⏵ bypass permissions on (shift+tab to cycle) · ctrl+t to hide tasks · ← for agents");
+    expect(chromeRefusal(tail)).toBeNull();
+  });
+
+  test("a `· 2 shells ·` footer segment -> refusal", () => {
+    const tail = withFooter("  ⏵⏵ bypass permissions on (shift+tab to cycle) · 2 shells · ← for agents");
+    expect(chromeRefusal(tail)).not.toBeNull();
+  });
+
+  test("an `esc to interrupt` footer segment -> refusal", () => {
+    const tail = withFooter("  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt");
+    expect(chromeRefusal(tail)).not.toBeNull();
+  });
+
+  test("a `PR #12` footer hint alone -> no refusal", () => {
+    const tail = withFooter("  ⏵⏵ bypass permissions on (shift+tab to cycle) · PR #12");
+    expect(chromeRefusal(tail)).toBeNull();
+  });
+
+  test("an unknown `· 3 foo ·` footer segment -> refusal (unknown with a digit = skip)", () => {
+    const tail = withFooter("  ⏵⏵ bypass permissions on (shift+tab to cycle) · 3 foo · ← for agents");
+    expect(chromeRefusal(tail)).not.toBeNull();
   });
 });
 
