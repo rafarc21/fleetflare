@@ -9,6 +9,7 @@ import { oneLine, COMMENT_EXCERPT } from "../github/wake-events";
 import { wakeStudioFor } from "./wake-gate";
 import { taskAssignees, taskStates } from "./types";
 import { MESSAGE_COMMENT_MARKER } from "./comment-wake";
+import { GitHubError } from "./api";
 
 export { MESSAGE_COMMENT_MARKER } from "./comment-wake";
 
@@ -58,7 +59,17 @@ export async function sendTaskMessage(
     return { ok: false, status: 400, message: `"text" is over ${MESSAGE_MAX_CHARS} characters` };
   }
 
-  const task = await api.getIssue(repo, number);
+  let task;
+  try {
+    task = await api.getIssue(repo, number);
+  } catch (err) {
+    // Board issue #1106: an unknown number answers in words that name the task,
+    // not GitHub's bare "Not Found".
+    if (err instanceof GitHubError && err.status === 404) {
+      return { ok: false, status: 404, message: `task #${number} not found in ${repo} — nothing to message` };
+    }
+    throw err;
+  }
   if (!task.open) {
     return { ok: false, status: 409, message: `task #${number} is closed — nothing to message` };
   }

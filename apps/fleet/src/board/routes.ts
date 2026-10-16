@@ -70,7 +70,7 @@ import { resolveOpsRepo } from "../ops-repo";
 // `/studio/board/tasks`, optionally one task number, optionally one action on
 // it. Anything else is a 404 by construction, including a non-numeric task id
 // — the board addresses tasks by issue number and nothing else.
-const BOARD_ROUTE_RE = /^\/studio\/board\/tasks(?:\/(\d+)(?:\/(state|envelope|adopt|assign|verify))?)?$/;
+const BOARD_ROUTE_RE = /^\/studio\/board\/tasks(?:\/(\d+)(?:\/(state|envelope|adopt|assign|verify|message))?)?$/;
 
 /**
  * The real port: one credential per repo OWNER, minted lazily on first use and
@@ -1008,6 +1008,13 @@ export async function handleBoard(
     // ordering discipline adopt/assign already follow. Never gates, never
     // transitions, never closes — see src/board/verify.ts's own header.
     if (action === "verify") return respond(await attemptVerification(api, verifyFetch, repo.value, number));
+    // Board issue #1106: the operator's `fleet task message <n>`. The same
+    // sendTaskMessage the studio surface runs (#1071), so one comment and one
+    // wake of the lead. Cloudflare Access (verifyAccess above) is the only
+    // gate here; the sender is stamped `operator`, never a request field.
+    if (action === "message") {
+      return respond(await sendTaskMessage(api, assignWake, repo.value, number, body, "operator"));
+    }
     // §6's msg_id: minted HERE, once per comment. It is the single writer's
     // stamp on a thread, so a sender never supplies it — see
     // src/board/envelope.ts's own note on the input/stored shape split.

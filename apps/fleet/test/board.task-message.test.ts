@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { sendTaskMessage, taskMessageDigest, taskMessageComment, MESSAGE_COMMENT_MARKER } from "../src/board/task-message";
 import type { AssignWakeDeps } from "../src/board/assign-wake";
 import { fakeApi, task } from "./helpers/board-api";
+import { GitHubError } from "../src/board/api";
 import { studioLabel } from "../src/board/types";
 import { qualifiesForCommentWake } from "../src/board/comment-wake";
 
@@ -100,6 +101,18 @@ describe("sendTaskMessage — comment on the task and wake its lead", () => {
     const res = await sendTaskMessage(api, d, REPO, 12, { text: "review is in" }, SENDER);
     expect(res.ok).toBe(true);
     expect(d.wake).toHaveBeenCalledTimes(1);
+  });
+
+  // Board issue #1106: an unknown number answers in words that name the task.
+  it("answers an unknown task as a 404 naming the task — nothing posted, nothing woken", async () => {
+    const api = fakeApi({
+      getIssue: vi.fn(async () => { throw new GitHubError(404, "GET /repos/acme/websites/issues/12 failed (404): Not Found"); }),
+    });
+    const d = deps();
+    const res = await sendTaskMessage(api, d, REPO, 12, { text: "hi" }, SENDER);
+    expect(res).toEqual({ ok: false, status: 404, message: "task #12 not found in acme/websites — nothing to message" });
+    expect(api.createComment).not.toHaveBeenCalled();
+    expect(d.wake).not.toHaveBeenCalled();
   });
 
   it("refuses an unassigned task as a 409 — there is no single lead to wake", async () => {

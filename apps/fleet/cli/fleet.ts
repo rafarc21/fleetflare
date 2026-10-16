@@ -1980,19 +1980,21 @@ async function cmdTaskVerify(creds: Credentials, number: number): Promise<void> 
 
 /**
  * `fleet task message <n> "<text>"` — board issue #1077, item 2. The local twin
- * of the in-container verb: POSTs {text} to the Worker's message route, which
- * writes one board comment and wakes the task's one studio lead
- * (src/board/task-message.ts). Prints the comment and the wake outcome, so a
- * refused wake (a stopped lead) is printed as NO WAKE, never silent. A Worker
- * refusal (a closed or finished task, 409) exits 1 through boardRequest.
+ * of the in-container verb: POSTs {text} and, when this folder names a repo,
+ * `repo` in the body (the operator's writes read the board repo from the body,
+ * issue #1106) to the Worker's message route, which writes one board comment
+ * and wakes the task's one studio lead (src/board/task-message.ts). Prints the
+ * comment and the wake outcome, so a refused wake (a stopped lead) is printed
+ * as NO WAKE, never silent. A Worker refusal (a closed or finished task, 409)
+ * exits 1 through boardRequest.
  */
 async function cmdTaskMessage(creds: Credentials, number: number, text: string): Promise<void> {
   const detected = await detectRepo();
   reportRepo("fleet task message", detected);
-  const result = (await boardRequest(creds, "fleet task message", `/tasks/${number}/message${repoQuery(detected.slug)}`, {
+  const result = (await boardRequest(creds, "fleet task message", `/tasks/${number}/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, ...(detected.slug ? { repo: detected.slug } : {}) }),
   })) as { comment: { url: string }; wake: AssignWakeReport };
   console.log(`task #${number} message posted: ${result.comment.url}`);
   const wake = formatAssignWake(result.wake);

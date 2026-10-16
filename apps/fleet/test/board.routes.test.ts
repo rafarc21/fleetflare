@@ -11,6 +11,7 @@ import type { BoardTask } from "../src/board/types";
 import { recordStudio } from "../src/studio/registry";
 import type { Env } from "../src/env";
 import { isJuniorAuthorized, recordJuniorAuthorization , JUNIOR_SWEEP_PAGE } from "../src/junior/authz";
+import { studioLabel } from "../src/board/types";
 
 // PR #9 review, blocker B1: fleet_state is not isolated per test (same as
 // agents.do.test.ts's own identical beforeEach) — the junior-authorization
@@ -1550,3 +1551,109 @@ describe("RepoReachFetch canonical alias", () => {
 // re-declaration (TS2440). A reverted routes file that restores its own
 // export and drops the import compiles clean — the sweep greps for that,
 // the compiler does not.
+
+// Board issue #1106: the OPERATOR's `fleet task message <n>` route. The studio
+// surface has had POST .../message since #1071; the operator surface had none,
+// so the local CLI got a 404 with no route to name. Both surfaces run the same
+// sendTaskMessage. What differs: the auth (Cloudflare Access only, so a studio
+// spawn token is refused) and the sender stamp (`operator`).
+describe("POST /studio/board/tasks/:n/message — the operator route (issue #1106)", () => {
+  const WEB = "websites--web-studio";
+
+  function wakeDeps() {
+    const wake = vi.fn(async (_studioId: string, _prompt: string) => ({ ok: true as const }));
+    return {
+      deps: {
+        studioState: vi.fn(async (_studioId: string) => ({ state: "running", repoSlug: null })),
+        wake,
+        resolveCanonicalRepo: vi.fn(async (slug: string) => slug),
+      },
+      wake,
+    };
+  }
+
+  const assigned = () => task({
+    number: 12, state: "working", labels: ["working", studioLabel(WEB)], assignee: WEB,
+  });
+
+  it("posts one comment stamped `operator` and wakes the task's lead, answering with both", async () => {
+    authorized();
+    const api = fakeApi({ getIssue: vi.fn(async () => assigned()) });
+    const { deps, wake } = wakeDeps();
+    const res = await handleBoard(
+      req("/studio/board/tasks/12/message", { method: "POST", body: JSON.stringify({ text: "rebase first" }) }),
+      testEnv, { api, reach, assignWake: deps },
+    );
+
+    expect(res.status).toBe(200);
+    expect(api.createComment).toHaveBeenCalledTimes(1);
+    const comment = vi.mocked(api.createComment).mock.calls[0][2];
+    expect(comment).toContain("Message from `operator`");
+    expect(comment).toContain("rebase first");
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake.mock.calls[0][0]).toBe(WEB);
+    expect(await res.json()).toMatchObject({ comment: { url: expect.any(String) }, wake: { woke: true } });
+  });
+
+  it("reads the board the body names — the CLI sends `repo` in the body on every write", async () => {
+    authorized();
+    const api = fakeApi({ getIssue: vi.fn(async () => assigned()) });
+    const { deps } = wakeDeps();
+    const res = await handleBoard(
+      req("/studio/board/tasks/12/message", { method: "POST", body: JSON.stringify({ text: "hi", repo: "acme-org/beta" }) }),
+      testEnv, { api, reach, assignWake: deps },
+    );
+
+    expect(res.status).toBe(200);
+    expect(vi.mocked(api.getIssue).mock.calls[0][0]).toBe("acme-org/beta");
+    expect(vi.mocked(api.createComment).mock.calls[0][0]).toBe("acme-org/beta");
+  });
+
+  it("refuses a studio's spawn token here — no Access identity, so 401, and nothing is posted or woken", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => assigned()) });
+    const { deps, wake } = wakeDeps();
+    const res = await handleBoard(
+      new Request("https://x/studio/board/tasks/12/message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Fleet-Spawn-Token": "studio-spawn-token" },
+        body: JSON.stringify({ text: "hi" }),
+      }),
+      testEnv, { api, reach, assignWake: deps },
+    );
+
+    expect(res.status).toBe(401);
+    expect(api.createComment).not.toHaveBeenCalled();
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it("answers an unknown task 404 with text that names the task, not the bare GitHub error", async () => {
+    authorized();
+    const api = fakeApi({
+      getIssue: vi.fn(async () => { throw new GitHubError(404, "GET /repos/acme-org/websites/issues/999 failed (404): Not Found"); }),
+    });
+    const { deps, wake } = wakeDeps();
+    const res = await handleBoard(
+      req("/studio/board/tasks/999/message", { method: "POST", body: JSON.stringify({ text: "hi" }) }),
+      testEnv, { api, reach, assignWake: deps },
+    );
+
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe("task #999 not found in acme-org/websites — nothing to message");
+    expect(api.createComment).not.toHaveBeenCalled();
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it("refuses a closed task as 409 — finished work gets no comment and no wake", async () => {
+    authorized();
+    const api = fakeApi({ getIssue: vi.fn(async () => ({ ...assigned(), open: false })) });
+    const { deps, wake } = wakeDeps();
+    const res = await handleBoard(
+      req("/studio/board/tasks/12/message", { method: "POST", body: JSON.stringify({ text: "hi" }) }),
+      testEnv, { api, reach, assignWake: deps },
+    );
+
+    expect(res.status).toBe(409);
+    expect(api.createComment).not.toHaveBeenCalled();
+    expect(wake).not.toHaveBeenCalled();
+  });
+});

@@ -108,3 +108,29 @@ describe("fleet task message (board issue #1077)", () => {
     expect(r.err).toContain("finished work takes no message");
   });
 });
+
+// Board issue #1106: the Worker reads the board repo from the BODY on every
+// operator write, never from the query string. A folder with an `origin`
+// remote must therefore name its repo in the body, or the message lands on the
+// fleet's default repo.
+describe("fleet task message — the repo travels in the body (issue #1106)", () => {
+  test("a folder with an origin remote sends its repo in the body", async () => {
+    const home = tmpDir("task-message-home-");
+    const cwd = tmpDir("task-message-cwd-");
+    const git = Bun.spawnSync(["git", "init", "-q"], { cwd });
+    expect(git.exitCode).toBe(0);
+    Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/acme-org/beta.git"], { cwd });
+
+    const { server, seen } = startMessageStandIn(() => Response.json({
+      comment: COMMENT,
+      wake: { woke: true, digest: "WAKE TASK MESSAGE #12" },
+    }));
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await runMessage(home, cwd, ["hi"]);
+    server.stop(true);
+
+    expect(r.code).toBe(0);
+    expect(seen[0]!.body).toEqual({ text: "hi", repo: "acme-org/beta" });
+  });
+});
