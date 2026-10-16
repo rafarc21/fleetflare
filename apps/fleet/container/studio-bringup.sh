@@ -973,21 +973,6 @@ for fn, b64 in bundle.items():
     fi
     chmod 0755 ~/.claude/hooks/install-marker.sh 2>/dev/null || true
 
-    # OSS-lead continue hook (issue #1112, layer 2): a Stop hook that keeps a
-    # glm/kimi/deepseek lead working while its TodoWrite list still has open
-    # items. Copied from gates/oss-lead-continue.sh like every hook here. The
-    # scope check (STUDIO_ID set, fleet-route ANTHROPIC_BASE_URL) lives inside
-    # the script, so a Claude-led studio gets a silent no-op. The Stop entry is
-    # registered in the SAME settings.json write as the lead gate below, and
-    # only when this copy succeeded. A failed copy logs and boot continues
-    # without the hook: fail open, never a refused boot.
-    if cp /opt/blueprint/gates/oss-lead-continue.sh ~/.claude/hooks/oss-lead-continue.sh 2>/dev/null; then
-      chmod 0755 ~/.claude/hooks/oss-lead-continue.sh 2>/dev/null || true
-    else
-      rm -f ~/.claude/hooks/oss-lead-continue.sh
-      echo "studio-bringup: oss-lead-continue hook not installed (source missing or copy failed) -- continuing boot without it" >&2
-    fi
-
     # settings.json: merge, never clobber. A base file may already carry
     # unrelated keys (an earlier bring-up on this same live container, or a
     # future image bake) -- load what's there, replace this one PreToolUse
@@ -1010,6 +995,7 @@ for fn, b64 in bundle.items():
     # (old matcher, baked path, no fail-closed guard) sitting beside the new
     # one -- the exact shape this fix exists to remove.
     mkdir -p ~/.claude
+# >>> lead-gate-settings-merge >>>
     python3 -c '
 import json, os
 path = os.path.expanduser("~/.claude/settings.json")
@@ -1058,18 +1044,35 @@ pt.append({
         "command": "S=\"$HOME/.claude/hooks/install-marker.sh\"; [ -x \"$S\" ] && exec \"$S\" || exit 0",
     }],
 })
-# OSS-lead continue hook (issue #1112, layer 2): Stop entry, registered in
-# this SAME write so one bring-up installs the lead gate and this hook together.
-# Only when the copy above landed; otherwise drop any prior entry and continue.
-oss = os.path.expanduser("~/.claude/hooks/oss-lead-continue.sh")
-stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])
-stop[:] = [e for e in stop if "oss-lead-continue.sh" not in json.dumps(e)]
-if os.path.isfile(oss):
+# OSS-lead continue hook (issue #1112, layer 2): a Stop entry in this SAME
+# write, so one bring-up installs every settings hook or fails the way it
+# always did. A failure here is logged and skipped: the lead-gate entries
+# above still land and bring-up continues without this hook (fail open).
+try:
+    stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])
+    stop[:] = [e for e in stop if "oss-lead-continue.sh" not in json.dumps(e)]
     stop.append({"hooks": [{"type": "command", "command": "S=\"$HOME/.claude/hooks/oss-lead-continue.sh\"; [ -x \"$S\" ] && exec \"$S\" || exit 0"}]})
+except Exception as e:
+    os.write(2, ("studio-bringup: oss-lead-continue Stop hook not registered (%s) -- continuing without it\n" % e).encode())
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
 '
+# <<< lead-gate-settings-merge <<<
 
+    # OSS-lead continue hook (issue #1112, layer 2): a Stop hook that keeps a
+    # glm/kimi/deepseek lead working while its TodoWrite list still has open
+    # items. Copied from gates/oss-lead-continue.sh like every hook here. The
+    # scope check (STUDIO_ID set, fleet-route ANTHROPIC_BASE_URL) lives inside
+    # the script, so a Claude-led studio gets a silent no-op. Fails open, like
+    # the PostToolUse install-marker above: a missing script costs one skipped
+    # nudge, never a refusal.
+    if [ -f /opt/blueprint/gates/oss-lead-continue.sh ]; then
+      cp /opt/blueprint/gates/oss-lead-continue.sh ~/.claude/hooks/oss-lead-continue.sh \
+        || echo "studio-bringup: cannot copy oss-lead-continue hook -- continuing without it" >&2
+    else
+      echo "studio-bringup: /opt/blueprint/gates/oss-lead-continue.sh missing -- cannot install oss-lead-continue hook" >&2
+    fi
+    chmod 0755 ~/.claude/hooks/oss-lead-continue.sh 2>/dev/null || true
   fi
 
   # --- activity heartbeat hook (issue #221, PR3b) -----------------------------
