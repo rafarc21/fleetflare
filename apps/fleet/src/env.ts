@@ -117,6 +117,14 @@ export interface Env {
    */
   LEAD_STREAM_IDLE_MS?: string;
   /**
+   * Issue #1147: ms of CLIENT silence (no byte written to the client) before
+   * the glm-lead streaming route sends one SSE `event: ping` to keep the
+   * connection alive and to detect a client that has gone (default 15000 —
+   * llm/anthropic-route.ts's LEAD_STREAM_PING_MS_DEFAULT). Garbage input falls
+   * back to the default. Pings never reset the idle timeout above.
+   */
+  LEAD_STREAM_PING_MS?: string;
+  /**
    * Issue #335: base backoff (ms) before the glm-lead route retries a
    * pre-stream Workers AI 504/529 (default 500 — llm/anthropic-route.ts's
    * LEAD_AI_RETRY_BASE_MS_DEFAULT). Garbage input falls back to the default.

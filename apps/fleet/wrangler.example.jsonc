@@ -29,7 +29,9 @@
   "name": "<YOUR_WORKER_NAME>",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
-  "compatibility_flags": ["nodejs_compat"],
+  // Issue #1147: req.signal aborts on a client drop only with this flag (workerd
+  // 1.20260730 probe: without it a dropped stream is never noticed by the pump).
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "observability": { "enabled": true },
   "triggers": { "crons": ["* * * * *"] },
   "vars": {
@@ -127,6 +129,8 @@
     // Issue #302: glm-lead stream idle timeout (ms without an upstream chunk
     // before the route sends the client `event: error`). Default 90000.
     // "LEAD_STREAM_IDLE_MS": "90000",
+    // Issue #1147 (GLM route): ms of client silence before a keepalive SSE ping. Default 15000.
+    // "LEAD_STREAM_PING_MS": "15000",
     // Issue #335 (GLM route): base backoff (ms) before retrying a Workers AI
     // 504/529 thrown before the stream starts (2 retries max). Default 500.
     // "LEAD_AI_RETRY_BASE_MS": "500",
