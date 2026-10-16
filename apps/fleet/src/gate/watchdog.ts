@@ -1,13 +1,16 @@
 // #1148 item 1 (refs #1135): the gate run watchdog. The every-minute cron sweeps
 // the per-PR run index. A live run with no progress for GATE_STALL_MS is hung (a
-// leg attempt lost its engine, so nothing stamps its progress). It is ended. Its
-// first run is rerun once as an infra error (#1119). A run that is already a
-// rerun takes the final error verdict. Pure of bindings: the cron glue
-// (watchdog-env.ts) passes the real index, engine and status post.
+// leg attempt lost its engine, so nothing stamps its progress). A run that is
+// already a rerun, or whose stored legs show a red result, takes the final
+// verdict. Any other stalled first run is rerun once (infra, #1119). Pure of
+// bindings: the cron glue (watchdog-env.ts) passes the real index, engine,
+// status post and R2 leg-result check.
 import {
-  endRunOrThrow, GATE_STALL_MS, isLiveStatus, statusOf, type GateRunIndex, type GateRunInstance, type GateRunRecord,
+  endRunOrThrow, GATE_STALL_MS, isLiveStatus, type GateRunIndex, type GateRunInstance, type GateRunRecord,
 } from "./auto-run";
-import { isRerunInstance, launchInfraRerun, recordInfraRerun, rerunInstanceId, rerunStatusArgs } from "./infra-rerun";
+import {
+  type InfraRerunOutcome, isRerunInstance, launchInfraRerun, recordInfraRerun, rerunInstanceId, rerunStatusArgs,
+} from "./infra-rerun";
 
 /** A row the watchdog may sweep: the run index's pointer plus the PR it belongs to. */
 export interface StalledRun extends GateRunRecord { repo: string; pr: number }
@@ -16,15 +19,22 @@ export interface StalledRun extends GateRunRecord { repo: string; pr: number }
  *  cron checks for two hours, far past one leg attempt. */
 export const GATE_WATCHDOG_LOOKBACK_MS = 2 * 60 * 60_000;
 
+/** A run that still cannot start its rerun this long after its last progress
+ *  gets the final error verdict. Five minutes inside the window's edge, so the
+ *  verdict posts before the row leaves the sweep. */
+export const GATE_WATCHDOG_FINAL_AGE_MS = GATE_WATCHDOG_LOOKBACK_MS - 5 * 60_000;
+
 /** The slice of the run index the watchdog reads and writes. */
 export interface WatchdogIndex extends Pick<GateRunIndex, "latest" | "handOff"> {
   /** Stamps the runs with no progress stamp (0) with `at`, so each gets a full stall window before it can be ended (#1148 item 3). */
   adoptUnknown(at: number): Promise<void>;
-  /** The pointers whose progress is at or before `before` and no older than `notBefore`, oldest first (stalled, as isStalled reads it). */
+  /** The pointers whose progress is at or before `before` and no older than `notBefore`, oldest first. */
   stalled(before: number, notBefore: number): Promise<StalledRun[]>;
+  /** Retires a finished run's row: its stamp becomes -1, so no later sweep lists it. Only while the row still holds `progressedAt`. */
+  retire(repo: string, pr: number, runId: string, progressedAt: number): Promise<void>;
 }
 
-/** The params an infra rerun is created with: the GateWorkflow's payload (workflow.ts) for a rerun. */
+/** The params an infra rerun is created with: the GateWorkflow's payload for a rerun. */
 export interface RerunParams { repo: string; pr: number; headSha: string; rerunOf: string }
 
 /** The slice of the GATE_WORKFLOW binding the watchdog uses. */
@@ -37,19 +47,20 @@ export interface WatchdogDeps {
   index: WatchdogIndex;
   workflow: WatchdogWorkflow;
   /** Posts a commit status on the head: the real GitHub call in the Worker, a recorder in tests. */
-  post: (repo: string, headSha: string, args: { state: "pending" | "error"; description: string }) => Promise<unknown>;
+  post: (repo: string, headSha: string, args: { state: "pending" | "error" | "failure"; description: string }) => Promise<unknown>;
+  /** Whether any leg of the run stored a red result. A red result is final, never rerun (#1119). */
+  hasRedLeg: (repo: string, pr: number, runId: string) => Promise<boolean>;
   now?: () => number;
 }
 
-/** What the sweep did with one stalled run: skipped (not live, or no longer the
- *  pointer), rerun (ended, and its one rerun started), final (ended, the final
- *  error verdict posted), or failed (its end failed; the next sweep retries). */
+/** What the sweep did with one stalled run: skipped (finished, retired, or no
+ *  longer the pointer), rerun (the rerun took over, the first run ended), final
+ *  (ended, the final verdict posted), or failed (the sweep retries it next minute). */
 export type WatchdogOutcome = "skipped" | "rerun" | "final" | "failed";
 
 export interface WatchdogRun { runId: string; outcome: WatchdogOutcome }
 
-/** One watchdog sweep. Adopts unknown stamps, then handles each stalled run. A
- *  run that fails does not stop the sweep: it is reported and the next sweep retries it. */
+/** One watchdog sweep. Handles each stalled run; a run that fails does not stop the sweep. */
 export async function sweepStalledRuns(deps: WatchdogDeps): Promise<WatchdogRun[]> {
   const now = (deps.now ?? Date.now)();
   await deps.index.adoptUnknown(now);
@@ -71,25 +82,57 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
   // The pointer moved on: a newer run owns this head, so this row is not the one to end.
   const latest = await deps.index.latest(repo, pr);
   if (latest?.runId !== runId) return "skipped";
-  if (!isLiveStatus(await statusOf(deps.workflow, runId))) return "skipped";
-  await endRunOrThrow(deps.workflow, runId);
+  // A failed read throws: the row is kept and the next sweep reads it again.
+  const status = (await (await deps.workflow.get(runId)).status()).status;
+  if (!isLiveStatus(status)) {
+    await deps.index.retire(repo, pr, runId, row.progressedAt ?? 0);
+    return "skipped";
+  }
 
   const minutes = Math.round(GATE_STALL_MS / 60_000);
-  if (isRerunInstance(runId)) {
-    await deps.post(repo, headSha, { state: "error", description: `no progress for ${minutes} min after its infra rerun (run ${runId}); a rerun is final` });
+  const red = await deps.hasRedLeg(repo, pr, runId);
+  if (red || isRerunInstance(runId)) {
+    await endRunOrThrow(deps.workflow, runId);
+    await deps.index.retire(repo, pr, runId, row.progressedAt ?? 0);
+    await deps.post(repo, headSha, red
+      ? { state: "failure", description: `a leg failed before the run stalled (run ${runId})` }
+      : { state: "error", description: `no progress for ${minutes} min after its infra rerun (run ${runId}); a rerun is final` });
     return "final";
   }
 
-  // The first run's infra rerun, the same one a failed-leg run starts (#1119).
+  // The rerun takes the pointer before the first run is ended. An unknown start
+  // throws: the first run stays live, so the next sweep retries it by id (#1150 review item 3).
   const rerunId = rerunInstanceId(runId);
+  let outcome: InfraRerunOutcome;
+  try {
+    outcome = await launchInfraRerun({
+      create: () => deps.workflow.create({ id: rerunId, params: { repo, pr, headSha, rerunOf: runId } }),
+      get: () => deps.workflow.get(rerunId),
+      handOff: () => recordInfraRerun(deps.index, { repo, pr, headSha, runId: rerunId, instanceId: runId, at: now }),
+      terminate: async () => (await deps.workflow.get(rerunId)).terminate(),
+    });
+  } catch (err) {
+    if (now - (row.progressedAt ?? 0) < GATE_WATCHDOG_FINAL_AGE_MS) throw err;
+    await endRunOrThrow(deps.workflow, runId);
+    await deps.index.retire(repo, pr, runId, row.progressedAt ?? 0);
+    await deps.post(repo, headSha, { state: "error", description: `no progress for ${minutes} min; the infra rerun did not start (run ${runId})` });
+    return "final";
+  }
+  if (outcome === "superseded") {
+    await endRunLogged(deps.workflow, runId);
+    return "skipped";
+  }
   await deps.post(repo, headSha, rerunStatusArgs(runId));
-  const outcome = await launchInfraRerun({
-    create: () => deps.workflow.create({ id: rerunId, params: { repo, pr, headSha, rerunOf: runId } }),
-    get: () => deps.workflow.get(rerunId),
-    handOff: () => recordInfraRerun(deps.index, { repo, pr, headSha, runId: rerunId, instanceId: runId, at: now }),
-    terminate: async () => (await deps.workflow.get(rerunId)).terminate(),
-  }).catch(() => "failed" as const);
-  if (outcome === "started") return "rerun";
-  await deps.post(repo, headSha, { state: "error", description: `no progress for ${minutes} min; the infra rerun did not start (run ${runId})` });
-  return "final";
+  await endRunLogged(deps.workflow, runId);
+  return "rerun";
+}
+
+/** Ends the first run once its rerun has the pointer. A failed end is logged: the
+ *  rerun stands, and the stalled run is no longer the pointer, so it is not swept again. */
+async function endRunLogged(workflow: WatchdogWorkflow, runId: string): Promise<void> {
+  try {
+    await endRunOrThrow(workflow, runId);
+  } catch (err) {
+    console.error(`gate watchdog: run ${runId} not ended after its rerun took over`, err);
+  }
 }

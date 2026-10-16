@@ -28,10 +28,11 @@ export function d1RunIndex(db: D1Database): GateRunIndex {
         .run();
     },
     async handOff(repo, pr, fromRunId, run) {
-      // One conditional write: the pointer moves only while it still names fromRunId (#1135).
+      // One conditional write: the pointer moves only while it still names fromRunId (#1135), or
+      // already names run.runId: a replayed start whose handoff landed is success, not a superseded rerun (#1150).
       const result = await db
-        .prepare("UPDATE gate_pr_head SET head_sha = ?, run_id = ?, progressed_at = ? WHERE repo = ? AND pr = ? AND run_id = ?")
-        .bind(run.headSha, run.runId, run.progressedAt ?? 0, repo.toLowerCase(), pr, fromRunId)
+        .prepare("UPDATE gate_pr_head SET head_sha = ?, run_id = ?, progressed_at = ? WHERE repo = ? AND pr = ? AND run_id IN (?, ?)")
+        .bind(run.headSha, run.runId, run.progressedAt ?? 0, repo.toLowerCase(), pr, fromRunId, run.runId)
         .run();
       return result.meta.changes > 0;
     },
@@ -51,6 +52,12 @@ export function d1WatchdogIndex(db: D1Database): WatchdogIndex {
     ...d1RunIndex(db),
     async adoptUnknown(at) {
       await db.prepare("UPDATE gate_pr_head SET progressed_at = ? WHERE progressed_at = 0").bind(at).run();
+    },
+    async retire(repo, pr, runId, progressedAt) {
+      await db
+        .prepare("UPDATE gate_pr_head SET progressed_at = -1 WHERE repo = ? AND pr = ? AND run_id = ? AND progressed_at = ?")
+        .bind(repo.toLowerCase(), pr, runId, progressedAt)
+        .run();
     },
     async stalled(before, notBefore) {
       const rows = await db

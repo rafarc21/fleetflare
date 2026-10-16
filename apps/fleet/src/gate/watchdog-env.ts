@@ -1,12 +1,27 @@
 // #1148 item 1: the gate run watchdog with the live Worker bindings: the GATE_WORKFLOW
-// binding, the D1 run index and the installation-token status post. Kept apart from
-// watchdog.ts, which stays free of env and auth imports so the bun-test project loads it.
+// binding, the D1 run index, the installation-token status post and the R2 leg
+// results. Kept apart from watchdog.ts, which stays free of env and auth imports so
+// the bun-test project loads it.
 import type { Env } from "../env";
-import { postCommitStatus } from "../github/api";
+import { getPullRequest, postCommitStatus } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
 import { d1WatchdogIndex } from "./auto-run-env";
 import { postGateStatus, type StatusPort } from "./status-post";
 import { sweepStalledRuns, type WatchdogRun } from "./watchdog";
+
+/** Whether any leg of the run stored a red result. The leg result keys are
+ *  gate/<owner>/<repo>/runs/<pr>/<runId>/... with the repo's canonical case: R2
+ *  keys are case-sensitive, so the name comes from GitHub, not the lowercased index (#1119). */
+async function hasRedLeg(env: Env, repo: string, pr: number, runId: string): Promise<boolean> {
+  const token = await repoTokenMinter(env)(repo);
+  const canonical = (await getPullRequest(token, repo, pr)).repoFullName;
+  const listed = await env.STUDIO_ARCHIVE.list({ prefix: `gate/${canonical}/runs/${pr}/${runId}/` });
+  for (const obj of listed.objects) {
+    const stored = await env.STUDIO_ARCHIVE.get(obj.key);
+    if ((await stored?.json<{ state?: string }>())?.state === "failure") return true;
+  }
+  return false;
+}
 
 /** One watchdog sweep, run by the every-minute cron. Its errors reach the caller;
  *  the cron keeps its other work regardless (src/index.ts). */
@@ -16,5 +31,6 @@ export async function sweepGateRunsFromEnv(env: Env): Promise<WatchdogRun[]> {
     index: d1WatchdogIndex(env.DB),
     workflow: env.GATE_WORKFLOW,
     post: (repo, headSha, args) => postGateStatus(port, repo, headSha, args),
+    hasRedLeg: (repo, pr, runId) => hasRedLeg(env, repo, pr, runId),
   });
 }

@@ -230,9 +230,13 @@ export async function startManualGateRun(
   } catch (err) {
     const status = await statusOf(wf, baseId);
     if (status === null) throw err;
-    // A live run the pointer does not name has no progress stamp anywhere, so it
-    // cannot be told from a hung run: it is ended, then a fresh run starts (#1148 item 2).
-    if (isLiveStatus(status)) await endRunOrThrow(wf, baseId);
+    if (isLiveStatus(status)) {
+      // The pointer's own run, read again after a transient status failure (#1150 item 4): healthy, reattach.
+      if (latest?.runId === baseId && !isStalled(latest, now())) return { runId: baseId, reused: true };
+      // A live run the pointer does not name has no progress stamp anywhere, so it
+      // cannot be told from a hung run: it is ended, then a fresh run starts (#1148 item 2).
+      await endRunOrThrow(wf, baseId);
+    }
     return startFresh();
   }
   return recordRun(wf, input, index, baseId, now);

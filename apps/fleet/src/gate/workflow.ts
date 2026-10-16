@@ -192,8 +192,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
           repo, pr, headSha: resolved.headSha, runId: rerunId, instanceId: event.instanceId, at: Date.now(),
         }),
         terminate: async () => (await this.env.GATE_WORKFLOW.get(rerunId)).terminate(),
-      })).catch(() => "failed" as const);
-      if (started === "started") return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results) };
+      })).catch((err: unknown) => {
+        console.error("gate: infra rerun start failed", err);
+        return "failed" as const;
+      });
+      // A step result cached before the outcome became a string replays as `true` (#1150 review).
+      if (started === "started" || (started as unknown) === true) return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results) };
     }
 
     // Wrapped in a step so a Workflow replay never posts the status twice.

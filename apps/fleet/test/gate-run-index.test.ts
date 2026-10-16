@@ -94,3 +94,23 @@ describe("d1WatchdogIndex: the watchdog sweep reads stalled pointers on the real
     expect(await base.latest("acme/watch-known", 7)).toMatchObject({ progressedAt: 42 });
   });
 });
+
+describe("d1RunIndex: review #1150 — a retried handoff is idempotent, finished rows retire (#1148)", () => {
+  it("handOff to the run the pointer already names is success, so a replayed rerun start is not superseded", async () => {
+    const index = d1RunIndex(env.DB);
+    await index.record("acme/idem-one", 11, { headSha: "a".repeat(40), runId: "gate-idem" });
+    expect(await index.handOff("acme/idem-one", 11, "gate-idem", { headSha: "a".repeat(40), runId: "rerun-gate-idem", progressedAt: 5 })).toBe(true);
+    expect(await index.handOff("acme/idem-one", 11, "gate-idem", { headSha: "a".repeat(40), runId: "rerun-gate-idem", progressedAt: 6 })).toBe(true);
+    expect(await index.latest("acme/idem-one", 11)).toMatchObject({ runId: "rerun-gate-idem" });
+  });
+
+  it("retire clears a finished row's stamp only while it still names that run and stamp", async () => {
+    await d1RunIndex(env.DB).record("acme/retire-one", 12, { headSha: "a".repeat(40), runId: "gate-retire", progressedAt: 77 });
+    const index = d1WatchdogIndex(env.DB);
+    await index.retire("acme/retire-one", 12, "gate-retire", 78);
+    expect(await index.latest("acme/retire-one", 12)).toMatchObject({ progressedAt: 77 });
+    await index.retire("acme/retire-one", 12, "gate-retire", 77);
+    expect(await index.latest("acme/retire-one", 12)).toMatchObject({ progressedAt: -1 });
+    expect((await index.stalled(1_000, -1_000)).some((r) => r.repo === "acme/retire-one")).toBe(false);
+  });
+});

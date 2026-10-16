@@ -440,6 +440,29 @@ describe("startManualGateRun: the manual start's edges around a live run (#1148 
   });
 });
 
+describe("startManualGateRun: a transient status failure never ends a healthy run (#1150 review item 4)", () => {
+  const T1 = 1_700_000_000_000;
+
+  it("the pointer's own live run whose first status read fails is reattached, not ended", async () => {
+    const { wf, creates, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    let failNext = true;
+    const flaky: GateRunStarter = {
+      create: wf.create,
+      get: async (id) => {
+        if (failNext) { failNext = false; throw new Error("D1 hiccup"); }
+        return wf.get(id);
+      },
+    };
+    const second = await startManualGateRun(flaky, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1 + 60_000);
+    expect(second).toEqual({ runId: first.runId, reused: true });
+    expect(terminated).toEqual([]);
+    // The fall-through's create is the duplicate attempt on the same id; nothing new starts.
+    expect(creates.map((c) => c.id)).toEqual([first.runId, first.runId]);
+  });
+});
+
 describe("autoRunPullRequest: every gated PR starts a run; the Workflow decides (#1132)", () => {
   it("a base with no gate block still starts one run, so the Workflow can post the visible failure", async () => {
     const { wf, creates } = fakeWorkflow();
