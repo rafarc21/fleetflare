@@ -132,7 +132,7 @@ describe("runLegInContainer: container start", () => {
     const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
     expect(outcome.kind).toBe("infra");
-    expect(outcome.description).toContain("gate");
+    if (outcome.kind === "infra") expect(outcome.description).toContain("gate");
     expect(c.starts).toHaveLength(0);
     expect(c.destroyCount).toBe(1);
   });
@@ -151,7 +151,7 @@ describe("runLegInContainer: container start", () => {
     const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
     expect(outcome.kind).toBe("infra");
-    expect(outcome.description).toContain("image pull failed");
+    if (outcome.kind === "infra") expect(outcome.description).toContain("image pull failed");
     expect(c.destroyCount).toBe(1);
   });
 });
@@ -205,7 +205,7 @@ describe("runLegInContainer: readiness and port", () => {
     const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
     expect(outcome.kind).toBe("infra");
-    expect(outcome.description).toContain("ECONNREFUSED");
+    if (outcome.kind === "infra") expect(outcome.description).toContain("ECONNREFUSED");
     // 60 s of 500 ms retries: one attempt at t=0 through t=60000 inclusive.
     expect(c.fetchCalls).toBe(121);
     expect(c.destroyCount).toBe(1);
@@ -217,7 +217,7 @@ describe("runLegInContainer: readiness and port", () => {
     const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
     expect(outcome.kind).toBe("infra");
-    expect(outcome.description).toContain("500");
+    if (outcome.kind === "infra") expect(outcome.description).toContain("500");
     expect(c.destroyCount).toBe(1);
   });
 });
