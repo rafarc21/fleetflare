@@ -15,6 +15,9 @@ export interface GateStatusResponse {
 
 const POLL_MS = 5_000;
 
+/** `gate watch`'s overall ceiling: 45 minutes with no verdict ends the watch. */
+export const GATE_WATCH_DEADLINE_MS = 45 * 60_000;
+
 /** The repo this command targets: the folder's own `origin`, same source
  *  every other repo-scoped verb reads (`fleet ff`, `detectRepo`). */
 async function gatedRepo(): Promise<string | null> {
@@ -64,6 +67,26 @@ export function gateWatchExitCode(status: GateStatusResponse): number {
   }
 }
 
+export type GateWatchDecision =
+  | { kind: "terminal"; status: GateStatusResponse }
+  | { kind: "continue" }
+  | { kind: "deadline" };
+
+/** Pure decision for one poll tick: a non-pending status ends the watch
+ *  immediately, a pending one past the 45-min ceiling ends it as a deadline,
+ *  otherwise keep polling. */
+export function gateWatchDecision(status: GateStatusResponse, elapsedMs: number): GateWatchDecision {
+  if (status.state !== "pending") return { kind: "terminal", status };
+  return elapsedMs >= GATE_WATCH_DEADLINE_MS ? { kind: "deadline" } : { kind: "continue" };
+}
+
+/** The deadline's exit path: one operator-facing line, exit 2 (infra — the
+ *  gate never reached a verdict, so this must never read as a green or red). */
+export function onGateWatchDeadline(runId: string): void {
+  console.error(`gate watch: no verdict after 45 min (run ${runId})`);
+  process.exitCode = 2;
+}
+
 export async function cmdGateWatch(creds: Credentials, pr: number, runId: string): Promise<void> {
   const repo = await gatedRepo();
   if (!repo) return;
@@ -71,6 +94,7 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
   url.searchParams.set("repo", repo);
   url.searchParams.set("pr", String(pr));
   url.searchParams.set("runId", runId);
+  const started = Date.now();
   for (;;) {
     let res: Response;
     try {
@@ -81,9 +105,14 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
       return;
     }
     const status = await res.json() as GateStatusResponse;
-    if (status.state !== "pending") {
-      console.log(`gate: ${status.state}${status.description ? ` — ${status.description}` : ""}`);
-      process.exitCode = gateWatchExitCode(status);
+    const decision = gateWatchDecision(status, Date.now() - started);
+    if (decision.kind === "terminal") {
+      console.log(`gate: ${decision.status.state}${decision.status.description ? ` — ${decision.status.description}` : ""}`);
+      process.exitCode = gateWatchExitCode(decision.status);
+      return;
+    }
+    if (decision.kind === "deadline") {
+      onGateWatchDeadline(runId);
       return;
     }
     await new Promise((r) => setTimeout(r, POLL_MS));
