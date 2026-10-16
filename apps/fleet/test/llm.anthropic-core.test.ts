@@ -297,7 +297,13 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     // Incident fix (#717): no LEAD_AI_GATEWAY_ID set in this fixture env, so
     // env.AI.run is called with exactly the pre-model-pool 2-arg shape — no
     // gateway option attached.
-    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS });
+    // Issue #1099 (review, finding 1): a non-streaming request is always sent
+    // upstream as a stream, so the runaway scan covers it. The 2-arg shape
+    // holds; the body carries the stream flag and its usage option.
+    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, {
+      model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS,
+      stream: true, stream_options: { include_usage: true },
+    });
     const body = await r.json();
     expect(body).toMatchObject({ type: "message", role: "assistant", model: good.model, content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 3, output_tokens: 2 } });
   });
@@ -342,6 +348,7 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
         { role: "tool", tool_call_id: "toolu_1", content: "sunny" },
       ],
       max_tokens: GLM_MIN_MAX_TOKENS,
+      stream: true, stream_options: { include_usage: true },
     });
     const replyBody = (await r.json()) as { content: unknown };
     expect(replyBody.content).toEqual([{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "nyc" } }]);
