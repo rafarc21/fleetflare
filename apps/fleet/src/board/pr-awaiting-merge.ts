@@ -3,6 +3,11 @@
 // lead's part is done when its PR is up. Maestros flipped this by hand, and 2
 // of 4 lanes sat at "working" with a PR open.
 //
+// Board issue #1077, item 1: a sub-PR routinely names umbrella tasks too, so
+// several refs can be working at once. Then the PR's head branch picks the one
+// task whose lead just finished (`task-1049-…` names #1049), and a branch that
+// names none or two of them flips none.
+//
 // Worker-side, called from the pull_request webhook (src/github/webhook.ts).
 // The write goes through transitionTask (board.ts), the one writer of task
 // state, so its compare-and-swap and single-label rule still hold. Pure over
@@ -33,13 +38,17 @@ export function prAwaitsMerge(action: string, draft: boolean): boolean {
 
 /**
  * What the pull_request webhook should flip, read from one delivery's payload:
- * the repo (lowercased, the board's own casing) and the refs named in the PR's
- * title and body. `null` when the delivery is not "ready for review" or names
- * no task, so the caller does nothing at all.
+ * the repo (lowercased, the board's own casing), the refs named in the PR's
+ * title and body, and the head branch name (the tie-break when several refs are
+ * working). `null` when the delivery is not "ready for review" or names no task,
+ * so the caller does nothing at all. `head` is "" when the payload carries none.
  */
 export function flipRequestFromPullRequest(
-  payload: { action?: unknown; repository?: { full_name?: unknown }; pull_request?: { draft?: unknown; title?: unknown; body?: unknown } },
-): { repo: string; refs: number[] } | null {
+  payload: {
+    action?: unknown; repository?: { full_name?: unknown };
+    pull_request?: { draft?: unknown; title?: unknown; body?: unknown; head?: { ref?: unknown } };
+  },
+): { repo: string; refs: number[]; head: string } | null {
   const pr = payload.pull_request;
   if (typeof payload.action !== "string" || !pr) return null;
   if (!prAwaitsMerge(payload.action, pr.draft === true)) return null;
@@ -47,22 +56,44 @@ export function flipRequestFromPullRequest(
   if (typeof full !== "string") return null;
   const refs = refsInBody(`${typeof pr.title === "string" ? pr.title : ""}\n${typeof pr.body === "string" ? pr.body : ""}`);
   if (refs.length === 0) return null;
-  return { repo: full.toLowerCase(), refs };
+  const head = typeof pr.head?.ref === "string" ? pr.head.ref : "";
+  return { repo: full.toLowerCase(), refs, head };
+}
+
+/** The task numbers a branch name carries as whole tokens. `task-1049-x` names
+ *  #1049; `task-10491-x` does not, because a digit run is one token. */
+function branchNumbers(headRef: string): Set<number> {
+  return new Set(headRef.split(/[^A-Za-z0-9]+/).filter((t) => /^\d+$/.test(t)).map(Number));
 }
 
 /**
- * Flip each referenced task that is working, open, and held by exactly one
- * studio to awaiting_merge. Every other task is left alone: a task not working
- * (submitted, input_required, already awaiting_merge), unassigned, closed, or
- * drifted (two state labels) has no lead whose part this PR just finished.
- *
- * TOTAL per ref: a board read or write failure on one task is logged and the
- * rest still flip. The caller has already answered the webhook with a 200.
- *
- * Returns the task numbers it flipped.
+ * The one task a PR may flip, from the working candidates it names. Exactly one
+ * candidate is the answer. Several: keep those the head branch names as a token;
+ * exactly one of those is the answer. Anything else (none, or the branch names
+ * two or none) is no answer, so nothing flips.
  */
-export async function markAwaitingMerge(api: BoardApi, repo: string, refs: number[]): Promise<number[]> {
-  const flipped: number[] = [];
+function flipTarget(candidates: number[], headRef: string): number | null {
+  if (candidates.length === 1) return candidates[0]!;
+  const named = branchNumbers(headRef);
+  const matched = candidates.filter((n) => named.has(n));
+  return matched.length === 1 ? matched[0]! : null;
+}
+
+/**
+ * Flip at most one referenced task that is working, open, and held by exactly
+ * one studio to awaiting_merge. Every other task is left alone: a task not
+ * working (submitted, input_required, already awaiting_merge), unassigned,
+ * closed, or drifted (two state labels) has no lead whose part this PR just
+ * finished. When several refs qualify, `headRef` picks the one (flipTarget); a
+ * pick that is still ambiguous flips nothing and is logged.
+ *
+ * TOTAL: a board read or write failure is logged and flips nothing. The caller
+ * has already answered the webhook with a 200.
+ *
+ * Returns the task numbers it flipped (empty or one).
+ */
+export async function markAwaitingMerge(api: BoardApi, repo: string, refs: number[], headRef = ""): Promise<number[]> {
+  const candidates: number[] = [];
   for (const number of refs) {
     try {
       const task = await api.getIssue(repo, number);
@@ -70,12 +101,29 @@ export async function markAwaitingMerge(api: BoardApi, repo: string, refs: numbe
       const states = taskStates(task.labels);
       if (states.length !== 1 || states[0] !== "working") continue;
       if (taskAssignees(task.labels).length !== 1) continue;
-      const moved = await transitionTask(api, repo, number, { from: "working", to: "awaiting_merge" });
-      if (moved.ok) flipped.push(number);
-      else console.error(`board: awaiting_merge flip on #${number} in ${repo} refused — ${moved.message}`);
+      candidates.push(number);
     } catch (err) {
-      console.error(`board: awaiting_merge flip on #${number} in ${repo} threw`, err);
+      console.error(`board: awaiting_merge read of #${number} in ${repo} threw`, err);
     }
   }
-  return flipped;
+
+  const number = flipTarget(candidates, headRef);
+  if (number === null) {
+    if (candidates.length > 1) {
+      console.error(
+        `board: awaiting_merge flip in ${repo} skipped — ${candidates.map((n) => `#${n}`).join(", ")} are all working ` +
+        `and branch "${headRef}" does not name exactly one of them`,
+      );
+    }
+    return [];
+  }
+
+  try {
+    const moved = await transitionTask(api, repo, number, { from: "working", to: "awaiting_merge" });
+    if (moved.ok) return [number];
+    console.error(`board: awaiting_merge flip on #${number} in ${repo} refused — ${moved.message}`);
+  } catch (err) {
+    console.error(`board: awaiting_merge flip on #${number} in ${repo} threw`, err);
+  }
+  return [];
 }

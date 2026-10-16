@@ -197,6 +197,10 @@ export type CliCommand =
   // route's own compare-and-swap exists to catch.
   // Issue #82: `fromNone` = `--from-none`, repair a task with no state label.
   | { cmd: "task-state"; number: number; to: BoardTaskState; fromNone?: true }
+  // Board issue #1077, item 2: `message <n> <text…>` — a board comment on the
+  // task plus a wake of its one studio lead (the Worker's own route, the same
+  // one the in-container verb calls). `text` is the rest of argv, joined.
+  | { cmd: "task-message"; number: number; text: string }
   // Board issue #8: deterministic backfill for a task whose PR merged/
   // promoted to the default branch but was never auto-closed — the ONLY
   // coverage for a repo whose owner resolves to the token auth path, where
@@ -385,6 +389,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   "task-show": {
     args: "show <n>",
     summary: "One task: its brief and every comment, including studio envelopes.",
+  },
+  "task-message": {
+    args: "message <n> <text>",
+    summary: "Post <text> as a board comment on task <n> and wake its one studio lead with it. The text is every word after <n>, so an unquoted multi-word message still arrives whole. A stopped lead is reported as NO WAKE, never dropped; a closed or finished task is refused.",
   },
   "task-verify": {
     args: "verify <n>",
@@ -704,6 +712,20 @@ function parseTask(argv: string[]): CliCommand {
       );
     }
     return { cmd: "task-state", number, to, ...(fromNone ? { fromNone: true as const } : {}) };
+  }
+  if (sub === "message") {
+    // Board issue #1077, item 2: the same grammar as the in-container verb
+    // (container/studio-fleet). The text is the rest of argv, so an unquoted
+    // multi-word message still reaches the lead whole.
+    const [rawNumber, ...words] = rest;
+    const number = parseIssueNumber(rawNumber);
+    if (number === null) {
+      const got = rawNumber === undefined ? "" : ` (got ${JSON.stringify(rawNumber)})`;
+      return usage(`fleet task message needs an issue number: fleet task message <n> "<text>"${got}`);
+    }
+    const text = words.join(" ").trim();
+    if (text === "") return usage('fleet task message needs the words the lead should read: fleet task message <n> "<text>"');
+    return { cmd: "task-message", number, text };
   }
   if (sub === "reap") {
     // Zero positionals, one optional bare boolean flag — NOT the
