@@ -713,6 +713,13 @@ describe("gate start / gate watch", () => {
   it("gate start with a non-numeric PR -> usage", () => {
     expect(parseCliArgs(["gate", "start", "abc"]).cmd).toBe("usage");
   });
+  it("gate run <pr> parses the PR number to one gate-run command", () => {
+    expect(parseCliArgs(["gate", "run", "715"])).toEqual({ cmd: "gate-run", pr: 715 });
+  });
+  it("gate run with no PR or a non-numeric PR -> usage", () => {
+    expect(parseCliArgs(["gate", "run"]).cmd).toBe("usage");
+    expect(parseCliArgs(["gate", "run", "abc"]).cmd).toBe("usage");
+  });
   it("gate with no sub-verb -> usage", () => {
     expect(parseCliArgs(["gate"]).cmd).toBe("usage");
   });

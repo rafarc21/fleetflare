@@ -928,6 +928,8 @@ interface PullRequestInfo {
   /** Issue #265: GitHub's canonical owner/name for the PR's repo — differs
    *  from the caller's slug after a rename/transfer. */
   repoFullName: string;
+  /** #715: the base repo's private flag. A private gate leg clones through the git proxy. */
+  baseRepoPrivate: boolean;
   /** Board issue #332: GitHub's own open/closed — `state === "open"` on the
    *  same single GET everything above already reads, so no second call. The
    *  park/destroy unmerged-PR warning (src/board/open-prs.ts) needs it to
@@ -940,7 +942,7 @@ export async function getPullRequest(token: string, repo: string, number: number
   const raw = await ghJson<{
     number: number; merged?: boolean; merge_commit_sha?: string | null;
     state?: string;
-    base: { ref: string; repo?: { full_name?: string } }; head: { ref: string }; title?: string; body?: string | null;
+    base: { ref: string; repo?: { full_name?: string; private?: boolean } }; head: { ref: string }; title?: string; body?: string | null;
   }>(
     token,
     `https://api.github.com/repos/${repo}/pulls/${number}`,
@@ -956,6 +958,7 @@ export async function getPullRequest(token: string, repo: string, number: number
     title: raw.title ?? "",
     body: raw.body ?? "",
     repoFullName: raw.base.repo?.full_name ?? repo,
+    baseRepoPrivate: raw.base.repo?.private === true,
     open: raw.state === "open",
   };
 }

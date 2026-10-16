@@ -1,5 +1,5 @@
-// #715 Phase 1: scripts/gate/maestro-gate.sh maps `fleet gate start` +
-// `fleet gate watch` onto one exit code: 0 green, 1 red, 2 error or gate off.
+// #715 Phase 1: scripts/gate/maestro-gate.sh is one `fleet gate run <pr>` call,
+// mapped onto one exit code: 0 green, 1 red, 2 error or gate off.
 // The real `fleet` CLI is replaced by a stub on FLEET_BIN, so this runs the
 // script's own branching and nothing else.
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
@@ -19,8 +19,7 @@ beforeEach(() => {
     "#!/usr/bin/env bash",
     `echo "$*" >> "${join(dir, "calls")}"`,
     'case "$1 $2" in',
-    '  "gate start") echo "gate-start: run run-1 started for PR #$3"; exit "${START_RC:-0}" ;;',
-    '  "gate watch") exit "${WATCH_RC:-0}" ;;',
+    '  "gate run") exit "${RUN_RC:-0}" ;;',
     "esac",
     "exit 9",
     "",
@@ -45,30 +44,20 @@ describe("maestro-gate.sh", () => {
     expect(await run("abc", {})).toEqual({ code: 2, calls: "" });
   });
 
-  it("start then watch, exit 0 when the verdict is success", async () => {
-    expect(await run("7", { START_RC: "0", WATCH_RC: "0" })).toEqual({
-      code: 0, calls: "gate start 7\ngate watch 7 run-1\n",
-    });
+  it("delegates to one `fleet gate run <pr>` call, exit 0 when green", async () => {
+    expect(await run("7", { RUN_RC: "0" })).toEqual({ code: 0, calls: "gate run 7\n" });
   });
 
-  it("exit 1 when the verdict is failure", async () => {
-    expect((await run("7", { WATCH_RC: "1" })).code).toBe(1);
+  it("exit 1 when the verdict is red", async () => {
+    expect((await run("7", { RUN_RC: "1" })).code).toBe(1);
   });
 
   it("exit 2 when the verdict is error", async () => {
-    expect((await run("7", { WATCH_RC: "2" })).code).toBe(2);
+    expect((await run("7", { RUN_RC: "2" })).code).toBe(2);
   });
 
-  it("exit 2 when a status POST failed (watch exit 3)", async () => {
-    expect((await run("7", { WATCH_RC: "3" })).code).toBe(2);
-  });
-
-  it("exit 2 without watching when start prints no run id", async () => {
-    writeFileSync(stub, readFileSync(stub, "utf8").replace('echo "gate-start: run run-1 started for PR #$3"', "true"));
-    expect(await run("7", {})).toEqual({ code: 2, calls: "gate start 7\n" });
-  });
-
-  it("exit 2 without watching when start fails (gate off, no-op route)", async () => {
-    expect(await run("7", { START_RC: "2" })).toEqual({ code: 2, calls: "gate start 7\n" });
+  it("any other exit from gate run is an error, never a green", async () => {
+    expect((await run("7", { RUN_RC: "3" })).code).toBe(2);
+    expect((await run("7", { RUN_RC: "9" })).code).toBe(2);
   });
 });
