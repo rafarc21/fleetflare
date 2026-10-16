@@ -7,6 +7,8 @@ import {
 } from "../../src/gate/config";
 import FLEET_JSON from "../../../../fleet.json";
 
+const BASE_SHA = "b".repeat(40);
+
 // Fixture repos are neutral on purpose (this repo is public).
 const BLOCK = { install: "x", legs: [], vitestCmd: "t", pathRules: ["a/**"] };
 const names = (n: number) => Array.from({ length: n }, (_, i) => `leg-${i}`);
@@ -333,27 +335,33 @@ describe("decideGateRun (#1091 review round 2)", () => {
   const cfg = parseGateBlock(BLOCK)!;
   const rules = ["apps/fleet/**"];
   it("a moved fleet.json (docs/fleet.json; root file gone at head) fails: head config absent", () => {
-    expect(decideGateRun({ changedFiles: ["docs/fleet.json"], fleetJsonChanged: true, base: cfg, head: null }))
+    expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["docs/fleet.json"], fleetJsonChanged: true, base: cfg, head: null }))
       .toEqual({ action: "fail", description: "head fleet.json invalid" });
   });
   it("a truncated file list still gates when the config changed by content", () => {
-    expect(decideGateRun({ changedFiles: ["README.md"], fleetJsonChanged: true, base: cfg, head: cfg }))
+    expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["README.md"], fleetJsonChanged: true, base: cfg, head: cfg }))
       .toEqual({ action: "run" });
   });
   it("gate added with no base config runs on the head config", () => {
-    expect(decideGateRun({ changedFiles: ["fleet.json"], fleetJsonChanged: true, base: null, head: cfg }))
+    expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["fleet.json"], fleetJsonChanged: true, base: null, head: cfg }))
       .toEqual({ action: "run" });
   });
-  it("no config on either side and no change: skipped with no status post", () => {
-    expect(decideGateRun({ changedFiles: ["README.md"], fleetJsonChanged: false, base: null, head: undefined }))
-      .toEqual({ action: "skip", reason: "no gate config for this repo", status: false });
+  // #1132 (refs #715): a gated repo whose base sha has no gate block is never a
+  // silent skip. The head gets a visible failure that names the base and the fix.
+  it("no gate block at the base and no config change: fails with the base sha and the fix, never a skip", () => {
+    expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["README.md"], fleetJsonChanged: false, base: null, head: undefined }))
+      .toEqual({ action: "fail", description: "no gate block at base bbbbbbbb: merge gated base into branch" });
   });
-  it("config present, nothing gated changed: skipped with a success status", () => {
-    expect(decideGateRun({ changedFiles: ["README.md"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined }))
-      .toEqual({ action: "skip", reason: "no gated paths changed", status: true });
+  it("the no-gate-block failure description fits GitHub's 140-char status description", () => {
+    const decision = decideGateRun({ baseSha: BASE_SHA, changedFiles: [], fleetJsonChanged: false, base: null, head: undefined });
+    expect(decision.action === "fail" && decision.description.length <= 140).toBe(true);
+  });
+  it("config present, nothing gated changed: skipped (the workflow posts success)", () => {
+    expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["README.md"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined }))
+      .toEqual({ action: "skip", reason: "no gated paths changed" });
   });
   it("a pathRule match runs the gate", () => {
-    expect(decideGateRun({ changedFiles: ["apps/fleet/src/x.ts"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined }))
+    expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["apps/fleet/src/x.ts"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined }))
       .toEqual({ action: "run" });
   });
 });
@@ -364,12 +372,12 @@ describe("truncated compare list gates (#1095 round 3)", () => {
   const cfg = parseGateBlock(BLOCK)!;
   const rules = ["apps/fleet/**"];
   it("a list cut at the cap runs the gate even when no pathRule matches", () => {
-    expect(decideGateRun({ changedFiles: ["notes/a.md"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined, truncated: true }))
+    expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["notes/a.md"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined, truncated: true }))
       .toEqual({ action: "run" });
   });
   it("an untruncated list with no pathRule match still skips", () => {
-    expect(decideGateRun({ changedFiles: ["notes/a.md"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined, truncated: false }))
-      .toEqual({ action: "skip", reason: "no gated paths changed", status: true });
+    expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["notes/a.md"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined, truncated: false }))
+      .toEqual({ action: "skip", reason: "no gated paths changed" });
   });
 });
 
@@ -405,7 +413,7 @@ describe("headFleetJsonFailure with a bad head gates map (#1095 round 3)", () =>
 describe("decideGateRun with a bad head gates map (#1095 round 3)", () => {
   const cfg = parseGateBlock(BLOCK)!;
   it("fails the run when the config changed and the head gates map is invalid", () => {
-    expect(decideGateRun({ changedFiles: ["fleet.json"], fleetJsonChanged: true, base: cfg, head: cfg, headGatesInvalid: true }))
+    expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["fleet.json"], fleetJsonChanged: true, base: cfg, head: cfg, headGatesInvalid: true }))
       .toEqual({ action: "fail", description: "head fleet.json invalid" });
   });
 });
