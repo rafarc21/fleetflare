@@ -2,7 +2,7 @@
 // whose return value is the GateRunnerDO's LegResult. Imported from
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import { runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
@@ -39,7 +39,7 @@ describe("runLegStep", () => {
   it("success: returns the DO payload as the leg result", async () => {
     const step = fakeStep();
     const dispatch = async () => reply({ state: "success" });
-    expect(await runLegStep(step, dispatch, PLANNED)).toEqual({ leg: "lint", state: "success" });
+    expect(await runLegStep(step, dispatch, PLANNED)).toEqual({ ms: expect.any(Number), leg: "lint", state: "success" });
   });
 
   it("failure: a red leg retries once as retry-<leg>, and a second failure is the final result", async () => {
@@ -47,7 +47,7 @@ describe("runLegStep", () => {
     let sent = 0;
     const dispatch = async () => { sent++; return reply({ state: "failure", description: "3 errors" }); };
     const result = await runLegStep(step, dispatch, PLANNED);
-    expect(result).toEqual({ leg: "lint", state: "failure", description: "3 errors" });
+    expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "failure", description: "3 errors" });
     expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
@@ -57,7 +57,7 @@ describe("runLegStep", () => {
     let sent = 0;
     const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" }); };
     const result = await runLegStep(step, dispatch, PLANNED);
-    expect(result).toEqual({ leg: "lint", state: "success", description: "flaky: passed on retry" });
+    expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "success", description: "flaky: passed on retry" });
     expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
@@ -66,6 +66,7 @@ describe("runLegStep", () => {
     const step = fakeStep();
     const dispatch = async () => reply({ state: "error", description: "container OOM" });
     expect(await runLegStep(step, dispatch, PLANNED)).toEqual({
+      ms: expect.any(Number),
       leg: "lint", state: "error", description: "container OOM",
     });
   });
@@ -127,5 +128,39 @@ describe("runLegStep", () => {
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result.state).toBe("error");
     expect(result.description).toContain("unknown state");
+  });
+});
+
+describe("runLegStep: time and test summary per leg (#1049)", () => {
+  it("ms is the sum of both attempts' wall time when a red leg retries (Date.now read inside each step)", async () => {
+    const clock = [1_000, 1_500, 2_000, 2_300];
+    const now = spyOn(Date, "now").mockImplementation(() => (clock.length > 1 ? clock.shift()! : clock[0]));
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" }); };
+    try {
+      const result = await runLegStep(step, dispatch, PLANNED);
+      expect(result).toMatchObject({ state: "success", ms: 800, description: "flaky: passed on retry" });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("the test summary the DO reports flows through to the leg result", async () => {
+    const step = fakeStep();
+    const dispatch = async () => reply({ state: "failure", description: "lint exited 1", summary: "Tests  1 failed | 1640 passed (1641)" });
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toMatchObject({ state: "failure", summary: "Tests  1 failed | 1640 passed (1641)" });
+  });
+
+  it("a flaky pass carries the retry's summary", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success", summary: "5 pass" });
+    };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toMatchObject({ state: "success", description: "flaky: passed on retry", summary: "5 pass" });
   });
 });

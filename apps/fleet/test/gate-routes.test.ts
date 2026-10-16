@@ -131,3 +131,20 @@ describe("GET /studio/gate/status with a skipped run", () => {
     });
   });
 });
+
+describe("GET /studio/gate/status per-leg output (#1049)", () => {
+  it("a complete run's legs pass through in plan order, with ms and summary", async () => {
+    const env = fakeEnv();
+    const legs = [
+      { leg: "merge-tree", state: "success", ms: 900 },
+      { leg: "vitest-1", state: "failure", description: "vitest-1 exited 1", ms: 83_000, summary: "Tests  1 failed | 1640 passed (1641)" },
+    ];
+    const output = { state: "failure", description: "1/2 green; red: vitest-1 (run 01234567)", statusPostFailed: false, legs };
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({ status: "complete", output })),
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(await res.json()).toEqual(output);
+  });
+});

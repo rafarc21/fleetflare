@@ -86,6 +86,8 @@ export interface GateBody {
   stderr?: string;
   /** "<soft> <hard>" open-file limit the leg ran under (EMFILE triage). */
   limits?: string;
+  /** The leg's own test summary line (#1049); absent when its output has none. */
+  summary?: string;
 }
 
 /** Tail kept of a leg's stdout and stderr in its R2 result. 4000 chars cut
@@ -140,9 +142,23 @@ export async function putResult(key: string, body: unknown, fetchFn: FetchFn = f
 
 const firstLine = (s: string) => s.split("\n")[0].trim();
 
+const ANSI_CODES = /\x1b\[[0-9;]*[A-Za-z]/g;
+
+/** One leg's test summary, read from its own output (#1049). Pure. vitest's
+ *  last "Tests ... (N)" line wins; otherwise bun test's last " N pass" and
+ *  " N fail" lines, joined. No match -> undefined. ANSI codes go first. */
+export function parseTestSummary(stdout: string, stderr: string): string | undefined {
+  const lines = `${stdout}\n${stderr}`.replace(ANSI_CODES, "").split("\n").map((l) => l.trim());
+  const lastMatch = (re: RegExp) => [...lines].reverse().find((l) => re.test(l));
+  const vitest = lastMatch(/Tests\s+.*\(\d+\)/);
+  if (vitest !== undefined) return vitest;
+  const parts = [lastMatch(/^\d+ pass$/), lastMatch(/^\d+ fail$/)].filter((p): p is string => p !== undefined);
+  return parts.length > 0 ? parts.join(", ") : undefined;
+}
+
 /** Runs one leg and writes its R2 result on every return path, including a
  *  throw: a leg never ends without a result object for the Workflow to read. */
-export async function runGate(req: GateRun, deps: GateDeps): Promise<{ state: GateBody["state"]; description?: string }> {
+export async function runGate(req: GateRun, deps: GateDeps): Promise<RunOutcome> {
   let body: GateBody;
   try {
     body = await runSteps(req, deps);
@@ -150,7 +166,7 @@ export async function runGate(req: GateRun, deps: GateDeps): Promise<{ state: Ga
     body = { state: "error", description: `gate-server: ${err instanceof Error ? err.message : String(err)}` };
   }
   await putResult(req.resultKey, body, deps.fetchFn);
-  return { state: body.state, description: body.description };
+  return { state: body.state, description: body.description, summary: body.summary };
 }
 
 async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
@@ -205,12 +221,13 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
 
   const test = await run("bash", ["-c", req.legCmd], { cwd: workdir });
   const tail = { stdout: test.stdout.slice(-OUTPUT_TAIL_CHARS), stderr: test.stderr.slice(-OUTPUT_TAIL_CHARS), limits };
+  const summary = parseTestSummary(test.stdout, test.stderr);
   return test.code === 0
-    ? { state: "success", ...tail }
-    : { state: "failure", description: `${req.leg} exited ${test.code}`, ...tail };
+    ? { state: "success", ...tail, summary }
+    : { state: "failure", description: `${req.leg} exited ${test.code}`, ...tail, summary };
 }
 
-export type RunOutcome = { state: GateBody["state"]; description?: string };
+export type RunOutcome = { state: GateBody["state"]; description?: string; summary?: string };
 
 /** The container's HTTP surface. One leg per container: POST /run starts it
  *  in the background and answers at once, so no request is held open for the
