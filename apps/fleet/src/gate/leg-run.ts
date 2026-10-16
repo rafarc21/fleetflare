@@ -277,7 +277,7 @@ function sumMs(...parts: (number | undefined)[]): number | undefined {
  *  private flag and the PR's own owner/repo reach the DO by a tested path. */
 export function legRequest(
   owner: string, repo: string, planned: PlannedLeg,
-  pr: { baseRef: string; pr: string; private: boolean; image?: string },
+  pr: { baseRef: string; pr: string; private: boolean; image?: string; bundleKey?: string; mergeBase?: string },
 ): GateLegRequest {
   return {
     owner, repo, commit: planned.commit, leg: planned.leg,
@@ -286,5 +286,44 @@ export function legRequest(
     private: pr.private, baseRef: pr.baseRef, pr: pr.pr,
     ...(planned.timeoutMin === undefined ? {} : { timeoutMin: planned.timeoutMin }),
     ...(pr.image === undefined ? {} : { image: pr.image }),
+    ...(pr.bundleKey === undefined ? {} : { bundleKey: pr.bundleKey }),
+    ...(pr.mergeBase === undefined ? {} : { mergeBase: pr.mergeBase }),
   };
+}
+
+/** The bundle step's config: one attempt. A retry would only repeat a clone the
+ *  legs can do themselves, and a hung bundle leg must not stall the run. */
+const BUNDLE_STEP_CONFIG: LegStepConfig = {
+  retries: { limit: 0, delay: "15 seconds", backoff: "constant" },
+  timeout: "30 minutes",
+};
+
+/** The slice of Workflows' WorkflowStep the bundle step uses. */
+export interface BundleStepRunner {
+  do(name: string, config: LegStepConfig, fn: () => Promise<void>): Promise<void>;
+}
+
+/** #1080: the bundle step needs two switches, both off by default. The fleet
+ *  flag (GATE_BUNDLE="1") is the kill switch: until the gate image that understands
+ *  the bundle leg is live, an old image would run it as a normal clone-and-checkout
+ *  leg. The repo's own `bundle: true` opts that repo in. Either one off, every leg clones. */
+export function bundleStepEnabled(fleetFlag: string | undefined, repoOptIn: boolean | undefined): boolean {
+  return fleetFlag === "1" && repoOptIn === true;
+}
+
+/** #1080: the one bundle step before the legs. True only when the bundle leg
+ *  answered 200 with state success (the DO answers 200 for a leg error too). False
+ *  on any failure, and it never throws: a run whose bundle did not build clones in
+ *  each leg, as before. */
+export async function runBundleStep(
+  step: BundleStepRunner,
+  dispatch: (planned: PlannedLeg) => Promise<Response>,
+  planned: PlannedLeg,
+): Promise<boolean> {
+  return step.do("build-bundle", BUNDLE_STEP_CONFIG, async () => {
+    const res = await dispatch(planned);
+    if (!res.ok) throw new Error(`bundle leg: HTTP ${res.status}`);
+    const body = await res.json() as { state?: unknown };
+    if (body.state !== "success") throw new Error(`bundle leg: state ${String(body.state)}`);
+  }).then(() => true, () => false);
 }

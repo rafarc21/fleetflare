@@ -231,3 +231,13 @@ the daemon. The scripts (`localci.sh`, `localci-daemon.sh`,
 `known-flaky.txt`) still exist for reproducing a lane on a Mac by hand
 (`localci.sh <pr-number|sha> --dry-run` runs it without posting anything),
 but no longer gate a merge or post a commit status.
+
+## Gate git bundle (#1080)
+
+Operator steps for the one-bundle-per-run path. Off by default, in two switches. Both must be on.
+
+1. **Fleet-wide flag:** `GATE_BUNDLE=1` turns the bundle step on. It is the kill switch. Set it only after the gate container image that understands the `bundle` leg is live. Before that, an old image runs `bundle` as a normal clone-and-checkout leg, one extra serial leg per run.
+2. **Per-repo opt-in:** a repo's gate block in `fleet.json` sets `"bundle": true`. Absent or `false` means every leg of that repo clones, even with `GATE_BUNDLE=1`. A PR that changes `fleet.json` runs both the base's and the head's legs, so the bundle is used only when every block that runs legs opts in.
+3. **Range parity rule:** opt in only a repo whose legs read no git history beyond the checked-out tree. A leg that reads history by range, such as `git log origin/<base>..HEAD`, `git diff origin/<base>...HEAD`, or a range-based secret scan, sees a different range on the snapshot: the snapshot has no `origin` remote, four shallow commits and no tags. Such a repo stays off until range parity exists, that is, legs get an `origin` remote with the base ref and the full PR range, so those commands match a clone. The config parser does not reject these repos. The opt-in is the guard.
+4. **R2 lifecycle:** add a rule on the archive bucket that expires objects under the prefix `gate-bundles/` after 1 day. Bundles live under their own top-level prefix because a lifecycle rule matches a plain prefix only, and `gate/*/*/bundles/` cannot be expressed.
+5. **Cap:** bundles over `MAX_BUNDLE_BYTES` (256 MiB) are not uploaded, and every leg clones. Measured snapshot sizes, local `file://` runs of the PR's own `runGate`: a small repo 6.4 MiB, a mid-size consumer 181 MiB (fits), a large consumer 311 MiB (over the cap, so its legs clone). The cap is unchanged; raising it is a separate decision.
