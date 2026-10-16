@@ -146,6 +146,28 @@ Config for a repo lives in that repo, not in the fleet. Three steps:
 A repo with no `gate` block, or one that is malformed, is skipped: the gate
 posts no status and runs no legs.
 
+### Pick the gate image (`image` key)
+
+A `gate` block may name the image its legs run in:
+
+```json
+"gate": { "image": "desktop", "install": "...", "legs": ["..."] }
+```
+
+- The value is a key of the operator's `images` map, never an image ref. Only
+  `gate` (the default, used when the key is absent) and `desktop` are accepted.
+  Any other value, including a registry ref, makes the block malformed: the
+  repo is skipped, as above.
+- The operator binds each key in `GateRunnerDO`'s `images` map (`wrangler.jsonc`
+  `containers[]`). `desktop` builds `container/Dockerfile.gate-desktop`, with
+  `build_context` `./container`. The example file binds `gate` only; add
+  `desktop` to the live file to use it.
+- A key that the map does not bind fails every leg as an infra error (`gate
+  image not bound (images.<key>)`). The gate never falls back to the shared
+  image for it.
+- `desktop` carries a Windows SDK and CRT. That licence keeps the built image in
+  the operator's private registry only. Never push it to a public one.
+
 ## 6. Rollback
 
 Set `FLEET_GATE_RUNNER` to `"off"` in live `vars`, redeploy. New starts refuse
