@@ -63,12 +63,12 @@ export interface Studio {
   prompt: string;
 }
 
-// skills/secrets/mcp are required keys but legally empty — "[]" is a real,
-// expected value for all three (a studio can decline extra skills, secrets,
-// or MCP servers). Same required-but-emptiable split
-// REQUIRED_ROLE_FIELDS/REQUIRED_NONEMPTY_ROLE_FIELDS draw in blueprint.ts,
-// for the same reason.
-const REQUIRED = ["name", "title", "lead", "skills", "secrets", "mcp", "allowedTools"] as const;
+// skills/secrets are required keys but legally empty — "[]" is a real,
+// expected value for both (a studio can decline extra skills or secrets).
+// Same required-but-emptiable split REQUIRED_ROLE_FIELDS/
+// REQUIRED_NONEMPTY_ROLE_FIELDS draw in blueprint.ts, for the same reason.
+// mcp is optional, absent means [] — same as a role's mcp (blueprint.ts).
+const REQUIRED = ["name", "title", "lead", "skills", "secrets", "allowedTools"] as const;
 const REQUIRED_NONEMPTY = ["name", "title", "lead", "allowedTools"] as const;
 
 /**
@@ -137,7 +137,8 @@ export function parseStudioFile(md: string): Studio {
     lead: fields.lead,
     skills: parseSimpleArray(fields.skills, "skills"),
     secrets: parseSimpleArray(fields.secrets, "secrets"),
-    mcp: parseSimpleArray(fields.mcp, "mcp"),
+    // Optional, default [] — same absent/present split as a role's mcp.
+    mcp: fields.mcp !== undefined ? parseSimpleArray(fields.mcp, "mcp") : [],
     allowedTools: fields.allowedTools,
     effort: fields.effort,
     model: fields.model,

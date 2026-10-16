@@ -421,8 +421,8 @@ describe("optional role field: mcp (issue #276)", () => {
       .toThrow(expect.objectContaining({ field: "mcp" }));
   });
 
-  it("the real pilot.md and scratch.md declare the playwright MCP", () => {
-    expect(parseRoleFile(env.TEST_PILOT_ROLE_MD).mcp).toEqual(["playwright"]);
-    expect(parseRoleFile(env.TEST_SCRATCH_ROLE_MD).mcp).toEqual(["playwright"]);
+  it("the real pilot.md and scratch.md declare no mcp (playwright retired, #293)", () => {
+    expect(parseRoleFile(env.TEST_PILOT_ROLE_MD).mcp).toEqual([]);
+    expect(parseRoleFile(env.TEST_SCRATCH_ROLE_MD).mcp).toEqual([]);
   });
 });

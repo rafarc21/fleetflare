@@ -4,7 +4,6 @@ title: Web Studio
 lead: Web Designer
 skills: [frontend-design, qa, landing-page, pricing-page, web-perf, unsplash-integration, ego-browser]
 secrets: [UNSPLASH_KEY]
-mcp: [playwright]
 allowedTools: Bash(git *) Bash(gh *) Bash(bun *) Bash(fleet *) Read Edit Write Glob Grep
 keep_alive: false
 ---
