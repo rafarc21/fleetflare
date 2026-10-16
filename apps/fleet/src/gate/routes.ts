@@ -9,13 +9,17 @@ import type { Env } from "../env";
 import { getPullRequestHeadSha } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
 import { startGateRun, type GateRunParams } from "./auto-run";
+import { d1RunIndex } from "./auto-run-env";
 import { isGateRunnerRepo } from "./config";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
 // Env; until then this cast keeps this module typechecking. Drop it then.
 type GateWorkflowBinding = {
   create(opts: { id?: string; params: GateRunParams }): Promise<{ id: string }>;
-  get(id: string): Promise<{ status(): Promise<{ status: string; output?: unknown }> }>;
+  get(id: string): Promise<{
+    status(): Promise<{ status: string; output?: unknown }>;
+    terminate(): Promise<void>;
+  }>;
 };
 
 const workflow = (env: Env) => (env as unknown as { GATE_WORKFLOW: GateWorkflowBinding }).GATE_WORKFLOW;
@@ -38,7 +42,7 @@ export async function handleGateRoute(
       return j({ error: "gate runner not enabled for this repo" }, 404);
     }
     const headSha = await headShaOf(body.repo, body.pr);
-    const run = await startGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha });
+    const run = await startGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha }, d1RunIndex(env.DB));
     return j({ started: true, runId: run.runId, reused: run.reused });
   }
 

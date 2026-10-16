@@ -14,10 +14,27 @@ import { loadGateConfig, type FleetJsonReader } from "./load-config";
  *  workflow.ts, which pulls cloudflare:workers into the bun-test project. */
 export interface GateRunParams { repo: string; pr: number }
 
+/** One Workflows instance handle: its status, and terminate() to end it. */
+export interface GateRunInstance {
+  status(): Promise<{ status: string }>;
+  terminate(): Promise<void>;
+}
+
 /** The slice of the GATE_WORKFLOW binding this module uses. */
 export interface GateRunStarter {
   create(opts: { id?: string; params: GateRunParams }): Promise<{ id: string }>;
-  get(id: string): Promise<unknown>;
+  get(id: string): Promise<GateRunInstance>;
+}
+
+/** The latest gate run recorded for one PR: the head sha it gates and its
+ *  Workflows instance id. */
+export interface GateRunRecord { headSha: string; runId: string }
+
+/** The per-PR pointer to the latest gate run. Workflows cannot list instances,
+ *  so this is how a new head sha finds the run it supersedes (#1082). */
+export interface GateRunIndex {
+  latest(repo: string, pr: number): Promise<GateRunRecord | null>;
+  record(repo: string, pr: number, run: GateRunRecord): Promise<void>;
 }
 
 export interface PullRequestAutoRun {
@@ -68,16 +85,34 @@ export async function gateRunId(repo: string, headSha: string): Promise<string> 
   return `gate-${repoKey}-${headSha}`;
 }
 
+/** Instance statuses that still do work. Anything else (complete, errored,
+ *  terminated, unknown) is left alone. */
+const LIVE_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "paused", "waiting", "waitingForPause"]);
+
+/** Ends the run when it is still live. Returns true only when it was ended: a
+ *  run already finished, or a terminate that fails, is not a superseded run and
+ *  never blocks the start of the new one. */
+async function endIfLive(wf: GateRunStarter, runId: string): Promise<boolean> {
+  try {
+    const instance = await wf.get(runId);
+    if (!LIVE_STATUSES.has((await instance.status()).status)) return false;
+    await instance.terminate();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Starts the gate run for one head sha, or reuses the run already started for
  *  it. Only a create that fails because the id exists reuses; any other create
- *  failure is rethrown. */
+ *  failure is rethrown. A new run records itself as the PR's latest and ends the
+ *  previous sha's run if that one is still live (#1082). A reuse changes nothing. */
 export async function startGateRun(
-  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string },
-): Promise<{ runId: string; reused: boolean }> {
+  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex,
+): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
   const runId = await gateRunId(input.repo, input.headSha);
   try {
     await wf.create({ id: runId, params: { repo: input.repo, pr: input.pr } });
-    return { runId, reused: false };
   } catch (err) {
     try {
       await wf.get(runId);
@@ -86,6 +121,11 @@ export async function startGateRun(
     }
     return { runId, reused: true };
   }
+  const previous = await index.latest(input.repo, input.pr);
+  await index.record(input.repo, input.pr, { headSha: input.headSha, runId });
+  if (previous === null || previous.runId === runId) return { runId, reused: false };
+  const superseded = await endIfLive(wf, previous.runId);
+  return { runId, reused: false, supersededRunId: superseded ? previous.runId : undefined };
 }
 
 export type AutoRunOutcome = "started" | "reused" | "no-gate-block";
@@ -94,6 +134,7 @@ export interface AutoRunDeps {
   fleetRepo: string;
   readFleetJson: FleetJsonReader;
   workflow: GateRunStarter;
+  index: GateRunIndex;
 }
 
 /** Starts the gate run for a gated PR, but only when its base carries a gate
@@ -102,6 +143,8 @@ export interface AutoRunDeps {
 export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDeps): Promise<AutoRunOutcome> {
   const config = await loadGateConfig({ repo: pr.repo, fleetRepo: deps.fleetRepo, baseSha: pr.baseSha }, deps.readFleetJson);
   if (config === null) return "no-gate-block";
-  const { reused } = await startGateRun(deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha });
+  const { reused } = await startGateRun(
+    deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index,
+  );
   return reused ? "reused" : "started";
 }
