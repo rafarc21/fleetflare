@@ -1596,3 +1596,57 @@ describe("#767 — 3021 same-model backoff", () => {
     expect(seen[3]).toBe(last);
   });
 });
+
+// Issue #1073: `<think>` parsing and think-block tool-call recovery run ONLY
+// for the kimi stream. A GLM stream with the same literal `<think>` text must
+// reach the client unchanged.
+describe("handleFleetAnthropicMessages — think-block parsing is kimi-only (issue #1073)", () => {
+  const THINK_TOOL_CALL = '<think><tool_call>{"name":"Read","arguments":{"file_path":"/workspace/acme/README.md"}}</tool_call></think>';
+
+  function sseStream(content: string): ReadableStream<Uint8Array> {
+    const enc = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+  }
+
+  /** Drives the real handler with a stream:true request, pool pinned to one model. */
+  async function streamVia(pool: readonly PoolModel[], content: string) {
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const run = vi.fn(async () => sseStream(content));
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...FAST_RETRY } as unknown as Env;
+    return handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows, pool);
+  }
+
+  function parseEvents(text: string) {
+    return text.split("\n\n").filter(Boolean).map((f) => {
+      const [eventLine, dataLine] = f.split("\n");
+      return { event: eventLine.slice("event: ".length), data: JSON.parse(dataLine.slice("data: ".length)) as Record<string, any> };
+    });
+  }
+
+  it("a kimi stream recovers the think-block tool call as a tool_use block", async () => {
+    const kimiOnly: readonly PoolModel[] = [{ ...POOL[1], smokePassed: true }];
+    const r = await streamVia(kimiOnly, THINK_TOOL_CALL);
+    expect(r.status).toBe(200);
+    const events = parseEvents(await r.text());
+    expect(events.find((e) => e.event === "content_block_start")?.data.content_block).toMatchObject({ type: "tool_use", name: "Read" });
+    expect(events.some((e) => e.event === "content_block_delta" && e.data.delta.type === "text_delta")).toBe(false);
+  });
+
+  it("a GLM stream with the same literal <think> text passes it through as visible text, no tool_use", async () => {
+    const glmOnly: readonly PoolModel[] = [{ ...POOL[0], smokePassed: true }];
+    const r = await streamVia(glmOnly, THINK_TOOL_CALL);
+    expect(r.status).toBe(200);
+    const events = parseEvents(await r.text());
+    expect(events.some((e) => e.event === "content_block_start" && e.data.content_block.type === "tool_use")).toBe(false);
+    const visible = events.filter((e) => e.event === "content_block_delta" && e.data.delta.type === "text_delta").map((e) => e.data.delta.text).join("");
+    expect(visible).toBe(THINK_TOOL_CALL);
+  });
+});
