@@ -1301,6 +1301,19 @@ describe("POST /studio/board/tasks/reap", () => {
 // the blocking task numbers up, so the 409 can name them.
 describe("openTaskChecker (#55)", () => {
   const MINE = "fleetflare--web-studio";
+  // Board issue #1071, item 2: the park flag reaches the board read, so a
+  // studio waiting on an answer or on a merge can be parked.
+  it("issue #1071: with park, an input_required task does not block; without it, it still does", async () => {
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [
+        task({ number: 66, state: "input_required", open: true, labels: ["input_required", `studio:${MINE}`], assignee: MINE }),
+      ]),
+    });
+    expect(await openTaskChecker(env as unknown as Env, api)(MINE, "acme/websites", true))
+      .toEqual({ ok: true, hasOpenTask: false, tasks: [], drifted: [] });
+    expect(await openTaskChecker(env as unknown as Env, api)(MINE, "acme/websites", false))
+      .toEqual({ ok: true, hasOpenTask: true, tasks: [66], drifted: [] });
+  });
   it("a completed task on an open issue does not block; a working one does, by number", async () => {
     const api = fakeApi({
       listIssues: vi.fn(async () => [

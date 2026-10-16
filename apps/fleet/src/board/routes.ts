@@ -46,6 +46,7 @@ import {
   revokeStudioReadToken,
 } from "../github/read-repos";
 import { wakeOnAssign, checkAssignRepo, type AssignWakeDeps, type AssignWakeReport } from "./assign-wake";
+import { sendTaskMessage } from "./task-message";
 import { realWakeDeps } from "./wake-deps";
 import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify";
 import { openTasksWithLatestPr } from "./pr-landed";
@@ -1060,7 +1061,7 @@ function upstreamFailure(err: unknown, method: string, pathname: string): Respon
  *  not verify work, so there is no route for it to be refused at. Issue #59
  *  added `assign` (and POST on the bare path, create) — both only toward a
  *  studio the caller's org-chart edges let it spawn. See directGate. */
-const FLEET_BOARD_ROUTE_RE = /^\/fleet\/tasks(?:\/(\d+)(?:\/(envelope|state|assign))?)?$/;
+const FLEET_BOARD_ROUTE_RE = /^\/fleet\/tasks(?:\/(\d+)(?:\/(envelope|state|assign|message))?)?$/;
 
 /**
  * Issue #59: the org chart, as a port. POST /fleet/tasks and
@@ -1260,6 +1261,16 @@ export async function handleFleetBoard(
       return respond(await revokeTaskGrantsIfTerminal(
         env, repo.value, await transitionStudioTask(api, repo.value, number, body, studio.id)));
     }
+    // Board issue #1071, item 4: `fleet task message <n> "<text>"` — a comment
+    // on the task plus a wake of its lead. A studio may message only a task
+    // held by a studio it directs (the same edge gate every other write here
+    // uses), never by the caller's own say-so.
+    if (action === "message") {
+      const current = await api.getIssue(repo.value, number);
+      const refused = await directGate(policy, studio, taskAssignees(current.labels));
+      if (refused) return refused;
+      return respond(await sendTaskMessage(api, assignWake, repo.value, number, body, studio.id));
+    }
     // Same stamp as handleBoard's own envelope branch: `msg_id` minted here,
     // once per comment. `sender` is stamped too on this surface — see
     // board.ts's commentStudioEnvelope for why a studio may not sign for
@@ -1342,12 +1353,14 @@ export function assignedBriefResolver(
  */
 export function openTaskChecker(
   env: Env, api: BoardApi = githubBoardApi(env),
-): (studioId: string, repoSlug: string) => Promise<
+): (studioId: string, repoSlug: string, park?: boolean) => Promise<
   { ok: true; hasOpenTask: boolean; tasks: number[]; drifted: number[] } | { ok: false; message: string }
 > {
-  return async (studioId, repoSlug) => {
+  // Issue #1071, item 2: `park` is the operator's `--park`, forwarded so a
+  // parking destroy passes over input_required and awaiting_merge.
+  return async (studioId, repoSlug, park = false) => {
     try {
-      const result = await openAssignedTasks(api, repoSlug.toLowerCase(), studioId);
+      const result = await openAssignedTasks(api, repoSlug.toLowerCase(), studioId, { parking: park });
       if (!result.ok) return { ok: false, message: result.message };
       return {
         ok: true, hasOpenTask: result.value.length > 0,
