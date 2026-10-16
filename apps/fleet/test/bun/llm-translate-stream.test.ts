@@ -503,60 +503,81 @@ describe("think tags are off for every model except kimi (issue #1073 review)", 
   });
 });
 
-// Issue #1099: a degenerate upstream stream (same line or paragraph repeated,
-// or text past a per-model soft cap with no tool_use started) is aborted with
-// a retriable overloaded_error, not run to the 64k output cap.
+// Issue #1099: a degenerate upstream stream is aborted with a retriable
+// overloaded_error, not run to the 64k output cap. Round 3 (maestro review)
+// dropped the per-model soft cap: repetition thresholds are conservative, and a
+// `finish_reason: "length"` with no tool_use started is the backstop.
 describe("runaway output detection (issue #1099)", () => {
   const delta = (d: Record<string, unknown>) => ({ choices: [{ delta: d }] });
 
-  test("a line repeated many times in a row sets reason repeat_line", () => {
+  test("a line of 40+ chars repeated 50 times in a row sets reason repeat_line", () => {
     const state = createStreamState();
-    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ content: "the same looping sentence here\n" }));
+    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ content: "the same looping sentence, again and again\n" }));
     expect(state.runaway).toBe("repeat_line");
   });
 
-  test("a multi-line paragraph repeated many times sets reason repeat_paragraph", () => {
+  test("a paragraph of 200+ chars repeated 8 times in a row sets reason repeat_paragraph", () => {
     const state = createStreamState();
-    const paragraph = "alpha line one\nalpha line two\n\n";
-    for (let i = 0; i < 30; i++) applyOpenAIStreamChunk(state, delta({ content: paragraph }));
+    const paragraph = `${"alpha line of prose that goes on for a while, ".repeat(5)}\nalpha second line of the same paragraph\n\n`;
+    for (let i = 0; i < 10; i++) applyOpenAIStreamChunk(state, delta({ content: paragraph }));
     expect(state.runaway).toBe("repeat_paragraph");
   });
 
   test("repeated reasoning_content trips the same repeat check", () => {
     const state = createStreamState();
-    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ reasoning_content: "loop loop loop loop\n" }));
+    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ reasoning_content: "loop loop loop loop loop loop loop loop loop loop\n" }));
     expect(state.runaway).toBe("repeat_line");
   });
 
-  test("text past the per-model soft cap with no tool_use sets reason soft_cap", () => {
-    const state = createStreamState({ softCapTokens: 100 });
-    let words = "";
-    for (let i = 0; words.length <= 100 * 4; i++) words += `word${i} `;
-    applyOpenAIStreamChunk(state, delta({ content: words }));
-    expect(state.runaway).toBe("soft_cap");
-  });
-
-  test("no soft cap applies when the model sets none", () => {
+  test("a line under 40 chars repeated many times does not trip (`}` and `---` style lines)", () => {
     const state = createStreamState();
-    let words = "";
-    for (let i = 0; i < 5000; i++) words += `word${i} `;
-    applyOpenAIStreamChunk(state, delta({ content: words }));
+    for (let i = 0; i < 200; i++) applyOpenAIStreamChunk(state, delta({ content: "  {\"a\": 1},\n" }));
     expect(state.runaway).toBeNull();
   });
 
-  test("once a tool_use has started, text past the soft cap is not a runaway", () => {
-    const state = createStreamState({ softCapTokens: 100 });
-    applyOpenAIStreamChunk(state, { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "Read", arguments: "{}" } }] } }] });
-    let words = "";
-    for (let i = 0; i < 300; i++) words += `word${i} `;
-    applyOpenAIStreamChunk(state, delta({ content: words }));
+  // Review case: CJK loop. CJK runs ~1.5 chars/token, so it is caught by the
+  // repeated-line check when it has line breaks, and by the length rule otherwise.
+  test("a CJK loop with line breaks is caught by the repeat check", () => {
+    const state = createStreamState();
+    const line = "这是一个重复的句子，没有任何新的内容。".repeat(3) + "\n";
+    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ content: line }));
+    expect(state.runaway).toBe("repeat_line");
+  });
+
+  test("a CJK loop without line breaks is caught by the length rule at the output cap", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, delta({ content: "推".repeat(40000) }));
+    expect(state.runaway).toBeNull();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "length" }] });
+    const close = closeStreamOrError(state, 32000);
+    expect(close.ok).toBe(false);
+    expect(close.reason).toBe("runaway:length");
+    expect(parseFrame(close.frames[0]).event).toBe("error");
+  });
+
+  // Review case: a 62k-char English answer with no repetition is a legit answer.
+  test("a 62k-char English answer with no repetition passes", () => {
+    const state = createStreamState();
+    let text = "";
+    for (let i = 0; text.length < 62000; i++) text += `token${i} ${i % 20 === 19 ? "\n" : ""}`;
+    applyOpenAIStreamChunk(state, delta({ content: text }));
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] });
+    expect(state.runaway).toBeNull();
+    expect(closeStreamOrError(state, 32000).ok).toBe(true);
+  });
+
+  // Review case: a 60-element JSON array of identical short objects is legit.
+  test("a JSON array of 60 identical short objects passes", () => {
+    const state = createStreamState();
+    const lines = ["[", ...Array.from({ length: 60 }, () => '  {"a": 1},'), "]"].join("\n") + "\n";
+    applyOpenAIStreamChunk(state, delta({ content: lines }));
     expect(state.runaway).toBeNull();
   });
 
-  test("a long tool_use input with repeated lines passes the soft cap and the repeat check", () => {
-    const state = createStreamState({ softCapTokens: 100 });
+  test("once a tool_use has started, a long repetitive tool argument stream passes", () => {
+    const state = createStreamState();
     applyOpenAIStreamChunk(state, { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "Write", arguments: "" } }] } }] });
-    const line = '  "row": "identical row of file content",\\n';
+    const line = '  "row": "identical row of file content, repeated",\\n';
     for (let i = 0; i < 200; i++) {
       applyOpenAIStreamChunk(state, { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: line } }] } }] });
     }
@@ -565,13 +586,13 @@ describe("runaway output detection (issue #1099)", () => {
   });
 
   test("a normal short turn is untouched: no runaway, frames identical to a plain state", () => {
-    const chunks = [delta({ content: "Hello\n" }), delta({ content: "World, done.\n" })];
-    const guarded = createStreamState({ softCapTokens: 16000 });
+    const guarded = createStreamState();
     const plain = createStreamState();
-    const guardedFrames = chunks.flatMap((c) => applyOpenAIStreamChunk(guarded, c));
-    const plainFrames = chunks.flatMap((c) => applyOpenAIStreamChunk(plain, c));
+    const chunks = [{ choices: [{ delta: { content: "hello " } }] }, { choices: [{ delta: { content: "world" }, finish_reason: "stop" }] }];
+    const a = chunks.flatMap((c) => applyOpenAIStreamChunk(guarded, c));
+    const b = chunks.flatMap((c) => applyOpenAIStreamChunk(plain, c));
+    expect(a).toEqual(b);
     expect(guarded.runaway).toBeNull();
-    expect(guardedFrames).toEqual(plainFrames);
   });
 
   test("runawayErrorFrame is a retriable overloaded_error SSE error frame naming the reason", () => {
@@ -582,44 +603,45 @@ describe("runaway output detection (issue #1099)", () => {
   });
 });
 
-// Maestro review (#1099 follow-up, finding 2): the soft cap counted characters
-// at 4 chars/token, but CJK and JSON run at <=3 chars/token, so a run could
-// pass the per-model token ceiling before the cap tripped. Ratio is now 2.5.
-describe("soft cap counts CJK and JSON conservatively (issue #1099 review)", () => {
-  test("a CJK run past the cap trips soft_cap (CJK ~1.5 chars/token)", () => {
-    const state = createStreamState({ softCapTokens: 1000 });
-    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "推".repeat(2600) } }] });
-    expect(state.runaway).toBe("soft_cap");
-  });
+const delta = (d: Record<string, unknown>) => ({ choices: [{ delta: d }] });
 
-  test("a JSON run past the cap trips soft_cap (JSON ~2.5 chars/token)", () => {
-    const state = createStreamState({ softCapTokens: 1000 });
-    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: '{"k":1}'.repeat(400) } }] });
-    expect(state.runaway).toBe("soft_cap");
-  });
-
-  test("text under the cap does not trip", () => {
-    const state = createStreamState({ softCapTokens: 1000 });
-    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: '{"k":1}'.repeat(200) } }] });
+// Review case: kimi writes a tool call inside <think>; the tool marker can be
+// split across 3-char deltas, so the payload must be recognised per tail of the
+// text, not per delta. A payload is tool arguments, never reasoning.
+describe("kimi in-think tool payload is never scanned as reasoning (issue #1099 review)", () => {
+  test("an in-think Write split into 3-char deltas, with repeated lines, is not a runaway", () => {
+    const state = createStreamState({ thinkTags: true });
+    const body = `${"const row = 'identical line of generated code here';\n".repeat(1500)}`;
+    const payload = `<tool_call>{"name":"Write","arguments":{"file_path":"a.ts","content":"${body}"}}</tool_call>`;
+    const pieces = [`<think>Plan the file.\n`, ...Array.from({ length: Math.ceil(payload.length / 3) }, (_, i) => payload.slice(i * 3, i * 3 + 3)), "</think>"];
+    for (const p of pieces) applyOpenAIStreamChunk(state, delta({ content: p }));
     expect(state.runaway).toBeNull();
+  });
+
+  test("reasoning in a think region with no tool call and a repeated line still trips", () => {
+    const state = createStreamState({ thinkTags: true });
+    applyOpenAIStreamChunk(state, delta({ content: `<think>${"z reasoning loop line, repeated many times over\n".repeat(60)}` }));
+    expect(state.runaway).toBe("repeat_line");
   });
 });
 
-// Maestro review (finding 3): kimi writes a tool call inside <think>, and the
-// tool registers only at </think>, so its payload counted toward the soft cap
-// and tripped it on a legitimate Write. Payload text is not reasoning.
-describe("kimi in-think tool payload is not counted toward the soft cap (issue #1099 review)", () => {
-  test("a recovered in-think Write payload past the cap is not a runaway", () => {
-    const state = createStreamState({ thinkTags: true, softCapTokens: 1000 });
-    const payload = `<tool_call>{"name":"Write","arguments":{"file_path":"a.ts","content":"${"y".repeat(6000)}"}}</tool_call>`;
-    const events = applyOpenAIStreamChunk(state, { choices: [{ delta: { content: `<think>Plan the file.\n${payload}</think>` } }] });
-    expect(state.runaway).toBeNull();
-    expect(events.join("")).toContain('"name":"Write"');
+// Issue #1099 (review round 3): a non-streaming reply is built from the stream
+// translator's own frames, and closeStreamOrError owns the no-finish and length
+// checks, so the non-streaming path needs no second reassembly.
+describe("closeStreamOrError runaway and finish rules (issue #1099 review)", () => {
+  test("a length finish with no tool_use started is a retriable runaway, not max_tokens", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "partial" } }] });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "length" }] });
+    const close = closeStreamOrError(state, 32000);
+    expect(close.ok).toBe(false);
+    expect(close.reason).toBe("runaway:length");
   });
 
-  test("reasoning in a think region with no tool call still trips the soft cap", () => {
-    const state = createStreamState({ thinkTags: true, softCapTokens: 1000 });
-    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: `<think>${"z".repeat(2600)}` } }] });
-    expect(state.runaway).toBe("soft_cap");
+  test("a length finish after a tool_use started is a normal tool turn", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "Read", arguments: "{}" } }] } }] });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "length" }] });
+    expect(closeStreamOrError(state, 32000).ok).toBe(true);
   });
 });

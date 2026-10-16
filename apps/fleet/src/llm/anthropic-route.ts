@@ -384,7 +384,7 @@ async function pumpAnthropicStream(
       try { await writer.write(enc.encode(f)); } catch { throw new ClientAbort(); }
     }
   };
-  const state = createStreamState({ thinkTags: poolModel?.thinkTags === true, softCapTokens: poolModel?.softCapTokens });
+  const state = createStreamState({ thinkTags: poolModel?.thinkTags === true });
   const reader = upstream.getReader();
   const cancelUpstream = () => { reader.cancel().catch(() => {}); };
   // Issue #1099 (review, finding 5): an aborted runaway never gets the upstream
@@ -468,79 +468,66 @@ async function pumpAnthropicStream(
   }
 }
 
-/** Issue #1099 (review, finding 1): the non-streaming path reads the upstream as
- *  a stream too, so the runaway scan sees the output while it is generated. A
- *  runaway aborts upstream and reports `runaway` (the caller answers 529 before
- *  any byte goes out). Otherwise the chunks are reassembled into one OpenAI-shaped
- *  reply for the usual non-streaming translation. */
-type CollectedUpstream =
-  | { kind: "reply"; reply: Json; inputTokens: number; outputTokens: number }
-  | { kind: "runaway"; reason: string; inputTokens: number; outputTokens: number }
-  | { kind: "error"; message: string };
+/** Issue #1099 (review round 3, finding 3): the non-streaming reply is built from
+ *  the stream translator's own frames. pumpAnthropicStream writes them into a
+ *  buffer, so the non-streaming path shares the stream's finish_reason, runaway
+ *  and error handling (closeStreamOrError) instead of a second reassembly. */
+async function collectAnthropicFrames(
+  upstream: ReadableStream<Uint8Array>, id: string, model: string, requestedMaxTokens: number,
+  idleMs: number, poolModel: PoolModel | undefined,
+): Promise<{ result: PumpResult; sse: string }> {
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  const sse = new Response(readable).text();
+  const result = await pumpAnthropicStream(upstream, writer, id, model, requestedMaxTokens, idleMs, poolModel)
+    .finally(() => writer.close().catch(() => {}));
+  return { result, sse: await sse };
+}
 
-async function collectUpstreamStream(
-  upstream: ReadableStream<Uint8Array>, idleMs: number, poolModel: PoolModel | undefined,
-  model: string, requestedMaxTokens: number,
-): Promise<CollectedUpstream> {
-  const reader = upstream.getReader();
-  const cancelUpstream = () => { reader.cancel().catch(() => {}); };
-  const state = createStreamState({ thinkTags: poolModel?.thinkTags === true, softCapTokens: poolModel?.softCapTokens });
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let content = "";
-  const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
-  let done = false;
-  while (!done) {
-    let step: ReadableStreamReadResult<Uint8Array> | typeof IDLE;
-    try {
-      step = await readWithIdleTimeout(reader, idleMs);
-    } catch (e) {
-      return { kind: "error", message: e instanceof Error ? e.message : String(e) };
-    }
-    if (step === IDLE) {
-      cancelUpstream();
-      return { kind: "error", message: `upstream stream idle timeout: no data for ${idleMs}ms` };
-    }
-    if (step.done) { done = true; buffer += decoder.decode(); } else { buffer += decoder.decode(step.value, { stream: true }); }
-    const frames = buffer.split("\n\n");
-    buffer = done ? "" : (frames.pop() ?? "");
-    for (const frame of frames) {
-      for (const line of frame.split("\n")) {
-        const parsed = parseSseDataLine(line);
-        if (parsed === "DONE" || parsed === null) continue;
-        const errorMessage = parseStreamErrorChunk(parsed);
-        if (errorMessage !== null) { cancelUpstream(); return { kind: "error", message: errorMessage }; }
-        applyOpenAIStreamChunk(state, parsed);
-        if (state.runaway !== null) {
-          cancelUpstream();
-          return {
-            kind: "runaway", reason: state.runaway, inputTokens: state.inputTokens,
-            outputTokens: Math.min(Math.max(state.outputTokens, runawayTokenEstimate(state)), requestedMaxTokens),
-          };
-        }
-        const delta = parsed?.choices?.[0]?.delta ?? {};
-        if (typeof delta.content === "string") content += delta.content;
-        for (const tc of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
-          const call = toolCalls.get(tc.index ?? 0) ?? { id: "", name: "", arguments: "" };
-          if (tc.id) call.id = tc.id;
-          if (tc.function?.name) call.name = tc.function.name;
-          call.arguments += tc.function?.arguments ?? "";
-          toolCalls.set(tc.index ?? 0, call);
-        }
-      }
+/** The translator's SSE frames, parsed back to event name and JSON data. */
+function parseFrames(sse: string): Array<{ event: string; data: Json }> {
+  const out: Array<{ event: string; data: Json }> = [];
+  for (const frame of sse.split("\n\n")) {
+    const event = /^event: (.+)$/m.exec(frame)?.[1];
+    const data = /^data: (.+)$/m.exec(frame)?.[1];
+    if (event !== undefined && data !== undefined) out.push({ event, data: JSON.parse(data) });
+  }
+  return out;
+}
+
+/** The message of the translator's `event: error` frame, if the stream ended in one. */
+function errorFrameMessage(sse: string): string | null {
+  return parseFrames(sse).find((f) => f.event === "error")?.data.error?.message ?? null;
+}
+
+/** Folds the translator's frames into one Anthropic Messages reply (the
+ *  non-streaming shape). A malformed tool argument becomes an empty input, the
+ *  same as openAIResponseToAnthropic. */
+function foldAnthropicFrames(sse: string): Json {
+  const message: Json = {
+    id: "", type: "message", role: "assistant", model: "", content: [],
+    stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 },
+  };
+  const toolArgs = new Map<number, string>();
+  for (const { event, data } of parseFrames(sse)) {
+    if (event === "message_start") Object.assign(message, data.message);
+    else if (event === "content_block_start") {
+      message.content[data.index] = { ...data.content_block };
+      if (data.content_block.type === "tool_use") toolArgs.set(data.index, "");
+    } else if (event === "content_block_delta") {
+      const block = message.content[data.index];
+      if (data.delta.type === "text_delta") block.text += data.delta.text;
+      else toolArgs.set(data.index, (toolArgs.get(data.index) ?? "") + data.delta.partial_json);
+    } else if (event === "content_block_stop" && toolArgs.has(data.index)) {
+      let input: Json = {};
+      try { input = JSON.parse(toolArgs.get(data.index) || "{}"); } catch { /* malformed args: empty input, as openAIResponseToAnthropic */ }
+      message.content[data.index].input = input;
+    } else if (event === "message_delta") {
+      message.stop_reason = data.delta.stop_reason;
+      message.usage = data.usage;
     }
   }
-  const message = {
-    content: content.length > 0 ? content : null,
-    ...(toolCalls.size === 0 ? {} : {
-      tool_calls: [...toolCalls.values()].map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.arguments } })),
-    }),
-  };
-  const reply = openAIResponseToAnthropic(
-    { choices: [{ message, finish_reason: state.finishReason }], usage: { prompt_tokens: state.inputTokens, completion_tokens: state.outputTokens } },
-    { model, requestedMaxTokens },
-  );
-  return { kind: "reply", reply, inputTokens: reply.usage.input_tokens, outputTokens: reply.usage.output_tokens };
+  return message;
 }
 
 /** Shared gate both `/fleet/llm/anthropic/v1/messages` handlers in this file
@@ -914,28 +901,42 @@ export async function handleFleetAnthropicMessages(
     logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
     return json(anthropic, 200);
   }
-  // Issue #1099 (review, finding 1): the upstream is read as a stream here so a
-  // runaway is caught before any byte goes out — 529 overloaded_error, the same
-  // retriable shape the streaming path ends with.
-  const collected = await collectUpstreamStream(upstream, leadStreamIdleMs(env), modelById(usedModel), requestedModel, body.max_tokens);
-  if (collected.kind === "error") {
-    const { status, type, message: overrideMessage } = classifyAiError(collected.message);
+  // Issue #1099 (review round 3, finding 3): the reply is folded from the stream
+  // translator's frames, so a runaway is caught before any byte goes out (529),
+  // and a stream that ends without a finish_reason is an error, never a 200.
+  let collected: Awaited<ReturnType<typeof collectAnthropicFrames>>;
+  try {
+    collected = await collectAnthropicFrames(
+      upstream, `msg_${crypto.randomUUID().replace(/-/g, "")}`, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel),
+    );
+  } catch (e) {
     logUsage(env, ctx, studio.id, {
       model: usedModel, stream: false, inputTokens: 0, outputTokens: 0, ok: false,
-      failure: `upstream_error ${type}: ${collected.message}`, startedAt, attempts,
+      failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`, startedAt, attempts,
     });
-    return json(anthropicErrorBody(type, overrideMessage ?? collected.message), status);
+    return json(anthropicErrorBody("api_error", "upstream stream failed"), 500);
   }
-  if (collected.kind === "runaway") {
+  const { result, sse } = collected;
+  if (result.failure?.startsWith("runaway:") === true) {
+    const reason = result.failure.slice("runaway:".length);
     logUsage(env, ctx, studio.id, {
-      model: usedModel, stream: false, inputTokens: collected.inputTokens || requestInputEstimate(), outputTokens: collected.outputTokens,
-      ok: false, failure: `runaway:${collected.reason}`, startedAt, attempts,
+      model: usedModel, stream: false, inputTokens: result.inputTokens || requestInputEstimate(), outputTokens: result.outputTokens,
+      ok: false, failure: result.failure, startedAt, attempts,
     });
     if (avoidOn) ctx.waitUntil(markRunawayAvoid(env.DB, studio.id, usedModel).catch(() => {}));
-    return json(anthropicErrorBody("overloaded_error", runawayErrorMessage(collected.reason)), 529);
+    return json(anthropicErrorBody("overloaded_error", runawayErrorMessage(reason)), 529);
   }
-  logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: collected.inputTokens, outputTokens: collected.outputTokens, ok: true, startedAt, attempts });
-  return json(collected.reply, 200);
+  if (!result.ok) {
+    const message = errorFrameMessage(sse) ?? result.failure ?? "upstream stream failed";
+    const { status, type, message: overrideMessage } = classifyAiError(message);
+    logUsage(env, ctx, studio.id, {
+      model: usedModel, stream: false, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ok: false,
+      failure: `upstream_error ${type}: ${message}`, startedAt, attempts,
+    });
+    return json(anthropicErrorBody(type, overrideMessage ?? message), status);
+  }
+  logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ok: true, startedAt, attempts });
+  return json(foldAnthropicFrames(sse), 200);
 }
 
 /** ESTIMATE ONLY, not a real count — this backend has no tokenizer exposed

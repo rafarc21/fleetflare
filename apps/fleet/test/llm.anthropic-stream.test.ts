@@ -1070,22 +1070,26 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
 // hang. These pin the route-level path end to end; the translation units
 // live in test/bun/llm-translate-*.test.ts.
 describe("handleFleetAnthropicMessages — output cap ends cleanly (#1070)", () => {
-  it("a non-streaming reply cut at the cap (finish_reason length) reaches the client as stop_reason max_tokens, 200", async () => {
-    const { token, rows, e } = await setup({
-      choices: [{ message: { role: "assistant", content: "partial answer" }, finish_reason: "length" }],
-      usage: { prompt_tokens: 40, completion_tokens: 32000 },
+  it("a non-streaming reply cut at the cap with no tool_use (finish_reason length) is a retriable 529, never a 200 max_tokens", async () => {
+    // The route always streams upstream (review round 3), so the mock is a stream.
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: "partial answer" } }] })}\n\n` +
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "length" }], usage: { prompt_tokens: 40, completion_tokens: 32000 } })}\n\n` +
+          "data: [DONE]\n\n",
+        ));
+        controller.close();
+      },
     });
+    const { token, rows, e, run } = await setup();
+    (run as unknown as { mockImplementation: (fn: () => Promise<unknown>) => void }).mockImplementation(async () => upstream);
     const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, max_tokens: 4000 } }), e, ctx, rows);
-    expect(r.status).toBe(200);
-    const replyBody = (await r.json()) as { stop_reason: string; content: { text: string }[]; usage: { output_tokens: number } };
-    expect(replyBody.stop_reason).toBe("max_tokens");
-    expect(replyBody.content[0].text).toBe("partial answer");
-    // The reported output is clamped to what the client asked for, never the
-    // raw reasoning-inflated count.
-    expect(replyBody.usage.output_tokens).toBe(4000);
+    expect(r.status).toBe(529);
+    expect(await r.json()).toMatchObject({ type: "error", error: { type: "overloaded_error" } });
   });
 
-  it("a streaming reply cut at the cap ends with message_delta stop_reason max_tokens and message_stop — no event: error", async () => {
+  it("a streaming reply cut at the cap with no tool_use ends with event: error overloaded_error, never max_tokens", async () => {
     const chunk = (c: unknown) => `data: ${JSON.stringify(c)}\n\n`;
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -1102,11 +1106,11 @@ describe("handleFleetAnthropicMessages — output cap ends cleanly (#1070)", () 
     const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true, max_tokens: 4000 } }), e, ctx, rows);
     expect(r.status).toBe(200);
     const text = await r.text();
-    expect(text).not.toContain("event: error");
-    expect(text).toContain('"stop_reason":"max_tokens"');
-    expect(text).toContain("event: message_stop");
+    expect(text).toContain("event: error");
+    expect(text).toContain('"type":"overloaded_error"');
+    expect(text).not.toContain('"stop_reason":"max_tokens"');
     await ctx.drain();
-    expect((await usageRows())[0]).toMatchObject({ ok: 1, outputTokens: 4000 });
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "runaway:length" });
   });
 
   it("a client max_tokens above the model ceiling is sent upstream clamped to GLM_MAX_MAX_TOKENS (32000), never passed through", async () => {
@@ -1669,7 +1673,7 @@ describe("handleFleetAnthropicMessages — runaway output abort (issue #1099)", 
     });
   }
 
-  const looping = Array.from({ length: 60 }, () => "the same looping sentence here\n");
+  const looping = Array.from({ length: 60 }, () => "the same looping sentence here, again and again\n");
   const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
 
   it("a runaway stream ends with a retriable overloaded_error, never a normal end_turn", async () => {
@@ -1722,7 +1726,7 @@ describe("handleFleetAnthropicMessages — runaway output abort (issue #1099)", 
 // scan — a 32k-token loop went out as a 200), 5 (cancelUpstream untested;
 // runaway usage row logged 0/0).
 describe("handleFleetAnthropicMessages — runaway review follow-ups (issue #1099)", () => {
-  const looping = Array.from({ length: 60 }, () => "the same looping sentence here\n");
+  const looping = Array.from({ length: 60 }, () => "the same looping sentence here, again and again\n");
   const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
 
   function trackedStream(contents: string[], onCancel: () => void, finish = false): ReadableStream<Uint8Array> {
@@ -1769,6 +1773,39 @@ describe("handleFleetAnthropicMessages — runaway review follow-ups (issue #109
     const row = (await usageRows()).at(-1)!;
     expect(row.inputTokens).toBeGreaterThan(0);
     expect(row.outputTokens).toBeGreaterThan(0);
+  });
+
+  it("a non-streaming reply with no finish_reason is an error, never a 200 end_turn", async () => {
+    const enc = new TextEncoder();
+    const run = vi.fn(async () => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "cut off mid" } }] })}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    }));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: good });
+    expect(r.status).not.toBe(200);
+    expect(await r.json()).toMatchObject({ type: "error" });
+  });
+
+  it("a non-streaming tool_use reply is rebuilt from the translator frames (text + tool block, stop_reason tool_use)", async () => {
+    const enc = new TextEncoder();
+    const run = vi.fn(async () => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "reading" } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_9", function: { name: "Read", arguments: "{\"file_path\":\"a.ts\"}" } }] } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    }));
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body: good });
+    expect(r.status).toBe(200);
+    const reply = (await r.json()) as { stop_reason: string; content: Array<{ type: string; text?: string; name?: string; input?: unknown }> };
+    expect(reply.stop_reason).toBe("tool_use");
+    expect(reply.content[0]).toMatchObject({ type: "text", text: "reading" });
+    expect(reply.content[1]).toMatchObject({ type: "tool_use", name: "Read", input: { file_path: "a.ts" } });
   });
 
   it("two runaways in a row avoid both models (the avoid set grows)", async () => {

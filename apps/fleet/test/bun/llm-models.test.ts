@@ -15,12 +15,7 @@ describe("model pool registry", () => {
     expect(new Set(POOL.map((m) => m.id)).size).toBe(POOL.length);
   });
   test("glm keeps today's id and 16000 max_tokens floor", () => {
-    expect(modelByKey("glm")).toEqual({ key: "glm", id: "@cf/zai-org/glm-5.3", minMaxTokens: 16000, maxMaxTokens: 32000, smokePassed: true, softCapTokens: 24000 });
-  });
-  // Issue #1099: the runaway soft cap must fire before the model's own ceiling
-  // would, or it never does anything.
-  test("every soft cap (issue #1099) sits below its model's maxMaxTokens ceiling", () => {
-    for (const m of POOL) if (m.softCapTokens !== undefined) expect(m.softCapTokens).toBeLessThan(m.maxMaxTokens);
+    expect(modelByKey("glm")).toEqual({ key: "glm", id: "@cf/zai-org/glm-5.3", minMaxTokens: 16000, maxMaxTokens: 32000, smokePassed: true });
   });
   // Incident #717: a per-model ceiling on the SAME computed max_tokens the
   // floor above bounds — reasoning_content can push total output past
