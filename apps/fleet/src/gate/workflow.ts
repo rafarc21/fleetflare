@@ -27,16 +27,25 @@ import {
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
 import { gateRunnerName, legRequest, legResultReader, runLegStep, type LegRunResult } from "./leg-run";
+import { infraRerunDecision, rerunStatusArgs } from "./infra-rerun";
 import { postGateStatus, type StatusPort } from "./status-post";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
-export interface GateWorkflowParams { repo: string; pr: number }
+export interface GateWorkflowParams {
+  repo: string;
+  pr: number;
+  /** Set on an auto-rerun (#1119): the run it re-runs. A rerun is never re-run again. */
+  rerunOf?: string;
+  /** Set on an auto-rerun (#1119): the head the first run gated. A moved head ends the rerun. */
+  headSha?: string;
+}
 
 // Vitest shard count comes from the fleet.json gate block (default 8, capped by
 // planLegs at MAX_LEGS_PER_PR). vitestCmd's {i}/{n} renders as i/n per shard.
 
 export type GateRunOutcome =
   | { state: "success" | "failure" | "error"; description?: string; statusPostFailed: boolean; legs: OutcomeLeg[] }
+  | { rerun: string; statusPostFailed: boolean; legs: OutcomeLeg[] }
   | { skipped: string; statusPostFailed: boolean };
 
 export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
@@ -90,6 +99,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     const headGatesInvalid = configChanged && isFleetRepo(repo, this.env.AGENT_REPO)
       ? await step.do("head-gates-map", async () => gateMapHasInvalidEntry(await readFleetJson(repo, resolved.headSha)))
       : false;
+
+    // An auto-rerun gates the head its first run gated (#1119). A head that moved
+    // since then is gated by its own push's run, so this rerun stops here.
+    if (event.payload.headSha !== undefined && event.payload.headSha !== resolved.headSha) {
+      return { skipped: "head moved since the infra error", statusPostFailed: false };
+    }
 
     const decision = decideGateRun({
       changedFiles: resolved.changedFiles, fleetJsonChanged: configChanged, base, head,
@@ -149,6 +164,28 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
     const final: Exclude<Verdict, { state: "pending" }> =
       verdict.state === "pending" ? { state: "error", description: "no legs reported" } : verdict;
+
+    // #1119: an all-infra run re-runs itself once, on the same head, instead of
+    // ending red. Its pending status goes up first, so the rerun's own status
+    // cannot be overwritten by this run's. A failed start falls through to the
+    // final error verdict below.
+    if (final.state === "error" && infraRerunDecision(results, event.payload.rerunOf)) {
+      const rerunId = `rerun-${event.instanceId}`;
+      const statusPostFailed = await step.do("post-infra-rerun", async () =>
+        postGateStatus(this.statusPort(), repo, resolved.headSha, rerunStatusArgs(event.instanceId)));
+      const started = await step.do("start-infra-rerun", async () => {
+        try {
+          await this.env.GATE_WORKFLOW.create({
+            id: rerunId, params: { repo, pr, headSha: resolved.headSha, rerunOf: event.instanceId },
+          });
+          return true;
+        } catch (err) {
+          console.error("gate: infra rerun create failed", err instanceof Error ? err.message : String(err));
+          return false;
+        }
+      });
+      if (started) return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results) };
+    }
 
     // Wrapped in a step so a Workflow replay never posts the status twice.
     const statusPostFailed = await step.do("post-verdict", async () =>
