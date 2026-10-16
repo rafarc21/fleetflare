@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withReapLock } from "../../cli/fleet";
 
-const HOLDER = join(import.meta.dir, "../fixtures/reap-lock-holder.ts");
+const HOLDER = join(import.meta.dir, "fixtures/reap-lock-holder.ts");
 
 let dir: string;
 let statePath: string;
