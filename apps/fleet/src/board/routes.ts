@@ -31,7 +31,7 @@ import {
   repoIsPrivate, fetchRepoFile, listOpenPullFiles,
 } from "../github/api";
 import {
-  createIssue, getIssue, listIssues, addLabels, removeLabel,
+  createIssue, getIssue, listIssues, addLabels, removeLabel, countIssues,
   createComment, listComments, listMilestones, GitHubError,
 } from "./api";
 import {
@@ -90,6 +90,7 @@ export function githubBoardApi(env: Env, leakDeps: Partial<LeakGuardDeps> = {}):
     createIssue: async (repo, input) => createIssue(await token(repo), repo, input),
     getIssue: async (repo, number) => getIssue(await token(repo), repo, number),
     listIssues: async (repo, query) => listIssues(await token(repo), repo, query),
+    countIssues: async (repo) => countIssues(await token(repo), repo),
     addLabels: async (repo, number, labels) => addLabels(await token(repo), repo, number, labels),
     removeLabel: async (repo, number, label) => removeLabel(await token(repo), repo, number, label),
     createComment: async (repo, number, body) => createComment(await token(repo), repo, number, body),
@@ -429,6 +430,28 @@ async function handleTaskReapRoute(
     };
     const results = await runTaskReap(deps, apply);
     return Response.json({ repo, apply, defaultBranch, results });
+  } catch (err) {
+    return upstreamFailure(err, req.method, new URL(req.url).pathname);
+  }
+}
+
+/**
+ * `GET /studio/board/tasks/count?repo=<slug>` — issue #1121. One GraphQL call
+ * answers the number reap's board-read floor needs (issues, all states, PRs
+ * excluded), so a full `state=all` paginated walk is never made just to count.
+ */
+async function handleBoardCountRoute(
+  req: Request, env: Env, api: BoardApi, reach: RepoReachFetch,
+): Promise<Response> {
+  if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
+  const repoResult = await resolveBoardRepo(
+    { reachRepo: reach },
+    { requested: new URL(req.url).searchParams.get("repo") ?? undefined, defaultSlug: env.AGENT_REPO },
+  );
+  if (!repoResult.ok) return respond(repoResult);
+  const repo = repoResult.value;
+  try {
+    return Response.json({ repo, count: await api.countIssues(repo) });
   } catch (err) {
     return upstreamFailure(err, req.method, new URL(req.url).pathname);
   }
@@ -877,6 +900,11 @@ export async function handleBoard(
   if (url.pathname === "/studio/board/tasks/reap") {
     return handleTaskReapRoute(req, env, api, reach, reapPort);
   }
+  // Issue #1121: same "own check, not a BOARD_ROUTE_RE alternative" reason as
+  // reap above — this path names no task number either.
+  if (url.pathname === "/studio/board/tasks/count") {
+    return handleBoardCountRoute(req, env, api, reach);
+  }
   if (url.pathname === "/studio/board/tasks/junior-sweep") {
     return handleJuniorSweepRoute(req, env, api, reach);
   }
@@ -958,6 +986,9 @@ export async function handleBoard(
       if (milestone !== null) query.milestone = milestone;
       const state = url.searchParams.get("state");
       if (state !== null) query.state = state;
+      // Issue #1121: reap reads only open tasks; the full board stays all-state.
+      const open = url.searchParams.get("open");
+      if (open !== null) query.open = open === "1" || open === "true";
       // §5 assignment, from the operator's side: which studio owns it. The
       // operator may filter by ANY studio — this is the whole board, seen by
       // the human who owns it. The studio surface below is the narrow one.

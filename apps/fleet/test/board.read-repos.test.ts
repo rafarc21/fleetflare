@@ -36,6 +36,7 @@ function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
     createIssue: vi.fn(async () => task()),
     getIssue: vi.fn(async () => task({ labels: ["submitted"], assignee: null })),
     listIssues: vi.fn(async () => []),
+    countIssues: vi.fn(async () => 0),
     addLabels: vi.fn(async () => {}),
     removeLabel: vi.fn(async () => {}),
     createComment: vi.fn(async () => ({ id: 1, url: "u" })),

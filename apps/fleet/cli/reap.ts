@@ -12,11 +12,12 @@
 //   1. Registry DERIVED each poll: GET /studio/ + one board listing for the
 //      scope repo. Never a hand-kept list (a hand list went stale and alarmed
 //      on 100+ dead entries — the issue's own measurement).
-//   2. Board-read floor: a listing that throws, returns 0 rows, or returns
-//      fewer than half the rows of the last good read reaps NOTHING this
-//      poll. So does a state file that cannot be trusted (floor unknown).
-//      The listing is state=all (closed tasks keep their state labels), so
-//      its row count only grows in normal use; a sudden drop is a bad read.
+//   2. Board-read floor: a listing that throws, or whose total falls below
+//      half the last good read reaps NOTHING this poll. So does a state file
+//      that cannot be trusted (floor unknown). The listing is state=open
+//      (issue #1121), and the floor compares GitHub's total issue count (all
+//      states, one GraphQL call) against the last good total — the open-only
+//      row count can legitimately shrink, the total only grows.
 //   3. STALL alarm: running + IDLE >= 10m WITH a live task -> one line, at
 //      most once per 15m per studio. Runs in dry-run too.
 //   4. Reap candidate: running + repoSlug == scope repo + IDLE >= threshold
@@ -92,7 +93,7 @@ export interface ReapState {
   backoffUntil: Record<string, string>;
   /** studio id -> ISO instant of its last STALL line. */
   stallAlarmAt: Record<string, string>;
-  /** lowercased repo -> row count of the last board listing that passed the floor. */
+  /** lowercased repo -> GitHub's non-PR issue count across all states, of the last read that passed the floor (issue #1121). */
   boardRows: Record<string, number>;
   /** studio id -> live-read refusals in a row while a candidate. */
   refusals: Record<string, number>;
@@ -133,8 +134,10 @@ export function destroyRaceOutcome(
 export interface ReapDeps {
   now: () => Date;
   listStudios: () => Promise<StudioStatus[]>;
-  /** Every task of the scope repo (state=all). Throws on any failure. */
+  /** Open/live tasks of the scope repo (state=open, issue #1121). Throws on any failure. */
   listBoard: () => Promise<BoardTask[]>;
+  /** GitHub's non-PR issue count (all states), one call (issue #1121). Throws on failure. */
+  boardTotal: () => Promise<number>;
   /** Tasks carrying this studio's label. Throws on any failure. */
   studioTasks: (id: string) => Promise<BoardTask[]>;
   inspect: (id: string) => Promise<ReapInspect>;
@@ -369,21 +372,26 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
     deps.log(`fleet reap: board read failed (${errText(err)}) — reaping nothing this poll`);
     return exit(1);
   }
-  // A repo that uses the board always has task history (state=all): zero rows
-  // is a bad read, never "nothing assigned to anyone".
-  if (board.length === 0) {
-    deps.log("fleet reap: board read returned 0 rows — reaping nothing this poll");
+  // Issue #1121: the listing is now `state=open`, which CAN be legitimately
+  // empty (every task closed), so its row count is no longer a monotone
+  // signal. The floor reads GitHub's non-PR issue count across ALL states —
+  // one GraphQL call — which only grows, preserving the bad-read detection.
+  let total: number;
+  try {
+    total = await deps.boardTotal();
+  } catch (err) {
+    deps.log(`fleet reap: board total read failed (${errText(err)}) — reaping nothing this poll`);
     return exit(1);
   }
   const prevRows = state.boardRows[repo];
-  if (prevRows !== undefined && board.length < Math.ceil(prevRows / 2)) {
+  if (prevRows !== undefined && total < Math.ceil(prevRows / 2)) {
     deps.log(
-      `fleet reap: board read floor — ${board.length} row(s), last good read had ${prevRows}; ` +
+      `fleet reap: board read floor — ${total} issue(s), last good read had ${prevRows}; ` +
         "reaping nothing this poll (delete the reap state file if the board really shrank)",
     );
     return exit(1);
   }
-  state.boardRows[repo] = board.length;
+  state.boardRows[repo] = total;
   if (floorUnknown) return exit(1);
 
   const candidates: { s: StudioStatus; idleMs: number }[] = [];
