@@ -194,11 +194,15 @@ export function gitIdentityCmd(): string {
  * with `&&`, so a failed identity write fails the refresh loudly.
  */
 export function refreshCredentialExec(
-  token: string | null, id: GitIdentity,
+  token: string | null, id: GitIdentity, workRepo?: string,
 ): { cmd: string; env: Record<string, string> } {
+  // Issue #1187: when workRepo is given, the shadow heal rides the same exec
+  // after the write — if a previous provision wrote a blueprint credential for
+  // this same repo, its scoped helper still shadows the fresh work token.
+  const heal = workRepo === undefined ? "" : ` && ${blueprintShadowDropCmd(workRepo)}`;
   return token === null
     ? { cmd: `${gitIdentityCmd()} && ${credentialClearCmd()}`, env: gitIdentityEnv(id) }
-    : { cmd: `${gitIdentityCmd()} && ${credentialWriteCmd()}`, env: { ...gitIdentityEnv(id), ...tokenEnv(token) } };
+    : { cmd: `${gitIdentityCmd()} && ${credentialWriteCmd()}${heal}`, env: { ...gitIdentityEnv(id), ...tokenEnv(token) } };
 }
 
 /**
@@ -282,6 +286,10 @@ export function credentialClearCmd(): string {
  * No token ever appears in a clone URL — same discipline
  * `credentialWriteCmd` already follows for the work repo.
  */
+/** The blueprint clone credential's own store file, a named constant so the
+ *  write and the two drops below cannot drift apart on the path. */
+export const BLUEPRINT_CREDENTIAL_PATH = "/workspace/.git-credentials-blueprint";
+
 export function blueprintCredentialWriteCmd(blueprintRepo: string): string {
   const base = `credential.https://github.com/${blueprintRepo}`;
   // The key must match the URL studio-bringup.sh clones, `.git` and all.
@@ -291,11 +299,53 @@ export function blueprintCredentialWriteCmd(blueprintRepo: string): string {
   const stale = `${base}.helper`;
   const drop = (k: string) => `{ git config --global --unset-all '${k}' 2>/dev/null || true; }`;
   return (
-    `printf '%s\\n' "https://x-access-token:$${FLEET_TOKEN_ENV}@github.com" > /workspace/.git-credentials-blueprint && ` +
+    `printf '%s\\n' "https://x-access-token:$${FLEET_TOKEN_ENV}@github.com" > ${BLUEPRINT_CREDENTIAL_PATH} && ` +
     `${drop(stale)} && ${drop(key)} && ` +
     `git config --global --add '${key}' '' && ` +
-    `git config --global --add '${key}' 'store --file=/workspace/.git-credentials-blueprint'`
+    `git config --global --add '${key}' 'store --file=${BLUEPRINT_CREDENTIAL_PATH}'`
   );
+}
+
+/** Issue #1187: the exact inverse of blueprintCredentialWriteCmd — unset both
+ *  scoped keys (the suffixless stale one and the `.git.helper` one) and remove
+ *  the store file. Run at provision when the blueprint repo IS the work repo:
+ *  a read-only 1 h token answering the work repo's own push URL is exactly
+ *  the shadow that breaks every push. Repeat-safe, like the write itself. */
+export function blueprintCredentialDropCmd(blueprintRepo: string): string {
+  if (!SAFE_REPO.test(blueprintRepo)) throw new Error(`blueprint drop: unsafe repo name ${JSON.stringify(blueprintRepo)}`);
+  const base = `credential.https://github.com/${blueprintRepo}`;
+  const drop = (k: string) => `{ git config --global --unset-all '${k}' 2>/dev/null || true; }`;
+  return (
+    `${drop(`${base}.helper`)} && ${drop(`${base}.git.helper`)} && ` +
+    `rm -f ${BLUEPRINT_CREDENTIAL_PATH}`
+  );
+}
+
+/** Issue #1187: the refresh-side heal for a live studio provisioned before
+ *  the provision skip existed. Unsets the work repo's two OWN-URL helper keys
+ *  — but only when the key's value names the blueprint store file, checked
+ *  with a `case` pattern (never `grep -q`: the value holds no newlines, and a
+ *  case needs no extra process), so a key re-pointed at some other store by a
+ *  future mechanism is left alone. The file is removed only when a shadow key
+ *  was actually found, so a legit OTHER-repo blueprint credential — a
+ *  different URL scope, whose file is shared — survives untouched. */
+export function blueprintShadowDropCmd(workRepo: string): string {
+  if (!SAFE_REPO.test(workRepo)) throw new Error(`blueprint shadow drop: unsafe repo name ${JSON.stringify(workRepo)}`);
+  return (
+    `{ n=0; for k in 'credential.https://github.com/${workRepo}.git.helper' 'credential.https://github.com/${workRepo}.helper'; ` +
+    `do v=$(git config --global --get "$k" 2>/dev/null || true); ` +
+    `case "$v" in *git-credentials-blueprint*) git config --global --unset-all "$k" || exit 1; n=1 ;; esac; done; ` +
+    `[ "$n" = 0 ] || rm -f ${BLUEPRINT_CREDENTIAL_PATH}; }`
+  );
+}
+
+/** Issue #1187: after a refresh write, ask git itself which password it now
+ *  serves for the work repo's push URL. The caller compares the password to
+ *  the fresh token in TypeScript — never in shell, where it would sit in a
+ *  `Killed <command>` line. */
+export function workCredentialVerifyCmd(workRepo: string): string {
+  if (!SAFE_REPO.test(workRepo)) throw new Error(`work credential verify: unsafe repo name ${JSON.stringify(workRepo)}`);
+  return `printf 'url=https://github.com/${workRepo}.git\\n\\n' | GIT_TERMINAL_PROMPT=0 git credential fill`;
 }
 
 /** Issue #291: the read-only sibling token's git-credential-store file. Its
