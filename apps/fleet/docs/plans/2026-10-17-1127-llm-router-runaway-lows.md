@@ -36,3 +36,21 @@ The llm router's runaway guard. If wrong, a real kimi in-think tool call whose
 tag splits across deltas is aborted as a runaway (tool call lost), or a long
 single-line answer is scanned slowly. Confined to `translate.ts` scanning; no
 other consumer of `scanForRunaway`.
+
+## Amend (#1185, maestro review of PR #1183)
+
+1. Blind spot: with `state.thinkTags` on, the latch `state.thinkTags || …`
+   runs the tool-call probe on every delta of the whole turn, so the probe's
+   own guard was believed to cover the split-tag case — but the repeated-line
+   scan was never exercised on thinkTags-visible text or reasoning_content.
+   The new latch `if (state.thinking || (state.pendingTag + text).includes(THINK_OPEN))`
+   latches only while a think region is open or being opened: split tags still
+   latch (pendingTag holds the held-back partial-tag bytes), visible text and
+   reasoning_content stop running the probe once no region opened.
+2. Two RED tests: a thinkTags stream with visible `{"name": "demo"}\n` plus
+   60 identical 40+ char lines must trip `repeat_line`; same via
+   reasoning_content.
+3. Perf test hardening: replace the timing-only 200k single-line test with a
+   spy on `String.prototype.split` — 10k newline-free 3-char deltas must
+   make 0 split calls; restore in finally. Deleting the
+   `if (!text.includes("\n"))` line must turn it red.
