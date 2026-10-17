@@ -92,6 +92,9 @@ describe("isBarePrompt", () => {
   it("returns false when there is no composer row", () => {
     expect(isBarePrompt("just some text")).toBe(false);
   });
+  it("returns false when wrapped queued text follows the bare prompt row", () => {
+    expect(isBarePrompt([RULE, "❯ ", "wrapped queued text", RULE].join("\n"))).toBe(false);
+  });
 });
 
 describe("idleAutoContinue (tick side effect)", () => {
@@ -171,6 +174,18 @@ describe("idleAutoContinue (tick side effect)", () => {
       storage as never, "acme--pilot",
     );
     expect(wake).not.toHaveBeenCalled();
+  });
+
+  it("does not stamp on a skipped wake", async () => {
+    const storage = fakeStorage();
+    const findTask = vi.fn(async () => task("submitted"));
+    const wake = vi.fn(async () => ({ ok: false, skipped: true } as const));
+    const escalate = vi.fn(async () => {});
+    await idleAutoContinue(
+      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), paneFrame: BARE_FRAME, findTask, wake, escalate },
+      storage as never, "acme--pilot",
+    );
+    expect(storage.map.get(AUTO_CONTINUE_KEY)).toBeUndefined();
   });
 
   it("stamps lastNudgeAt on a failed wake so the next tick does not retype", async () => {

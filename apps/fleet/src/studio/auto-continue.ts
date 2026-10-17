@@ -1,6 +1,6 @@
 import type { Activity } from "./activity";
 import type { BoardTaskState } from "../board/types";
-import { PROMPT_LINE, RULE_LINE } from "./failover";
+import { PROMPT_LINE, QUEUED_TEXT_ROWS, RULE_LINE } from "./failover";
 
 export const AUTO_CONTINUE_IDLE_MS = 10 * 60_000;
 export const AUTO_CONTINUE_EVERY_MS = 20 * 60_000;
@@ -49,24 +49,30 @@ export function autoContinuePrompt(taskNumber: number): string {
   return `Continue your board task #${taskNumber} now; do not stop between steps.`;
 }
 
-/** The claude composer row, when the frame draws an idle input box (a
- *  RULE_LINE immediately followed by a PROMPT_LINE), else null. */
-function composerRowIn(frame: string): string | null {
+/** Index of the composer's prompt row (a RULE_LINE directly above a
+ *  PROMPT_LINE), else -1. */
+function promptRowIn(frame: string): number {
   const lines = frame.replace(/\s+$/, "").split("\n");
   for (let i = 0; i < lines.length - 1; i++) {
-    if (RULE_LINE.test(lines[i]) && PROMPT_LINE.test(lines[i + 1] ?? "")) return lines[i + 1];
+    if (RULE_LINE.test(lines[i]) && PROMPT_LINE.test(lines[i + 1] ?? "")) return i + 1;
   }
-  return null;
+  return -1;
 }
 
 /** True only when the composer is provably BARE — `❯` with nothing typed
- *  after it. Any text (a half-typed draft, a ghost suggestion, queued text)
- *  or no composer row at all fails closed to false: not a safe place to type
- *  a continue nudge. */
+ *  after it and no queued/wrapped text before the closing rule. A draft,
+ *  ghost suggestion, wrapped queued text, or no composer row all fail closed
+ *  to false: not a safe place to type a continue nudge. */
 export function isBarePrompt(frame: string): boolean {
-  const row = composerRowIn(frame);
-  if (row === null) return false;
-  return /^\s*❯\s*$/.test(row);
+  const lines = frame.replace(/\s+$/, "").split("\n");
+  const idx = promptRowIn(frame);
+  if (idx < 0 || !/^\s*❯\s*$/.test(lines[idx])) return false;
+  for (let j = idx + 1, rows = 0; j < lines.length && rows < QUEUED_TEXT_ROWS; j++, rows++) {
+    if (lines[j].trim() === "") continue;
+    if (RULE_LINE.test(lines[j])) return true;
+    return false;
+  }
+  return false;
 }
 
 /**
