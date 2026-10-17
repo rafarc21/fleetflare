@@ -19,10 +19,10 @@
 // nothing here infers deploy truth from a label — that is measured from
 // branch + host, never from the board.
 
-import { parseBrief, renderBriefPrompt, renderTaskBody, taskKeyMarker, type TaskBrief } from "./brief";
+import { parseBrief, refsInBrief, renderBriefPrompt, renderTaskBody, taskKeyMarker, type TaskBrief } from "./brief";
 import { parseEnvelope, parseEnvelopeComment, renderEnvelopeComment } from "./envelope";
 import {
-  isStaleBacklog, isTaskState, studioLabel, taskAssignees, taskStates, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES,
+  isStaleBacklog, isTaskState, latestResultPr, studioLabel, taskAssignees, taskStates, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES,
   JUNIOR_LABEL, SECURITY_LABEL,
   type BoardTask, type BoardTaskView, type EnvelopeDoc, type BoardTaskState, type CloseReason,
 } from "./types";
@@ -302,6 +302,43 @@ export async function createTask(
     const leadType = await getLeadType(brief.assignee);
     if (securityRefusesGlmLead(labels, leadType)) {
       return { ok: false, status: 400, message: securityGlmRefusalMessage(brief.assignee) };
+    }
+  }
+  // Issue #1133: refuse a second open task for an issue the brief references.
+  // `--allow-duplicate` skips it; a getIssue that throws (404 or upstream)
+  // fails OPEN — the create is about to need GitHub anyway, so an unreachable
+  // issue must not refuse a task that otherwise validated.
+  if (brief.allowDuplicate !== true) {
+    for (const number of refsInBrief(brief.title, brief.objective)) {
+      let existing: BoardTask;
+      try {
+        existing = await api.getIssue(repo, number);
+      } catch (err) {
+        if (err instanceof GitHubError && err.status === 404) continue;
+        console.error(`board: duplicate check of #${number} in ${repo} threw`, err);
+        continue;
+      }
+      // Issue #1208: refuse only a REAL board task in a live state. A plain
+      // open issue or an open PR (state === null — no state label) is not a
+      // task and must not block a filing that merely references its number.
+      const terminal = existing.state !== null && TERMINAL_TASK_STATES.includes(existing.state);
+      if (existing.open && existing.state !== null && !terminal) {
+        const holder = existing.assignee === null ? "unassigned" : existing.assignee;
+        const pr = await (async (): Promise<number | null> => {
+          try {
+            const shown = await showTask(api, repo, number);
+            return shown.ok ? latestResultPr(shown.value.comments) : null;
+          } catch {
+            return null;
+          }
+        })();
+        const line = pr === null
+          ? `task #${number} in ${repo} is already open (${existing.state ?? "unlabelled"}, ${holder}) — ` +
+            "this brief references its issue. Refusing to file a duplicate; pass --allow-duplicate to override."
+          : `task #${number} in ${repo} is already open (${existing.state ?? "unlabelled"}, ${holder}, PR #${pr}) — ` +
+            "this brief references its issue. Refusing to file a duplicate; pass --allow-duplicate to override.";
+        return { ok: false, status: 409, message: line };
+      }
     }
   }
   const input: IssueInput = {

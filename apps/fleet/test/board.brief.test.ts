@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseBrief, renderBriefPrompt, renderTaskBody, TASK_BODY_MAX, TASK_TITLE_MAX } from "../src/board/brief";
+import { parseBrief, refsInBrief, renderBriefPrompt, renderTaskBody, TASK_BODY_MAX, TASK_TITLE_MAX } from "../src/board/brief";
 
 // §5's ruling made mechanical: a task body is a SELF-CONTAINED brief —
 // objective, output format, boundaries. Spec issues cause 43.8% of agent
@@ -80,6 +80,25 @@ describe("parseBrief", () => {
   it("refuses a non-object body outright", () => {
     expect(parseBrief(null).ok).toBe(false);
     expect(parseBrief("brief").ok).toBe(false);
+  });
+});
+
+// Issue #1133: the issue numbers a brief references — `#N` anywhere in its
+// title, or the board's canonical `refs #N` in title or objective (the same
+// form pr-awaiting-merge.ts reads on PRs). `continues` is NOT a reference: a
+// follow-up legitimately reopens work on the issue a merge just closed.
+describe("refsInBrief", () => {
+  it("reads #N anywhere in the title, in order of first appearance", () => {
+    expect(refsInBrief("#1156 gate watchdog", "objective")).toEqual([1156]);
+    expect(refsInBrief("fix #1156 and #1150", "x")).toEqual([1156, 1150]);
+  });
+
+  it("reads the board's canonical `refs #N` in the title or objective", () => {
+    expect(refsInBrief("gate watchdog follow-ups", "refs #1150 in the objective")).toEqual([1150]);
+  });
+
+  it("does not read `continues` as a reference — a follow-up legitimately reopens the issue", () => {
+    expect(refsInBrief("Build the task board", "Continues #7.\n\nwork")).toEqual([]);
   });
 });
 
@@ -164,6 +183,21 @@ describe("parseBrief — security (#249)", () => {
     const absent = parseBrief(base);
     expect(absent.ok && absent.brief.security).toBeUndefined();
     expect(parseBrief({ ...base, security: "yes" })).toEqual({ ok: false, message: "security must be a boolean" });
+  });
+});
+
+// Issue #1133: `--allow-duplicate` opts a task out of the duplicate-task
+// refusal — same boolean shape `junior` and `security` already use.
+describe("parseBrief — allowDuplicate (#1133)", () => {
+  it("allowDuplicate: true accepted, absent/false means not set, anything else is a 400", () => {
+    const base = { title: "t", objective: "o", outputFormat: "f", boundaries: "b" };
+    const ok = parseBrief({ ...base, allowDuplicate: true });
+    expect(ok.ok && ok.brief.allowDuplicate).toBe(true);
+    const off = parseBrief({ ...base, allowDuplicate: false });
+    expect(off.ok && off.brief.allowDuplicate).toBeUndefined();
+    const absent = parseBrief(base);
+    expect(absent.ok && absent.brief.allowDuplicate).toBeUndefined();
+    expect(parseBrief({ ...base, allowDuplicate: "yes" })).toEqual({ ok: false, message: "allowDuplicate must be a boolean" });
   });
 });
 
