@@ -3,14 +3,18 @@
 
 ## Problem
 
-Two coverage gaps in apps/fleet/test/bun/gate-leg-run.test.ts, from the #1175 review:
+Two R2-composed retry paths in apps/fleet/test/bun/gate-leg-run.test.ts are
+unpinned, from the #1175 review:
 
-1. Clone-via-R2 is unpinned: #1175 only tested install failed through the R2
-   prefix. Mutating only the clone branch of `isRetryable` (dropping
-   `stripped.startsWith("clone failed:")`) keeps 54/54 green.
-2. Nothing pins that an R2-recovered error whose underlying text is NOT an
-   install/clone cause stays final: mutating `isRetryable` to return true for
-   every error (over-broad retry) keeps 54/54 green.
+1. No test covers a clone failure recovered from R2 reaching the
+   flaky-success tag: #1175 only routed an install failure through the
+   `R2_PREFIX` strip. The direct-clone tests that exist never carry the
+   read-back prefix, so the composed path (prefix + clone branch + retry +
+   `flaky: passed on retry`) is untested.
+2. No test covers an R2-recovered error whose underlying text is NOT an
+   install/clone cause staying final: the finality tests that exist never
+   carry the read-back prefix, so the composed path (prefix + unrelated
+   cause + no retry) is untested.
 
 ## Tests (both added to the `runLegStep: clone failure retries once (#1104)` describe block, after the `.retry.json` evidence-key test, ~line 505)
 
