@@ -666,6 +666,12 @@ const TOOL_CALL_TAG = /<tool_call>([\s\S]*?)<\/tool_call>/g;
  *  tool-call payload (issue #1099). The unrecovered-tool-call error path no
  *  longer keys on this marker — see recoverThinkToolCalls (issue #1186). */
 const TOOL_CALL_MARKER = /<tool_call\b|"name"\s*:\s*"/;
+/** A `<tool_call>` opener with no closer — an interrupted call is still an
+ *  attempt to recover or retry, never silently dropped (issue #1201). */
+const UNTERMINATED_TOOL_CALL = /<tool_call\b/;
+/** A bare JSON tool-call body: `{` immediately followed by `"name"`, even
+ *  after prose. A prose `"name":` mention with no brace does NOT match. */
+const BARE_JSON_ATTEMPT = /\{\s*"name"/;
 const UNRECOVERED_TOOL_CALL_MESSAGE =
   "upstream emitted a tool call inside its reasoning block that could not be recovered; retry the turn";
 
@@ -745,30 +751,48 @@ function routeContent(state: StreamState, content: string, events: string[]): vo
  *      be a JSON-encoded string, OpenAI-style);
  *   2. the whole think body being that one JSON object, with no tags.
  *  Anything else is not recovered — a payload that does not parse, or prose
- *  wrapped around the call, is left for the error path to report. */
-function recoverThinkToolCalls(thinkText: string): { calls: Array<{ name: string; input: Record<string, unknown> }>; hadToolCallAttempt: boolean } {
+ *  wrapped around the call, is left for the error path to report.
+ *  `hadToolCallAttempt` is true when the region carries tool-call-shaped text
+ *  in any recognized form — a complete or unterminated `<tool_call>` opener,
+ *  or a bare JSON body (`{` then `"name"`, even after prose). `failedTagged`
+ *  is true when a tagged block did not parse, so a lost sibling call is never
+ *  dropped silently (issue #1201). */
+function recoverThinkToolCalls(thinkText: string): {
+  calls: Array<{ name: string; input: Record<string, unknown> }>;
+  hadToolCallAttempt: boolean;
+  failedTagged: boolean;
+} {
   const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
-  const take = (raw: string) => {
+  const take = (raw: string): boolean => {
     let value: Json;
-    try { value = JSON.parse(raw.trim()); } catch { return; }
-    if (!value || typeof value !== "object" || typeof value.name !== "string" || value.name.length === 0) return;
+    try { value = JSON.parse(raw.trim()); } catch { return false; }
+    if (!value || typeof value !== "object" || typeof value.name !== "string" || value.name.length === 0) return false;
     let input: Json = value.arguments ?? value.input ?? {};
     if (typeof input === "string") {
-      try { input = JSON.parse(input); } catch { return; }
+      try { input = JSON.parse(input); } catch { return false; }
     }
-    if (input && typeof input === "object" && !Array.isArray(input)) calls.push({ name: value.name, input });
+    if (input && typeof input === "object" && !Array.isArray(input)) {
+      calls.push({ name: value.name, input });
+      return true;
+    }
+    return false;
   };
   const tagged = [...thinkText.matchAll(TOOL_CALL_TAG)];
   if (tagged.length > 0) {
-    for (const m of tagged) take(m[1]);
-    return { calls, hadToolCallAttempt: true };
+    let failedTagged = false;
+    for (const m of tagged) if (!take(m[1])) failedTagged = true;
+    return { calls, hadToolCallAttempt: true, failedTagged };
   }
-  // Bare-JSON form: an attempt only when the body starts like an object.
-  if (thinkText.trim().startsWith("{")) {
+  // Unterminated opener with no closer: still an attempt, never silent.
+  if (UNTERMINATED_TOOL_CALL.test(thinkText)) {
+    return { calls, hadToolCallAttempt: true, failedTagged: false };
+  }
+  // Bare-JSON form: `{` then "name" anywhere — including after prose.
+  if (BARE_JSON_ATTEMPT.test(thinkText)) {
     take(thinkText);
-    return { calls, hadToolCallAttempt: true };
+    return { calls, hadToolCallAttempt: true, failedTagged: false };
   }
-  return { calls, hadToolCallAttempt: false };
+  return { calls, hadToolCallAttempt: false, failedTagged: false };
 }
 
 /** Closes a think region: recovered tool calls become complete tool_use
@@ -777,8 +801,8 @@ function recoverThinkToolCalls(thinkText: string): { calls: Array<{ name: string
  *  error path in closeStreamOrError. */
 function finishThink(state: StreamState, events: string[]): void {
   state.scan.payload = false;
-  const { calls, hadToolCallAttempt } = recoverThinkToolCalls(state.thinkText);
-  if (calls.length === 0 && hadToolCallAttempt) state.unrecoverableToolCall = true;
+  const { calls, hadToolCallAttempt, failedTagged } = recoverThinkToolCalls(state.thinkText);
+  if (failedTagged || (calls.length === 0 && hadToolCallAttempt)) state.unrecoverableToolCall = true;
   state.thinkText = "";
   if (calls.length === 0) return;
   closeOpenBlock(state, events);
