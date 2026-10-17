@@ -195,8 +195,9 @@ describe("writeBlueprintCredentialPort — do.ts's own side of the #149 wiring",
   const BLUEPRINT = "acme-org/websites";
   const okExec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
 
+  type Mint = (workRepoSlug: string, blueprintRepo: string) => Promise<string | null>;
   function port(
-    mint = vi.fn(async () => "ghs_blueprint"),
+    mint: Mint = async () => "ghs_blueprint",
     exec = okExec,
   ) {
     return writeBlueprintCredentialPort(
@@ -240,7 +241,7 @@ describe("writeBlueprintCredentialPort — do.ts's own side of the #149 wiring",
   });
 
   it("a null mint returns the no-token error, exec not called", async () => {
-    const mint = vi.fn(async () => null);
+    const mint: Mint = async () => null;
     const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
     const res = await port(mint, exec);
     expect(res.ok).toBe(false);
