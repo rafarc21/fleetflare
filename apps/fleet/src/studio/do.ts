@@ -170,7 +170,7 @@ import {
 import { sendCard } from "../telegram/api";
 import { parseLearnings, parseEnvelopeComment } from "../board/envelope";
 import { assignedBriefResolver, openTaskChecker, githubBoardApi } from "../board/routes";
-import { listTasks, openTasksNeedingRebrief, autoStartSubmittedTasks } from "../board/board";
+import { listTasks, openTasksNeedingRebrief, autoStartSubmittedTasks, findLiveAssignedTask } from "../board/board";
 // Issue #249 (PR4b): "live" is the board's own state, not GitHub's open flag —
 // a terminal state leaves the issue open, and a finished task's branch is not
 // work a fresh lead needs re-briefed on. Same filter
@@ -183,6 +183,7 @@ import { LIVE_TASK_STATES, TERMINAL_TASK_STATES } from "../board/types";
 // pane instead. No cycle: assign-wake.ts's only studio/ import is a
 // type-only one (WakeOutcome from ./wake), elided at build time.
 import { assignDigest } from "../board/assign-wake";
+import { idleAutoContinue, AUTO_CONTINUE_KEY, AUTO_CONTINUE_IDLE_MS, AUTO_CONTINUE_MAX_NUDGES, type AutoContinueStorage, type IdleAutoContinueResult } from "./auto-continue";
 import { observeContainer } from "./container-watch";
 import { makeEvent, shortId, type FleetEvent } from "../events/schema";
 import { leadAccountMismatch } from "./lead-route";
@@ -4897,16 +4898,25 @@ export async function ensureSpawnToken(
  * only this feature touches.
  */
 async function getObservedWithActivity(storage: ObservedStorage): Promise<Observed> {
-  const [observed, activity, memberAlerts, restarts] = await Promise.all([
+  const [observed, activity, autoContinue, memberAlerts, restarts] = await Promise.all([
     getObserved(storage),
     (storage as unknown as ActivityStorage).get(ACTIVITY_KEY),
+    // Issue #1193 — the monotonic nudge count, same "own DO key, internal
+    // cast at the one call site that needs it" idiom.
+    (storage as unknown as AutoContinueStorage).get(AUTO_CONTINUE_KEY),
     // Issue #311 — same "own DO key, internal cast at the one call site
     // that needs it" idiom `ACTIVITY_KEY` (above) already uses.
     (storage as unknown as MemberAlertsStorage).get(MEMBER_ALERTS_KEY),
     // Issue #56 — same idiom again: the container-restart log (restarts.ts).
     (storage as unknown as RestartStorage).get(RESTARTS_KEY),
   ]);
-  return { ...observed, activity: activity ?? null, memberAlerts: memberAlerts ?? null, ...(restarts === undefined ? {} : { restarts }) };
+  return {
+    ...observed,
+    activity: activity ?? null,
+    autoContinues: autoContinue?.totalNudges ?? null,
+    memberAlerts: memberAlerts ?? null,
+    ...(restarts === undefined ? {} : { restarts }),
+  };
 }
 
 export async function withObserved(storage: ObservedStorage, status: StudioStatus): Promise<StudioStatus> {
@@ -5168,6 +5178,8 @@ async function applyActivityVerdict(
   id: string,
   onLeadWorking?: () => Promise<void>,
   onStaleBackgroundShell?: () => Promise<void>,
+  onIdleAutoContinue?: (paneFrame?: string) => Promise<IdleAutoContinueResult>,
+  paneFrame?: string,
 ): Promise<void> {
   const activityStatus = await storage.get(STATUS_KEY);
   const activityOpFresh = operationLockFresh(await storage.get(OPERATION_KEY), deps.now());
@@ -5208,6 +5220,21 @@ async function applyActivityVerdict(
     const wasStale = prevAge !== null && prevAge >= BACKGROUND_SHELL_STALE_MS;
     if (nowStale && !wasStale) {
       await staleShellNudge(deps, storage as unknown as StaleShellNudgeStorage, onStaleBackgroundShell, id);
+    }
+  }
+  // Issue #1193 — level-triggered, not edge-triggered: an OSS lead can stay
+  // idle for an hour, and the 20-minute cadence needs re-evaluation while the
+  // idle state persists. The callback's own cheap gates make every non-due
+  // tick a no-op; the age gate here keeps it silent for the first ten idle
+  // minutes of an episode.
+  if (onIdleAutoContinue && nextAct.state === "idle") {
+    const idleMs = deps.now().getTime() - Date.parse(nextAct.since);
+    if (Number.isFinite(idleMs) && idleMs >= AUTO_CONTINUE_IDLE_MS) {
+      const result = await onIdleAutoContinue(paneFrame);
+      if (result.kind !== "none" && recordStudioFn) {
+        const fresh = await storage.get(STATUS_KEY);
+        if (fresh) await recordStudioFn(await withObserved(storage, fresh));
+      }
     }
   }
 }
@@ -5420,6 +5447,7 @@ export async function runShipTickWithObservation(
   archive?: { doneRecords: DoneRecordPorts; resolveOpsRepo: ResolveMemoryRepo },
   onLeadWorking?: () => Promise<void>,
   onStaleBackgroundShell?: () => Promise<void>,
+  onIdleAutoContinue?: (paneFrame?: string) => Promise<IdleAutoContinueResult>,
   // Issue #1146: the one board event per replace (replacementEvent). Optional:
   // a caller that never wires it keeps the pre-#1146 behaviour exactly.
   onReplaced?: (ev: FleetEvent) => Promise<void>,
@@ -5699,7 +5727,7 @@ export async function runShipTickWithObservation(
   // `applyActivityVerdict`, above `runShipTickWithObservation`).
   if (result.paneVerdict !== undefined) {
     await applyActivityVerdict(
-      deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat, id, onLeadWorking, onStaleBackgroundShell,
+      deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat, id, onLeadWorking, onStaleBackgroundShell, onIdleAutoContinue, result.paneFrame,
     );
   }
 
@@ -6354,6 +6382,62 @@ export class StudioDO extends Sandbox<Env> {
       console.log(`studio ${this.selfId()}: lead working — task ${res.moved.map((n) => `#${n}`).join(", ")} submitted -> working`);
     }
     for (const e of res.errors) console.error(`studio ${this.selfId()}: auto submitted->working: ${e}`);
+  }
+
+  /** Issue #1193 — the real `onIdleAutoContinue` callback. Runs the whole
+   *  decision (lead type, idle age, board task, 20-minute window, 6-per-task
+   *  cap) under the single-flight wake lock, emits one `events` row per
+   *  landed nudge and per escalation, and lets `withObserved` (which reads
+   *  AUTO_CONTINUE_KEY) carry the fresh count to D1. */
+  private async notifyIdleAutoContinue(paneFrame?: string): Promise<IdleAutoContinueResult> {
+    const now = new Date();
+    const storedStatus = (await this.ctx.storage.get<StudioStatus>(STATUS_KEY)) ?? null;
+    const activity = (await (this.ctx.storage as unknown as ActivityStorage).get(ACTIVITY_KEY)) ?? null;
+    return idleAutoContinue(
+      {
+        now: () => now,
+        leadType: resolveLeadType(storedStatus),
+        activity,
+        paneFrame,
+        findTask: async () => {
+          const repo = (await this.workRepoSlug(null)).toLowerCase();
+          const r = await findLiveAssignedTask(githubBoardApi(this.env), repo, this.selfId());
+          return r.ok ? r.value : null;
+        },
+        wake: (prompt) => singleFlightWake(this.wakeLock, () => wakeStudioWith(
+          this.ctx.storage,
+          (cmd: string) => sbExec(this, cmd, EXEC_CLASSES.wake),
+          { isMaestro: this.isMaestro(), armSweep: () => this.armSweep(), prompt, studioId: this.selfId() },
+        )),
+        escalate: async (taskNumber) => {
+          await appendEvent(this.env.DB, this.autoContinueEscalationEvent(taskNumber, now));
+        },
+      },
+      this.ctx.storage as unknown as AutoContinueStorage, this.selfId(),
+    ).then((result) => {
+      if (result.kind === "nudged") {
+        void appendEvent(this.env.DB, this.autoContinueNudgeEvent(result.taskNumber, result.totalNudges, now)).catch((err) => {
+          console.error(`studio ${this.selfId()}: auto-continue nudge event write failed`, err);
+        });
+      }
+      return result;
+    });
+  }
+
+  private autoContinueNudgeEvent(taskNumber: number, totalNudges: number, now: Date): FleetEvent {
+    const project = parseStudioId(this.selfId())?.repo ?? this.selfId();
+    return makeEvent({
+      from: this.selfId(), to: "board", kind: "decision", project, ref: this.selfId(),
+      body: `auto-continue: nudged idle OSS lead to continue board task #${taskNumber} (total nudges ${totalNudges})`,
+    }, now.getTime(), shortId());
+  }
+
+  private autoContinueEscalationEvent(taskNumber: number, now: Date): FleetEvent {
+    const project = parseStudioId(this.selfId())?.repo ?? this.selfId();
+    return makeEvent({
+      from: this.selfId(), to: "board", kind: "escalation", project, ref: this.selfId(),
+      body: `auto-continue: ${AUTO_CONTINUE_MAX_NUDGES} nudges sent for board task #${taskNumber}, lead still idle — human check needed`,
+    }, now.getTime(), shortId());
   }
 
   /** Issue #106 — the real `onStaleBackgroundShell` callback, wired at
@@ -8432,6 +8516,7 @@ export class StudioDO extends Sandbox<Env> {
             { doneRecords: this.doneRecordPorts(), resolveOpsRepo: this.memoryDeps().resolveMemoryRepo },
             () => this.autoStartSubmitted(),
             () => this.notifyStaleBackgroundShell(),
+            (frame) => this.notifyIdleAutoContinue(frame),
             // Issue #1146: one `events` log row per replace — a log row only,
             // no reader surfaces it (see #1152 review item 2). A throw here is
             // caught by the tick's own handler.

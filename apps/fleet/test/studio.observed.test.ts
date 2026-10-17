@@ -20,7 +20,12 @@ describe("observed.ts", () => {
   it("emptyObserved: every field null/zero, session null", () => {
     expect(emptyObserved()).toEqual({
       incarnation: null, replacedAt: null, execFailures: 0, unreachableSince: null,
-      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null,
+      // Issue #1193: the monotonic auto-continue nudge count mirror, null
+      // before the first nudge (same optional-means-null reading as the
+      // markers below).
+      autoContinues: null,
+      memberAlerts: null,
       // Issue #249 (PR4b): the survival re-brief's dedup marker. OPTIONAL on
       // the type (absence means exactly what `null` means, so a pre-#249
       // stored record reads as "never delivered"), but `emptyObserved` still
