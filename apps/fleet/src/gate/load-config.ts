@@ -4,12 +4,12 @@
 //
 // Lookup order:
 //   1. `gates[repo]` in the FLEET repo's fleet.json (read at HEAD). An entry
-//      wins, and a malformed entry is a skip, never a fall-through.
+//      wins, and a malformed entry fails the run, never a fall-through.
 //   2. Else the PR repo's OWN root fleet.json `gate` block, read at the PR's
 //      BASE sha. Never the head or the merge commit: a PR must not be able to
 //      edit its own gate. Exception (#1091): a PR that changes fleet.json is
 //      gated on the head's block, the config it introduces.
-//   3. Missing or malformed → null → the gate skips, same as today.
+//   3. Missing or malformed → null → a gated repo whose PR targets this base fails (#1132).
 import { fleetJsonChanged, gateMapEntry, parseGateBlock, type GateConfig } from "./config";
 
 /** Parsed fleet.json for `repo` at `ref`, or null when the file is absent or

@@ -235,6 +235,21 @@ describe("GET /studio/gate/status with a skipped run", () => {
       state: "error", description: "skipped: no gate block in fleet.json", statusPostFailed: false,
     });
   });
+
+  it("a #1125 head-moved skip posted nothing to post, but its head's own push gates it: success, never a false red", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({
+        status: "complete",
+        output: { skipped: "head moved since the infra error", statusPostFailed: false },
+      })),
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(await res.json()).toEqual({
+      state: "success", description: "skipped: head moved since the infra error", statusPostFailed: false,
+    });
+  });
 });
 
 describe("GET /studio/gate/status per-leg output (#1049)", () => {
