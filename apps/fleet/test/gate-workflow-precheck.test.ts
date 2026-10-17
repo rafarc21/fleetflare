@@ -25,6 +25,11 @@ type Recorded = { method: string; url: string; body: unknown };
 
 let recorded: Recorded[] = [];
 let realFetch: typeof globalThis.fetch;
+// #1203: the two /compare/ GETs in one run — resolve-pr's compareFiles first,
+// then the precheck's comparePrecheckData — are told apart by call count, so a
+// test can throw ONLY the precheck's call and pin the fail-closed catch.
+let compareCalls = 0;
+let compareThrows2nd = false;
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -54,6 +59,13 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   if (method === "GET" && /\/compare\/[0-9a-f]+\.\.\.[0-9a-f]+$/.test(url)) {
     // compareFiles (resolve-pr) + comparePrecheckData (precheck step): the one
     // body serves both. The commit message carries a closing keyword.
+    compareCalls++;
+    // #1203: throw every precheck compare (call 2 and any Workflows retry of
+    // it), never resolve-pr's own first call. `=== 2` alone would let a retry
+    // of the precheck step (call 3) succeed and mask the fail-closed catch.
+    if (compareThrows2nd && compareCalls >= 2) {
+      return Promise.reject(new Error("boom"));
+    }
     return Promise.resolve(json({
       ahead_by: 1,
       merge_base_commit: { sha: MERGE_BASE },
@@ -82,6 +94,8 @@ const workflowEnv = () => env as unknown as Env;
 
 beforeEach(() => {
   recorded = [];
+  compareCalls = 0;
+  compareThrows2nd = false;
   realFetch = globalThis.fetch;
   globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
 });
@@ -124,6 +138,39 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       // No leg ran: the SKIP path and its precheck never touch GATE_RUNNER.
       const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
       expect(legCalls).toEqual([]);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("a precheck compare that throws fails closed: posts the fail-closed description (#1203)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    delete e.FLEET_OPS_REPO;
+
+    // Only the precheck's own compare GET throws: resolve-pr's compareFiles is
+    // the first /compare/ call and must still resolve, or the run errors before
+    // the precheck step ever runs.
+    compareThrows2nd = true;
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-fix2");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-fix2", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("failure");
+      expect(out.description).toBe("gate precheck failed closed");
+
+      const post = recorded.find((r) => r.method === "POST" && /\/statuses\//.test(r.url));
+      expect(post).toBeDefined();
+      expect(post!.body).toEqual({
+        state: "failure",
+        context: GATE_STATUS_CONTEXT,
+        description: "gate precheck failed closed",
+      });
     } finally {
       await instance.dispose();
     }
