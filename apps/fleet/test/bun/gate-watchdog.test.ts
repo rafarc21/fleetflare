@@ -69,7 +69,7 @@ function fakeIndex(initial: GateRunRecord | null) {
 
 type Post = { repo: string; headSha: string; state: string; description?: string };
 
-function harness(opts: { initial?: GateRunRecord | null; redLeg?: boolean; runs?: Record<string, string> } = {}) {
+function harness(opts: { initial?: GateRunRecord | null; redLeg?: boolean; postFails?: boolean; runs?: Record<string, string> } = {}) {
   const engine = fakeEngine();
   for (const [id, status] of Object.entries(opts.runs ?? { "gate-x": "running" })) {
     engine.runs.set(id, { status, params: {} });
@@ -78,11 +78,11 @@ function harness(opts: { initial?: GateRunRecord | null; redLeg?: boolean; runs?
   const posts: Post[] = [];
   const post = async (repo: string, headSha: string, args: { state: string; description?: string }) => {
     posts.push({ repo, headSha, ...args });
-    return true;
+    return opts.postFails === true;
   };
   const hasRedLeg = async () => opts.redLeg === true;
   const sweep = (now: number) => sweepStalledRuns({ index, workflow: engine.workflow, post, hasRedLeg, now: () => now });
-  return { engine, index, head, posts, sweep };
+  return { engine, index, head, posts, sweep, opts };
 }
 
 describe("sweepStalledRuns: a live run with no progress for the stall window is hung (#1148 item 1)", () => {
@@ -210,12 +210,64 @@ describe("sweepStalledRuns: one bad read never stops the sweep or retires a live
   });
 });
 
-describe("sweepStalledRuns: the gate runner's switch is honored by the sweep (#1148 review, LOW 5)", () => {
+describe("sweepStalledRuns: a red check that fails is retried, then ends final at the watch edge (#1156 item 1)", () => {
+  it("a red check that fails before the final age is kept; at the final age the run gets the final error", async () => {
+    const h = harness();
+    let redCheckFails = true;
+    const deps = {
+      index: h.index, workflow: h.engine.workflow,
+      post: async (repo: string, headSha: string, args: { state: string; description?: string }) => {
+        h.posts.push({ repo, headSha, ...args }); return false;
+      },
+      hasRedLeg: async () => { if (redCheckFails) throw new Error("github down"); return false; },
+      now: () => T0 + GATE_STALL_MS,
+    };
+    expect(await sweepStalledRuns(deps)).toEqual([{ runId: "gate-x", outcome: "failed" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.engine.terminated).toEqual([]);
+    const edge = T0 + GATE_WATCHDOG_FINAL_AGE_MS;
+    expect(await sweepStalledRuns({ ...deps, now: () => edge })).toEqual([{ runId: "gate-x", outcome: "final" }]);
+    expect(h.engine.terminated).toEqual(["gate-x"]);
+    expect(h.posts.at(-1)).toMatchObject({ state: "error" });
+    expect(h.posts.at(-1)?.description).toContain("could not check leg results");
+  });
+});
+
+describe("sweepStalledRuns: the final verdict is stamped before its post (#1156 item 3)", () => {
+  it("the progress stamp lands before the final post, so a slow post is never re-stalled", async () => {
+    const h = harness({ redLeg: true });
+    const now = T0 + GATE_STALL_MS;
+    let stampAtPost: number | undefined;
+    await sweepStalledRuns({
+      index: h.index, workflow: h.engine.workflow, hasRedLeg: async () => true, now: () => now,
+      post: async (repo, headSha, args) => { stampAtPost = h.head()?.progressedAt; h.posts.push({ repo, headSha, ...args }); return false; },
+    });
+    expect(stampAtPost).toBe(now);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+});
+
+describe("sweepStalledRuns: a final post that failed is retried, not silently retired (#1156 item 4)", () => {
+  it("the failed post keeps the run live and its row, so a later sweep reposts the verdict", async () => {
+    const h = harness({ redLeg: true, postFails: true });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "failed" }]);
+    expect(h.engine.terminated).toEqual([]);
+    expect(h.head()?.runId).toBe("gate-x");
+    expect(h.head()?.progressedAt).toBe(T0 + GATE_STALL_MS);
+    h.opts.postFails = false;
+    const later = T0 + GATE_STALL_MS + GATE_STALL_MS + 60_000;
+    expect(await h.sweep(later)).toEqual([{ runId: "gate-x", outcome: "final" }]);
+    expect(h.engine.terminated).toEqual(["gate-x"]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+});
+
+describe("sweepStalledRuns: a repo the gate runner is off for is retired at once, never ended, reran or posted (#1148 review LOW 5, #1156 item 2)", () => {
   it("a repo the gate runner is off for is never ended, reran or posted", async () => {
     const h = harness();
     const result = await sweepStalledRuns({
       index: h.index, workflow: h.engine.workflow, hasRedLeg: async () => false, now: () => T0 + GATE_STALL_MS,
-      post: async (repo, headSha, args) => { h.posts.push({ repo, headSha, ...args }); return true; },
+      post: async (repo, headSha, args) => { h.posts.push({ repo, headSha, ...args }); return false; },
       gated: () => false,
     });
     expect(result).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
@@ -223,6 +275,7 @@ describe("sweepStalledRuns: the gate runner's switch is honored by the sweep (#1
     expect(h.engine.creates).toEqual([]);
     expect(h.posts).toEqual([]);
     expect(h.head()?.runId).toBe("gate-x");
+    expect(h.head()?.progressedAt).toBe(-1); // the switched-off repo is retired, freeing its sweep slot
   });
 });
 
@@ -286,6 +339,11 @@ describe("hasRedResult: a leg's decisive stored result decides red, as the run's
 
   it("no stored result at all is not red: nothing failed before the stall", async () => {
     expect(await hasRedResult([], store({}))).toBe(false);
+  });
+
+  it("a red first try whose retry stored an error stays red: the run's red-first rule is final (#1156 N1c)", async () => {
+    const files = { [`${P}/shard-lint.json`]: "failure", [`${P}/shard-lint.retry.json`]: "error" };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
   });
 });
 
