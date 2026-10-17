@@ -4,7 +4,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   CLOSING_KEYWORD_RE, closingKeywordFailure, leakFailure, mergePrecheckFailures,
-  COMPARE_TRUNCATED_FAILURE, truncationFailure, addedLines, unscannableFiles, precheckBlobs,
+  COMPARE_TRUNCATED_FAILURE, truncationFailure, addedLines, unscannableFiles, precheckBlobs, recheckFailures,
 } from "../../src/gate/merge-precheck";
 
 const CLOSING = "closing keyword in PR title or body";
@@ -295,5 +295,31 @@ describe("mergePrecheckFailures: patchless files fail closed, added lines only",
       files,
     });
     expect(failures).toEqual([expect.stringContaining("#1")]);
+  });
+});
+
+// #1176: the success-path recheck — same rules, title/body re-read, diff not
+// refetched.
+describe("recheckFailures", () => {
+  it("flags a closing keyword on the re-read title", () => {
+    expect(recheckFailures({ title: "Fixes #2", body: "", patterns: ["acmeclient"], private: false })).toEqual([CLOSING]);
+  });
+
+  it("flags a leak on the re-read body, naming only the pattern index", () => {
+    const failures = recheckFailures({ title: "plain", body: "AcmeClient note", patterns: ["acmeclient"], private: false });
+    expect(failures).toEqual([expect.stringContaining("#1")]);
+  });
+
+  it("private:true runs the keyword check only, no leak scan", () => {
+    expect(recheckFailures({ title: "plain", body: "AcmeClient note", patterns: [], private: true })).toEqual([]);
+    expect(recheckFailures({ title: "Fix #2", body: "", patterns: [], private: true })).toEqual([CLOSING]);
+  });
+
+  it("fails closed on empty patterns", () => {
+    expect(recheckFailures({ title: "plain", body: "plain", patterns: [], private: false })).toEqual([DENYLIST_UNAVAILABLE]);
+  });
+
+  it("is clean for a plain re-read", () => {
+    expect(recheckFailures({ title: "plain", body: "plain", patterns: ["acmeclient"], private: false })).toEqual([]);
   });
 });

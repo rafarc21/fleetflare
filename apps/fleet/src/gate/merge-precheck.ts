@@ -88,6 +88,18 @@ export function capStatusDescription(s: string): string {
   return s.slice(0, 140).trimEnd();
 }
 
+/** #1176: the success-path recheck — same rules, title/body re-read, diff not
+ *  refetched. */
+export function recheckFailures(input: { title: string; body: string; patterns: string[]; private: boolean }): string[] {
+  const out: string[] = [];
+  const closing = closingKeywordFailure(input.title, input.body);
+  if (closing !== null) out.push(closing);
+  if (input.private) return out;
+  const leak = leakFailure(input.patterns, [input.title, input.body]);
+  if (leak !== null) out.push(leak);
+  return out;
+}
+
 /** Both prechecks, as a list of failure descriptions ([] = clean). */
 export interface MergePrecheckInput {
   title: string;

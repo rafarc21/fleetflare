@@ -20,7 +20,7 @@ import {
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
 import { resolveOpsRepo } from "../ops-repo";
-import { mergePrecheckFailures, precheckBlobs } from "./merge-precheck";
+import { capStatusDescription, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import { bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
@@ -148,13 +148,35 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     }).catch(() => ["gate precheck failed closed"] as string[]);
 
     if (precheckFailure.length > 0) {
-      const description = precheckFailure[0];
+      const description = capStatusDescription(precheckFailure[0]);
       const statusPostFailed = await step.do("post-precheck-failure", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description }));
       return { state: "failure", description, statusPostFailed, legs: [] };
     }
 
+    // #1176: a green run must not certify a title/body edited after the run
+    // started — re-read them and re-run the pure precheck (keyword + leak on the
+    // fresh title/body, diff not refetched) before either success post. Fail
+    // closed on error. Only one of the two call sites executes per run, so the
+    // shared step name replays correctly.
+    const recheck = async (): Promise<string[]> => {
+      const token = await mintToken(repo);
+      const pull = await getPullRequest(token, repo, pr);
+      const opsRepo = resolveOpsRepo(this.env);
+      const patterns = resolved.private ? [] : opsRepo === null ? [] : parseDenylist(
+        await fetchRepoFile(await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }), opsRepo, OPS_DENYLIST_PATH, "HEAD"));
+      return recheckFailures({ title: pull.title, body: pull.body, patterns, private: resolved.private });
+    };
+    const postRecheckFailure = async (failures: string[]) => {
+      const description = capStatusDescription(failures[0]);
+      const statusPostFailed = await step.do("post-recheck-failure", async () =>
+        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description }));
+      return { state: "failure" as const, description, statusPostFailed, legs: [] };
+    };
+
     if (decision.action === "skip") {
+      const recheckFailure = await step.do("precheck-recheck", recheck).catch(() => ["gate precheck failed closed"] as string[]);
+      if (recheckFailure.length > 0) return postRecheckFailure(recheckFailure);
       // Post success so the required context is not left pending forever. (A guess: localci.sh's own skip path is the model.)
       const statusPostFailed = await step.do("post-skip-status", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha,
@@ -260,6 +282,14 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       });
       // A step result cached before the outcome became a string replays as `true` (#1150 review).
       if (rerunStarted(started)) return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results) };
+    }
+
+    // #1176: before the verdict post, re-read title/body once more — only a
+    // GREEN verdict can certify a PR for auto-merge, so only that one is gated
+    // by the recheck; a red verdict posts red either way.
+    if (final.state === "success") {
+      const recheckFailure = await step.do("precheck-recheck", recheck).catch(() => ["gate precheck failed closed"] as string[]);
+      if (recheckFailure.length > 0) return postRecheckFailure(recheckFailure);
     }
 
     // Wrapped in a step so a Workflow replay never posts the status twice.
