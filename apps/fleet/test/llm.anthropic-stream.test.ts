@@ -42,8 +42,8 @@ let ctx: ReturnType<typeof fakeCtx>;
 
 async function usageRows() {
   const res = await env.DB.prepare(
-    "SELECT studio_id AS studioId, mode, model, input_tokens AS inputTokens, output_tokens AS outputTokens, ok, error, duration_ms AS durationMs, attempts FROM junior_usage_log ORDER BY ts ASC",
-  ).all<{ studioId: string; mode: string; model: string; inputTokens: number; outputTokens: number; ok: number; error: string | null; durationMs: number | null; attempts: number | null }>();
+    "SELECT studio_id AS studioId, mode, model, input_tokens AS inputTokens, output_tokens AS outputTokens, ok, error, duration_ms AS durationMs, attempts, time_to_headers AS timeToHeaders FROM junior_usage_log ORDER BY ts ASC",
+  ).all<{ studioId: string; mode: string; model: string; inputTokens: number; outputTokens: number; ok: number; error: string | null; durationMs: number | null; attempts: number | null; timeToHeaders: number | null }>();
   return res.results ?? [];
 }
 
@@ -343,6 +343,84 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     const rowsLogged = await usageRows();
     expect(rowsLogged).toHaveLength(1);
     expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1, error: null });
+  });
+
+  // Issue #1155 item 1: env.AI.run blocks before any Response exists, so
+  // the pre-header window — request start to the first possible response —
+  // is the one part of a call's life `duration_ms` cannot see on its own.
+  // Every lead row now carries `time_to_headers` alongside it. A real
+  // streaming upstream (a ReadableStream, not setup()'s plain-object
+  // fallback) exercises the path Claude Code actually takes.
+  it("a successful stream:true call logs a time_to_headers that is a non-negative integer (issue #1155)", async () => {
+    const enc = new TextEncoder();
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 2 } },
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    await r.text();
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].timeToHeaders).not.toBeNull();
+    expect(Number.isInteger(rowsLogged[0].timeToHeaders)).toBe(true);
+    expect(rowsLogged[0].timeToHeaders!).toBeGreaterThanOrEqual(0);
+  });
+
+  // Issue #1179: real timers, so the route's two clocks are actually
+  // exercised — env.AI.run awaits a real 30 ms before resolving (the
+  // pre-header window), then the ReadableStream's start() awaits another
+  // real 40 ms before its first enqueue (post-header). One-sided bounds
+  // only, so a slow CI can never flake it: a real timer fires at or after
+  // its delay, never before.
+  it("real timers: time_to_headers covers only the pre-header window (issue #1179)", async () => {
+    const enc = new TextEncoder();
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 2 } },
+    ];
+    const run = vi.fn(async () => {
+      await sleep(30);
+      return new ReadableStream<Uint8Array>({
+        async start(controller) {
+          await sleep(40);
+          for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+          controller.enqueue(enc.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+    });
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    await r.text();
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    const timeToHeaders = rowsLogged[0].timeToHeaders!;
+    const durationMs = rowsLogged[0].durationMs!;
+    // Mutant A (headersAt = startedAt) makes this 0; the run() timer makes it >= 30.
+    expect(timeToHeaders).toBeGreaterThanOrEqual(25);
+    // Mutant B (time_to_headers computed at log time) makes this ~0; the
+    // stream-start timer makes it >= 40.
+    expect(durationMs - timeToHeaders).toBeGreaterThanOrEqual(30);
   });
 
   // Fresh-context review, #717 critical follow-up: this is the critical gap
