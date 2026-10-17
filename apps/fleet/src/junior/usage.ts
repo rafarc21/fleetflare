@@ -36,6 +36,8 @@ interface JuniorUsageRow {
   durationMs?: number;
   /** Issue #335: env.AI.run attempts the call took, 1 = no retry. */
   attempts?: number;
+  /** Issue #1155: ms from request start to the first possible response (lead rows only). */
+  timeToHeaders?: number;
 }
 
 /** Single INSERT, one row per /fleet/junior call. Never throws on its own —
@@ -62,8 +64,9 @@ export async function insertJuniorUsage(db: D1Database, row: JuniorUsageRow): Pr
     ...(row.durationMs === undefined ? [] : [["duration_ms", row.durationMs] as [string, unknown]]),
     ...(row.attempts === undefined ? [] : [["attempts", row.attempts] as [string, unknown]]),
   ];
+  const v0010: [string, unknown][] = row.timeToHeaders === undefined ? [] : [["time_to_headers", row.timeToHeaders] as [string, unknown]];
   // Newest schema first; each fallback is tried only if it differs.
-  const shapes = [[...base, ...v0005, ...v0006], [...base, ...v0005], base]
+  const shapes = [[...base, ...v0005, ...v0006, ...v0010], [...base, ...v0005, ...v0006], [...base, ...v0005], base]
     .filter((cols, i, all) => i === 0 || cols.length !== all[i - 1].length);
   for (let i = 0; i < shapes.length; i++) {
     const cols = shapes[i];

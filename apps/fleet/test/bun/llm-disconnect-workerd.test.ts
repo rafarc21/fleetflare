@@ -106,7 +106,7 @@ describe("client drop under workerd (issue #1147, review round 2)", () => {
     }, 150_000);
     afterAll(() => stop());
 
-    it("the bounded keepalive write still detects a dropped client without the request-signal flag", async () => {
+    it("without the request-signal flag, the bounded keepalive write only reports the drop locally (production detection is inert)", async () => {
       await dropClient(url, "stream", "noflag-on", 50);
       const row = await rowFor(url, "noflag-on", 2_000);
       expect(row).toMatchObject({ ok: false, failure: "client_abort" });

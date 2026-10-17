@@ -933,9 +933,10 @@ export function streamErrorFrame(message: string): string {
   return sseEvent("error", { type: "error", error: { type, message: override ?? message } });
 }
 
-/** Issue #1147: Anthropic's own keepalive frame. Sent while the upstream is
- *  silent so an idle-timed client does not give up during a long prefill or a
- *  long gap between chunks. Carries no content and no usage. */
+/** Issue #1147: Anthropic's own keepalive frame. Sent while the CLIENT has gone
+ *  a ping interval without a byte (its silence, not the upstream's) so an
+ *  idle-timed client does not give up during a long prefill or a long gap
+ *  between visible chunks. Carries no content and no usage. */
 export function streamPing(): string {
   return sseEvent("ping", { type: "ping" });
 }
