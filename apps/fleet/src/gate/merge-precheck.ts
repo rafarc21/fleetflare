@@ -58,10 +58,14 @@ export function addedLines(patch: string): string {
 
 /** #1176: files the scan cannot see — no patch (binary or oversized) and not a
  *  removal. Unscannable = red, never a silent pass. A missing status reads as
- *  changed, so fail closed. */
-export function unscannableFiles(files: { filename: string; patch?: string; status?: string }[]): string[] {
+ *  changed, so fail closed. #1191: a rename/copy with `changes` 0 is a pure move
+ *  — there is no diff to scan, so it must not go red. */
+export function unscannableFiles(
+  files: { filename: string; patch?: string; status?: string; changes?: number }[],
+): string[] {
   return files
     .filter((f) => f.patch === undefined && f.status !== "removed")
+    .filter((f) => !((f.status === "renamed" || f.status === "copied") && f.changes === 0))
     .map((f) => f.filename);
 }
 
@@ -115,7 +119,7 @@ export interface MergePrecheckInput {
    *  from them, so a keyword there closes issues at merge). */
   commitMessages?: string[];
   /** #1176: the compare's files, for the patchless-file fail-closed check. */
-  files?: { filename: string; previous_filename?: string; patch?: string; status?: string }[];
+  files?: { filename: string; previous_filename?: string; patch?: string; status?: string; changes?: number }[];
 }
 
 export function mergePrecheckFailures(input: MergePrecheckInput): string[] {

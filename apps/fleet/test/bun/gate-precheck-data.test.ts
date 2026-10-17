@@ -43,6 +43,20 @@ describe("precheckSummary", () => {
     expect("status" in out.files[0]).toBe(false);
   });
 
+  it("maps a file's changes count through (#1191)", () => {
+    const out = precheckSummary({
+      files: [{ filename: "new.ts", previous_filename: "old.ts", status: "renamed", changes: 0 }],
+    });
+    expect(out.files).toEqual([
+      { filename: "new.ts", previous_filename: "old.ts", status: "renamed", changes: 0 },
+    ]);
+  });
+
+  it("omits changes when GitHub sends none", () => {
+    const out = precheckSummary({ files: [{ filename: "b.ts" }] });
+    expect("changes" in out.files[0]).toBe(false);
+  });
+
   it("maps author and committer identities", () => {
     const out = precheckSummary({
       commits: [{

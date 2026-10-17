@@ -242,6 +242,24 @@ describe("unscannableFiles", () => {
   it("does not flag a file that has a patch", () => {
     expect(unscannableFiles([{ filename: "a.ts", patch: "diff", status: "modified" }])).toEqual([]);
   });
+
+  it("does not flag a pure-move rename: renamed with changes 0 and no patch", () => {
+    expect(unscannableFiles([{ filename: "new.md", previous_filename: "old.md", status: "renamed", changes: 0 }]))
+      .toEqual([]);
+  });
+
+  it("does not flag a pure copy: copied with changes 0 and no patch", () => {
+    expect(unscannableFiles([{ filename: "copy.md", status: "copied", changes: 0 }])).toEqual([]);
+  });
+
+  it("flags a rename that moved lines: renamed with changes > 0 and no patch fails closed", () => {
+    expect(unscannableFiles([{ filename: "new.md", previous_filename: "old.md", status: "renamed", changes: 5 }]))
+      .toEqual(["new.md"]);
+  });
+
+  it("flags a plain modified patchless file with no changes count (GitHub omitted it)", () => {
+    expect(unscannableFiles([{ filename: "bin/blob.png", status: "modified" }])).toEqual(["bin/blob.png"]);
+  });
 });
 
 describe("mergePrecheckFailures: patchless files fail closed, added lines only", () => {

@@ -41,7 +41,9 @@ describe("gate precheck flow: the posted description per scenario", () => {
     });
     expect(desc).not.toBeNull();
     expect(desc!.startsWith(UNSCANNABLE_FILE_FAILURE)).toBe(true);
-    expect(desc).toContain("bin/blob.png");
+    // #1191: the failure names a count, never the filename.
+    expect(desc).toContain("1 file(s)");
+    expect(desc).not.toContain("bin/blob.png");
   });
 
   it("a commit message with a closing keyword posts the commit-keyword failure", () => {
