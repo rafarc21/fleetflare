@@ -318,8 +318,11 @@ export async function createTask(
         console.error(`board: duplicate check of #${number} in ${repo} threw`, err);
         continue;
       }
+      // Issue #1208: refuse only a REAL board task in a live state. A plain
+      // open issue or an open PR (state === null — no state label) is not a
+      // task and must not block a filing that merely references its number.
       const terminal = existing.state !== null && TERMINAL_TASK_STATES.includes(existing.state);
-      if (existing.open && !terminal) {
+      if (existing.open && existing.state !== null && !terminal) {
         const holder = existing.assignee === null ? "unassigned" : existing.assignee;
         const pr = await (async (): Promise<number | null> => {
           try {
