@@ -392,3 +392,83 @@ describe("runShipTickWithObservation — onStaleBackgroundShell (issue #106)", (
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #1193 — the Worker-side auto-continue for an idle OSS lead. Exercises
+// the FULL runShipTickWithObservation path the same way the stale-shell
+// describe above does: the onIdleAutoContinue callback must fire exactly once
+// on the tick where the lead's idle age crosses AUTO_CONTINUE_IDLE_MS, never
+// on an earlier still-under-10-minutes idle tick. The decision itself (lead
+// type, board state, rate window, cap) is unit-tested in
+// test/studio.oss-auto-continue.test.ts; this proves do.ts's OWN wiring edge.
+// ---------------------------------------------------------------------------
+describe("runShipTickWithObservation — onIdleAutoContinue (issue #1193)", () => {
+  const MIN = 60_000;
+  const T0 = new Date("2026-10-17T12:00:00.000Z");
+  const TOK_1 = "11111111-2222-3333-4444-555555555555";
+
+  const IDLE_PANE = [
+    "⏺ Done.", "", "─".repeat(68), "❯ ", "─".repeat(68),
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+  ].join("\n");
+
+  function b64Utf8(s: string): string {
+    return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+  }
+  function stdoutWithPane(pane: string, incarnation = TOK_1): string {
+    return [
+      "---FLEET-BOOTID---", "", "---FLEET-STAT---", "-1", "---FLEET-INCARNATION---", incarnation,
+      SECTION_PANE, b64Utf8(pane),
+    ].join("\n");
+  }
+
+  const status = (o: Partial<StudioStatus> = {}) => row({ id: "websites--pilot", state: "running", leadType: "glm", ...o });
+
+  function fakeStorage(seed?: { status?: StudioStatus }): (TranscriptStorage & StudioStorage & { map: Map<string, unknown> }) {
+    const map = new Map<string, unknown>();
+    if (seed?.status) map.set(STATUS_KEY, seed.status);
+    return {
+      map,
+      get: (async (key: string) => map.get(key)) as never,
+      put: (async (keyOrEntries: unknown, value?: unknown) => {
+        if (typeof keyOrEntries === "object" && keyOrEntries !== null) {
+          for (const [k, v] of Object.entries(keyOrEntries as Record<string, unknown>)) map.set(k, v);
+          return;
+        }
+        map.set(keyOrEntries as string, value);
+      }) as never,
+    };
+  }
+
+  const shipDeps = (pane: string, now: Date): ShipDeps => ({
+    exec: vi.fn(async () => ({ code: 0, stdout: stdoutWithPane(pane), stderr: "" })),
+    r2Put: vi.fn(async () => {}),
+    now: () => now,
+  });
+
+  const run = (pane: string, now: Date, storage: ReturnType<typeof fakeStorage>, cb: () => Promise<void>) =>
+    runShipTickWithObservation(
+      shipDeps(pane, now), storage, "websites--pilot", undefined, 5000, undefined, undefined, undefined, undefined, cb,
+    );
+
+  it("does NOT fire while idle is still under 10 minutes", async () => {
+    const storage = fakeStorage({ status: status() });
+    const cb = vi.fn(async () => {});
+    await run(IDLE_PANE, T0, storage, cb);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("fires exactly once on the tick that crosses 10 idle minutes, not again while it stays idle", async () => {
+    const storage = fakeStorage({ status: status() });
+    const cb = vi.fn(async () => {});
+    await run(IDLE_PANE, T0, storage, cb);
+
+    const crossing = new Date(T0.getTime() + 11 * MIN);
+    await run(IDLE_PANE, crossing, storage, cb);
+    expect(cb).toHaveBeenCalledTimes(1);
+
+    const stillIdle = new Date(T0.getTime() + 12 * MIN);
+    await run(IDLE_PANE, stillIdle, storage, cb);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+});
