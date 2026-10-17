@@ -19,7 +19,7 @@
 // nothing here infers deploy truth from a label — that is measured from
 // branch + host, never from the board.
 
-import { parseBrief, renderBriefPrompt, renderTaskBody, taskKeyMarker, type TaskBrief } from "./brief";
+import { parseBrief, refsInBrief, renderBriefPrompt, renderTaskBody, taskKeyMarker, type TaskBrief } from "./brief";
 import { parseEnvelope, parseEnvelopeComment, renderEnvelopeComment } from "./envelope";
 import {
   isStaleBacklog, isTaskState, studioLabel, taskAssignees, taskStates, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES,
@@ -269,6 +269,37 @@ async function pathClaimWarnings(
 }
 
 /**
+ * Issue #1133: the PR the duplicate task's studio has already opened, best
+ * effort — read from the existing task's newest §6 result envelope, so the
+ * refusal points the caller at the live work. Null when the read fails or the
+ * newest result envelope names no PR; the refusal is already decided and this
+ * only enriches its wording.
+ *
+ * Inlined rather than reused from ./verify (verify.ts imports showTask from
+ * this file, so importing back would be a cycle): the same backwards scan
+ * `findLatestResultEnvelope` does, over `showTask`'s own decoded comments.
+ */
+async function duplicatePr(api: BoardApi, repo: string, number: number): Promise<number | null> {
+  try {
+    const shown = await showTask(api, repo, number);
+    if (!shown.ok) return null;
+    for (let i = shown.value.comments.length - 1; i >= 0; i--) {
+      const env = shown.value.comments[i].envelope;
+      if (!env || env.envelope.intent !== "result") continue;
+      for (const art of env.payload.artifacts) {
+        if (art.pr === undefined) continue;
+        const n = Number.parseInt(art.pr.replace(/^#/, ""), 10);
+        if (Number.isInteger(n) && n > 0) return n;
+      }
+      return null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * One task = one deliverable of substantial scope (§5), opened `submitted`.
  *
  * The six state labels do not have to exist in the repo first: GitHub creates
@@ -302,6 +333,33 @@ export async function createTask(
     const leadType = await getLeadType(brief.assignee);
     if (securityRefusesGlmLead(labels, leadType)) {
       return { ok: false, status: 400, message: securityGlmRefusalMessage(brief.assignee) };
+    }
+  }
+  // Issue #1133: refuse a second open task for an issue the brief references.
+  // `--allow-duplicate` skips it; a getIssue that throws (404 or upstream)
+  // fails OPEN — the create is about to need GitHub anyway, so an unreachable
+  // issue must not refuse a task that otherwise validated.
+  if (brief.allowDuplicate !== true) {
+    for (const number of refsInBrief(brief.title, brief.objective)) {
+      let existing: BoardTask;
+      try {
+        existing = await api.getIssue(repo, number);
+      } catch (err) {
+        if (err instanceof GitHubError && err.status === 404) continue;
+        console.error(`board: duplicate check of #${number} in ${repo} threw`, err);
+        continue;
+      }
+      const terminal = existing.state !== null && TERMINAL_TASK_STATES.includes(existing.state);
+      if (existing.open && !terminal) {
+        const holder = existing.assignee === null ? "unassigned" : existing.assignee;
+        const pr = await duplicatePr(api, repo, number);
+        const line = pr === null
+          ? `task #${number} in ${repo} is already open (${existing.state ?? "unlabelled"}, ${holder}) — ` +
+            "this brief references its issue. Refusing to file a duplicate; pass --allow-duplicate to override."
+          : `task #${number} in ${repo} is already open (${existing.state ?? "unlabelled"}, ${holder}, PR #${pr}) — ` +
+            "this brief references its issue. Refusing to file a duplicate; pass --allow-duplicate to override.";
+        return { ok: false, status: 409, message: line };
+      }
     }
   }
   const input: IssueInput = {

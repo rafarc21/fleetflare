@@ -304,6 +304,8 @@ export interface TaskBriefArgs {
   /** Task 5: maestro's `--junior` authorization for this task. Absent = the
    *  ordinary, unauthorized default. See src/board/brief.ts's TaskBrief.junior. */
   junior?: true;
+  /** Issue #1133: `--allow-duplicate` opts this task out of the duplicate-task refusal. */
+  allowDuplicate?: true;
   /** Issue #291: `--read-repos owner/a,owner/b`. Read-only access to sibling
    *  repos of the task repo's owner, for the assigned studio, while the task
    *  is live. Validated Worker-side (src/github/read-repos.ts). */
@@ -776,11 +778,13 @@ function parseTask(argv: string[]): CliCommand {
   let junior = false;
   let provision = false;
   let freshSession = false;
+  let allowDuplicate = false;
   const flagArgs: string[] = [];
   if (sub === "new") {
     for (let i = 0; i < rest.length; i++) {
       const token = rest[i];
       if (token === "--junior") { junior = true; continue; }
+      if (token === "--allow-duplicate") { allowDuplicate = true; continue; }
       if (token === "--provision") { provision = true; continue; }
       if (token === "--fresh-session") { freshSession = true; continue; }
       flagArgs.push(token);
@@ -851,6 +855,7 @@ function parseTask(argv: string[]): CliCommand {
     brief.continues = Number(parsed.continues);
   }
   if (junior) brief.junior = true;
+  if (allowDuplicate) brief.allowDuplicate = true;
   if (parsed["read-repos"] !== undefined) {
     const readRepos = splitReadRepos(parsed["read-repos"]);
     if (readRepos === null) return usage("--read-repos needs at least one owner/name");
