@@ -351,7 +351,7 @@ describe("decideGateRun (#1091 review round 2)", () => {
   // silent skip. The head gets a visible failure that names the base and the fix.
   it("no gate block at the base and no config change: fails with the base sha and the fix, never a skip", () => {
     expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["README.md"], fleetJsonChanged: false, base: null, head: undefined }))
-      .toEqual({ action: "fail", description: "no gate block at base bbbbbbbb: merge gated base into branch" });
+      .toEqual({ action: "fail", description: "no valid gate config at base bbbbbbbb" });
   });
   it("the no-gate-block failure description fits GitHub's 140-char status description", () => {
     const decision = decideGateRun({ baseSha: BASE_SHA, changedFiles: [], fleetJsonChanged: false, base: null, head: undefined });
