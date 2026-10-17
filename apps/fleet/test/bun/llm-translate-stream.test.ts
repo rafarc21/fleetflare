@@ -566,6 +566,14 @@ describe("runaway output detection (issue #1099)", () => {
     expect(closeStreamOrError(state, 32000).ok).toBe(true);
   });
 
+  test("a 200k-char single line delivered as 3-char deltas scans without tripping (#1127)", () => {
+    const state = createStreamState();
+    const text = "x".repeat(200000);
+    for (let i = 0; i < text.length; i += 3) applyOpenAIStreamChunk(state, delta({ content: text.slice(i, i + 3) }));
+    expect(state.runaway).toBeNull();
+    expect(state.scan.partial.length).toBe(200000);
+  });
+
   // Review case: a 60-element JSON array of identical short objects is legit.
   test("a JSON array of 60 identical short objects passes", () => {
     const state = createStreamState();
@@ -616,6 +624,19 @@ describe("kimi in-think tool payload is never scanned as reasoning (issue #1099 
     const pieces = [`<think>Plan the file.\n`, ...Array.from({ length: Math.ceil(payload.length / 3) }, (_, i) => payload.slice(i * 3, i * 3 + 3)), "</think>"];
     for (const p of pieces) applyOpenAIStreamChunk(state, delta({ content: p }));
     expect(state.runaway).toBeNull();
+  });
+
+  test("a <think> tag split across deltas still latches the tool payload before its repeated argument lines (#1127)", () => {
+    const state = createStreamState({ thinkTags: true });
+    const row = "a very long repeated row value here for the guard test";
+    const rows = Array.from({ length: 60 }, () => `  "${row}",`);
+    const payload = `{"name":"Write","input":{"rows":[\n${rows.join("\n")}\n]}}`;
+    const pieces = ["<thi", `nk>${payload}`, "</think>"];
+    const frames: string[] = [];
+    for (const p of pieces) frames.push(...applyOpenAIStreamChunk(state, delta({ content: p })));
+    expect(state.runaway).toBeNull();
+    const start = frames.map(parseFrame).find((f) => f.event === "content_block_start");
+    expect(start?.data).toMatchObject({ content_block: { type: "tool_use", name: "Write" } });
   });
 
   test("reasoning in a think region with no tool call and a repeated line still trips", () => {
