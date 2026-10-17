@@ -278,7 +278,11 @@ export async function studioReadReposCredential(
     return null;
   }
   for (const g of sameOwner) await deleteFlag(db, errorKey(g.repo, g.number));
+  // Issue #1187: never hand the studio a read token scoped to its own work
+  // repo — its own repo uses the primary credential, not the read-only one.
+  const own = sameOwner[0]!.repo.toLowerCase();
   const repos = [...new Set([...granted, ...canonicalFor(minted.canonical, sameOwner[0]!.repo)])]
+    .filter((r) => r.toLowerCase() !== own)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   console.log(`read-repos: minted read-only token for ${studioId} (tasks ${tasks}) repos ${repos.join(", ")}`);
   return { token: minted.token, repos };

@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import {
   withObserved, recordSnapshotOnSuccess, applyStudioGitSafetyPort, studioGitSafetyCmd,
   runShipTickWithObservation, STALE_SHELL_NUDGE_KEY, STALE_SHELL_NUDGE_EVERY_MS,
+  writeBlueprintCredentialPort,
 } from "../src/studio/do";
+import { tokenEnv, blueprintCredentialWriteCmd, blueprintCredentialDropCmd } from "../src/studio/credentials";
 import { emptyObserved, OBSERVED_KEY, type Observed, type ObservedStorage } from "../src/studio/observed";
 import type { StudioStatus } from "../src/studio/types";
 import type { SyncResult } from "../src/studio/session-sync";
@@ -147,8 +149,8 @@ describe("recordSnapshotOnSuccess — oversize skip leaves lastSnapshotAt untouc
 // while leaving every studio unguarded. The body now lives in
 // applyStudioGitSafetyPort, which `deps()` wires and nothing else, so these
 // assertions are assertions about what the DO actually does. (The same gap
-// still stands for writeBlueprintCredential's own port next to it — named in
-// PR #259's body, not closed here.)
+// stood for writeBlueprintCredential's own port next to it — named in PR #259's
+// body and closed by the writeBlueprintCredentialPort block below.)
 describe("applyStudioGitSafetyPort — do.ts's own side of the #253 wiring", () => {
   it("execs studioGitSafetyCmd()'s EXACT string, once, and reports ok", async () => {
     const exec = vi.fn(async (_cmd: string) => ({ code: 0, stdout: "", stderr: "" }));
@@ -181,6 +183,102 @@ describe("applyStudioGitSafetyPort — do.ts's own side of the #253 wiring", () 
 
     expect(res.ok).toBe(false);
     expect(res.ok === false && res.error).toContain("session busy");
+  });
+});
+
+// Issue #1187 (S2): writeBlueprintCredential's provision-skip branch was
+// inlined in `deps()` and reached by no test. Extracted to
+// writeBlueprintCredentialPort, which `deps()` wires and nothing else, so
+// these assertions are assertions about what the DO actually does.
+describe("writeBlueprintCredentialPort — do.ts's own side of the #149 wiring", () => {
+  const WORK = "acme-org/sample";
+  const BLUEPRINT = "acme-org/websites";
+  const okExec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+
+  type Mint = (workRepoSlug: string, blueprintRepo: string) => Promise<string | null>;
+  function port(
+    mint: Mint = async () => "ghs_blueprint",
+    exec = okExec,
+  ) {
+    return writeBlueprintCredentialPort(
+      mint, exec, tokenEnv, BLUEPRINT, "sample--pilot", WORK,
+    );
+  }
+
+  it("equal repos (case-insensitive): mints nothing, execs the drop cmd, returns ok", async () => {
+    const mint = vi.fn(async () => "ghs_blueprint");
+    const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+    const res = await writeBlueprintCredentialPort(
+      mint, exec, tokenEnv, "Acme-Org/Sample", "sample--pilot", "acme-org/sample",
+    );
+    expect(res).toEqual({ ok: true });
+    expect(mint).not.toHaveBeenCalled();
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(exec).toHaveBeenCalledWith(blueprintCredentialDropCmd("Acme-Org/Sample"));
+  });
+
+  it("a non-zero drop exec returns ok:false with the error, mint not called", async () => {
+    const mint = vi.fn(async () => "ghs_blueprint");
+    const exec = vi.fn(async () => ({ code: 3, stdout: "", stderr: "config locked" }));
+    const res = await writeBlueprintCredentialPort(
+      mint, exec, tokenEnv, BLUEPRINT, "sample--pilot", BLUEPRINT,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.error).toContain("blueprint credential drop failed (3)");
+    expect(res.ok === false && res.error).toContain("config locked");
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  it("a thrown drop exec is caught and redacted, never propagated — equal repos", async () => {
+    const mint = vi.fn(async () => "ghs_blueprint");
+    const exec = vi.fn(async (): Promise<{ code: number; stdout: string; stderr: string }> => {
+      throw new Error("ghs_leakedTokenValue123 sandbox down");
+    });
+    const res = await writeBlueprintCredentialPort(
+      mint, exec, tokenEnv, BLUEPRINT, "sample--pilot", BLUEPRINT,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.error).toContain("sandbox down");
+    expect(res.ok === false && res.error).not.toContain("ghs_");
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  it("unequal repos: mints with (workRepoSlug, blueprintRepo), execs the write cmd with the token env", async () => {
+    const mint = vi.fn(async () => "ghs_blueprint");
+    const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+    const res = await port(mint, exec);
+    expect(res).toEqual({ ok: true });
+    expect(mint).toHaveBeenCalledTimes(1);
+    expect(mint).toHaveBeenCalledWith(WORK, BLUEPRINT);
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(exec).toHaveBeenCalledWith(blueprintCredentialWriteCmd(BLUEPRINT), tokenEnv("ghs_blueprint"));
+  });
+
+  it("a null mint returns the no-token error, exec not called", async () => {
+    const mint: Mint = async () => null;
+    const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+    const res = await port(mint, exec);
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.error).toContain("no read-only token for the blueprint repo");
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it("a non-zero write exec returns ok:false with the stderr error", async () => {
+    const exec = vi.fn(async () => ({ code: 128, stdout: "", stderr: "permission denied" }));
+    const res = await port(undefined, exec);
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.error).toContain("blueprint credential write failed (128)");
+    expect(res.ok === false && res.error).toContain("permission denied");
+  });
+
+  it("a thrown exec is caught and redacted, never propagated", async () => {
+    const exec = vi.fn(async (): Promise<{ code: number; stdout: string; stderr: string }> => {
+      throw new Error("ghs_leakedTokenValue123 session busy");
+    });
+    const res = await port(undefined, exec);
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.error).toContain("session busy");
+    expect(res.ok === false && res.error).not.toContain("ghs_");
   });
 });
 

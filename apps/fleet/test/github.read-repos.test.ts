@@ -223,6 +223,21 @@ describe("studioReadReposCredential (the refresh cycle's port)", () => {
     expect(all).toContain("acme-org/alpha");
     expect(all).not.toContain(READ_TOKEN);
   });
+
+  // Issue #1187: a grant listing the task's OWN repo must not hand the studio
+  // a read-only token scoped to it — the work repo uses the primary credential,
+  // and a read helper over it would shadow pushes.
+  it("the task's own repo is dropped from the returned repo list (case-insensitive)", async () => {
+    await recordReadReposGrant(env.DB, TASK_REPO, 7, STUDIO, ["acme-org/alpha", "Acme-Org/Websites"], 1000);
+    const getTask = vi.fn(async () => liveTask());
+    answer = () => Response.json({ token: READ_TOKEN, repositories: [{ full_name: "acme-org/websites" }, { full_name: "Acme-Org/Alpha" }] });
+    const got = await studioReadReposCredential(appEnv(), STUDIO, { getTask });
+    expect(got).not.toBeNull();
+    expect(got!.repos).not.toContain("acme-org/websites");
+    expect(got!.repos).not.toContain("Acme-Org/Websites");
+    expect(got!.repos).toContain("acme-org/alpha");
+    expect(got!.repos).toContain("Acme-Org/Alpha");
+  });
 });
 
 // PR #292 review item 1: a mint failure (App not installed on a sibling ->
