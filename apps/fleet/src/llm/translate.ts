@@ -787,8 +787,10 @@ function recoverThinkToolCalls(thinkText: string): {
   if (UNTERMINATED_TOOL_CALL.test(thinkText)) {
     return { calls, hadToolCallAttempt: true, failedTagged: false };
   }
-  // Bare-JSON form: `{` then "name" anywhere — including after prose.
-  if (BARE_JSON_ATTEMPT.test(thinkText)) {
+  // Bare-JSON form: a brace-leading body (the pre-#1186 recovery shape), or
+  // `{` then "name" anywhere — including after prose. Both feed `take`, which
+  // recovers or leaves the attempt for the error path.
+  if (thinkText.trim().startsWith("{") || BARE_JSON_ATTEMPT.test(thinkText)) {
     take(thinkText);
     return { calls, hadToolCallAttempt: true, failedTagged: false };
   }
