@@ -1280,7 +1280,7 @@ fleet_mcp_config() {
   fi
   mkdir -p "${file%/*}" || return 1
   MCP_PATH="$file" MCP_NAMES="$names" python3 -c '
-import json, os, shutil, sys
+import json, os, sys
 known = {"playwright": {"command": "bun", "args": ["x", "@playwright/mcp@latest"]}, "codebase-memory": {"command": "/usr/local/bin/codebase-memory-mcp", "env": {"CBM_MEM_BUDGET_MB": "1024"}}}
 servers = {}
 for n in [n for n in os.environ["MCP_NAMES"].split(",") if n]:
