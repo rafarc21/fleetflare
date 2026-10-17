@@ -66,9 +66,10 @@ function bringUp(env: Record<string, string>, home = fakeHome()) {
 
 const PLAYWRIGHT = { command: "bun", args: ["x", "@playwright/mcp@latest"] };
 
-// Hermetic PATH for the absent-binary tests: system dirs only, never
-// /usr/local/bin where the image bakes codebase-memory-mcp — the tests must
-// not depend on the host (or the rolled-out image) lacking the binary.
+// Hermetic PATH for the role/studio absent tests: system dirs only. The
+// access check now reads CBM_MCP_BIN (or the exact image path) directly, so
+// PATH no longer drives the skip; NO_CBM_PATH just pins a minimal PATH so the
+// python3 heredoc resolves without relying on the host environment.
 const NO_CBM_PATH = "/usr/bin:/bin";
 
 describe("bring-up MCP config — roles honor mcp: (issue #276)", () => {
@@ -133,14 +134,14 @@ describe("bring-up MCP config — roles honor mcp: (issue #276)", () => {
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "codebase-memory-mcp"), "#!/bin/sh\nexit 0\n");
     chmodSync(join(bin, "codebase-memory-mcp"), 0o755);
-    const out = bringUp({ ROLE_MCP: "codebase-memory", PATH: `${bin}:${NO_CBM_PATH}` }, home);
-    expect(out.config?.mcpServers["codebase-memory"]).toEqual({ command: "/usr/local/bin/codebase-memory-mcp" });
+    const out = bringUp({ ROLE_MCP: "codebase-memory", PATH: `${bin}:${NO_CBM_PATH}`, CBM_MCP_BIN: join(bin, "codebase-memory-mcp") }, home);
+    expect(out.config?.mcpServers["codebase-memory"]).toEqual({ command: "/usr/local/bin/codebase-memory-mcp", env: { CBM_MEM_BUDGET_MB: "1024" } });
     expect(out.args).toEqual(["--mcp-config", out.file]);
   });
 
   test("codebase-memory binary absent -> skipped with a stderr line, boot never fails", () => {
     const home = fakeHome();
-    const out = bringUp({ ROLE_MCP: "codebase-memory", PATH: NO_CBM_PATH }, home);
+    const out = bringUp({ ROLE_MCP: "codebase-memory", CBM_MCP_BIN: "/usr/local/bin/codebase-memory-mcp" }, home);
     expect(out.config?.mcpServers["codebase-memory"]).toBeUndefined();
     expect(out.args).toEqual([]);
     expect(out.stderr).toContain("codebase-memory");
