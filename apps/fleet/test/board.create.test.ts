@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createTask, transitionTask, autoStartSubmittedTasks, findLiveAssignedTask, type BoardApi } from "../src/board/board";
-import { defaultBrief as brief, fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
-import { studioLabel, type BoardTask } from "../src/board/types";
+import { defaultBrief as brief, envelopeComment, fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
+import { studioLabel, type BoardTask, type EnvelopeDoc } from "../src/board/types";
 import { GitHubError } from "../src/board/api";
 
 // Old local defaults preserved as explicit overrides: title "Build the task
@@ -279,10 +279,26 @@ describe("createTask — duplicate-task refusal (#1133)", () => {
   });
 
   it("does not refuse when the referenced issue's task is terminal", async () => {
-    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 12, state: "completed", open: false, labels: ["completed"] })) });
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 12, state: "completed", open: true, labels: ["completed"] })) });
     const res = await createTask(api, "o/r", { ...brief, title: "#12 gate" });
     expect(res.ok).toBe(true);
     expect(api.createIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the PR in the newest result envelope when the duplicate's studio already opened one", async () => {
+    const doc: EnvelopeDoc = {
+      envelope: { msg_id: "m", task_id: 12, sender: "s", intent: "result", schema_version: "1" },
+      payload: { status: "ok", artifacts: [{ kind: "pr", pr: "#55" }], evidence: [], open_questions: [], context_digest: [], learnings: [] },
+      notes: "",
+    };
+    const api = fakeApi({
+      getIssue: vi.fn(async () => openDuplicate()),
+      listComments: vi.fn(async () => [envelopeComment(doc)]),
+    });
+    const res = await createTask(api, "o/r", { ...brief, title: "#12 gate" });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain("PR #55");
   });
 
   it("fails open: an unreadable referenced issue still lets the create through", async () => {
