@@ -66,12 +66,17 @@ function bringUp(env: Record<string, string>, home = fakeHome()) {
 
 const PLAYWRIGHT = { command: "bun", args: ["x", "@playwright/mcp@latest"] };
 
+// Hermetic PATH for the absent-binary tests: system dirs only, never
+// /usr/local/bin where the image bakes codebase-memory-mcp — the tests must
+// not depend on the host (or the rolled-out image) lacking the binary.
+const NO_CBM_PATH = "/usr/bin:/bin";
+
 describe("bring-up MCP config — roles honor mcp: (issue #276)", () => {
   for (const role of ["pilot", "scratch"]) {
     test(`real roles/${role}.md declares codebase-memory; binary absent in test env -> no config, no flag, skip logged`, () => {
       const parsed = parseRoleFile(readFileSync(join(BLUEPRINT, "roles", `${role}.md`), "utf8"));
       const env = roleBringupEnv(parsed);
-      const out = bringUp({ ...env });
+      const out = bringUp({ ...env, PATH: NO_CBM_PATH });
       expect(out.config).toBeNull();
       expect(out.args).toEqual([]);
       expect(out.stderr).toContain("codebase-memory");
@@ -81,7 +86,7 @@ describe("bring-up MCP config — roles honor mcp: (issue #276)", () => {
   test("real studios/web-studio declares codebase-memory; binary absent in test env -> no config, no flag, skip logged", () => {
     const studio = parseStudioFile(readFileSync(join(BLUEPRINT, "studios", "web-studio", "studio.md"), "utf8"));
     const env = studioBringupEnv(studio, []);
-    const out = bringUp({ ...env });
+    const out = bringUp({ ...env, PATH: NO_CBM_PATH });
     expect(out.config).toBeNull();
     expect(out.args).toEqual([]);
     expect(out.stderr).toContain("codebase-memory");
@@ -128,16 +133,14 @@ describe("bring-up MCP config — roles honor mcp: (issue #276)", () => {
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "codebase-memory-mcp"), "#!/bin/sh\nexit 0\n");
     chmodSync(join(bin, "codebase-memory-mcp"), 0o755);
-    const out = bringUp({ ROLE_MCP: "codebase-memory", PATH: `${bin}:${process.env.PATH ?? ""}` }, home);
+    const out = bringUp({ ROLE_MCP: "codebase-memory", PATH: `${bin}:${NO_CBM_PATH}` }, home);
     expect(out.config?.mcpServers["codebase-memory"]).toEqual({ command: "/usr/local/bin/codebase-memory-mcp" });
     expect(out.args).toEqual(["--mcp-config", out.file]);
   });
 
   test("codebase-memory binary absent -> skipped with a stderr line, boot never fails", () => {
     const home = fakeHome();
-    const bin = join(home, "bin");
-    mkdirSync(bin, { recursive: true });
-    const out = bringUp({ ROLE_MCP: "codebase-memory", PATH: `${bin}:${process.env.PATH ?? ""}` }, home);
+    const out = bringUp({ ROLE_MCP: "codebase-memory", PATH: NO_CBM_PATH }, home);
     expect(out.config?.mcpServers["codebase-memory"]).toBeUndefined();
     expect(out.args).toEqual([]);
     expect(out.stderr).toContain("codebase-memory");
