@@ -529,6 +529,20 @@ describe("runaway output detection (issue #1099)", () => {
     expect(state.runaway).toBe("repeat_line");
   });
 
+  test("a thinkTags stream whose visible text repeats must still trip repeat_line (#1185)", () => {
+    const state = createStreamState({ thinkTags: true });
+    applyOpenAIStreamChunk(state, delta({ content: "{\"name\": \"demo\"}\n" }));
+    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ content: "the same looping visible sentence, again and again\n" }));
+    expect(state.runaway).toBe("repeat_line");
+  });
+
+  test("a thinkTags stream whose reasoning_content repeats must still trip repeat_line (#1185)", () => {
+    const state = createStreamState({ thinkTags: true });
+    applyOpenAIStreamChunk(state, delta({ reasoning_content: "{\"name\": \"demo\"}\n" }));
+    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ reasoning_content: "the same looping reasoning sentence, again and again\n" }));
+    expect(state.runaway).toBe("repeat_line");
+  });
+
   test("a line under 40 chars repeated many times does not trip (`}` and `---` style lines)", () => {
     const state = createStreamState();
     for (let i = 0; i < 200; i++) applyOpenAIStreamChunk(state, delta({ content: "  {\"a\": 1},\n" }));
@@ -566,12 +580,21 @@ describe("runaway output detection (issue #1099)", () => {
     expect(closeStreamOrError(state, 32000).ok).toBe(true);
   });
 
-  test("a 200k-char single line delivered as 3-char deltas scans without tripping (#1127)", () => {
-    const state = createStreamState();
-    const text = "x".repeat(200000);
-    for (let i = 0; i < text.length; i += 3) applyOpenAIStreamChunk(state, delta({ content: text.slice(i, i + 3) }));
-    expect(state.runaway).toBeNull();
-    expect(state.scan.partial.length).toBe(200000);
+  test("10k newline-free 3-char deltas never call String.prototype.split (#1127)", () => {
+    const originalSplit = String.prototype.split;
+    let splitCalls = 0;
+    String.prototype.split = function (...args: Parameters<typeof originalSplit>) {
+      splitCalls++;
+      return originalSplit.apply(this, args);
+    };
+    try {
+      const state = createStreamState();
+      for (let i = 0; i < 10000; i++) applyOpenAIStreamChunk(state, delta({ content: "abc" }));
+      expect(splitCalls).toBe(0);
+      expect(state.scan.partial.length).toBe(30000);
+    } finally {
+      String.prototype.split = originalSplit;
+    }
   });
 
   // Review case: a 60-element JSON array of identical short objects is legit.
