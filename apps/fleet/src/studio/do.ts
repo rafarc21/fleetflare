@@ -8877,12 +8877,15 @@ export async function writeBlueprintCredentialPort(
   tokenEnvFn: (token: string) => Record<string, string>,
   blueprintRepo: string, id: string, workRepoSlug: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (blueprintRepo.toLowerCase() === workRepoSlug.toLowerCase()) {
-    const res = await exec(blueprintCredentialDropCmd(blueprintRepo));
-    if (res.code !== 0) return { ok: false as const, error: `blueprint credential drop failed (${res.code}): ${res.stderr.slice(0, 500)}` };
-    return { ok: true as const };
-  }
+  // Issue #1187: the whole body is guarded, both branches — a thrown exec
+  // (a dropped sandbox connection) must degrade no studio, so every throw
+  // returns a redacted error instead of escaping to runProvision's catch.
   try {
+    if (blueprintRepo.toLowerCase() === workRepoSlug.toLowerCase()) {
+      const res = await exec(blueprintCredentialDropCmd(blueprintRepo));
+      if (res.code !== 0) return { ok: false as const, error: `blueprint credential drop failed (${res.code}): ${res.stderr.slice(0, 500)}` };
+      return { ok: true as const };
+    }
     // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts);
     // work repo from provision, as memoryToken above.
     const token = await mint(workRepoSlug, blueprintRepo);

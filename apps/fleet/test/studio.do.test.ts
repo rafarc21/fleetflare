@@ -229,6 +229,20 @@ describe("writeBlueprintCredentialPort — do.ts's own side of the #149 wiring",
     expect(mint).not.toHaveBeenCalled();
   });
 
+  it("a thrown drop exec is caught and redacted, never propagated — equal repos", async () => {
+    const mint = vi.fn(async () => "ghs_blueprint");
+    const exec = vi.fn(async (): Promise<{ code: number; stdout: string; stderr: string }> => {
+      throw new Error("ghs_leakedTokenValue123 sandbox down");
+    });
+    const res = await writeBlueprintCredentialPort(
+      mint, exec, tokenEnv, BLUEPRINT, "sample--pilot", BLUEPRINT,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.error).toContain("sandbox down");
+    expect(res.ok === false && res.error).not.toContain("ghs_");
+    expect(mint).not.toHaveBeenCalled();
+  });
+
   it("unequal repos: mints with (workRepoSlug, blueprintRepo), execs the write cmd with the token env", async () => {
     const mint = vi.fn(async () => "ghs_blueprint");
     const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
