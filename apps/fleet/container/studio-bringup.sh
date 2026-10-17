@@ -1046,8 +1046,7 @@ pt.append({
 })
 # OSS-lead continue hook (issue #1112, layer 2): a Stop entry in this SAME
 # write, so one bring-up installs every settings hook or fails the way it
-# always did. A failure here is logged and skipped: the lead-gate entries
-# above still land and bring-up continues without this hook (fail open).
+# always did. A non-list Stop is logged, reset to [], and the hook registers normally.
 stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])
 if not isinstance(stop, list):
     os.write(2, ("studio-bringup: Stop not a list (was %s), reset to [] so oss-lead-continue registers\n" % json.dumps(stop)).encode())

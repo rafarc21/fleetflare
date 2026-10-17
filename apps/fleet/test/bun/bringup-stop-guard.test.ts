@@ -87,6 +87,20 @@ describe.each(NON_LIST_STOPS)("a non-list Stop (%s) fails open, not closed", (_l
   });
 });
 
+describe("a non-list Stop logs the old value", () => {
+  test("lead-gate region logs the serialized old string Stop", () => {
+    const home = freshHome("not-a-list");
+    try {
+      const region = extractRegion(BRINGUP, "lead-gate-settings-merge");
+      const res = runSnippet({ script: region, shell: "bash", env: { HOME: home } });
+      expect(res.code).toBe(0);
+      expect(res.stderr).toContain('"not-a-list"');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("settings.json keeps 0600 through the atomic write (issue #1190)", () => {
   const REGIONS: string[] = [
     "lead-gate-settings-merge",

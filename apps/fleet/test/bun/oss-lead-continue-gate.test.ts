@@ -327,10 +327,10 @@ describe("studio-bringup.sh installs the Stop hook for OSS leads", () => {
     expect(JSON.stringify(cfg.hooks.PreToolUse)).toContain("lead-gate.sh");
   });
 
-  test("a failing OSS Stop registration does not abort the lead-gate settings write", () => {
+  test("a non-list OSS Stop registration does not abort the lead-gate settings write", () => {
     const claudeDir = join(home, ".claude");
     mkdirSync(claudeDir, { recursive: true });
-    // Stop as a string: the Stop registration cannot merge into it.
+    // Stop as a string: the Stop registration resets it to [] and merges.
     writeFileSync(join(claudeDir, "settings.json"), JSON.stringify({ hooks: { Stop: "not-a-list" } }));
     const region = extractRegion(BRINGUP, "lead-gate-settings-merge");
     const res = runSnippet({ script: region, shell: "bash", env: { HOME: home }, timeout: 10_000 });
