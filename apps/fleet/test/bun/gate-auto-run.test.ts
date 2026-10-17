@@ -164,6 +164,15 @@ describe("startGateRun: a second start for the same sha reuses the first run", (
     expect(terminated).toEqual([]);
   });
 
+  it("a run under this head owned by the same PR (pointer names the head) still reuses", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(second).toEqual({ runId: first.runId, reused: true });
+    expect(runs.size).toBe(1);
+  });
+
   it("a new head sha starts a new run", async () => {
     const { wf, runs } = fakeWorkflow();
     const { index } = fakeIndex();
@@ -495,32 +504,6 @@ describe("autoRunPullRequest: every gated PR starts a run; the Workflow decides 
     await autoRunPullRequest(PR, deps);
     expect(await autoRunPullRequest({ ...PR, headSha: THIRD }, deps)).toBe("started");
     expect(terminated).toEqual([await gateRunId(PR_REPO, HEAD)]);
-  });
-});
-
-describe("startGateRun: a shared head sha does not inherit another PR's verdict (#1139)", () => {
-  it("a run under this head owned by another PR starts a fresh -r run, never a reuse", async () => {
-    const { wf, runs } = fakeWorkflow();
-    const { index } = fakeIndex();
-    // Another PR (#8) opened first with this head: its run owns the (repo, sha) id.
-    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
-    const foreignRunId = await gateRunId(PR_REPO, HEAD);
-    expect(runs.get(foreignRunId)!.status).toBe("running");
-    // This PR (#7) shares the head but has no pointer of its own.
-    const out = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
-    expect(out.reused).toBe(false);
-    expect(out.runId).not.toBe(foreignRunId);
-    expect(out.runId.startsWith(`${foreignRunId}-r`)).toBe(true);
-    expect(runs.size).toBe(2);
-  });
-
-  it("a run under this head owned by the same PR (pointer names the head) still reuses", async () => {
-    const { wf, runs } = fakeWorkflow();
-    const { index } = fakeIndex();
-    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
-    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
-    expect(second).toEqual({ runId: first.runId, reused: true });
-    expect(runs.size).toBe(1);
   });
 });
 

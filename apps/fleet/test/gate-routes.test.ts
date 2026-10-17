@@ -236,7 +236,7 @@ describe("GET /studio/gate/status with a skipped run", () => {
     });
   });
 
-  it("a #1125 head-moved skip posted nothing to post, but its head's own push gates it: success, never a false red", async () => {
+  it("a #1125 head-moved skip posted nothing to GitHub: error, never a false green", async () => {
     const env = fakeEnv();
     env.GATE_WORKFLOW.get = vi.fn(async () => ({
       status: vi.fn(async () => ({
@@ -247,7 +247,7 @@ describe("GET /studio/gate/status with a skipped run", () => {
     const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
     const res = await handleGateRoute(req, env);
     expect(await res.json()).toEqual({
-      state: "success", description: "skipped: head moved since the infra error", statusPostFailed: false,
+      state: "error", description: "skipped: head moved since the infra error", statusPostFailed: false,
     });
   });
 });
