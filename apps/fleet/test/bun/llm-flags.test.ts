@@ -1,9 +1,11 @@
 // Issue #1147 item 4: `enable_request_signal` is measured — in production
 // (15s ping) a dropped client fails in 15.1s WITH the flag but 60.2s WITHOUT
-// it (the 30s background limit cuts detection off). So every deployed
-// wrangler config must keep the flag; the only committed config allowed to
-// omit it is test/workerd/wrangler.noflag.jsonc, the no-flag control
+// it (the 30s background limit cuts detection off). So every fleet wrangler
+// config keeps the flag; the only committed apps/fleet config allowed to omit
+// it is test/workerd/wrangler.noflag.jsonc, the no-flag control
 // llm-disconnect-workerd.test.ts spins up to characterize the inert path.
+// skills/release-verification-checklist/worker/wrangler.toml is a separate
+// worker with no streaming pump, so it is deliberately outside this pin's scope.
 import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -13,8 +15,8 @@ const FLEET = path.resolve(import.meta.dir, "../..");
 const flagsOf = (file: string): string[] =>
   (Bun.JSONC.parse(readFileSync(file, "utf8")) as { compatibility_flags?: string[] }).compatibility_flags ?? [];
 
-describe("enable_request_signal is kept in every deployed wrangler config (issue #1147 item 4)", () => {
-  it("the example config and both committed deployed configs carry the flag", () => {
+describe("enable_request_signal is kept in every fleet wrangler config (issue #1147 item 4)", () => {
+  it("the example template and both committed test-fixture configs carry the flag", () => {
     const flagged = [
       path.join(FLEET, "wrangler.example.jsonc"),
       path.join(FLEET, "test", "wrangler.test.jsonc"),
