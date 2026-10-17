@@ -72,6 +72,12 @@
   // #715 gate runner (Phase 1): the `gate` Workflow that fans a PR's legs out
   // to GateRunnerDO containers. Mirrors wrangler.example.jsonc's workflows[]
   // (name/binding/class_name) so vitest can drive GateWorkflow.run() directly.
+  // #1203: GATE_RUNNER binds the test-only GateRunnerStub (test/helpers/
+  // gate-runner-stub.ts) instead of the real container-backed GateRunnerDO —
+  // vitest-pool-workers cannot spawn a container, so the stub answers /run-leg
+  // with a success LegResult and lets the workflow's success path run end to
+  // end. The stub is reachable only through the test-only worker entrypoint
+  // (test/vitest-test-entry.ts), never src/index.ts.
   "workflows": [
     { "name": "gate", "binding": "GATE_WORKFLOW", "class_name": "GateWorkflow" }
   ],
@@ -80,14 +86,16 @@
       { "name": "AGENT", "class_name": "AgentDO" },
       { "name": "DEPLOY", "class_name": "DeployDO" },
       { "name": "STUDIO", "class_name": "StudioDO" },
-      { "name": "STUDIO_BIG", "class_name": "StudioBigDO" }
+      { "name": "STUDIO_BIG", "class_name": "StudioBigDO" },
+      { "name": "GATE_RUNNER", "class_name": "GateRunnerStub" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["AgentDO"] },
     { "tag": "v2", "new_sqlite_classes": ["DeployDO"] },
     { "tag": "v3", "new_sqlite_classes": ["StudioDO"] },
-    { "tag": "v4", "new_sqlite_classes": ["StudioBigDO"] }
+    { "tag": "v4", "new_sqlite_classes": ["StudioBigDO"] },
+    { "tag": "v5", "new_sqlite_classes": ["GateRunnerStub"] }
   ],
   "containers": [
     {

@@ -191,6 +191,13 @@ export default defineConfig({
       // sits in every studio container. Pinned by
       // test/bun/wrangler-test-config-location.test.ts.
       wrangler: { configPath: "./test/wrangler.test.jsonc" },
+      // #1203: the test-only worker entrypoint. wrangler.test.jsonc's GATE_RUNNER
+      // binding names GateRunnerStub (a test-only Durable Object standing in for
+      // the container-backed GateRunnerDO), and vitest resolves every DO/workflow
+      // class from `main`. This entry re-exports src/index.ts's classes verbatim
+      // and adds the stub, so nothing test-only needs to live in src/index.ts —
+      // the same containment test-integration/dev-entry.ts already establishes.
+      main: "./test/vitest-test-entry.ts",
       miniflare: {
         fetchMock,
         d1Databases: ["DB"],

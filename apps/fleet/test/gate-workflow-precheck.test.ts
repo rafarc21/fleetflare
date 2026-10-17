@@ -1,14 +1,18 @@
-// #1191: drive GateWorkflow.run() end to end through the real Workflows
-// engine (vitest-pool-workers), on the SKIP path so no leg runs and the
-// GATE_RUNNER DO is never touched. The precheck must fail on a commit-message
-// closing keyword BEFORE the skip returns success, and post a gate/verdict
-// failure naming that keyword. Neutral fixtures only (acme/example): this file
+// #1191/#1203: drive GateWorkflow.run() end to end through the real Workflows
+// engine (vitest-pool-workers). The SKIP path never touches the GATE_RUNNER DO;
+// the RUN path does, through the test-only GateRunnerStub bound in
+// wrangler.test.jsonc (the real container-backed GateRunnerDO cannot boot under
+// vitest). The precheck must fail on a commit-message closing keyword BEFORE
+// the skip returns success, and both the skip-path and the success-path recheck
+// must post a gate/verdict failure naming a title edited to a closing keyword
+// after the precheck passed. Neutral fixtures only (acme/example): this file
 // ships public.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { env, introspectWorkflowInstance } from "cloudflare:test";
 import type { Env } from "../src/env";
-import { CLOSING_KEYWORD_COMMIT_FAILURE, CLOSING_KEYWORD_FAILURE, recheckFailures } from "../src/gate/merge-precheck";
+import { CLOSING_KEYWORD_COMMIT_FAILURE, CLOSING_KEYWORD_FAILURE } from "../src/gate/merge-precheck";
 import { GATE_STATUS_CONTEXT } from "../src/gate/status-post";
+import { requestedLegs } from "./helpers/gate-runner-stub";
 
 const REPO = "acme/example";
 const PR = 7;
@@ -19,6 +23,14 @@ const INSTANCE_ID = "gate-precheck-fix5";
 
 const FLEET_JSON = JSON.stringify({
   gate: { install: "bun install", legs: ["lint"], pathRules: ["src/**"] },
+});
+
+// #1203: the success-path block. pathRules matches the compare's
+// docs/readme.md (unlike FLEET_JSON's src/**), so decideGateRun=run instead of
+// skip, and legs [] leaves exactly the always-planned merge-tree leg. Every
+// fleet.json read returns whatever `fleetJson` currently holds.
+const RUN_FLEET_JSON = JSON.stringify({
+  gate: { install: "bun install", legs: [], pathRules: ["docs/**"] },
 });
 
 type Recorded = { method: string; url: string; body: unknown };
@@ -38,6 +50,9 @@ let pullsCalls = 0;
 // The compare's commit message, so a test can hold the precheck clean (the
 // default "Fix #9" fails it before the recheck could ever run).
 let commitMessage = "Fix #9";
+// The fleet.json body served (FLEET_JSON or RUN_FLEET_JSON), so a test can
+// pick the skip path or the run path.
+let fleetJson = FLEET_JSON;
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -93,8 +108,10 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   }
   if (method === "GET" && /\/contents\/fleet\.json\?ref=/.test(url)) {
     // Every fleet.json read (the fleet repo's at HEAD, and the PR repo's at
-    // merge-base, head and base) returns the same gate block: paths outside it.
-    return Promise.resolve(new Response(FLEET_JSON, { status: 200 }));
+    // merge-base, head and base) returns the same gate block: FLEET_JSON (a
+    // skip-path block) or RUN_FLEET_JSON (a run-path block whose pathRules
+    // match docs/readme.md).
+    return Promise.resolve(new Response(fleetJson, { status: 200 }));
   }
   if (method === "GET" && /\/contents\/public-denylist\.txt\?ref=/.test(url)) {
     // The ops denylist: one pattern that does not hit the neutral fixtures, so
@@ -115,6 +132,8 @@ beforeEach(() => {
   compareThrows2nd = false;
   pullsCalls = 0;
   commitMessage = "Fix #9";
+  fleetJson = FLEET_JSON;
+  requestedLegs.length = 0;
   realFetch = globalThis.fetch;
   globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
 });
@@ -233,19 +252,52 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
   }, 60_000);
 
   // #1203: the success-path recheck (workflow.ts:290) fires only when
-  // final.state === "success", reached after real legs run. GateRunnerDO is
-  // container-backed and NOT bound in test/wrangler.test.jsonc (vitest-pool-workers
-  // cannot spawn its container), and planUnionLegs always plans a merge-tree leg,
-  // so there is no "run" verdict reachable without the GATE_RUNNER binding. The
-  // success-path recheck is the SAME step name ("precheck-recheck") and the SAME
-  // postRecheckFailure path as the skip-path recheck (workflow.ts:178), exercised
-  // end to end above. This test pins the pure core both call sites share:
-  // recheckFailures turns a keyword title into the closing-keyword failure.
-  it("the success-path recheck's pure core turns a keyword title into a failure (#1203)", () => {
-    expect(recheckFailures({ title: "Fix #2", body: "Readme tweak", patterns: ["acmeclient"], private: false }))
-      .toEqual([CLOSING_KEYWORD_FAILURE]);
-    // The clean title passes: the same re-read, held clean, yields no failure.
-    expect(recheckFailures({ title: "Docs update", body: "Readme tweak", patterns: ["acmeclient"], private: false }))
-      .toEqual([]);
-  });
+  // final.state === "success", reached after real legs run. The real
+  // GateRunnerDO is container-backed and cannot boot under vitest-pool-workers,
+  // so wrangler.test.jsonc binds the test-only GateRunnerStub under GATE_RUNNER:
+  // it answers /run-leg with a success LegResult, the always-planned merge-tree
+  // leg goes green, and the run reaches the success-path recheck — whose
+  // title/body re-read then flips to a closing keyword and posts failure.
+  // Deleting workflow.ts:290-292 (the success-only recheck block) makes this
+  // test red: the run would post success instead.
+  it("a title edited to a closing keyword after the legs passed fails the success-path recheck (#1203)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    // The precheck must pass clean (title and commit message clean) so the run
+    // reaches the legs and then the success-path recheck.
+    commitMessage = "clean";
+    // pathRules docs/** matches the compare's docs/readme.md, so decideGateRun
+    // is "run", not "skip"; legs [] leaves exactly the merge-tree leg.
+    fleetJson = RUN_FLEET_JSON;
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-fix4");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-fix4", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("failure");
+      expect(out.description).toBe(CLOSING_KEYWORD_FAILURE);
+
+      // The run path posts pending first ("running ... 1 legs"), then the
+      // recheck failure — find the failure post, not the pending one.
+      const post = recorded.find((r) =>
+        r.method === "POST" && /\/statuses\//.test(r.url) && (r.body as { state?: string }).state === "failure");
+      expect(post).toBeDefined();
+      expect(post!.body).toEqual({
+        state: "failure",
+        context: GATE_STATUS_CONTEXT,
+        description: CLOSING_KEYWORD_FAILURE,
+      });
+
+      // The merge-tree leg ran once (the run path touched GATE_RUNNER), and the
+      // stub's success verdict is what carried the run to the success recheck.
+      expect(requestedLegs).toEqual(["merge-tree"]);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
 });
