@@ -458,10 +458,11 @@ describe("runShipTickWithObservation — onIdleAutoContinue (issue #1193)", () =
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it("fires exactly once on the tick that crosses 10 idle minutes, not again while it stays idle", async () => {
+  it("fires on the tick that crosses 10 idle minutes, and again on every later idle tick (level, not edge)", async () => {
     const storage = fakeStorage({ status: status() });
     const cb = vi.fn(async () => {});
     await run(IDLE_PANE, T0, storage, cb);
+    expect(cb).not.toHaveBeenCalled();
 
     const crossing = new Date(T0.getTime() + 11 * MIN);
     await run(IDLE_PANE, crossing, storage, cb);
@@ -469,6 +470,6 @@ describe("runShipTickWithObservation — onIdleAutoContinue (issue #1193)", () =
 
     const stillIdle = new Date(T0.getTime() + 12 * MIN);
     await run(IDLE_PANE, stillIdle, storage, cb);
-    expect(cb).toHaveBeenCalledTimes(1);
+    expect(cb).toHaveBeenCalledTimes(2);
   });
 });

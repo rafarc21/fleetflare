@@ -330,6 +330,14 @@ export interface Observed {
    */
   activity: Activity | null;
   /**
+   * Issue #1193 — the D1-facing mirror of the DO's own AUTO_CONTINUE_KEY
+   * (auto-continue.ts), same "own key, attached at withObserved" convention
+   * `activity` above established. `null` before the first nudge (or for a
+   * pre-feature row); a positive number is the monotonic "Nx" the ACTIVITY
+   * cell renders.
+   */
+  autoContinues: number | null;
+  /**
    * Issue #311 (PR3 addendum) — the D1-facing mirror of the DO's own
    * `memberAlerts` key (member-alerts.ts's `MEMBER_ALERTS_KEY`), same "own
    * key, never inside `OBSERVED_KEY`'s own read-patch-write cycle"
@@ -629,7 +637,7 @@ export const HEAL_COOLDOWN_MS = 30 * 60_000;
 export function emptyObserved(): Observed {
   return {
     incarnation: null, replacedAt: null, execFailures: 0, unreachableSince: null,
-    lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+    lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, autoContinues: null, memberAlerts: null,
     survivalBriefDeliveredFor: null, survivalBriefPending: null, lastMessageLine: null,
     taskWakesDeliveredFor: null,
   };
