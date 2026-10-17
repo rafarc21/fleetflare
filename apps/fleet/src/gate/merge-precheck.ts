@@ -140,7 +140,8 @@ export function mergePrecheckFailures(input: MergePrecheckInput): string[] {
   }
   const unscannable = unscannableFiles(input.files ?? []);
   if (unscannable.length > 0) {
-    out.push(capStatusDescription(UNSCANNABLE_FILE_FAILURE + unscannable.join(", ")));
+    // #1191: a count, never the filenames — a filename can carry a denylisted term.
+    out.push(capStatusDescription(`${UNSCANNABLE_FILE_FAILURE}${unscannable.length} file(s)`));
   }
   const leak = leakFailure(input.patterns, [...input.blobs, ...(input.commitMessages ?? [])]);
   if (leak !== null) out.push(leak);

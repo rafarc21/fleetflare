@@ -272,7 +272,7 @@ describe("mergePrecheckFailures: patchless files fail closed, added lines only",
     expect(failures).toEqual([expect.stringContaining("#1")]);
   });
 
-  it("a patchless binary file fails closed, naming it", () => {
+  it("a patchless binary file fails closed, naming a count, never the filename", () => {
     const files = [{ filename: "bin/blob.png", status: "modified" }];
     const failures = mergePrecheckFailures({
       title: "plain title",
@@ -282,7 +282,27 @@ describe("mergePrecheckFailures: patchless files fail closed, added lines only",
       files,
     });
     expect(failures).toEqual([expect.stringContaining("no diff to scan")]);
-    expect(failures[0]).toContain("bin/blob.png");
+    expect(failures[0]).toContain("1 file(s)");
+    expect(failures[0]).not.toContain("bin/blob.png");
+  });
+
+  it("three patchless files fail closed with a count, none of the filenames", () => {
+    const files = [
+      { filename: "bin/one.png", status: "modified" },
+      { filename: "bin/two.png", status: "modified" },
+      { filename: "bin/three.png", status: "modified" },
+    ];
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: precheckBlobs({ title: "plain title", body: "", files, commits: [] }),
+      files,
+    });
+    expect(failures[0]).toContain("3 file(s)");
+    expect(failures[0]).not.toContain("one.png");
+    expect(failures[0]).not.toContain("two.png");
+    expect(failures[0]).not.toContain("three.png");
   });
 
   it("a filename itself still scans whole: a path can carry a client name", () => {
