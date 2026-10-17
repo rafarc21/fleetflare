@@ -1138,6 +1138,63 @@ export function comparedFilePaths(
     ? [f.filename] : [f.filename, f.previous_filename]));
 }
 
+/** #1169: the compare fields the merge precheck scans — each file's patch
+ *  (and a rename's old name), plus every commit's author/committer identity. */
+export interface PrecheckFile { filename: string; previous_filename?: string; patch?: string }
+export interface PrecheckCommitMeta { author: string; committer: string }
+
+/** The raw compare fields precheckSummary maps from (#1169). */
+export interface PrecheckCompareResponse {
+  files?: { filename: string; previous_filename?: string; patch?: string }[];
+  commits?: {
+    commit?: {
+      author?: { name?: string; email?: string } | null;
+      committer?: { name?: string; email?: string } | null;
+    };
+  }[];
+}
+
+/** precheckSummary's mapping of one commit identity: name and email joined,
+ *  or "" when GitHub omits it (a null author on some merge commits). */
+function precheckIdentity(p: { name?: string; email?: string } | null | undefined): string {
+  return [p?.name ?? "", p?.email ?? ""].filter((s) => s !== "").join(" ");
+}
+
+/** #1169: what the merge precheck takes from one compare response — patches
+ *  and identities, not the path/merge-base view compareSummary maps. Pure, so
+ *  bun test proves the mapping without the network. */
+export function precheckSummary(c: PrecheckCompareResponse): {
+  files: PrecheckFile[]; commits: PrecheckCommitMeta[];
+} {
+  return {
+    files: (c.files ?? []).map((f) => ({
+      filename: f.filename,
+      ...(f.previous_filename === undefined ? {} : { previous_filename: f.previous_filename }),
+      ...(f.patch === undefined ? {} : { patch: f.patch }),
+    })),
+    commits: (c.commits ?? []).map((m) => ({
+      author: precheckIdentity(m.commit?.author),
+      committer: precheckIdentity(m.commit?.committer),
+    })),
+  };
+}
+
+/** #1169: the compare call behind the merge precheck — each file's patch (and
+ *  a rename's old name), plus every commit's author/committer identity.
+ *  Separate from compareFiles: the precheck reads text bodies, the gate's path
+ *  rules read names only, and neither should pay for the other. */
+export async function comparePrecheckData(
+  token: string, repo: string, base: string, head: string,
+): Promise<{ files: PrecheckFile[]; commits: PrecheckCommitMeta[] }> {
+  const c = await ghJson<PrecheckCompareResponse>(
+    token,
+    `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+    { method: "GET" },
+    `read ${repo} precheck compare ${base}...${head}`,
+  );
+  return precheckSummary(c);
+}
+
 /**
  * Issue #249 (PR4b, #107's delivery): how far `head` is ahead of `base`, and
  * when its newest commit landed — the two facts a survival re-brief's task
