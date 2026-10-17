@@ -107,8 +107,8 @@ export async function idleAutoContinue(deps: IdleAutoContinueDeps, storage: Auto
   const escalationDue = (prev?.nudgeCount ?? 0) >= AUTO_CONTINUE_MAX_NUDGES && !(prev?.escalated ?? false);
   if (rateLimited && !escalationDue) return { kind: "none" };
   const task = await deps.findTask();
-  const nudgeCountForTask = prev?.taskNumber === task?.number ? prev.nudgeCount : 0;
-  const alreadyEscalated = prev?.taskNumber === task?.number && prev.escalated;
+  const nudgeCountForTask = prev !== null && prev.taskNumber === task?.number ? prev.nudgeCount : 0;
+  const alreadyEscalated = prev !== null && prev.taskNumber === task?.number && prev.escalated;
   const decision = shouldAutoContinue({
     leadType: deps.leadType, activity: act, now: deps.now(), task,
     lastNudgeAt: prev?.lastNudgeAt ?? null, nudgeCountForTask, alreadyEscalated,

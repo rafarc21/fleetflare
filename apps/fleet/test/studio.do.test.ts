@@ -10,6 +10,7 @@ import { ACTIVITY_KEY, type Activity } from "../src/studio/activity";
 import { MEMBER_ALERTS_KEY, type MemberAlert } from "../src/studio/member-alerts";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
 import type { TranscriptStorage, ShipDeps } from "../src/studio/transcript";
+import type { IdleAutoContinueResult } from "../src/studio/auto-continue";
 import { row } from "./helpers/studio-row";
 
 // Wire-format literal (marker is container↔Worker protocol, pinned here so
@@ -424,7 +425,7 @@ describe("runShipTickWithObservation — onIdleAutoContinue (issue #1193)", () =
 
   const status = (o: Partial<StudioStatus> = {}) => row({ id: "websites--pilot", state: "running", leadType: "glm", ...o });
 
-  function fakeStorage(seed?: { status?: StudioStatus }): (TranscriptStorage & StudioStorage & { map: Map<string, unknown> }) {
+  function fakeStorage(seed?: { status?: StudioStatus }): (TranscriptStorage & ObservedStorage & StudioStorage & { map: Map<string, unknown> }) {
     const map = new Map<string, unknown>();
     if (seed?.status) map.set(STATUS_KEY, seed.status);
     return {
@@ -446,21 +447,21 @@ describe("runShipTickWithObservation — onIdleAutoContinue (issue #1193)", () =
     now: () => now,
   });
 
-  const run = (pane: string, now: Date, storage: ReturnType<typeof fakeStorage>, cb: () => Promise<void>) =>
+  const run = (pane: string, now: Date, storage: ReturnType<typeof fakeStorage>, cb: () => Promise<IdleAutoContinueResult>) =>
     runShipTickWithObservation(
       shipDeps(pane, now), storage, "websites--pilot", undefined, 5000, undefined, undefined, undefined, cb,
     );
 
   it("does NOT fire while idle is still under 10 minutes", async () => {
     const storage = fakeStorage({ status: status() });
-    const cb = vi.fn(async () => {});
+    const cb = vi.fn(async (): Promise<IdleAutoContinueResult> => ({ kind: "none" }));
     await run(IDLE_PANE, T0, storage, cb);
     expect(cb).not.toHaveBeenCalled();
   });
 
   it("fires on the tick that crosses 10 idle minutes, and again on every later idle tick (level, not edge)", async () => {
     const storage = fakeStorage({ status: status() });
-    const cb = vi.fn(async () => {});
+    const cb = vi.fn(async (): Promise<IdleAutoContinueResult> => ({ kind: "none" }));
     await run(IDLE_PANE, T0, storage, cb);
     expect(cb).not.toHaveBeenCalled();
 

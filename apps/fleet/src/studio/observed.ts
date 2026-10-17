@@ -336,7 +336,7 @@ export interface Observed {
    * pre-feature row); a positive number is the monotonic "Nx" the ACTIVITY
    * cell renders.
    */
-  autoContinues: number | null;
+  autoContinues?: number | null;
   /**
    * Issue #311 (PR3 addendum) — the D1-facing mirror of the DO's own
    * `memberAlerts` key (member-alerts.ts's `MEMBER_ALERTS_KEY`), same "own
