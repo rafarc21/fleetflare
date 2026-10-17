@@ -629,8 +629,8 @@ describe("kimi in-think tool payload is never scanned as reasoning (issue #1099 
   test("a <think> tag split across deltas still latches the tool payload before its repeated argument lines (#1127)", () => {
     const state = createStreamState({ thinkTags: true });
     const row = "a very long repeated row value here for the guard test";
-    const rows = Array.from({ length: 60 }, () => `  "${row}",`);
-    const payload = `{"name":"Write","input":{"rows":[\n${rows.join("\n")}\n]}}`;
+    const rows = Array.from({ length: 60 }, () => `  "${row}"`);
+    const payload = `{"name":"Write","input":{"rows":[\n${rows.join(",\n")}\n]}}`;
     const pieces = ["<thi", `nk>${payload}`, "</think>"];
     const frames: string[] = [];
     for (const p of pieces) frames.push(...applyOpenAIStreamChunk(state, delta({ content: p })));

@@ -585,12 +585,13 @@ function scanForRunaway(state: StreamState, text: string): void {
   // inside <think> and only registers at </think>. The marker is matched on the
   // tail of the think text plus this delta, so a marker split across deltas
   // still latches the payload.
-  if (state.thinking || text.includes(THINK_OPEN)) {
+  if (state.thinkTags || state.thinking || text.includes(THINK_OPEN)) {
     const probe = scan.tail + text;
     if (TOOL_CALL_MARKER.test(probe)) scan.payload = true;
     scan.tail = probe.slice(-PAYLOAD_PROBE_CHARS);
   }
   if (scan.payload) return;
+  if (!text.includes("\n")) { scan.partial += text; return; }
   const pieces = (scan.partial + text).split("\n");
   scan.partial = pieces.pop() ?? "";
   for (const line of pieces) {
