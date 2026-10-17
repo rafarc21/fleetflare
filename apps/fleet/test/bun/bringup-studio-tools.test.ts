@@ -39,9 +39,12 @@ function sysBin(): string {
   return dir;
 }
 
-/** A fake PATH dir. `apt-get` records its argv and exits APT_EXIT (default 0);
- *  `az` exists only when `withAz` is set, which is what the region checks.
- *  `fingerprint` (default the pinned value) is what the fake gpg reports. */
+/** A fake PATH dir. `apt-get` records its argv, then — when APT_SLEEP=1 —
+ *  blocks on sleep 30 (the hung-apt test), prints a unique stderr line when
+ *  APT_EXIT != 0, and exits APT_EXIT (default 0). `sleep` blocks on the host
+ *  sleep so the region's `timeout` is the only bound. `az` exists only when
+ *  `withAz` is set, which is what the region checks. `fingerprint` (default
+ *  the pinned value) is what the fake gpg reports. */
 function fakeBin(withAz: boolean, fingerprint?: string): string {
   const bin = tmp("fleet-tools-bin-");
   const apt = join(bin, "apt-get");
@@ -50,9 +53,9 @@ function fakeBin(withAz: boolean, fingerprint?: string): string {
     '#!/bin/sh\necho "$@" >> "$APT_LOG"\nif [ "${APT_SLEEP:-0}" = "1" ]; then exec sleep 30; fi\nif [ "${APT_EXIT:-0}" != "0" ]; then echo "APTERR-7f3a9c apt failed" >&2; fi\nexit "${APT_EXIT:-0}"\n',
   );
   chmodSync(apt, 0o755);
-  // fake sleep: records its argv so the hung-apt test proves the region
-  // really ran it under `timeout`, then blocks via the host sleep so the
-  // timeout is the only thing that bounds it (exec, so SIGTERM lands on it).
+  // fake sleep: blocks via the host sleep so the timeout is the only thing
+  // that bounds it (exec, so SIGTERM lands on it). argv is recorded only so
+  // the apt log stays self-describing; no assertion reads it back.
   const sleep = join(bin, "sleep");
   writeFileSync(sleep, `#!/bin/sh\necho "sleep $@" >> "$APT_LOG"\nexec ${Bun.which("sleep") ?? "/usr/bin/sleep"} "$@"\n`);
   chmodSync(sleep, 0o755);

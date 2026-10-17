@@ -23,7 +23,7 @@ All in apps/fleet/test/bun/bringup-studio-tools.test.ts, plus fake bins.
 4. Mutation check (one-off, hand-edit a region copy): drop the `timeout`
    wrappers, or send apt stderr to /dev/null — each turns a test red.
    Revert after. Shipped tests stay green and hermetic.
-5. Drop the chmod source-grep test: behavior covered by item 3.
+5. Drop the chmod source-grep test (0755 home / 0644 key) — the task's "or drop it" branch; the key-permission behavior is dropped, not behaviorally covered.
 
 ## Verification (one heavy gate at a time, sequential)
 
