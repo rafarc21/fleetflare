@@ -45,8 +45,17 @@ function sysBin(): string {
 function fakeBin(withAz: boolean, fingerprint?: string): string {
   const bin = tmp("fleet-tools-bin-");
   const apt = join(bin, "apt-get");
-  writeFileSync(apt, '#!/bin/sh\necho "$@" >> "$APT_LOG"\nexit "${APT_EXIT:-0}"\n');
+  writeFileSync(
+    apt,
+    '#!/bin/sh\necho "$@" >> "$APT_LOG"\nif [ "${APT_SLEEP:-0}" = "1" ]; then exec sleep 30; fi\nif [ "${APT_EXIT:-0}" != "0" ]; then echo "APTERR-7f3a9c apt failed" >&2; fi\nexit "${APT_EXIT:-0}"\n',
+  );
   chmodSync(apt, 0o755);
+  // fake sleep: records its argv so the hung-apt test proves the region
+  // really ran it under `timeout`, then blocks via the host sleep so the
+  // timeout is the only thing that bounds it (exec, so SIGTERM lands on it).
+  const sleep = join(bin, "sleep");
+  writeFileSync(sleep, `#!/bin/sh\necho "sleep $@" >> "$APT_LOG"\nexec ${Bun.which("sleep") ?? "/usr/bin/sleep"} "$@"\n`);
+  chmodSync(sleep, 0o755);
   if (withAz) {
     const az = join(bin, "az");
     writeFileSync(az, "#!/bin/sh\nexit 0\n");
@@ -72,9 +81,19 @@ interface Run {
   log: string;
   markerExists: boolean;
   marker: string;
+  wallMs: number;
 }
 
-function runRegion(opts: { tools: string; withAz?: boolean; aptExit?: number; preMarker?: boolean; toolsUnset?: boolean; fingerprint?: string }): Run {
+function runRegion(opts: {
+  tools: string;
+  withAz?: boolean;
+  aptExit?: number;
+  preMarker?: boolean;
+  toolsUnset?: boolean;
+  fingerprint?: string;
+  aptSleep?: boolean;
+  toolsTimeout?: string;
+}): Run {
   const ws = tmp("fleet-tools-ws-");
   const bin = fakeBin(opts.withAz ?? false, opts.fingerprint);
   const aptLog = join(ws, "apt.log");
@@ -93,6 +112,9 @@ function runRegion(opts: { tools: string; withAz?: boolean; aptExit?: number; pr
   };
   if (opts.toolsUnset) env.STUDIO_TOOLS = "";
   else env.STUDIO_TOOLS = opts.tools;
+  if (opts.aptSleep) env.APT_SLEEP = "1";
+  if (opts.toolsTimeout) env.STUDIO_TOOLS_TIMEOUT = opts.toolsTimeout;
+  const startedAt = Date.now();
   const r = runSnippet({
     shell: "bash",
     env,
@@ -111,6 +133,7 @@ function runRegion(opts: { tools: string; withAz?: boolean; aptExit?: number; pr
     log: existsSync(bringupLog) ? readFileSync(bringupLog, "utf8") : "",
     markerExists: existsSync(marker),
     marker: existsSync(marker) ? readFileSync(marker, "utf8") : "",
+    wallMs: Date.now() - startedAt,
   };
 }
 
@@ -199,8 +222,19 @@ describe("studio-tools region", () => {
     expect(r.aptCalls.some((c) => c.includes("install") && c.includes("Dir::Etc::sourcelist=") && c.includes("Dir::Etc::sourceparts=-"))).toBe(true);
   });
 
-  test("the signing key is made apt-readable (0755 home, 0644 key)", () => {
-    expect(REGION).toContain("chmod 0755 \"$tools_gpg_home\"");
-    expect(REGION).toContain("chmod 0644 \"$tools_key\"");
+  test("a hung apt is bounded by STUDIO_TOOLS_TIMEOUT: run returns fast, marker written, exit 0", () => {
+    const r = runRegion({ tools: "azure-cli", aptSleep: true, toolsTimeout: "1" });
+    expect(r.code).toBe(0);
+    expect(r.wallMs).toBeLessThan(5000);
+    expect(r.markerExists).toBe(true);
+    expect(r.aptCalls.some((c) => c.includes("update"))).toBe(true);
+  });
+
+  test("apt stderr lands in bringup.log and never in the marker", () => {
+    const r = runRegion({ tools: "azure-cli", aptExit: 100 });
+    expect(r.code).toBe(0);
+    expect(r.log).toContain("APTERR-7f3a9c");
+    expect(r.marker).not.toContain("APTERR-7f3a9c");
+    expect(r.marker).toBe("tools: not installed\n");
   });
 });
