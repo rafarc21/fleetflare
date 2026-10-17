@@ -143,8 +143,11 @@ Config for a repo lives in that repo, not in the fleet. Three steps:
    fleet gate run <pr>
    ```
 
-A repo with no `gate` block, or one that is malformed, is skipped: the gate
-posts no status and runs no legs.
+A repo with no `gate` block at the PR's base, or one that is malformed, is
+failed: the gate posts a red status naming the base (no valid gate config).
+Only removing the repo from `GATE_RUNNER_REPOS`, or setting `FLEET_GATE_RUNNER`
+to `"off"`, switches a repo off. A PR that changes `fleet.json` gates on the
+block its head introduces instead.
 
 ### Pick the gate image (`image` key)
 
@@ -157,7 +160,7 @@ A `gate` block may name the image its legs run in:
 - The value is a key of the operator's `images` map, never an image ref. Only
   `gate` (the default, used when the key is absent) and `desktop` are accepted.
   Any other value, including a registry ref, makes the block malformed: the
-  repo is skipped, as above.
+  repo is failed red (no valid gate config), as above.
 - The operator binds each key in `GateRunnerDO`'s `images` map (`wrangler.jsonc`
   `containers[]`). `desktop` builds `container/Dockerfile.gate-desktop`, with
   `build_context` `./container`. The example file binds `gate` only; add
