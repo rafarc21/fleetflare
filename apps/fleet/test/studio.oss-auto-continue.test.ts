@@ -88,7 +88,7 @@ describe("idleAutoContinue (tick side effect)", () => {
 
   it("skips the board read while rate-limited and under the cap", async () => {
     const storage = fakeStorage();
-    const prev: AutoContinueState = { taskNumber: 77, nudgeCount: 1, lastNudgeAt: new Date(T0.getTime() - 5 * MIN).toISOString(), escalated: false };
+    const prev: AutoContinueState = { taskNumber: 77, nudgeCount: 1, totalNudges: 1, lastNudgeAt: new Date(T0.getTime() - 5 * MIN).toISOString(), escalated: false };
     storage.map.set(AUTO_CONTINUE_KEY, prev);
     const findTask = vi.fn(async () => task("submitted"));
     const wake = vi.fn(async () => ({ ok: true }));
@@ -110,12 +110,12 @@ describe("idleAutoContinue (tick side effect)", () => {
       storage as never, "acme--pilot",
     );
     expect(wake).toHaveBeenCalledWith("Continue your board task #77 now; do not stop between steps.");
-    expect(storage.map.get(AUTO_CONTINUE_KEY)).toEqual({ taskNumber: 77, nudgeCount: 1, lastNudgeAt: T0.toISOString(), escalated: false });
+    expect(storage.map.get(AUTO_CONTINUE_KEY)).toEqual({ taskNumber: 77, nudgeCount: 1, totalNudges: 1, lastNudgeAt: T0.toISOString(), escalated: false });
   });
 
   it("escalates instead of a 7th nudge and marks escalated", async () => {
     const storage = fakeStorage();
-    const prev: AutoContinueState = { taskNumber: 77, nudgeCount: AUTO_CONTINUE_MAX_NUDGES, lastNudgeAt: new Date(T0.getTime() - 25 * MIN).toISOString(), escalated: false };
+    const prev: AutoContinueState = { taskNumber: 77, nudgeCount: AUTO_CONTINUE_MAX_NUDGES, totalNudges: AUTO_CONTINUE_MAX_NUDGES, lastNudgeAt: new Date(T0.getTime() - 25 * MIN).toISOString(), escalated: false };
     storage.map.set(AUTO_CONTINUE_KEY, prev);
     const findTask = vi.fn(async () => task("working"));
     const wake = vi.fn(async () => ({ ok: true }));
@@ -127,5 +127,19 @@ describe("idleAutoContinue (tick side effect)", () => {
     expect(wake).not.toHaveBeenCalled();
     expect(escalate).toHaveBeenCalledWith(77);
     expect(storage.map.get(AUTO_CONTINUE_KEY)).toMatchObject({ escalated: true, taskNumber: 77 });
+  });
+
+  it("returns the nudged result with the running total across task changes", async () => {
+    const storage = fakeStorage();
+    storage.map.set(AUTO_CONTINUE_KEY, { taskNumber: 99, nudgeCount: 2, totalNudges: 2, lastNudgeAt: new Date(T0.getTime() - 25 * MIN).toISOString(), escalated: false } satisfies AutoContinueState);
+    const findTask = vi.fn(async () => task("working"));
+    const wake = vi.fn(async () => ({ ok: true }));
+    const escalate = vi.fn(async () => {});
+    const result = await idleAutoContinue(
+      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), findTask, wake, escalate },
+      storage as never, "acme--pilot",
+    );
+    expect(result).toEqual({ kind: "nudged", taskNumber: 77, totalNudges: 3 });
+    expect(storage.map.get(AUTO_CONTINUE_KEY)).toMatchObject({ taskNumber: 77, nudgeCount: 1, totalNudges: 3 });
   });
 });

@@ -12,11 +12,20 @@ export interface AutoContinueState {
   taskNumber: number;
   /** Nudges already sent for `taskNumber`. */
   nudgeCount: number;
+  /** Monotonic nudges across all tasks — the "Nx" fleet ls renders. */
+  totalNudges: number;
   /** Last nudge ISO, or null. */
   lastNudgeAt: string | null;
   /** Escalation already raised for `taskNumber` after the cap. */
   escalated: boolean;
 }
+
+/** What one evaluation actually did, so the caller can emit the matching
+ *  events row and read the fresh count back for its own mirror. */
+export type IdleAutoContinueResult =
+  | { kind: "nudged"; taskNumber: number; totalNudges: number }
+  | { kind: "escalated"; taskNumber: number }
+  | { kind: "none" };
 
 export interface AutoContinueInput {
   leadType: "claude" | "glm";
@@ -86,17 +95,17 @@ export interface IdleAutoContinueDeps {
  * the cap is not yet due to escalate. Never throws — a board hiccup waits for
  * the next tick, same posture staleShellNudge keeps.
  */
-export async function idleAutoContinue(deps: IdleAutoContinueDeps, storage: AutoContinueStorage, id: string): Promise<void> {
-  if (deps.leadType !== "glm") return;
+export async function idleAutoContinue(deps: IdleAutoContinueDeps, storage: AutoContinueStorage, id: string): Promise<IdleAutoContinueResult> {
+  if (deps.leadType !== "glm") return { kind: "none" };
   const act = deps.activity;
-  if (act === null || act.state !== "idle") return;
+  if (act === null || act.state !== "idle") return { kind: "none" };
   const idleMs = deps.now().getTime() - Date.parse(act.since);
-  if (!Number.isFinite(idleMs) || idleMs < AUTO_CONTINUE_IDLE_MS) return;
+  if (!Number.isFinite(idleMs) || idleMs < AUTO_CONTINUE_IDLE_MS) return { kind: "none" };
   const prev = (await storage.get(AUTO_CONTINUE_KEY)) ?? null;
   const lastMs = Date.parse(prev?.lastNudgeAt ?? "");
   const rateLimited = Number.isFinite(lastMs) && deps.now().getTime() - lastMs < AUTO_CONTINUE_EVERY_MS;
   const escalationDue = (prev?.nudgeCount ?? 0) >= AUTO_CONTINUE_MAX_NUDGES && !(prev?.escalated ?? false);
-  if (rateLimited && !escalationDue) return;
+  if (rateLimited && !escalationDue) return { kind: "none" };
   const task = await deps.findTask();
   const nudgeCountForTask = prev?.taskNumber === task?.number ? prev.nudgeCount : 0;
   const alreadyEscalated = prev?.taskNumber === task?.number && prev.escalated;
@@ -104,23 +113,26 @@ export async function idleAutoContinue(deps: IdleAutoContinueDeps, storage: Auto
     leadType: deps.leadType, activity: act, now: deps.now(), task,
     lastNudgeAt: prev?.lastNudgeAt ?? null, nudgeCountForTask, alreadyEscalated,
   });
-  if (decision.kind === "none") return;
+  if (decision.kind === "none") return { kind: "none" };
   if (decision.kind === "nudge") {
     const outcome = await deps.wake(autoContinuePrompt(decision.taskNumber));
-    if (!outcome.ok) return;
+    if (!outcome.ok) return { kind: "none" };
+    const totalNudges = (prev?.totalNudges ?? 0) + 1;
     await storage.put(AUTO_CONTINUE_KEY, {
-      taskNumber: decision.taskNumber, nudgeCount: nudgeCountForTask + 1,
+      taskNumber: decision.taskNumber, nudgeCount: nudgeCountForTask + 1, totalNudges,
       lastNudgeAt: deps.now().toISOString(), escalated: false,
     });
-    return;
+    return { kind: "nudged", taskNumber: decision.taskNumber, totalNudges };
   }
   try {
     await deps.escalate(decision.taskNumber);
     await storage.put(AUTO_CONTINUE_KEY, {
-      taskNumber: decision.taskNumber, nudgeCount: nudgeCountForTask,
+      taskNumber: decision.taskNumber, nudgeCount: nudgeCountForTask, totalNudges: prev?.totalNudges ?? 0,
       lastNudgeAt: deps.now().toISOString(), escalated: true,
     });
+    return { kind: "escalated", taskNumber: decision.taskNumber };
   } catch (err) {
     console.error(`studio ${id}: auto-continue escalation failed, next tick retries`, err);
+    return { kind: "none" };
   }
 }
