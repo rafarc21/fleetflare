@@ -15,9 +15,12 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, getBranchSha, getPullRequest, getPullRequestHeadSha, listRepoTree, postCommitStatus,
+  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listRepoTree, postCommitStatus,
 } from "../github/api";
-import { repoTokenMinter } from "../github/auth";
+import { mintRepoToken, repoTokenMinter } from "../github/auth";
+import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
+import { resolveOpsRepo } from "../ops-repo";
+import { mergePrecheckFailures } from "./merge-precheck";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import { bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
@@ -80,6 +83,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       return {
         headSha, baseSha, mergeBaseSha: compare.mergeBaseSha, baseRef: pull.baseRef,
         changedFiles: compare.files, truncated: compare.truncated, private: pull.baseRepoPrivate,
+        title: pull.title, body: pull.body,
       };
     });
 
@@ -121,6 +125,32 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: decision.description }));
       return { state: "failure", description: decision.description, statusPostFailed, legs: [] };
     }
+    // #1169: the merge prechecks GitHub auto-merge would otherwise skip —
+    // closing keyword + leak scan on title/body/diff/commit identities. Runs
+    // before the skip return so a docs-only PR with a keyword still goes red.
+    // Fail closed: a missing denylist or scanner error is a red verdict, never
+    // a silent pass (leak-gate.ts's own rule).
+    const precheckFailure = await step.do("precheck", async () => {
+      const token = await mintToken(repo);
+      const compare = await comparePrecheckData(token, repo, resolved.baseSha, resolved.headSha);
+      const opsRepo = resolveOpsRepo(this.env);
+      const patterns = opsRepo === null ? [] : parseDenylist(
+        await fetchRepoFile(await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }), opsRepo, OPS_DENYLIST_PATH, "HEAD"));
+      const blobs = [
+        resolved.title, resolved.body,
+        ...compare.files.flatMap((f) => [f.filename, f.previous_filename ?? "", f.patch ?? ""]),
+        ...compare.commits.flatMap((c) => [c.author, c.committer]),
+      ];
+      return mergePrecheckFailures({ title: resolved.title, body: resolved.body, patterns, blobs });
+    }).catch(() => ["gate precheck failed closed"] as string[]);
+
+    if (precheckFailure.length > 0) {
+      const description = precheckFailure[0];
+      const statusPostFailed = await step.do("post-precheck-failure", async () =>
+        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description }));
+      return { state: "failure", description, statusPostFailed, legs: [] };
+    }
+
     if (decision.action === "skip") {
       // Post success so the required context is not left pending forever. (A guess: localci.sh's own skip path is the model.)
       const statusPostFailed = await step.do("post-skip-status", async () =>
