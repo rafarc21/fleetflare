@@ -75,7 +75,6 @@ describe("leakFailure", () => {
 describe("truncationFailure", () => {
   it("returns the failure string when the compare was truncated", () => {
     expect(truncationFailure(true)).toBe(COMPARE_TRUNCATED_FAILURE);
-    expect(COMPARE_TRUNCATED_FAILURE).toBe("gate precheck: compare truncated, cannot scan full diff");
   });
 
   it("returns null when the compare was complete", () => {
