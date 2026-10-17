@@ -473,4 +473,14 @@ describe("runShipTickWithObservation — onIdleAutoContinue (issue #1193)", () =
     await run(IDLE_PANE, stillIdle, storage, cb);
     expect(cb).toHaveBeenCalledTimes(2);
   });
+
+  it("passes the raw pane frame to the callback", async () => {
+    const storage = fakeStorage({ status: status() });
+    const received: (string | undefined)[] = [];
+    const cb = vi.fn(async (frame?: string): Promise<IdleAutoContinueResult> => { received.push(frame); return { kind: "none" }; });
+    await run(IDLE_PANE, T0, storage, cb as never); // seed idle activity
+    await run(IDLE_PANE, new Date(T0.getTime() + 11 * MIN), storage, cb as never);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(received[0]).toBe(IDLE_PANE);
+  });
 });

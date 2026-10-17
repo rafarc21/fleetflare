@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  shouldAutoContinue, autoContinuePrompt, idleAutoContinue,
+  shouldAutoContinue, autoContinuePrompt, idleAutoContinue, isBarePrompt,
   AUTO_CONTINUE_MAX_NUDGES, AUTO_CONTINUE_KEY, type AutoContinueState,
 } from "../src/studio/auto-continue";
 import type { Activity } from "../src/studio/activity";
@@ -13,6 +13,9 @@ function idle(since: Date): Activity {
   return { state: "idle", since: since.toISOString(), anchored: true, observedAt: since.toISOString(), source: "pane", reason: null, membersTickingAt: null };
 }
 const task = (state: BoardTaskState | null, open = true) => ({ number: 77, state, open });
+const RULE = "─".repeat(68);
+const BARE_FRAME = [RULE, "❯ ", RULE].join("\n");
+const DRAFT_FRAME = [RULE, "❯ half-typed draft", RULE].join("\n");
 const base = {
   leadType: "glm" as const,
   activity: idle(new Date(T0.getTime() - 11 * MIN)),
@@ -76,6 +79,21 @@ describe("autoContinuePrompt", () => {
   });
 });
 
+describe("isBarePrompt", () => {
+  it("returns true for a bare `❯ ` row", () => {
+    expect(isBarePrompt(BARE_FRAME)).toBe(true);
+  });
+  it("returns false for a half-typed draft row", () => {
+    expect(isBarePrompt(DRAFT_FRAME)).toBe(false);
+  });
+  it("returns false for a ghost suggestion row", () => {
+    expect(isBarePrompt([RULE, "❯ What do you want to do next?", RULE].join("\n"))).toBe(false);
+  });
+  it("returns false when there is no composer row", () => {
+    expect(isBarePrompt("just some text")).toBe(false);
+  });
+});
+
 describe("idleAutoContinue (tick side effect)", () => {
   const fakeStorage = () => {
     const map = new Map<string, unknown>();
@@ -94,7 +112,7 @@ describe("idleAutoContinue (tick side effect)", () => {
     const wake = vi.fn(async () => ({ ok: true }));
     const escalate = vi.fn(async () => {});
     await idleAutoContinue(
-      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), findTask, wake, escalate },
+      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), paneFrame: BARE_FRAME, findTask, wake, escalate },
       storage as never, "acme--pilot",
     );
     expect(findTask).not.toHaveBeenCalled();
@@ -106,7 +124,7 @@ describe("idleAutoContinue (tick side effect)", () => {
     const wake = vi.fn(async () => ({ ok: true }));
     const escalate = vi.fn(async () => {});
     await idleAutoContinue(
-      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), findTask, wake, escalate },
+      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), paneFrame: BARE_FRAME, findTask, wake, escalate },
       storage as never, "acme--pilot",
     );
     expect(wake).toHaveBeenCalledWith("Continue your board task #77 now; do not stop between steps.");
@@ -121,7 +139,7 @@ describe("idleAutoContinue (tick side effect)", () => {
     const wake = vi.fn(async () => ({ ok: true }));
     const escalate = vi.fn(async () => {});
     await idleAutoContinue(
-      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), findTask, wake, escalate },
+      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), paneFrame: BARE_FRAME, findTask, wake, escalate },
       storage as never, "acme--pilot",
     );
     expect(wake).not.toHaveBeenCalled();
@@ -136,10 +154,36 @@ describe("idleAutoContinue (tick side effect)", () => {
     const wake = vi.fn(async () => ({ ok: true }));
     const escalate = vi.fn(async () => {});
     const result = await idleAutoContinue(
-      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), findTask, wake, escalate },
+      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), paneFrame: BARE_FRAME, findTask, wake, escalate },
       storage as never, "acme--pilot",
     );
     expect(result).toEqual({ kind: "nudged", taskNumber: 77, totalNudges: 3 });
     expect(storage.map.get(AUTO_CONTINUE_KEY)).toMatchObject({ taskNumber: 77, nudgeCount: 1, totalNudges: 3 });
+  });
+
+  it("refuses to nudge when the pane composer has draft text", async () => {
+    const storage = fakeStorage();
+    const findTask = vi.fn(async () => task("submitted"));
+    const wake = vi.fn(async () => ({ ok: true }));
+    const escalate = vi.fn(async () => {});
+    await idleAutoContinue(
+      { now: () => T0, leadType: "glm", activity: idle(new Date(T0.getTime() - 11 * MIN)), paneFrame: DRAFT_FRAME, findTask, wake, escalate },
+      storage as never, "acme--pilot",
+    );
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it("stamps lastNudgeAt on a failed wake so the next tick does not retype", async () => {
+    const storage = fakeStorage();
+    const findTask = vi.fn(async () => task("submitted"));
+    const wake = vi.fn(async () => ({ ok: false }));
+    const escalate = vi.fn(async () => {});
+    const deps = { now: () => T0, leadType: "glm" as const, activity: idle(new Date(T0.getTime() - 11 * MIN)), paneFrame: BARE_FRAME, findTask, wake, escalate };
+    await idleAutoContinue(deps, storage as never, "acme--pilot");
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(storage.map.get(AUTO_CONTINUE_KEY)).toMatchObject({ taskNumber: 77, nudgeCount: 0, totalNudges: 0, lastNudgeAt: T0.toISOString() });
+    // Second tick within the window: rate-limited by the stamp, no retype.
+    await idleAutoContinue(deps, storage as never, "acme--pilot");
+    expect(wake).toHaveBeenCalledTimes(1);
   });
 });
