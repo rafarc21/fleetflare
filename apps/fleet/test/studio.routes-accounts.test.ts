@@ -21,7 +21,7 @@ import { readFleetAccountUsage, writeFleetAccountUsage } from "../src/studio/acc
 import { resolveClaudeAccounts, selectByHeadroom } from "../src/studio/accounts";
 import {
   STUDIO_ID, FAKE_ROLE_PROMPT, FAKE, decodeRolePrompt,
-  envWithFakeStudio, envWithThrowingVerb, fakeFetchBlueprintFile,
+  envWithFakeStudio, envWithThrowingVerb,
   setFakeRescueAnswer, resetFakeRescueAnswer,
 } from "./helpers/routes-studio-harness";
 
