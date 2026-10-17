@@ -10,6 +10,7 @@ import { scanText, leakHitMessage } from "../leak-gate";
 export const CLOSING_KEYWORD_RE = /(^|[^a-z])(close[sd]?|fix(es|ed)?|resolve[sd]?) #[0-9]/gim;
 
 export const CLOSING_KEYWORD_FAILURE = "closing keyword in PR title or body";
+export const CLOSING_KEYWORD_COMMIT_FAILURE = "closing keyword in a commit message";
 export const DENYLIST_UNAVAILABLE = "gate precheck: denylist unavailable";
 export const LEAK_SCAN_ERROR = "gate precheck: leak scan error";
 export const COMPARE_TRUNCATED_FAILURE = "gate precheck: compare truncated, cannot scan full diff";
@@ -53,6 +54,9 @@ export interface MergePrecheckInput {
    *  the closing-keyword check still runs. */
   private?: boolean;
   truncated?: boolean;
+  /** #1176: commit messages join the keyword and leak scans (a squash body builds
+   *  from them, so a keyword there closes issues at merge). */
+  commitMessages?: string[];
 }
 
 export function mergePrecheckFailures(input: MergePrecheckInput): string[] {
@@ -65,13 +69,17 @@ export function mergePrecheckFailures(input: MergePrecheckInput): string[] {
   }
   const closing = closingKeywordFailure(input.title, input.body);
   if (closing !== null) out.push(closing);
+  // #1176: a keyword in any commit message closes issues at merge (GitHub's
+  // squash builds the merge commit's message from them), so it refuses too.
+  const commitClosing = (input.commitMessages ?? []).some((m) => closingKeywordFailure(m, "") !== null);
+  if (commitClosing) out.push(CLOSING_KEYWORD_COMMIT_FAILURE);
   if (input.private === true) {
     // Leaks cannot leave a private repo, so neither the scan nor its truncation
     // guard applies — the same whole-scan skip board/leak.ts makes. Only a
     // CONFIRMED private repo takes this path, never an unknown visibility.
     return out;
   }
-  const leak = leakFailure(input.patterns, input.blobs);
+  const leak = leakFailure(input.patterns, [...input.blobs, ...(input.commitMessages ?? [])]);
   if (leak !== null) out.push(leak);
   return out;
 }

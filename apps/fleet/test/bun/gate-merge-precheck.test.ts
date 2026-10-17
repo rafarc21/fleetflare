@@ -150,3 +150,52 @@ describe("mergePrecheckFailures: a private repo skips the leak scan", () => {
     expect(failures).toEqual([COMPARE_TRUNCATED_FAILURE, expect.stringContaining("#1")]);
   });
 });
+
+// #1176: commit messages are scanned for both a closing keyword (a squash body
+// builds from them, so a keyword there closes issues at merge) and leaks.
+describe("mergePrecheckFailures: commit messages are scanned", () => {
+  it("flags a closing keyword in a commit message", () => {
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: [],
+      commitMessages: ["Fix #5"],
+    });
+    expect(failures).toEqual(["closing keyword in a commit message"]);
+  });
+
+  it("scans commit messages for leaks too", () => {
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: [],
+      commitMessages: ["AcmeClient note"],
+    });
+    expect(failures).toEqual([expect.stringContaining("#1")]);
+  });
+
+  it("is clean for a plain commit message", () => {
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: [],
+      commitMessages: ["plain"],
+    });
+    expect(failures).toEqual([]);
+  });
+
+  it("a private repo still flags a closing keyword in a commit message", () => {
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: [],
+      blobs: [],
+      commitMessages: ["Fix #5"],
+      private: true,
+    });
+    expect(failures).toEqual(["closing keyword in a commit message"]);
+  });
+});

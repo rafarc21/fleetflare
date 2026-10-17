@@ -141,11 +141,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       const blobs = [
         resolved.title, resolved.body,
         ...compare.files.flatMap((f) => [f.filename, f.previous_filename ?? "", f.patch ?? ""]),
-        ...compare.commits.flatMap((c) => [c.author, c.committer]),
+        ...compare.commits.flatMap((c) => [c.author, c.committer, c.message]),
       ];
       return mergePrecheckFailures({
         title: resolved.title, body: resolved.body, patterns, blobs,
         private: resolved.private, truncated: compare.truncated,
+        commitMessages: compare.commits.map((c) => c.message),
       });
     }).catch(() => ["gate precheck failed closed"] as string[]);
 

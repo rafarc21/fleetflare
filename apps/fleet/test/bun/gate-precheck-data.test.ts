@@ -35,12 +35,38 @@ describe("precheckSummary", () => {
         commit: {
           author: { name: "Acme Dev", email: "dev@example.com" },
           committer: { name: "GitHub", email: "noreply@github.com" },
+          message: "plain commit",
         },
       }],
     });
     expect(out.commits).toEqual([
-      { author: "Acme Dev dev@example.com", committer: "GitHub noreply@github.com" },
+      { author: "Acme Dev dev@example.com", committer: "GitHub noreply@github.com", message: "plain commit" },
     ]);
+  });
+
+  it("maps the commit message", () => {
+    const out = precheckSummary({
+      commits: [{
+        commit: {
+          author: { name: "Acme Dev", email: "dev@example.com" },
+          committer: { name: "GitHub", email: "noreply@github.com" },
+          message: "Fix #5 in the commit",
+        },
+      }],
+    });
+    expect(out.commits[0].message).toBe("Fix #5 in the commit");
+  });
+
+  it("reads a missing commit message as empty string", () => {
+    const out = precheckSummary({
+      commits: [{
+        commit: {
+          author: { name: "Acme Dev", email: "dev@example.com" },
+          committer: { name: "GitHub", email: "noreply@github.com" },
+        },
+      }],
+    });
+    expect(out.commits[0].message).toBe("");
   });
 
   it("reads a null author as empty string", () => {
@@ -49,11 +75,12 @@ describe("precheckSummary", () => {
         commit: {
           author: null,
           committer: { name: "GitHub", email: "noreply@github.com" },
+          message: "plain",
         },
       }],
     });
     expect(out.commits).toEqual([
-      { author: "", committer: "GitHub noreply@github.com" },
+      { author: "", committer: "GitHub noreply@github.com", message: "plain" },
     ]);
   });
 
@@ -99,11 +126,12 @@ describe("precheckSummary", () => {
         commit: {
           author: { name: "Acme Dev" },
           committer: { email: "noreply@github.com" },
+          message: "plain",
         },
       }],
     });
     expect(out.commits).toEqual([
-      { author: "Acme Dev", committer: "noreply@github.com" },
+      { author: "Acme Dev", committer: "noreply@github.com", message: "plain" },
     ]);
   });
 });
