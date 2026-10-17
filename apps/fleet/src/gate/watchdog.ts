@@ -182,19 +182,21 @@ async function endRunFinal(
   deps: WatchdogDeps, row: StalledRun, now: number,
   args: { state: "error" | "failure"; description: string },
 ): Promise<WatchdogOutcome> {
-  const stamped = row.progressedAt ?? 0;
+  const prior = row.progressedAt ?? 0;
   await deps.index.progress(row.repo, row.pr, row.runId, now);
   const postFailed = await deps.post(row.repo, row.headSha, args);
   if (postFailed) {
     // At the final age the row leaves the sweep next minute regardless, so end
     // and retire it and log the lost verdict rather than restore and retry.
-    if (now - stamped >= GATE_WATCHDOG_FINAL_AGE_MS) {
-      console.error(`gate watchdog: final status post failed at the final age for ${row.runId}; verdict lost`);
+    if (now - prior >= GATE_WATCHDOG_FINAL_AGE_MS) {
+      console.error(
+        `gate watchdog: final status post failed at the final age for ${row.runId}; verdict lost (${args.state}: ${args.description})`,
+      );
       await endRunOrThrow(deps.workflow, row.runId);
       await deps.index.retire(row.repo, row.pr, row.runId, now);
       return "final";
     }
-    await deps.index.progress(row.repo, row.pr, row.runId, stamped);
+    await deps.index.progress(row.repo, row.pr, row.runId, prior);
     throw new Error(`gate watchdog: final status post failed for ${row.runId}`);
   }
   await endRunOrThrow(deps.workflow, row.runId);
