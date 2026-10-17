@@ -6274,40 +6274,15 @@ export class StudioDO extends Sandbox<Env> {
       // Board task #149: mint + write the blueprint clone's own credential —
       // see blueprintCredentialWriteCmd's own doc comment (above) for the
       // mechanism, and ProvisionDeps.writeBlueprintCredential's (provision.ts)
-      // for why this port exists at all. A fresh mint against `blueprintRepo`
-      // specifically (never `workRepoSlug`) — this must never widen to any
-      // repo beyond the blueprint one it is handed.
-      //
-      // Issue #331: also narrowed to `permissions: {contents: "read"}` — the
-      // blueprint clone only ever needs to be READ (fleet.json, a role file,
-      // org.json), never pushed to, so the mint itself is denied write from
-      // the start rather than merely being scoped to the right repo.
-      writeBlueprintCredential: async (blueprintRepo: string, _id: string, workRepoSlug: string) => {
-        // Issue #1187: when the blueprint repo IS the work repo, a scoped
-        // blueprint helper would answer the work repo's own push URL with a
-        // read-only 1 h token. Skip mint+write entirely and drop any shadow a
-        // prior provision left behind.
-        if (blueprintRepo.toLowerCase() === workRepoSlug.toLowerCase()) {
-          const res = await sbExec(this, blueprintCredentialDropCmd(blueprintRepo), EXEC_CLASSES.provision);
-          if (res.code !== 0) return { ok: false as const, error: `blueprint credential drop failed (${res.code}): ${res.stderr.slice(0, 500)}` };
-          return { ok: true as const };
-        }
-        try {
-          // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts);
-          // work repo from provision, as memoryToken above.
-          const token = await containerToken(this.env, workRepoSlug, blueprintRepo, { contents: "read" });
-          if (token === null) {
-            return { ok: false as const, error: "no read-only token for the blueprint repo -- set GITHUB_READ_TOKEN (a public blueprint still clones anonymously)" };
-          }
-          const res = await sbExec(this, blueprintCredentialWriteCmd(blueprintRepo), { ...EXEC_CLASSES.provision, env: tokenEnv(token) });
-          if (res.code !== 0) {
-            throw new Error(`blueprint credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
-          }
-          return { ok: true as const };
-        } catch (err) {
-          return { ok: false as const, error: redactSecrets(err instanceof Error ? err.message : String(err)) };
-        }
-      },
+      // for why this port exists at all. The body lives in
+      // writeBlueprintCredentialPort (below this class), so a test can reach
+      // it the same way applyStudioGitSafetyPort's own does.
+      writeBlueprintCredential: (blueprintRepo: string, id: string, workRepoSlug: string) =>
+        writeBlueprintCredentialPort(
+          (w, b) => containerToken(this.env, w, b, { contents: "read" }),
+          (cmd, env) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env }),
+          tokenEnv, blueprintRepo, id, workRepoSlug,
+        ),
       // Issue #253: push.default/branch.autoSetupMerge + the
       // /usr/local/bin/git wrapper that refuses a push at the remote's
       // default branch — see credentials.ts's studioGitSafetyCmd for the
@@ -8871,6 +8846,53 @@ export async function installLeakGatePort(
   try {
     const res = await exec(leakGateInstallCmd());
     if (res.code !== 0) throw new Error(`leak gate install failed (${res.code}): ${res.stderr.slice(0, 500)}`);
+    return { ok: true as const };
+  } catch (err) {
+    return { ok: false as const, error: redactSecrets(err instanceof Error ? err.message : String(err)) };
+  }
+}
+
+/**
+ * `ProvisionDeps.writeBlueprintCredential`'s body (board task #149, issue
+ * #1187), lifted OUT of `deps()` so a test can reach it — the same reason
+ * applyStudioGitSafetyPort and installLeakGatePort just above exist. `deps()`
+ * wires this function and nothing else, so asserting on it is asserting on
+ * what the DO really does.
+ *
+ * A fresh mint against `blueprintRepo` specifically (never `workRepoSlug`) —
+ * this must never widen to any repo beyond the blueprint one it is handed.
+ * Issue #331: also narrowed to `permissions: {contents: "read"}` — the
+ * blueprint clone only ever needs to be READ (fleet.json, a role file,
+ * org.json), never pushed to, so the mint itself is denied write from the
+ * start rather than merely being scoped to the right repo.
+ *
+ * Issue #1187: when the blueprint repo IS the work repo, a scoped blueprint
+ * helper would answer the work repo's own push URL with a read-only 1 h
+ * token. Skip mint+write entirely and drop any shadow a prior provision left
+ * behind.
+ */
+export async function writeBlueprintCredentialPort(
+  mint: (workRepoSlug: string, blueprintRepo: string) => Promise<string | null>,
+  exec: (cmd: string, env?: Record<string, string>) => Promise<{ code: number; stdout: string; stderr: string }>,
+  tokenEnvFn: (token: string) => Record<string, string>,
+  blueprintRepo: string, id: string, workRepoSlug: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (blueprintRepo.toLowerCase() === workRepoSlug.toLowerCase()) {
+    const res = await exec(blueprintCredentialDropCmd(blueprintRepo));
+    if (res.code !== 0) return { ok: false as const, error: `blueprint credential drop failed (${res.code}): ${res.stderr.slice(0, 500)}` };
+    return { ok: true as const };
+  }
+  try {
+    // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts);
+    // work repo from provision, as memoryToken above.
+    const token = await mint(workRepoSlug, blueprintRepo);
+    if (token === null) {
+      return { ok: false as const, error: "no read-only token for the blueprint repo -- set GITHUB_READ_TOKEN (a public blueprint still clones anonymously)" };
+    }
+    const res = await exec(blueprintCredentialWriteCmd(blueprintRepo), tokenEnvFn(token));
+    if (res.code !== 0) {
+      throw new Error(`blueprint credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
+    }
     return { ok: true as const };
   } catch (err) {
     return { ok: false as const, error: redactSecrets(err instanceof Error ? err.message : String(err)) };
