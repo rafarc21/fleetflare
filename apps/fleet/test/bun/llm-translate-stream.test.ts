@@ -557,8 +557,8 @@ describe("stray closer and narrate-then-unrecoverable tool call (issue #1186)", 
 });
 
 describe("tool-call attempt detection gaps (issue #1201)", () => {
-  const OPEN = " thinking";
-  const CLOSE = " response";
+  const OPEN = "<think>";
+  const CLOSE = "</think>";
 
   test("an unterminated <tool_call> opener with no closer is an attempt — retryable error, not end_turn", () => {
     const { closed } = runThinkStream(["I will look now" + OPEN + "<tool_call>{\"name\":\"Read\",\"arguments\":{", "oops" + CLOSE], "stop");
