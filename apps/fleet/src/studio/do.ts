@@ -6399,7 +6399,9 @@ export class StudioDO extends Sandbox<Env> {
       this.ctx.storage as unknown as AutoContinueStorage, this.selfId(),
     ).then((result) => {
       if (result.kind === "nudged") {
-        void appendEvent(this.env.DB, this.autoContinueNudgeEvent(result.taskNumber, result.totalNudges, now)).catch(() => {});
+        void appendEvent(this.env.DB, this.autoContinueNudgeEvent(result.taskNumber, result.totalNudges, now)).catch((err) => {
+          console.error(`studio ${this.selfId()}: auto-continue nudge event write failed`, err);
+        });
       }
       return result;
     });
