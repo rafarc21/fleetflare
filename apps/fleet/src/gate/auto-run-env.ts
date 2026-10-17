@@ -1,9 +1,9 @@
-// #1072 (refs #715): the webhook's auto-run with the live Worker bindings: the
-// installation-token minter, the GitHub fleet.json reader and the GATE_WORKFLOW
-// binding. Kept apart from auto-run.ts, which stays free of env/auth imports so
-// the bun-test project can load it without pulling in cloudflare:workers. Only
-// the GATE_RUNNER_REPOS / FLEET_GATE_RUNNER switch (not a gate block) turns a
-// repo off: a gated repo with no valid gate config fails red (#1132).
+// #1072 (refs #715): the webhook's auto-run with the live Worker bindings:
+// GATE_WORKFLOW and the D1 run index. Kept apart from auto-run.ts, which stays
+// free of env/auth imports so the bun-test project can load it without pulling
+// in cloudflare:workers. Only the GATE_RUNNER_REPOS / FLEET_GATE_RUNNER switch
+// (not a gate block) turns a repo off: a gated repo with no valid gate config
+// fails red (#1132).
 import type { Env } from "../env";
 import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
 import type { StalledRun, WatchdogIndex } from "./watchdog";

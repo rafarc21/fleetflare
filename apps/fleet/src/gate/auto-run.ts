@@ -192,7 +192,7 @@ export async function startGateRun(
     // sha: reuse would inherit that PR's verdict. Start a fresh -r run instead.
     const latest = await index.latest(input.repo, input.pr);
     if (latest?.headSha !== input.headSha) {
-      const freshId = `${runId}-r${Date.now().toString(36)}`;
+      const freshId = `${runId}-r${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 6)}`;
       await wf.create({ id: freshId, params: { repo: input.repo, pr: input.pr } });
       return recordRun(wf, input, index, freshId, Date.now);
     }

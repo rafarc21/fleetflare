@@ -1,7 +1,7 @@
 // The GitHub-backed FleetJsonReader (#715, #1072): one repo's fleet.json at a
-// ref, read with a token minted for that repo. Shared by the gate Workflow's
-// load-config step, the one place that turns a null (absent or malformed) into
-// the red "no valid gate config" verdict (#1132).
+// ref, read with a token minted for that repo. Used by the gate Workflow's
+// load-config step; the null it returns (absent or malformed) is turned red
+// by decideGateRun (#1132).
 import { fetchRepoFile } from "../github/api";
 import type { FleetJsonReader } from "./load-config";
 
