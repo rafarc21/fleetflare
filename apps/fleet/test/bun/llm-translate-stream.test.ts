@@ -602,6 +602,65 @@ describe("tool-call attempt detection gaps (issue #1201)", () => {
   });
 });
 
+// Issue #1209 (maestro review round 3): a truncated sibling after the last
+// complete </tool_call> must still flag the turn — the tagged loop used to
+// return early and drop it silently. Test 4 feeds the same shape through the
+// real wire path (SSE data line -> parseSseDataLine -> chunk).
+describe("tool-call attempt detection round 3 (issue #1209)", () => {
+  const OPEN = "<think>";
+  const CLOSE = "</think>";
+
+  test("an unterminated <tool_call> opener with no name is an attempt — retryable error", () => {
+    const { closed } = runThinkStream(["I will look now" + OPEN + '<tool_call>{', "still no name" + CLOSE], "stop");
+    expect(closed.ok).toBe(false);
+    const err = closed.frames.map(parseFrame).find((f) => f.event === "error");
+    expect(err).toBeDefined();
+    expect((err?.data as { error: { message: string } }).error.message).toMatch(/retry/i);
+    expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+
+  test('a brace-leading body without "name" is an attempt — retryable error', () => {
+    const { closed } = runThinkStream(["I will look now" + OPEN + '{"arguments":{"file_path":"a"}}', "oops" + CLOSE], "stop");
+    expect(closed.ok).toBe(false);
+    const err = closed.frames.map(parseFrame).find((f) => f.event === "error");
+    expect(err).toBeDefined();
+    expect((err?.data as { error: { message: string } }).error.message).toMatch(/retry/i);
+    expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+
+  test("a good call followed by a truncated sibling is an attempt — retryable error", () => {
+    const { closed } = runThinkStream([
+      "I will look now" + OPEN
+      + '<tool_call>{"name":"Read","arguments":{"file_path":"a"}}</tool_call>'
+      + '<tool_call>{"name":"Bash","arguments":{"command":"ls' + CLOSE,
+    ], "stop");
+    expect(closed.ok).toBe(false);
+    const err = closed.frames.map(parseFrame).find((f) => f.event === "error");
+    expect(err).toBeDefined();
+    expect((err?.data as { error: { message: string } }).error.message).toMatch(/retry/i);
+    expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+
+  test("wire-level kimi stream: a trailing truncated tool_call is a retryable error", () => {
+    const state = createStreamState({ thinkTags: true });
+    const frames: string[] = [];
+    const sse = (content: string) => "data: " + JSON.stringify({ choices: [{ delta: { content } }] }) + "\n\n";
+    const feed = (line: string) => {
+      const chunk = parseSseDataLine(line);
+      frames.push(...applyOpenAIStreamChunk(state, chunk));
+    };
+    feed(sse('<think>I need two calls'));
+    feed(sse('<tool_call>{"name":"Read","arguments":{"file_path":"/workspace/acme/a.txt"}}</tool_call>'));
+    feed(sse('<tool_call>{"name":"Bash","arguments":{"command":"ls -la"'));
+    feed(sse('</think>'));
+    frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] }));
+    const closed = closeStreamOrError(state, 64000);
+    expect(closed.ok).toBe(false);
+    expect(closed.reason).toBe("think_tool_call_unrecovered");
+    expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+});
+
 // Issue #1099: a degenerate upstream stream is aborted with a retriable
 // overloaded_error, not run to the 64k output cap. Round 3 (maestro review)
 // dropped the per-model soft cap: repetition thresholds are conservative, and a
