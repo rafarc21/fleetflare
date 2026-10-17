@@ -3,9 +3,10 @@ import { env } from "cloudflare:test";
 import {
   runRefreshCredential, runRefreshToken, refreshWithStorage,
   credentialWriteCmd, credentialClearCmd, tokenEnv, FLEET_TOKEN_ENV, REFRESH_SECONDS, studioEnvVars, readTailscaleHost, type RefreshDeps,
-  refreshCredentialExec, gitIdentityCmd, gitIdentityEnv, STUDIO_GIT_IDENTITY,
+  refreshCredentialExec, gitIdentityCmd, gitIdentityEnv, STUDIO_GIT_IDENTITY, refreshBackoffDelaySeconds, workCredentialVerifyCmd,
   ensureSpawnToken, loadOrMintSpawnToken, SPAWN_TOKEN_KEY, type SpawnTokenStorage,
 } from "../src/studio/do";
+import { blueprintShadowDropCmd } from "../src/studio/credentials";
 import { hashSpawnToken } from "../src/studio/org";
 import { realDoClassForRole } from "../src/studio/profile";
 import { writeProxyConfigCmd } from "../src/write-proxy/container-config";
@@ -302,6 +303,64 @@ describe("runRefreshCredential", () => {
     const result = await runRefreshCredential(deps);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).not.toContain("ghs_echoedbacktoken");
+  });
+
+  // Issue #1187: with a workRepo the write exec also heals any blueprint
+  // shadow, and a post-write verify asks git which token the work repo now
+  // gets — the fresh token must come back, or the refresh is degraded.
+  it("workRepo appends the shadow drop to the write exec and runs the verify exec", async () => {
+    const calls: string[] = [];
+    const deps = fakeRefreshDeps({
+      workRepo: "acme-org/websites",
+      sbExec: vi.fn(async (cmd: string) => {
+        calls.push(cmd);
+        return cmd === workCredentialVerifyCmd("acme-org/websites")
+          ? { code: 0, stdout: "password=ghs_freshtoken000\n", stderr: "" }
+          : { code: 0, stdout: "", stderr: "" };
+      }),
+    });
+    expect((await runRefreshCredential(deps)).ok).toBe(true);
+    const exec = refreshCredentialExec("ghs_freshtoken000", STUDIO_GIT_IDENTITY, "acme-org/websites");
+    expect(calls[0]).toContain(blueprintShadowDropCmd("acme-org/websites"));
+    expect(calls[0]).toBe(exec.cmd);
+    expect(calls[1]).toBe(workCredentialVerifyCmd("acme-org/websites"));
+  });
+
+  it("verify returning a wrong or missing password fails the refresh (degraded)", async () => {
+    for (const stdout of ["", "password=ghs_someOtherToken\n", "username=x-access-token\n"]) {
+      const deps = fakeRefreshDeps({
+        workRepo: "acme-org/websites",
+        sbExec: vi.fn(async (cmd: string) => (
+          cmd === workCredentialVerifyCmd("acme-org/websites")
+            ? { code: 0, stdout, stderr: "" } : { code: 0, stdout: "", stderr: "" }
+        )),
+      });
+      const result = await runRefreshCredential(deps);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("verify failed");
+    }
+  });
+
+  it("verify returning the fresh token keeps the refresh ok:true", async () => {
+    const deps = fakeRefreshDeps({
+      workRepo: "acme-org/websites",
+      sbExec: vi.fn(async (cmd: string) => (
+        cmd === workCredentialVerifyCmd("acme-org/websites")
+          ? { code: 0, stdout: "password=ghs_freshtoken000\n", stderr: "" } : { code: 0, stdout: "", stderr: "" }
+      )),
+    });
+    expect((await runRefreshCredential(deps)).ok).toBe(true);
+  });
+});
+
+describe("refreshBackoffDelaySeconds (issue #1187)", () => {
+  it("0 (success) = REFRESH_SECONDS; 1 -> 30, 2 -> 120, 3+ -> 300", () => {
+    expect(refreshBackoffDelaySeconds(0)).toBe(REFRESH_SECONDS);
+    expect(refreshBackoffDelaySeconds(-1)).toBe(REFRESH_SECONDS);
+    expect(refreshBackoffDelaySeconds(1)).toBe(30);
+    expect(refreshBackoffDelaySeconds(2)).toBe(120);
+    expect(refreshBackoffDelaySeconds(3)).toBe(300);
+    expect(refreshBackoffDelaySeconds(5)).toBe(300);
   });
 });
 
@@ -719,7 +778,7 @@ describe("provision + credential (do.ts's real provision() shape)", () => {
     // The recurring refresh got scheduled, with the brief's exact interval.
     // REFRESH_SECONDS's real do.ts wiring is pinned in the "StudioDO wiring
     // (source-pinned)" describe block below (armTicks/refreshToken rearm).
-    expect(scheduler.active).toEqual([{ delaySeconds: 3000, name: "refreshToken" }]);
+    expect(scheduler.active).toEqual([{ delaySeconds: REFRESH_SECONDS, name: "refreshToken" }]);
 
     // The credential-writing command (token-bearing) is never persisted:
     // not in DO storage, not in the D1-backed registry row.
@@ -1333,15 +1392,15 @@ describe("StudioDO wiring (source-pinned — the class cannot be constructed her
   });
 
   // REFRESH_SECONDS's real consumer is do.ts, unreachable by import (the DO
-  // cannot be constructed here) — pins the symbol itself at both rearm
-  // sites (armTicks' initial arm, refreshToken()'s own reschedule), so a
-  // future edit that hardcodes a different interval at either site, or
-  // drops the constant from one of them, breaks this. StudioDO cannot be
-  // constructed under vitest-pool-workers; source-pinning is this repo's
-  // established compromise, see studio.account-launched.test.ts.
-  it("rearms refreshToken with REFRESH_SECONDS at both call sites (armTicks, refreshToken's own reschedule)", () => {
-    const sites = src.split("\n").filter((l) => l.includes('this.rearm("refreshToken", REFRESH_SECONDS)'));
-    expect(sites.length).toBe(2); // test-lies-check: allow — source-pinning, see comment above
+  // cannot be constructed here) — pins the symbol itself at the initial arm
+  // (armTicks) and refreshBackoffDelaySeconds at the reschedule site
+  // (refreshToken()'s own tail), so a future edit that hardcodes a different
+  // interval at either site, or drops either symbol, breaks this. StudioDO
+  // cannot be constructed under vitest-pool-workers; source-pinning is this
+  // repo's established compromise, see studio.account-launched.test.ts.
+  it("armTicks arms refreshToken with REFRESH_SECONDS; refreshToken re-arms via refreshBackoffDelaySeconds", () => {
+    expect(src.split("\n").filter((l) => l.includes('this.rearm("refreshToken", REFRESH_SECONDS)'))).toHaveLength(1);
+    expect(src).toContain('this.rearm("refreshToken", refreshBackoffDelaySeconds(');
   });
 });
 

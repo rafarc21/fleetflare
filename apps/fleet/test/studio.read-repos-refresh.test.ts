@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
-  runRefreshCredential, refreshCredentialExec, STUDIO_GIT_IDENTITY, tokenEnv, type RefreshDeps,
+  runRefreshCredential, refreshCredentialExec, STUDIO_GIT_IDENTITY, tokenEnv, workCredentialVerifyCmd, type RefreshDeps,
 } from "../src/studio/do";
 import { readReposCredentialClearCmd, readReposCredentialWriteCmd } from "../src/studio/credentials";
 
@@ -86,6 +86,50 @@ describe("runRefreshCredential — read-repos (issue #291)", () => {
     const d = deps();
     expect((await runRefreshCredential(d)).ok).toBe(true);
     expect(vi.mocked(d.sbExec).mock.calls).toEqual([[PRIMARY.cmd, PRIMARY.env]]);
+  });
+
+  // Issue #1187: workRepo enables the post-write verify; the read grant is
+  // unaffected by it — the two ride separate exec calls. The read-repos exec
+  // runs BEFORE the verify: the verify can fail (a stale own-repo read key
+  // still shadows the fresh token), and the read-repos rewrite is the heal
+  // that drops that stale key — it must never be skipped by a failed verify.
+  it("workRepo adds a verify exec AFTER the read-repos exec; a read grant still lists the own repo (that guard lives in read-repos.ts)", async () => {
+    const d = deps({
+      workRepo: "acme-org/websites",
+      readRepos: vi.fn(async () => ({ token: "ghs_read", repos: ["acme-org/alpha"] })),
+      sbExec: vi.fn(async (cmd: string) => (
+        cmd === workCredentialVerifyCmd("acme-org/websites")
+          ? { code: 0, stdout: "password=ghs_primary\n", stderr: "" } : { code: 0, stdout: "", stderr: "" }
+      )),
+    });
+    expect((await runRefreshCredential(d)).ok).toBe(true);
+    const calls = vi.mocked(d.sbExec).mock.calls.map(([cmd]) => cmd);
+    expect(calls).toEqual([
+      refreshCredentialExec("ghs_primary", STUDIO_GIT_IDENTITY, "acme-org/websites").cmd,
+      readReposCredentialWriteCmd(["acme-org/alpha"]),
+      workCredentialVerifyCmd("acme-org/websites"),
+    ]);
+  });
+
+  // Issue #1187: the read-repos heal must run even when the verify is about
+  // to fail — the heal is what drops a stale own-repo read key that makes the
+  // verify return the wrong token, so it is load-bearing, not best-effort.
+  it("a failing verify still runs the read-repos exec first — the heal is never skipped by the verify's own failure", async () => {
+    const d = deps({
+      workRepo: "acme-org/websites",
+      readRepos: vi.fn(async () => ({ token: "ghs_read", repos: ["acme-org/alpha"] })),
+      sbExec: vi.fn(async (cmd: string) => (
+        cmd === workCredentialVerifyCmd("acme-org/websites")
+          ? { code: 0, stdout: "password=ghs_stale\n", stderr: "" } : { code: 0, stdout: "", stderr: "" }
+      )),
+    });
+    expect((await runRefreshCredential(d)).ok).toBe(false);
+    const calls = vi.mocked(d.sbExec).mock.calls.map(([cmd]) => cmd);
+    expect(calls).toEqual([
+      refreshCredentialExec("ghs_primary", STUDIO_GIT_IDENTITY, "acme-org/websites").cmd,
+      readReposCredentialWriteCmd(["acme-org/alpha"]),
+      workCredentialVerifyCmd("acme-org/websites"),
+    ]);
   });
 
   it("do.ts wires the port into refreshDeps (source pin: StudioDO cannot be constructed under test)", () => {

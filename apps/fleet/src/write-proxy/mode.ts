@@ -109,18 +109,16 @@ export async function studioReadToken(
 }
 
 /** What do.ts's refresh writes into the container for an already-resolved
- *  mode: null = clear it. In proxy mode a failed mint is null too, so a stale
- *  credential never lingers. */
+ *  mode: null = clear it (no read token configured — a legitimate clear, not
+ *  a failure). A proxy mint error PROPAGATES instead of returning null: a
+ *  swallowed null would wipe a previously-good credential on a transient mint
+ *  500, and rethrowing lets runRefreshCredential degrade the status and retry
+ *  with backoff while the container keeps its last good credential. */
 export async function studioCredential(
   env: Env, repo: string, mode: WriteMode, mint: typeof mintRepoToken = mintRepoToken,
 ): Promise<string | null> {
   if (mode === "direct") return mint(env, repo);
-  try {
-    return await studioReadToken(env, repo, mint);
-  } catch (err) {
-    console.error(`write proxy: read token for ${repo} failed, clearing the studio credential`, err instanceof Error ? err.message : String(err));
-    return null;
-  }
+  return await studioReadToken(env, repo, mint);
 }
 
 /**

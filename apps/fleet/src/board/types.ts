@@ -318,3 +318,24 @@ export interface EnvelopeDoc {
   };
   notes: string;
 }
+
+/**
+ * Issue #1133: the PR number in the newest §6 result envelope, or null.
+ * Searched BACKWARDS so a later plain comment (or a non-result envelope) never
+ * shadows the actual result — the same scan findLatestResultEnvelope does, over
+ * a caller's already-decoded comments. Pure, lives here (not in board.ts or
+ * verify.ts) so every reader of a decoded envelope can call it without a cycle.
+ */
+export function latestResultPr(comments: { envelope: EnvelopeDoc | null }[]): number | null {
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const env = comments[i].envelope;
+    if (!env || env.envelope.intent !== "result") continue;
+    for (const art of env.payload.artifacts) {
+      if (art.pr === undefined) continue;
+      const n = Number.parseInt(art.pr.replace(/^#/, ""), 10);
+      if (Number.isInteger(n) && n > 0) return n;
+    }
+    return null;
+  }
+  return null;
+}
