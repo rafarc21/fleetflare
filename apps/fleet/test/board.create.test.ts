@@ -259,6 +259,54 @@ describe("createTask", () => {
   });
 });
 
+// Issue #1133: a new board task filed for an issue that already has an open
+// task burned capacity quietly. Refuse a 409 naming the existing task and its
+// assignee; `--allow-duplicate` (brief.allowDuplicate) skips; an unreadable
+// issue fails open (the create is about to need GitHub anyway).
+describe("createTask — duplicate-task refusal (#1133)", () => {
+  const openDuplicate = () =>
+    task({ number: 12, state: "working", labels: ["working", "studio:websites--web-studio"], assignee: "websites--web-studio", open: true });
+
+  it("refuses a brief referencing an OPEN task's issue, naming the task and its assignee", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => openDuplicate()) });
+    const res = await createTask(api, "o/r", { ...brief, title: "#12 gate" });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(409);
+    expect(res.message).toContain("#12");
+    expect(res.message).toContain("websites--web-studio");
+    expect(api.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("does not refuse when the referenced issue's task is terminal", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 12, state: "completed", open: false, labels: ["completed"] })) });
+    const res = await createTask(api, "o/r", { ...brief, title: "#12 gate" });
+    expect(res.ok).toBe(true);
+    expect(api.createIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails open: an unreadable referenced issue still lets the create through", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => { throw new GitHubError(404, "Not Found"); }) });
+    const res = await createTask(api, "o/r", { ...brief, title: "#12 gate" });
+    expect(res.ok).toBe(true);
+    expect(api.createIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("--allow-duplicate skips the refusal even with an open duplicate", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => openDuplicate()) });
+    const res = await createTask(api, "o/r", { ...brief, title: "#12 gate", allowDuplicate: true });
+    expect(res.ok).toBe(true);
+    expect(api.createIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("a brief with no issue reference never reads getIssue (no extra read)", async () => {
+    const api = fakeApi();
+    const res = await createTask(api, "o/r", brief);
+    expect(res.ok).toBe(true);
+    expect(api.getIssue).not.toHaveBeenCalled();
+  });
+});
+
 // Issue #139: GitHub created the issue, then the response came back a 520 —
 // the caller saw a failure, retried, and filed a duplicate (#56 / #57). The
 // fake below is a tiny stateful GitHub: createIssue WRITES first and only
