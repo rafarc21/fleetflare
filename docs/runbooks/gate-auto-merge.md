@@ -15,7 +15,7 @@ invocation only. Identity watcher = piece (d), separate, not here.
 ```sh
 gh pr merge <pr> --auto --squash \
   --match-head-commit <head-sha> \
-  --author-email 'fleet-studio@users.noreply.github.com'
+  --author-email '<operator-chosen noreply identity — decision pending, see #1168>'
 ```
 
 Why each flag:
@@ -31,6 +31,12 @@ Why each flag:
 - `--author-email`: sets merge commit author email to the public-safe
   noreply identity. `gh` sends `authorEmail` in the auto-merge mutation, so
   the merge commit carries it from arm time.
+
+The exact author email is an operator decision, pending (#1168). A GitHub
+noreply email has the form `<id>+<username>@users.noreply.github.com` and is
+owned by ITS user, so borrowing a bare one (for example
+`fleet-studio@users.noreply.github.com`, a third-party user's address) is
+wrong — the operator must choose an identity they actually own.
 
 ## Post-merge audit boundary
 
