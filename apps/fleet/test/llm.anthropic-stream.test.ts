@@ -380,6 +380,49 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     expect(rowsLogged[0].timeToHeaders!).toBeGreaterThanOrEqual(0);
   });
 
+  // Issue #1179: real timers, so the route's two clocks are actually
+  // exercised — env.AI.run awaits a real 30 ms before resolving (the
+  // pre-header window), then the ReadableStream's start() awaits another
+  // real 40 ms before its first enqueue (post-header). One-sided bounds
+  // only, so a slow CI can never flake it: a real timer fires at or after
+  // its delay, never before.
+  it("real timers: time_to_headers covers only the pre-header window (issue #1179)", async () => {
+    const enc = new TextEncoder();
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 2 } },
+    ];
+    const run = vi.fn(async () => {
+      await sleep(30);
+      return new ReadableStream<Uint8Array>({
+        async start(controller) {
+          await sleep(40);
+          for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+          controller.enqueue(enc.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+    });
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    await r.text();
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    const timeToHeaders = rowsLogged[0].timeToHeaders!;
+    const durationMs = rowsLogged[0].durationMs!;
+    // Mutant A (headersAt = startedAt) makes this 0; the run() timer makes it >= 30.
+    expect(timeToHeaders).toBeGreaterThanOrEqual(25);
+    // Mutant B (time_to_headers computed at log time) makes this ~0; the
+    // stream-start timer makes it >= 40.
+    expect(durationMs - timeToHeaders).toBeGreaterThanOrEqual(30);
+  });
+
   // Fresh-context review, #717 critical follow-up: this is the critical gap
   // — Claude Code streams by default, so THIS path (pumpAnthropicStream ->
   // applyOpenAIStreamChunk/closeStreamOrError) is the one that actually

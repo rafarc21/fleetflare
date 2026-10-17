@@ -36,7 +36,7 @@ interface JuniorUsageRow {
   durationMs?: number;
   /** Issue #335: env.AI.run attempts the call took, 1 = no retry. */
   attempts?: number;
-  /** Issue #1155: ms from request start to the first possible response (lead rows only). */
+  /** Issue #1155: ms from model-call start (after auth, rate limit, body, pool reads) to the first possible response (lead rows only). */
   timeToHeaders?: number;
 }
 
