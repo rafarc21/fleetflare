@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { env, introspectWorkflowInstance } from "cloudflare:test";
 import type { Env } from "../src/env";
-import { CLOSING_KEYWORD_COMMIT_FAILURE } from "../src/gate/merge-precheck";
+import { CLOSING_KEYWORD_COMMIT_FAILURE, CLOSING_KEYWORD_FAILURE, recheckFailures } from "../src/gate/merge-precheck";
 import { GATE_STATUS_CONTEXT } from "../src/gate/status-post";
 
 const REPO = "acme/example";
@@ -30,6 +30,14 @@ let realFetch: typeof globalThis.fetch;
 // test can throw ONLY the precheck's call and pin the fail-closed catch.
 let compareCalls = 0;
 let compareThrows2nd = false;
+// #1203: the title getPullRequest serves is call-count driven, so a test can
+// leave it clean through resolve-pr (calls 1-2) and flip it to a closing
+// keyword only at the recheck (call 3), which re-reads the PR after the
+// initial precheck passed.
+let pullsCalls = 0;
+// The compare's commit message, so a test can hold the precheck clean (the
+// default "Fix #9" fails it before the recheck could ever run).
+let commitMessage = "Fix #9";
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -45,12 +53,16 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
 
   if (method === "GET" && /\/pulls\/\d+$/.test(url)) {
     // getPullRequest + getPullRequestHeadSha: same body serves both (head.sha
-    // is read only by the latter; getPullRequest ignores it).
+    // is read only by the latter; getPullRequest ignores it). The title is
+    // clean through resolve-pr's two reads (calls 1-2) and flips to a closing
+    // keyword at the recheck's re-read (call 3), so a title edited between the
+    // initial precheck and the recheck goes red.
+    pullsCalls++;
     return Promise.resolve(json({
       number: PR, merged: false, merge_commit_sha: null, state: "open",
       base: { ref: "main", repo: { full_name: REPO, private: false } },
       head: { ref: "feature", sha: HEAD },
-      title: "Docs update", body: "Readme tweak",
+      title: pullsCalls >= 3 ? "Fix #2" : "Docs update", body: "Readme tweak",
     }));
   }
   if (method === "GET" && /\/commits\/main$/.test(url)) {
@@ -74,7 +86,7 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
         commit: {
           author: { name: "Acme Dev", email: "dev@example.com" },
           committer: { name: "Acme Bot", email: "bot@example.com" },
-          message: "Fix #9",
+          message: commitMessage,
         },
       }],
     }));
@@ -83,6 +95,11 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     // Every fleet.json read (the fleet repo's at HEAD, and the PR repo's at
     // merge-base, head and base) returns the same gate block: paths outside it.
     return Promise.resolve(new Response(FLEET_JSON, { status: 200 }));
+  }
+  if (method === "GET" && /\/contents\/public-denylist\.txt\?ref=/.test(url)) {
+    // The ops denylist: one pattern that does not hit the neutral fixtures, so
+    // a precheck with FLEET_OPS_REPO set passes clean and reaches the recheck.
+    return Promise.resolve(new Response("acmeclient\n", { status: 200 }));
   }
   if (method === "POST" && /\/statuses\/[0-9a-f]{40}$/.test(url)) {
     return Promise.resolve(json({}));
@@ -96,6 +113,8 @@ beforeEach(() => {
   recorded = [];
   compareCalls = 0;
   compareThrows2nd = false;
+  pullsCalls = 0;
+  commitMessage = "Fix #9";
   realFetch = globalThis.fetch;
   globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
 });
@@ -175,4 +194,58 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       await instance.dispose();
     }
   }, 60_000);
+
+  it("a title edited to a closing keyword after the precheck fails the skip-path recheck (#1203)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    // A real denylist with one non-hitting pattern: the precheck must pass clean
+    // (title and commit message are clean) so the run reaches the skip recheck.
+    e.FLEET_OPS_REPO = "acme/ops";
+    // The compare's commit message must not carry a keyword, or the precheck
+    // fails before the recheck could ever run.
+    commitMessage = "clean";
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-fix3a");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-fix3a", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("failure");
+      expect(out.description).toBe(CLOSING_KEYWORD_FAILURE);
+
+      const post = recorded.find((r) => r.method === "POST" && /\/statuses\//.test(r.url));
+      expect(post).toBeDefined();
+      expect(post!.body).toEqual({
+        state: "failure",
+        context: GATE_STATUS_CONTEXT,
+        description: CLOSING_KEYWORD_FAILURE,
+      });
+
+      // No leg ran: the SKIP path and its recheck never touch GATE_RUNNER.
+      const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
+      expect(legCalls).toEqual([]);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  // #1203: the success-path recheck (workflow.ts:290) fires only when
+  // final.state === "success", reached after real legs run. GateRunnerDO is
+  // container-backed and NOT bound in test/wrangler.test.jsonc (vitest-pool-workers
+  // cannot spawn its container), and planUnionLegs always plans a merge-tree leg,
+  // so there is no "run" verdict reachable without the GATE_RUNNER binding. The
+  // success-path recheck is the SAME step name ("precheck-recheck") and the SAME
+  // postRecheckFailure path as the skip-path recheck (workflow.ts:178), exercised
+  // end to end above. This test pins the pure core both call sites share:
+  // recheckFailures turns a keyword title into the closing-keyword failure.
+  it("the success-path recheck's pure core turns a keyword title into a failure (#1203)", () => {
+    expect(recheckFailures({ title: "Fix #2", body: "Readme tweak", patterns: ["acmeclient"], private: false }))
+      .toEqual([CLOSING_KEYWORD_FAILURE]);
+    // The clean title passes: the same re-read, held clean, yields no failure.
+    expect(recheckFailures({ title: "Docs update", body: "Readme tweak", patterns: ["acmeclient"], private: false }))
+      .toEqual([]);
+  });
 });
