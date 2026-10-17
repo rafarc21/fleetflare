@@ -1019,13 +1019,13 @@ describe("StudioDO wiring for #94 (source-pinned — the class cannot be constru
   }
 
   it("deps() lists R2 keys for the keeper fallback", () => {
-    expect(methodBody("  private deps(): ProvisionDeps {")).toMatch(
+    expect(methodBody("  private deps(")).toMatch(
       /r2List: async \(prefix: string\) => \{\s*const listed = await this\.env\.STUDIO_ARCHIVE\.list\(\{ prefix \}\);\s*return listed\.objects\.map\(\(o\) => o\.key\);/,
     );
   });
 
   it("deps() stores a restored mark and deletes the baseline when the restore has none", () => {
-    const body = methodBody("  private deps(): ProvisionDeps {");
+    const body = methodBody("  private deps(");
     expect(body).toMatch(/recordRestoredMark: async \(mark: SessionMark \| null\) => \{/);
     expect(body).toContain("if (mark) await this.ctx.storage.put(SESSION_MARK_KEY, mark);");
     expect(body).toContain("else await this.ctx.storage.delete(SESSION_MARK_KEY);");
@@ -1036,7 +1036,7 @@ describe("StudioDO wiring for #94 (source-pinned — the class cannot be constru
   // override, or an override armed before the restore would survive to
   // force-upload the very next ORDINARY sync tick with zero comparison.
   it("deps() cancels the pending force-upload override on every restore", () => {
-    const body = methodBody("  private deps(): ProvisionDeps {");
+    const body = methodBody("  private deps(");
     expect(body).toContain("await this.ctx.storage.delete(SESSION_FORCE_KEY);");
   });
 

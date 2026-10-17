@@ -164,8 +164,15 @@ describe("relaunchBringup — failover relaunch adopts first (issue #116)", () =
     const src: string = env.TEST_STUDIO_DO_SRC;
     const line = src.split("\n").find((l) => l.includes("relaunchBringup("));
     expect(line).toBeDefined();
-    const lambda = line!.match(/relaunchBringup\((\(cmd, env\) => sbExec\(this, cmd, [^)]*\)),/)?.[1];
-    expect(lambda).toBe("(cmd, env) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env })");
+    // Issue #1153: the relaunch hands bring-up the wrapper from bringupExec()
+    // (the glm rewrite lives in withGlmBringup). The exec-class bag is pinned
+    // on that wrapper's own sbExec call, and deps()'s sbExec uses the same one.
+    expect(line).toContain("relaunchBringup(this.bringupExec(), roleEnv, this.selfId())");
+    expect(src).toContain("sbExec: this.bringupExec(cfgLeadType),");
+    expect(src).toContain("this.deps(cfg.leadType)");
+    const body = src.slice(src.indexOf("private bringupExec("));
+    const sbLine = body.split("\n").find((l) => l.includes("(cmd, env) => sbExec(this, cmd"));
+    expect(sbLine).toContain("{ ...EXEC_CLASSES.provision, env }");
 
     const seen: Array<{ cmd: string; opts: SbExecOptions }> = [];
     const sbExec = async (_self: unknown, cmd: string, opts: SbExecOptions) => {
