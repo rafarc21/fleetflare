@@ -82,6 +82,8 @@ function flags(over: Partial<ReapFlags> = {}): ReapFlags {
 interface World {
   studios: StudioStatus[];
   board: BoardTask[] | Error;
+  /** issue #1121: GitHub's non-PR issue count (all states). Default: board.length. */
+  boardTotal?: number | Error;
   studioTasks?: (id: string) => BoardTask[] | Error;
   /** n = 1 for the cheap pre-check, 2 for the read right before destroy. */
   inspect?: (id: string, n: number) => ReapInspect;
@@ -114,6 +116,11 @@ function fake(w: World) {
       push("board");
       if (w.board instanceof Error) throw w.board;
       return w.board;
+    },
+    boardTotal: async () => {
+      push("total");
+      if (w.boardTotal instanceof Error) throw w.boardTotal;
+      return w.boardTotal ?? (w.board instanceof Error ? 0 : w.board.length);
     },
     studioTasks: async (id) => {
       push(`tasks:${id}`);
@@ -583,6 +590,21 @@ describe("reap — board read failure and floor", () => {
     await runReap(flags(), f.deps);
     expect(f.calls).toContain(`destroy:${PILOT}`);
     expect(f.saved()!.boardRows[REPO]).toBe(5);
+  });
+
+  test("issue #1121: an empty open board with a healthy total proceeds (every task closed)", async () => {
+    const state = { ...emptyReapState(), boardRows: { [REPO]: 10 } };
+    const f = fake({ studios: [IDLE_45()], board: [], boardTotal: 10, state });
+    await runReap(flags(), f.deps);
+    expect(f.calls).toContain(`destroy:${PILOT}`);
+    expect(f.saved()!.boardRows[REPO]).toBe(10);
+  });
+
+  test("issue #1121: board total read fails -> reap nothing this poll", async () => {
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, boardTotal: new Error("GraphQL 502") });
+    const out = await runReap(flags(), f.deps);
+    expect(out.exitCode).toBe(1);
+    expect(f.calls).toEqual(["board", "total"]);
   });
 
   test("listing studios fails -> non-zero exit, nothing else called", async () => {

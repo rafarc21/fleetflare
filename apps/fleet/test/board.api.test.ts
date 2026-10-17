@@ -124,6 +124,13 @@ describe("listIssues", () => {
     expect(calls[0].url).toContain("labels=working");
   });
 
+  it("narrows to open issues when asked (issue #1121)", async () => {
+    respond = () => Response.json([]);
+    await listIssues("tok", "o/r", { open: true });
+    expect(calls[0].url).toContain("state=open");
+    expect(calls[0].url).not.toContain("state=all");
+  });
+
   // Issue #148: a repo whose issues+PRs pass 100 hid everything older than
   // page 1. These pin pagination across the `Link` response header.
   //

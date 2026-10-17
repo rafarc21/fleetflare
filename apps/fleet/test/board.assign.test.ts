@@ -302,6 +302,13 @@ describe("listTasks", () => {
     expect(badMilestone.ok).toBe(false);
     if (!badMilestone.ok) expect(badMilestone.status).toBe(404);
   });
+
+  it("passes open through to the api query (issue #1121)", async () => {
+    const api = fakeApi({ listIssues: vi.fn(async () => []) });
+    const res = await listTasks(api, "o/r", { open: true });
+    expect(res.ok).toBe(true);
+    expect(api.listIssues).toHaveBeenCalledWith("o/r", { open: true });
+  });
 });
 
 describe("showTask", () => {
