@@ -705,6 +705,19 @@ function routeContent(state: StreamState, content: string, events: string[]): vo
   let input = state.pendingTag + content;
   state.pendingTag = "";
   for (;;) {
+    if (!state.thinking) {
+      // A closer with no preceding open is noise from upstream, never visible
+      // text: drop it and keep scanning (issue #1186).
+      const closeAt = input.indexOf(THINK_CLOSE);
+      if (closeAt !== -1) {
+        const openAt = input.indexOf(THINK_OPEN);
+        if (openAt === -1 || closeAt < openAt) {
+          pushSegment(state, input.slice(0, closeAt), events);
+          input = input.slice(closeAt + THINK_CLOSE.length);
+          continue;
+        }
+      }
+    }
     const tag = state.thinking ? THINK_CLOSE : THINK_OPEN;
     const at = input.indexOf(tag);
     if (at === -1) {
@@ -731,7 +744,7 @@ function routeContent(state: StreamState, content: string, events: string[]): vo
  *   2. the whole think body being that one JSON object, with no tags.
  *  Anything else is not recovered — a payload that does not parse, or prose
  *  wrapped around the call, is left for the error path to report. */
-function recoverThinkToolCalls(thinkText: string): Array<{ name: string; input: Record<string, unknown> }> {
+function recoverThinkToolCalls(thinkText: string): { calls: Array<{ name: string; input: Record<string, unknown> }>; hadToolCallAttempt: boolean } {
   const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
   const take = (raw: string) => {
     let value: Json;
@@ -744,9 +757,16 @@ function recoverThinkToolCalls(thinkText: string): Array<{ name: string; input: 
     if (input && typeof input === "object" && !Array.isArray(input)) calls.push({ name: value.name, input });
   };
   const tagged = [...thinkText.matchAll(TOOL_CALL_TAG)];
-  if (tagged.length > 0) for (const m of tagged) take(m[1]);
-  else take(thinkText);
-  return calls;
+  if (tagged.length > 0) {
+    for (const m of tagged) take(m[1]);
+    return { calls, hadToolCallAttempt: true };
+  }
+  // Bare-JSON form: only an attempt when the whole body looks like an object.
+  if (thinkText.trim().startsWith("{")) {
+    take(thinkText);
+    return { calls, hadToolCallAttempt: true };
+  }
+  return { calls, hadToolCallAttempt: false };
 }
 
 /** Closes a think region: recovered tool calls become complete tool_use
@@ -755,8 +775,8 @@ function recoverThinkToolCalls(thinkText: string): Array<{ name: string; input: 
  *  error path in closeStreamOrError. */
 function finishThink(state: StreamState, events: string[]): void {
   state.scan.payload = false;
-  const calls = recoverThinkToolCalls(state.thinkText);
-  if (calls.length === 0 && TOOL_CALL_MARKER.test(state.thinkText)) state.unrecoverableToolCall = true;
+  const { calls, hadToolCallAttempt } = recoverThinkToolCalls(state.thinkText);
+  if (calls.length === 0 && hadToolCallAttempt) state.unrecoverableToolCall = true;
   state.thinkText = "";
   if (calls.length === 0) return;
   closeOpenBlock(state, events);
@@ -1008,11 +1028,10 @@ export function closeStreamOrError(state: StreamState, requestedMaxTokens: numbe
     return { frames: [streamErrorFrame("upstream stream ended without a finish reason")], ok: false, reason: "no_finish_reason" };
   }
   const frames = closeStream(state, requestedMaxTokens);
-  // Issue #1073: a turn whose only output was a tool call kimi wrote inside
-  // its think block, and that did not recover, would otherwise close as an
-  // empty max_tokens turn — a silent idle the client never retries. nextIndex
-  // === 0 means no block was ever opened, so no tool call was recovered either.
-  if (state.unrecoverableToolCall && state.nextIndex === 0) {
+  // Issue #1073: an unrecoverable in-think tool call is a retryable error
+  // whether or not visible narration preceded it — the model's tool call was
+  // dropped either way, so no `nextIndex === 0` guard.
+  if (state.unrecoverableToolCall) {
     return { frames: [streamErrorFrame(UNRECOVERED_TOOL_CALL_MESSAGE)], ok: false, reason: "think_tool_call_unrecovered" };
   }
   // Issue #1099 (review round 3, finding 5): a turn cut at the output ceiling
