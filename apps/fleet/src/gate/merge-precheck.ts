@@ -44,12 +44,33 @@ export function leakFailure(patterns: string[], blobs: string[]): string | null 
 }
 
 /** Both prechecks, as a list of failure descriptions ([] = clean). */
-export function mergePrecheckFailures(input: {
-  title: string; body: string; patterns: string[]; blobs: string[];
-}): string[] {
+export interface MergePrecheckInput {
+  title: string;
+  body: string;
+  patterns: string[];
+  blobs: string[];
+  /** #1176: a confirmed-private repo skips the leak scan (board/leak.ts's rule);
+   *  the closing-keyword check still runs. */
+  private?: boolean;
+  truncated?: boolean;
+}
+
+export function mergePrecheckFailures(input: MergePrecheckInput): string[] {
   const out: string[] = [];
+  // The workflow always listed truncation first (its own prepend before the
+  // pure list), so a truncated compare keeps posting that description.
+  if (input.private !== true) {
+    const trunc = truncationFailure(input.truncated === true);
+    if (trunc !== null) out.push(trunc);
+  }
   const closing = closingKeywordFailure(input.title, input.body);
   if (closing !== null) out.push(closing);
+  if (input.private === true) {
+    // Leaks cannot leave a private repo, so neither the scan nor its truncation
+    // guard applies — the same whole-scan skip board/leak.ts makes. Only a
+    // CONFIRMED private repo takes this path, never an unknown visibility.
+    return out;
+  }
   const leak = leakFailure(input.patterns, input.blobs);
   if (leak !== null) out.push(leak);
   return out;

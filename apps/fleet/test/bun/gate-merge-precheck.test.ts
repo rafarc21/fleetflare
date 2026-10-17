@@ -99,3 +99,54 @@ describe("mergePrecheckFailures", () => {
     })).toEqual([]);
   });
 });
+
+// #1176: a confirmed-private repo skips the leak scan (board/leak.ts's rule)
+// and the truncation refusal (leaks cannot leave a private repo) — the
+// closing-keyword check still runs.
+describe("mergePrecheckFailures: a private repo skips the leak scan", () => {
+  it("private:true with leaky blobs returns no leak failure and no truncation failure", () => {
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: ["AcmeClient auth"],
+      private: true,
+      truncated: true,
+    });
+    expect(failures).toEqual([]);
+  });
+
+  it("private:true with a closing keyword title still returns the keyword failure", () => {
+    const failures = mergePrecheckFailures({
+      title: "Fix #123",
+      body: "",
+      patterns: [],
+      blobs: [],
+      private: true,
+    });
+    expect(failures).toEqual([CLOSING]);
+  });
+
+  it("private:true with empty patterns returns [], not DENYLIST_UNAVAILABLE", () => {
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: [],
+      blobs: ["anything"],
+      private: true,
+    });
+    expect(failures).toEqual([]);
+  });
+
+  it("private:false/absent keeps the current behavior (leak + truncation)", () => {
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: ["AcmeClient auth"],
+      private: false,
+      truncated: true,
+    });
+    expect(failures).toEqual([COMPARE_TRUNCATED_FAILURE, expect.stringContaining("#1")]);
+  });
+});
