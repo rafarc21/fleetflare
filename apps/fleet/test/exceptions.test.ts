@@ -329,11 +329,17 @@ describe("pruneWorkerExceptions", () => {
   it("caps the table at `keep` rows, keeping the newest by ts", async () => {
     const total = 1005;
     const keep = 1000;
-    for (let i = 0; i < total; i++) {
-      await env.DB.prepare(
-        "INSERT INTO worker_exceptions (id, ts, route, name, message, stack_head) VALUES (?, ?, ?, ?, ?, ?)",
-      ).bind(`exc-${i}`, i, "/x", "Error", "boom", null).run();
-    }
+    // One statement, not 1005 round-trips — the per-row await loop is what
+    // blows past vitest's 5 s default under gate CPU contention (#1123).
+    await env.DB.prepare(`
+      WITH RECURSIVE seq(i) AS (
+        SELECT 0
+        UNION ALL
+        SELECT i + 1 FROM seq WHERE i < ${total - 1}
+      )
+      INSERT INTO worker_exceptions (id, ts, route, name, message, stack_head)
+      SELECT 'exc-' || i, i, '/x', 'Error', 'boom', NULL FROM seq
+    `).run();
 
     await pruneWorkerExceptions(env.DB, keep);
 
