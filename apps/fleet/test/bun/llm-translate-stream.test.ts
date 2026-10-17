@@ -503,6 +503,105 @@ describe("think tags are off for every model except kimi (issue #1073 review)", 
   });
 });
 
+describe("stray closer and narrate-then-unrecoverable tool call (issue #1186)", () => {
+  const OPEN = "<think>";
+  const CLOSE = "</think>";
+
+  test("a stray CLOSE with no OPEN is dropped, not emitted as visible text", () => {
+    const { frames, closed } = runThinkStream(["answer text" + CLOSE], "stop");
+    const texts = frames.map(parseFrame).filter((f) => f.event === "content_block_delta")
+      .map((f) => (f.data as { delta: { text?: string } }).delta.text ?? "");
+    expect(texts.join("")).toBe("answer text");
+    expect(closed.ok).toBe(true);
+    expect(closed.frames.map(parseFrame).some((f) => f.event === "error")).toBe(false);
+    expect(closed.frames.map(parseFrame).find((f) => f.event === "message_delta")?.data)
+      .toMatchObject({ delta: { stop_reason: "end_turn" } });
+  });
+
+  test("a stray closer split across deltas is dropped, not emitted", () => {
+    const splitAt = Math.floor(CLOSE.length / 2);
+    const { frames, closed } = runThinkStream(["answer" + CLOSE.slice(0, splitAt), CLOSE.slice(splitAt)], "stop");
+    const texts = frames.map(parseFrame).filter((f) => f.event === "content_block_delta")
+      .map((f) => (f.data as { delta: { text?: string } }).delta.text ?? "");
+    expect(texts.join("")).toBe("answer");
+    expect(closed.ok).toBe(true);
+  });
+
+  test("narrate then an unrecoverable tagged tool call inside OPEN..CLOSE ends with a retryable error, not end_turn", () => {
+    const { frames, closed } = runThinkStream(["I will look now" + OPEN + "<tool_call>{not valid json</tool_call>" + CLOSE], "stop");
+    expect(closed.ok).toBe(false);
+    const err = closed.frames.map(parseFrame).find((f) => f.event === "error");
+    expect(err).toBeDefined();
+    expect((err?.data as { error: { message: string } }).error.message).toMatch(/retry/i);
+    expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+
+  test("narrate then a bare-JSON tool-call attempt inside OPEN..CLOSE that fails to parse ends with a retryable error", () => {
+    const { frames, closed } = runThinkStream(["I will look now" + OPEN + "{\"name\":\"Read\",\"arguments\":{oops" + CLOSE], "stop");
+    expect(closed.ok).toBe(false);
+    const err = closed.frames.map(parseFrame).find((f) => f.event === "error");
+    expect(err).toBeDefined();
+    expect((err?.data as { error: { message: string } }).error.message).toMatch(/retry/i);
+    expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+
+  test("a prose mention of a name in reasoning after narration is NOT treated as a tool call", () => {
+    const { frames, closed } = runThinkStream(["Done" + OPEN + "the field \"name\": \"x\" matters here" + CLOSE], "stop");
+    expect(closed.ok).toBe(true);
+    expect(closed.frames.map(parseFrame).some((f) => f.event === "error")).toBe(false);
+    expect(closed.frames.map(parseFrame).find((f) => f.event === "message_delta")?.data)
+      .toMatchObject({ delta: { stop_reason: "end_turn" } });
+    expect(frames.map(parseFrame).some((f) => f.event === "content_block_start"
+      && (f.data as { content_block: { type: string } }).content_block.type === "tool_use")).toBe(false);
+  });
+});
+
+describe("tool-call attempt detection gaps (issue #1201)", () => {
+  const OPEN = "<think>";
+  const CLOSE = "</think>";
+
+  test("an unterminated <tool_call> opener with no closer is an attempt — retryable error, not end_turn", () => {
+    const { closed } = runThinkStream(["I will look now" + OPEN + "<tool_call>{\"name\":\"Read\",\"arguments\":{", "oops" + CLOSE], "stop");
+    expect(closed.ok).toBe(false);
+    const err = closed.frames.map(parseFrame).find((f) => f.event === "error");
+    expect(err).toBeDefined();
+    expect((err?.data as { error: { message: string } }).error.message).toMatch(/retry/i);
+    expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+
+  test("bare JSON after prose inside  thinking is an attempt — retryable error", () => {
+    const { closed } = runThinkStream(["I will look now" + OPEN + "let me check.\n{\"name\":\"Read\",\"arguments\":{\"file_path\":\"a\"}}" + CLOSE], "stop");
+    expect(closed.ok).toBe(false);
+    const err = closed.frames.map(parseFrame).find((f) => f.event === "error");
+    expect(err).toBeDefined();
+    expect((err?.data as { error: { message: string } }).error.message).toMatch(/retry/i);
+    expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+
+  test("prose mentioning \"name\": with no brace is NOT an attempt — end_turn, ok", () => {
+    const { frames, closed } = runThinkStream(["Done" + OPEN + "the field \"name\": \"x\" matters here" + CLOSE], "stop");
+    expect(closed.ok).toBe(true);
+    expect(closed.frames.map(parseFrame).some((f) => f.event === "error")).toBe(false);
+    expect(closed.frames.map(parseFrame).find((f) => f.event === "message_delta")?.data)
+      .toMatchObject({ delta: { stop_reason: "end_turn" } });
+    expect(frames.map(parseFrame).some((f) => f.event === "content_block_start"
+      && (f.data as { content_block: { type: string } }).content_block.type === "tool_use")).toBe(false);
+  });
+
+  test("one tagged call parses, its sibling fails — retryable error even though one recovered", () => {
+    const { closed } = runThinkStream([
+      "I will look now" + OPEN
+      + "<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"a\"}}</tool_call>"
+      + "<tool_call>{not valid json</tool_call>" + CLOSE,
+    ], "stop");
+    expect(closed.ok).toBe(false);
+    const err = closed.frames.map(parseFrame).find((f) => f.event === "error");
+    expect(err).toBeDefined();
+    expect((err?.data as { error: { message: string } }).error.message).toMatch(/retry/i);
+    expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+});
+
 // Issue #1099: a degenerate upstream stream is aborted with a retriable
 // overloaded_error, not run to the 64k output cap. Round 3 (maestro review)
 // dropped the per-model soft cap: repetition thresholds are conservative, and a

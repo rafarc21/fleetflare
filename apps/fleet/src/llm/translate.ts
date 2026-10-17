@@ -669,10 +669,16 @@ export function streamPrelude(id: string, model: string): string[] {
 const THINK_OPEN = "<think>";
 const THINK_CLOSE = "</think>";
 const TOOL_CALL_TAG = /<tool_call>([\s\S]*?)<\/tool_call>/g;
-/** Anything that looks like a tool call, even one that will not parse. A
- *  `"name": "..."` match alone is common in reasoning prose, so it only
- *  counts toward the error path when the turn also has no visible output. */
+/** Latches the runaway scan's payload flag when a think region may carry a
+ *  tool-call payload (issue #1099). The unrecovered-tool-call error path no
+ *  longer keys on this marker — see recoverThinkToolCalls (issue #1186). */
 const TOOL_CALL_MARKER = /<tool_call\b|"name"\s*:\s*"/;
+/** A `<tool_call>` opener with no closer — an interrupted call is still an
+ *  attempt to recover or retry, never silently dropped (issue #1201). */
+const UNTERMINATED_TOOL_CALL = /<tool_call\b/;
+/** A bare JSON tool-call body: `{` immediately followed by `"name"`, even
+ *  after prose. A prose `"name":` mention with no brace does NOT match. */
+const BARE_JSON_ATTEMPT = /\{\s*"name"/;
 const UNRECOVERED_TOOL_CALL_MESSAGE =
   "upstream emitted a tool call inside its reasoning block that could not be recovered; retry the turn";
 
@@ -712,10 +718,25 @@ function routeContent(state: StreamState, content: string, events: string[]): vo
   let input = state.pendingTag + content;
   state.pendingTag = "";
   for (;;) {
+    if (!state.thinking) {
+      // A closer with no preceding open is noise from upstream, never visible
+      // text: drop it and keep scanning (issue #1186).
+      const closeAt = input.indexOf(THINK_CLOSE);
+      if (closeAt !== -1) {
+        const openAt = input.indexOf(THINK_OPEN);
+        if (openAt === -1 || closeAt < openAt) {
+          pushSegment(state, input.slice(0, closeAt), events);
+          input = input.slice(closeAt + THINK_CLOSE.length);
+          continue;
+        }
+      }
+    }
     const tag = state.thinking ? THINK_CLOSE : THINK_OPEN;
     const at = input.indexOf(tag);
     if (at === -1) {
-      const keep = partialTagSuffix(input, tag);
+      const keep = state.thinking
+        ? partialTagSuffix(input, tag)
+        : Math.max(partialTagSuffix(input, THINK_OPEN), partialTagSuffix(input, THINK_CLOSE));
       pushSegment(state, input.slice(0, input.length - keep), events);
       state.pendingTag = input.slice(input.length - keep);
       return;
@@ -737,23 +758,50 @@ function routeContent(state: StreamState, content: string, events: string[]): vo
  *      be a JSON-encoded string, OpenAI-style);
  *   2. the whole think body being that one JSON object, with no tags.
  *  Anything else is not recovered — a payload that does not parse, or prose
- *  wrapped around the call, is left for the error path to report. */
-function recoverThinkToolCalls(thinkText: string): Array<{ name: string; input: Record<string, unknown> }> {
+ *  wrapped around the call, is left for the error path to report.
+ *  `hadToolCallAttempt` is true when the region carries tool-call-shaped text
+ *  in any recognized form — a complete or unterminated `<tool_call>` opener,
+ *  or a bare JSON body (`{` then `"name"`, even after prose). `failedTagged`
+ *  is true when a tagged block did not parse, so a lost sibling call is never
+ *  dropped silently (issue #1201). */
+function recoverThinkToolCalls(thinkText: string): {
+  calls: Array<{ name: string; input: Record<string, unknown> }>;
+  hadToolCallAttempt: boolean;
+  failedTagged: boolean;
+} {
   const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
-  const take = (raw: string) => {
+  const take = (raw: string): boolean => {
     let value: Json;
-    try { value = JSON.parse(raw.trim()); } catch { return; }
-    if (!value || typeof value !== "object" || typeof value.name !== "string" || value.name.length === 0) return;
+    try { value = JSON.parse(raw.trim()); } catch { return false; }
+    if (!value || typeof value !== "object" || typeof value.name !== "string" || value.name.length === 0) return false;
     let input: Json = value.arguments ?? value.input ?? {};
     if (typeof input === "string") {
-      try { input = JSON.parse(input); } catch { return; }
+      try { input = JSON.parse(input); } catch { return false; }
     }
-    if (input && typeof input === "object" && !Array.isArray(input)) calls.push({ name: value.name, input });
+    if (input && typeof input === "object" && !Array.isArray(input)) {
+      calls.push({ name: value.name, input });
+      return true;
+    }
+    return false;
   };
   const tagged = [...thinkText.matchAll(TOOL_CALL_TAG)];
-  if (tagged.length > 0) for (const m of tagged) take(m[1]);
-  else take(thinkText);
-  return calls;
+  if (tagged.length > 0) {
+    let failedTagged = false;
+    for (const m of tagged) if (!take(m[1])) failedTagged = true;
+    return { calls, hadToolCallAttempt: true, failedTagged };
+  }
+  // Unterminated opener with no closer: still an attempt, never silent.
+  if (UNTERMINATED_TOOL_CALL.test(thinkText)) {
+    return { calls, hadToolCallAttempt: true, failedTagged: false };
+  }
+  // Bare-JSON form: a brace-leading body (the pre-#1186 recovery shape), or
+  // `{` then "name" anywhere — including after prose. Both feed `take`, which
+  // recovers or leaves the attempt for the error path.
+  if (thinkText.trim().startsWith("{") || BARE_JSON_ATTEMPT.test(thinkText)) {
+    take(thinkText);
+    return { calls, hadToolCallAttempt: true, failedTagged: false };
+  }
+  return { calls, hadToolCallAttempt: false, failedTagged: false };
 }
 
 /** Closes a think region: recovered tool calls become complete tool_use
@@ -762,8 +810,8 @@ function recoverThinkToolCalls(thinkText: string): Array<{ name: string; input: 
  *  error path in closeStreamOrError. */
 function finishThink(state: StreamState, events: string[]): void {
   state.scan.payload = false;
-  const calls = recoverThinkToolCalls(state.thinkText);
-  if (calls.length === 0 && TOOL_CALL_MARKER.test(state.thinkText)) state.unrecoverableToolCall = true;
+  const { calls, hadToolCallAttempt, failedTagged } = recoverThinkToolCalls(state.thinkText);
+  if (failedTagged || (calls.length === 0 && hadToolCallAttempt)) state.unrecoverableToolCall = true;
   state.thinkText = "";
   if (calls.length === 0) return;
   closeOpenBlock(state, events);
@@ -1015,11 +1063,10 @@ export function closeStreamOrError(state: StreamState, requestedMaxTokens: numbe
     return { frames: [streamErrorFrame("upstream stream ended without a finish reason")], ok: false, reason: "no_finish_reason" };
   }
   const frames = closeStream(state, requestedMaxTokens);
-  // Issue #1073: a turn whose only output was a tool call kimi wrote inside
-  // its think block, and that did not recover, would otherwise close as an
-  // empty max_tokens turn — a silent idle the client never retries. nextIndex
-  // === 0 means no block was ever opened, so no tool call was recovered either.
-  if (state.unrecoverableToolCall && state.nextIndex === 0) {
+  // Issue #1073: an unrecoverable in-think tool call is a retryable error
+  // whether or not visible narration preceded it — the model's tool call was
+  // dropped either way, so no `nextIndex === 0` guard.
+  if (state.unrecoverableToolCall) {
     return { frames: [streamErrorFrame(UNRECOVERED_TOOL_CALL_MESSAGE)], ok: false, reason: "think_tool_call_unrecovered" };
   }
   // Issue #1099 (review round 3, finding 5): a turn cut at the output ceiling
