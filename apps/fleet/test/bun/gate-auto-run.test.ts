@@ -496,13 +496,42 @@ describe("startEditedGateRun: an edit re-runs under its own -e id (#1176)", () =
     expect(heads.get(`${PR_REPO}#7`)).toMatchObject({ headSha: HEAD, runId: `${baseId}-e${T1.toString(36)}` });
   });
 
-  it("does not end a live plain-sha run of the same head", async () => {
-    const { wf, terminated } = fakeWorkflow();
+  it("calls postPending exactly once, before the edited run is created (#1191)", async () => {
+    const { wf, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const log: string[] = [];
+    const wrapped: GateRunStarter = {
+      create: async (opts) => { log.push("create"); return wf.create(opts); },
+      get: (id) => wf.get(id),
+    };
+    await startEditedGateRun(wrapped, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1, async (repo, headSha) => {
+      log.push(`pending:${repo}:${headSha}`);
+    });
+    expect(log).toEqual([`pending:${PR_REPO}:${HEAD}`, "create"]);
+    expect(creates).toHaveLength(1);
+  });
+
+  it("ends a live plain-sha run of the same head before creating the edited run (#1191)", async () => {
+    const { wf, terminated, creates } = fakeWorkflow();
     const { index } = fakeIndex();
     const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(first.runId).toBe(await gateRunId(PR_REPO, HEAD));
+    const baseId = await gateRunId(PR_REPO, HEAD);
+    const out = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    expect(terminated).toEqual([baseId]);
+    // The edited run is created only after the plain run was ended.
+    expect(creates.at(-1)).toEqual({ id: out.runId, params: { repo: PR_REPO, pr: 7 } });
+    expect(out.runId).not.toBe(baseId);
+  });
+
+  it("does not end a plain-sha run that is not live (#1191)", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    runs.get(first.runId)!.status = "complete";
     await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
     expect(terminated).toEqual([]);
-    expect(first.runId).toBe(await gateRunId(PR_REPO, HEAD));
+    expect(runs.get(first.runId)!.status).toBe("complete");
   });
 });
 

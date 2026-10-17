@@ -61,7 +61,7 @@ export function addedLines(patch: string): string {
  *  changed, so fail closed. #1191: a rename/copy with `changes` 0 is a pure move
  *  — there is no diff to scan, so it must not go red. */
 export function unscannableFiles(
-  files: { filename: string; patch?: string; status?: string; changes?: number }[],
+  files: { filename: string; previous_filename?: string; patch?: string; status?: string; changes?: number }[],
 ): string[] {
   return files
     .filter((f) => f.patch === undefined && f.status !== "removed")

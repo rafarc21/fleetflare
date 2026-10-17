@@ -203,14 +203,23 @@ export async function startGateRun(
 /** #1176: a title/body edit re-runs the precheck under its own id. The head sha
  *  is unchanged, so the plain sha id would dedupe-skip or reattach — an edit's
  *  recheck must be a fresh run. It records itself as the PR's latest WITHOUT
- *  ending the plain sha run (recordRun ends a live previous run): that one gates
- *  the push itself, and the Workflow's head-moved check does not apply (same
- *  head). Mirrors startManualGateRun's fresh-start shape. */
+ *  ending the plain sha run through recordRun. Mirrors startManualGateRun's
+ *  fresh-start shape.
+ *
+ *  #1191: (a) the plain-sha run of the same head is a stale gate of the pre-edit
+ *  title/body — end it first if it is still live, so the edit's recheck is the
+ *  only live run of the head. (b) an optional pending-status callback posts
+ *  `running` BEFORE the edited run is created, so GitHub never sees the head
+ *  without a pending gate/verdict. Absent = no-op: auto-run.ts stays free of
+ *  cloudflare:workers / auth imports so the bun-test project can load it. */
 export async function startEditedGateRun(
   wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex,
   now: () => number = Date.now,
+  postPending?: (repo: string, headSha: string) => Promise<void>,
 ): Promise<{ runId: string; reused: boolean }> {
   const baseId = await gateRunId(input.repo, input.headSha);
+  await endIfLive(wf, baseId);
+  if (postPending) await postPending(input.repo, input.headSha);
   const runId = `${baseId}-e${now().toString(36)}`;
   await wf.create({ id: runId, params: { repo: input.repo, pr: input.pr } });
   await index.record(input.repo, input.pr, { headSha: input.headSha, runId, progressedAt: now() });
@@ -272,6 +281,8 @@ export type AutoRunOutcome = "started" | "reused";
 export interface AutoRunDeps {
   workflow: GateRunStarter;
   index: GateRunIndex;
+  /** #1191: the pending-status post for an edited run, injected by the env wiring. */
+  postPending?: (repo: string, headSha: string) => Promise<void>;
 }
 
 /** Starts the gate run for a gated PR. No precheck of the base's gate config
@@ -280,7 +291,10 @@ export interface AutoRunDeps {
  *  head from that run, never silence. */
 export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDeps): Promise<AutoRunOutcome> {
   if (pr.edited === true) {
-    await startEditedGateRun(deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index);
+    await startEditedGateRun(
+      deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index,
+      Date.now, deps.postPending,
+    );
     return "started";
   }
   const { reused } = await startGateRun(
