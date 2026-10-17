@@ -1,5 +1,6 @@
 import type { Activity } from "./activity";
 import type { BoardTaskState } from "../board/types";
+import { PROMPT_LINE, RULE_LINE } from "./failover";
 
 export const AUTO_CONTINUE_IDLE_MS = 10 * 60_000;
 export const AUTO_CONTINUE_EVERY_MS = 20 * 60_000;
@@ -48,6 +49,26 @@ export function autoContinuePrompt(taskNumber: number): string {
   return `Continue your board task #${taskNumber} now; do not stop between steps.`;
 }
 
+/** The claude composer row, when the frame draws an idle input box (a
+ *  RULE_LINE immediately followed by a PROMPT_LINE), else null. */
+function composerRowIn(frame: string): string | null {
+  const lines = frame.replace(/\s+$/, "").split("\n");
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (RULE_LINE.test(lines[i]) && PROMPT_LINE.test(lines[i + 1] ?? "")) return lines[i + 1];
+  }
+  return null;
+}
+
+/** True only when the composer is provably BARE — `❯` with nothing typed
+ *  after it. Any text (a half-typed draft, a ghost suggestion, queued text)
+ *  or no composer row at all fails closed to false: not a safe place to type
+ *  a continue nudge. */
+export function isBarePrompt(frame: string): boolean {
+  const row = composerRowIn(frame);
+  if (row === null) return false;
+  return /^\s*❯\s*$/.test(row);
+}
+
 /**
  * The decision. Guard order matters and is the test surface: lead type, then
  * the activity state (idle already means the claude window is active, no
@@ -83,8 +104,11 @@ export interface IdleAutoContinueDeps {
   now: () => Date;
   leadType: "claude" | "glm";
   activity: Activity | null;
+  /** Raw pane frame this tick; `isBarePrompt` reads it. `undefined` fails
+   *  closed (no nudge). */
+  paneFrame: string | undefined;
   findTask: () => Promise<{ number: number; state: BoardTaskState | null; open: boolean } | null>;
-  wake: (prompt: string) => Promise<{ ok: boolean }>;
+  wake: (prompt: string) => Promise<{ ok: boolean; skipped?: true }>;
   escalate: (taskNumber: number) => Promise<void>;
 }
 
@@ -101,6 +125,7 @@ export async function idleAutoContinue(deps: IdleAutoContinueDeps, storage: Auto
   if (act === null || act.state !== "idle") return { kind: "none" };
   const idleMs = deps.now().getTime() - Date.parse(act.since);
   if (!Number.isFinite(idleMs) || idleMs < AUTO_CONTINUE_IDLE_MS) return { kind: "none" };
+  if (deps.paneFrame === undefined || !isBarePrompt(deps.paneFrame)) return { kind: "none" };
   const prev = (await storage.get(AUTO_CONTINUE_KEY)) ?? null;
   const lastMs = Date.parse(prev?.lastNudgeAt ?? "");
   const rateLimited = Number.isFinite(lastMs) && deps.now().getTime() - lastMs < AUTO_CONTINUE_EVERY_MS;
@@ -116,7 +141,18 @@ export async function idleAutoContinue(deps: IdleAutoContinueDeps, storage: Auto
   if (decision.kind === "none") return { kind: "none" };
   if (decision.kind === "nudge") {
     const outcome = await deps.wake(autoContinuePrompt(decision.taskNumber));
-    if (!outcome.ok) return { kind: "none" };
+    if (!outcome.ok) {
+      // A refused/unconfirmed wake must not retry every tick: stamp the
+      // attempt so the 20-minute window applies to failed nudges too. The
+      // nudge did NOT land, so nudgeCount/totalNudges stay put.
+      if (!outcome.skipped) {
+        await storage.put(AUTO_CONTINUE_KEY, {
+          taskNumber: decision.taskNumber, nudgeCount: nudgeCountForTask, totalNudges: prev?.totalNudges ?? 0,
+          lastNudgeAt: deps.now().toISOString(), escalated: false,
+        });
+      }
+      return { kind: "none" };
+    }
     const totalNudges = (prev?.totalNudges ?? 0) + 1;
     await storage.put(AUTO_CONTINUE_KEY, {
       taskNumber: decision.taskNumber, nudgeCount: nudgeCountForTask + 1, totalNudges,

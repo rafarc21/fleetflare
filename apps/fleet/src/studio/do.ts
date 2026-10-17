@@ -5147,7 +5147,8 @@ async function applyActivityVerdict(
   id: string,
   onLeadWorking?: () => Promise<void>,
   onStaleBackgroundShell?: () => Promise<void>,
-  onIdleAutoContinue?: () => Promise<IdleAutoContinueResult>,
+  onIdleAutoContinue?: (paneFrame?: string) => Promise<IdleAutoContinueResult>,
+  paneFrame?: string,
 ): Promise<void> {
   const activityStatus = await storage.get(STATUS_KEY);
   const activityOpFresh = operationLockFresh(await storage.get(OPERATION_KEY), deps.now());
@@ -5198,7 +5199,7 @@ async function applyActivityVerdict(
   if (onIdleAutoContinue && nextAct.state === "idle") {
     const idleMs = deps.now().getTime() - Date.parse(nextAct.since);
     if (Number.isFinite(idleMs) && idleMs >= AUTO_CONTINUE_IDLE_MS) {
-      const result = await onIdleAutoContinue();
+      const result = await onIdleAutoContinue(paneFrame);
       if (result.kind !== "none" && recordStudioFn) {
         const fresh = await storage.get(STATUS_KEY);
         if (fresh) await recordStudioFn(await withObserved(storage, fresh));
@@ -5415,7 +5416,7 @@ export async function runShipTickWithObservation(
   archive?: { doneRecords: DoneRecordPorts; resolveOpsRepo: ResolveMemoryRepo },
   onLeadWorking?: () => Promise<void>,
   onStaleBackgroundShell?: () => Promise<void>,
-  onIdleAutoContinue?: () => Promise<IdleAutoContinueResult>,
+  onIdleAutoContinue?: (paneFrame?: string) => Promise<IdleAutoContinueResult>,
   // Issue #1146: the one board event per replace (replacementEvent). Optional:
   // a caller that never wires it keeps the pre-#1146 behaviour exactly.
   onReplaced?: (ev: FleetEvent) => Promise<void>,
@@ -5695,7 +5696,7 @@ export async function runShipTickWithObservation(
   // `applyActivityVerdict`, above `runShipTickWithObservation`).
   if (result.paneVerdict !== undefined) {
     await applyActivityVerdict(
-      deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat, id, onLeadWorking, onStaleBackgroundShell, onIdleAutoContinue,
+      deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat, id, onLeadWorking, onStaleBackgroundShell, onIdleAutoContinue, result.paneFrame,
     );
   }
 
@@ -6373,7 +6374,7 @@ export class StudioDO extends Sandbox<Env> {
    *  cap) under the single-flight wake lock, emits one `events` row per
    *  landed nudge and per escalation, and lets `withObserved` (which reads
    *  AUTO_CONTINUE_KEY) carry the fresh count to D1. */
-  private async notifyIdleAutoContinue(): Promise<IdleAutoContinueResult> {
+  private async notifyIdleAutoContinue(paneFrame?: string): Promise<IdleAutoContinueResult> {
     const now = new Date();
     const storedStatus = (await this.ctx.storage.get<StudioStatus>(STATUS_KEY)) ?? null;
     const activity = (await (this.ctx.storage as unknown as ActivityStorage).get(ACTIVITY_KEY)) ?? null;
@@ -6382,6 +6383,7 @@ export class StudioDO extends Sandbox<Env> {
         now: () => now,
         leadType: resolveLeadType(storedStatus),
         activity,
+        paneFrame,
         findTask: async () => {
           const repo = (await this.workRepoSlug(null)).toLowerCase();
           const r = await findLiveAssignedTask(githubBoardApi(this.env), repo, this.selfId());
@@ -8492,7 +8494,7 @@ export class StudioDO extends Sandbox<Env> {
             { doneRecords: this.doneRecordPorts(), resolveOpsRepo: this.memoryDeps().resolveMemoryRepo },
             () => this.autoStartSubmitted(),
             () => this.notifyStaleBackgroundShell(),
-            () => this.notifyIdleAutoContinue(),
+            (frame) => this.notifyIdleAutoContinue(frame),
             // Issue #1146: one `events` log row per replace — a log row only,
             // no reader surfaces it (see #1152 review item 2). A throw here is
             // caught by the tick's own handler.
