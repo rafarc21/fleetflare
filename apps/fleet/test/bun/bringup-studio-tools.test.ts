@@ -40,8 +40,9 @@ function sysBin(): string {
 }
 
 /** A fake PATH dir. `apt-get` records its argv and exits APT_EXIT (default 0);
- *  `az` exists only when `withAz` is set, which is what the region checks. */
-function fakeBin(withAz: boolean): string {
+ *  `az` exists only when `withAz` is set, which is what the region checks.
+ *  `fingerprint` (default the pinned value) is what the fake gpg reports. */
+function fakeBin(withAz: boolean, fingerprint?: string): string {
   const bin = tmp("fleet-tools-bin-");
   const apt = join(bin, "apt-get");
   writeFileSync(apt, '#!/bin/sh\necho "$@" >> "$APT_LOG"\nexit "${APT_EXIT:-0}"\n');
@@ -56,9 +57,10 @@ function fakeBin(withAz: boolean): string {
   writeFileSync(curl, '#!/bin/sh\nout=""\nwhile [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done\nprintf "stub-microsoft-key\\n" > "$out"\nexit 0\n');
   chmodSync(curl, 0o755);
   // fake gpg: --dearmor copies its input to the -o target; anything else
-  // prints the pinned fingerprint, so the fingerprint check can run.
+  // prints the CONFIGURABLE fingerprint (GPG_FPR), so the fingerprint check
+  // can run against the value the test supplies.
   const gpg = join(bin, "gpg");
-  writeFileSync(gpg, '#!/bin/sh\nif [ "$1" = "--dearmor" ]; then cat "$4" > "$3"; exit 0; fi\nprintf "fpr:::::::::BC528686B50D79E339D3721CEB3E94ADBE1229CF\\n"\nexit 0\n');
+  writeFileSync(gpg, '#!/bin/sh\nif [ "$1" = "--dearmor" ]; then cat "$4" > "$3"; exit 0; fi\nprintf "fpr:::::::::%s\\n" "${GPG_FPR:-BC528686B50D79E339D3721CEB3E94ADBE1229CF}"\nexit 0\n');
   chmodSync(gpg, 0o755);
   return bin;
 }
@@ -72,9 +74,9 @@ interface Run {
   marker: string;
 }
 
-function runRegion(opts: { tools: string; withAz?: boolean; aptExit?: number; preMarker?: boolean; toolsUnset?: boolean }): Run {
+function runRegion(opts: { tools: string; withAz?: boolean; aptExit?: number; preMarker?: boolean; toolsUnset?: boolean; fingerprint?: string }): Run {
   const ws = tmp("fleet-tools-ws-");
-  const bin = fakeBin(opts.withAz ?? false);
+  const bin = fakeBin(opts.withAz ?? false, opts.fingerprint);
   const aptLog = join(ws, "apt.log");
   const bringupLog = join(ws, "bringup.log");
   const marker = join(ws, ".fleet", "tools-down");
@@ -86,9 +88,11 @@ function runRegion(opts: { tools: string; withAz?: boolean; aptExit?: number; pr
     FLEET_BRINGUP_RUN_ID: "run-test",
     APT_LOG: aptLog,
     APT_EXIT: String(opts.aptExit ?? 0),
+    GPG_FPR: opts.fingerprint ?? "BC528686B50D79E339D3721CEB3E94ADBE1229CF",
     PATH: `${bin}:${sysBin()}`,
   };
-  if (!opts.toolsUnset) env.STUDIO_TOOLS = opts.tools;
+  if (opts.toolsUnset) env.STUDIO_TOOLS = "";
+  else env.STUDIO_TOOLS = opts.tools;
   const r = runSnippet({
     shell: "bash",
     env,
@@ -183,8 +187,11 @@ describe("studio-tools region", () => {
     expect(r.aptCalls.some((c) => c.includes("update"))).toBe(true);
   });
 
-  test("the Microsoft signing-key fingerprint is checked in the region", () => {
-    expect(REGION).toContain("BC528686B50D79E339D3721CEB3E94ADBE1229CF");
+  test("a wrong signing key is refused: install fails, marker written", () => {
+    const r = runRegion({ tools: "azure-cli", fingerprint: "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF" });
+    expect(r.code).toBe(0);
+    expect(r.markerExists).toBe(true);
+    expect(r.aptCalls).toEqual([]);
   });
 
   test("install reads the temp source list (a mutant that drops the flags cannot locate azure-cli)", () => {
