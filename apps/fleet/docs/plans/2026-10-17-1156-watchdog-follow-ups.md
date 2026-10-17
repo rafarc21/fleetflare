@@ -13,10 +13,11 @@ Five non-blocking fixes from the #1150 round-2 review, all decided. No redesign.
 3. **Final verdict post unstamped.** Call `deps.index.progress(repo, pr, runId, now)` before
    `deps.post(...)` in BOTH final branches (red/rerun and the catch branch). `WatchdogIndex` already
    has `progress` via `GateRunIndex`. Add tests.
-4. **Final post failure ignored after retire.** Reorder post-before-retire in both final branches:
-   `endRunOrThrow`, `progress`, `post`, `retire`. A post that throws keeps the row (outcome "failed")
-   so the next sweep retries; a finished run is then read as not-live and retires silently (accepted
-   limitation, same as today). Test pins the order: post succeeds then retire; post throws then failed.
+4. **Final post failure ignored after retire.** Reorder both final branches so the post lands before
+   the end and the retire: `progress`, `post`, `endRunOrThrow`, `retire`. `post` returns a boolean
+   (postGateStatus's failed-after-retries contract), and a failed post throws, keeping the run live and
+   its row in the sweep so the next sweep retries the verdict instead of losing it. Test pins the order:
+   post succeeds then retire; post fails then failed.
 5. **N1c (comment 6223292963).** `decisiveResultKeys` picks retry over first try unconditionally, so
    a red first try whose retry stored an error reads as not-red. Fix in `hasRedResult`: for each leg
    base, read the first try; when it is `failure` and a retry exists, red only when the retry is not
