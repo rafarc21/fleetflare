@@ -69,9 +69,12 @@ export interface PullRequestAutoRun {
   pr: number;
   headSha: string;
   baseSha: string;
+  /** #1176: an edit of the title/body re-runs the precheck under its own run id
+   *  (the head sha is unchanged, so the plain sha id would dedupe-skip). */
+  edited?: boolean;
 }
 
-const AUTO_RUN_ACTIONS: ReadonlySet<string> = new Set(["opened", "synchronize", "ready_for_review"]);
+const AUTO_RUN_ACTIONS: ReadonlySet<string> = new Set(["opened", "synchronize", "ready_for_review", "edited"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 /** The gate-runner switches a pull_request decision reads. */
@@ -87,10 +90,15 @@ export function pullRequestAutoRun(body: string, env: GateRunnerSwitches): PullR
   if (typeof parsed !== "object" || parsed === null) return null;
   const e = parsed as {
     action?: unknown;
+    changes?: { title?: unknown; body?: unknown };
     repository?: { full_name?: unknown };
     pull_request?: { number?: unknown; draft?: unknown; head?: { sha?: unknown }; base?: { sha?: unknown } };
   };
   if (typeof e.action !== "string" || !AUTO_RUN_ACTIONS.has(e.action)) return null;
+  // #1176: an edit fires only for a title or body change — GitHub sends a
+  // `changes` object naming what moved. Any other edit (labels, base, ...) is
+  // the dedupe case for the unchanged head sha.
+  if (e.action === "edited" && e.changes?.title === undefined && e.changes?.body === undefined) return null;
   const pr = e.pull_request;
   const repo = e.repository?.full_name;
   if (pr === undefined || typeof repo !== "string" || typeof pr.number !== "number") return null;
@@ -99,7 +107,7 @@ export function pullRequestAutoRun(body: string, env: GateRunnerSwitches): PullR
   const baseSha = pr.base?.sha;
   if (typeof headSha !== "string" || !SHA_PATTERN.test(headSha) || typeof baseSha !== "string") return null;
   if (env.FLEET_GATE_RUNNER !== "on" || !isGateRunnerRepo(env.GATE_RUNNER_REPOS, repo)) return null;
-  return { repo, pr: pr.number, headSha, baseSha };
+  return { repo, pr: pr.number, headSha, baseSha, ...(e.action === "edited" ? { edited: true } : {}) };
 }
 
 /** The Workflows instance id for one repo and head sha: deterministic, so a
@@ -192,6 +200,23 @@ export async function startGateRun(
   return recordRun(wf, input, index, runId, Date.now);
 }
 
+/** #1176: a title/body edit re-runs the precheck under its own id. The head sha
+ *  is unchanged, so the plain sha id would dedupe-skip or reattach — an edit's
+ *  recheck must be a fresh run. It records itself as the PR's latest WITHOUT
+ *  ending the plain sha run (recordRun ends a live previous run): that one gates
+ *  the push itself, and the Workflow's head-moved check does not apply (same
+ *  head). Mirrors startManualGateRun's fresh-start shape. */
+export async function startEditedGateRun(
+  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex,
+  now: () => number = Date.now,
+): Promise<{ runId: string; reused: boolean }> {
+  const baseId = await gateRunId(input.repo, input.headSha);
+  const runId = `${baseId}-e${now().toString(36)}`;
+  await wf.create({ id: runId, params: { repo: input.repo, pr: input.pr } });
+  await index.record(input.repo, input.pr, { headSha: input.headSha, runId, progressedAt: now() });
+  return { runId, reused: false };
+}
+
 /** #1085 (refs #715): the manual start (`fleet gate run`, /studio/gate/start).
  *  Reattaches ONLY to a live run of the sha (LIVE_STATUSES) that progressed
  *  within GATE_STALL_MS (#1135). A finished run of the sha is not reused: a fresh
@@ -254,6 +279,10 @@ export interface AutoRunDeps {
  *  and the #1091 head path. A base with no block gets a visible failure on the
  *  head from that run, never silence. */
 export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDeps): Promise<AutoRunOutcome> {
+  if (pr.edited === true) {
+    await startEditedGateRun(deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index);
+    return "started";
+  }
   const { reused } = await startGateRun(
     deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index,
   );

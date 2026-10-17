@@ -8,7 +8,7 @@ import { describe, it, expect } from "bun:test";
 import { MAX_LEG_TIMEOUT_MIN } from "../../src/gate/config";
 import { legStepDeadlineMs } from "../../src/gate/leg-run";
 import {
-  autoRunPullRequest, gateRunId, GATE_STALL_MS, markRunProgress, pullRequestAutoRun, startGateRun, startManualGateRun,
+  autoRunPullRequest, gateRunId, GATE_STALL_MS, markRunProgress, pullRequestAutoRun, startGateRun, startManualGateRun, startEditedGateRun,
   type GateRunIndex, type GateRunInstance, type GateRunRecord, type GateRunStarter, type PullRequestAutoRun,
 } from "../../src/gate/auto-run";
 
@@ -19,11 +19,12 @@ const THIRD = "c".repeat(40);
 const BLOCK = { install: "bun install", legs: ["lint"], pathRules: ["src/**"] };
 const ON = { FLEET_GATE_RUNNER: "on", GATE_RUNNER_REPOS: PR_REPO };
 
-function payload(over: { action?: string; draft?: boolean; repo?: string } = {}): string {
+function payload(over: { action?: string; draft?: boolean; repo?: string; changes?: { title?: unknown; body?: unknown } } = {}): string {
   return JSON.stringify({
     action: over.action ?? "opened",
     number: 7,
     repository: { full_name: over.repo ?? PR_REPO },
+    ...(over.changes === undefined ? {} : { changes: over.changes }),
     pull_request: { number: 7, draft: over.draft ?? false, head: { sha: HEAD }, base: { sha: BASE, ref: "main" } },
   });
 }
@@ -99,9 +100,28 @@ describe("pullRequestAutoRun: which deliveries start a run", () => {
   });
 
   it("any other action starts nothing", () => {
-    for (const action of ["closed", "edited", "labeled", "reopened", "converted_to_draft"]) {
+    for (const action of ["closed", "labeled", "reopened", "converted_to_draft"]) {
       expect(pullRequestAutoRun(payload({ action }), ON)).toBeNull();
     }
+  });
+
+  it("an edit of the title fires with edited:true and the same head sha", () => {
+    const out = pullRequestAutoRun(payload({ action: "edited", changes: { title: { from: "old" } } }), ON);
+    expect(out).toEqual({ ...PR, edited: true });
+  });
+
+  it("an edit of the body fires with edited:true", () => {
+    const out = pullRequestAutoRun(payload({ action: "edited", changes: { body: { from: "old" } } }), ON);
+    expect(out).toEqual({ ...PR, edited: true });
+  });
+
+  it("an edit with neither a title nor a body change starts nothing", () => {
+    expect(pullRequestAutoRun(payload({ action: "edited", changes: {} }), ON)).toBeNull();
+    expect(pullRequestAutoRun(payload({ action: "edited" }), ON)).toBeNull();
+  });
+
+  it("a non-edit action still carries no edited flag", () => {
+    expect(pullRequestAutoRun(payload({ action: "synchronize" }), ON)).toEqual(PR);
   });
 
   it("a repo outside GATE_RUNNER_REPOS starts nothing", () => {
@@ -460,6 +480,29 @@ describe("startManualGateRun: a transient status failure never ends a healthy ru
     expect(terminated).toEqual([]);
     // The fall-through's create is the duplicate attempt on the same id; nothing new starts.
     expect(creates.map((c) => c.id)).toEqual([first.runId, first.runId]);
+  });
+});
+
+describe("startEditedGateRun: an edit re-runs under its own -e id (#1176)", () => {
+  const T1 = 1_700_000_000_000;
+
+  it("starts under a fresh id suffixed -e<base36 time>, and records it as the PR's latest", async () => {
+    const { wf, creates } = fakeWorkflow();
+    const { index, heads } = fakeIndex();
+    const out = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    const baseId = await gateRunId(PR_REPO, HEAD);
+    expect(out).toEqual({ runId: `${baseId}-e${T1.toString(36)}`, reused: false });
+    expect(creates).toEqual([{ id: `${baseId}-e${T1.toString(36)}`, params: { repo: PR_REPO, pr: 7 } }]);
+    expect(heads.get(`${PR_REPO}#7`)).toMatchObject({ headSha: HEAD, runId: `${baseId}-e${T1.toString(36)}` });
+  });
+
+  it("does not end a live plain-sha run of the same head", async () => {
+    const { wf, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    expect(terminated).toEqual([]);
+    expect(first.runId).toBe(await gateRunId(PR_REPO, HEAD));
   });
 });
 
