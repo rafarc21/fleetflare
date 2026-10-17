@@ -142,12 +142,12 @@ import { juniorEnabled } from "../junior/gate";
 // here so every existing `from "./do"` importer is unchanged.
 import {
   credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV,
-  readReposCredentialWriteCmd, readReposCredentialClearCmd,
+  readReposCredentialWriteCmd, readReposCredentialClearCmd, blueprintCredentialDropCmd, workCredentialVerifyCmd,
 } from "./credentials";
 import { refreshCredentialExec, studioGitIdentity, gitIdentityCmd, gitIdentityEnv, STUDIO_GIT_IDENTITY, type GitIdentity } from "./credentials";
 import { studioReadReposCredential, swapStoredReadToken, type ReadTokenStore } from "../github/read-repos";
 import { leakGateInstallCmd } from "./gh-wrapper";
-export { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV };
+export { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV, blueprintCredentialDropCmd, workCredentialVerifyCmd };
 export { refreshCredentialExec, studioGitIdentity, gitIdentityCmd, gitIdentityEnv, STUDIO_GIT_IDENTITY, type GitIdentity };
 
 import { mintSpawnToken, hashSpawnToken } from "./org";
@@ -231,15 +231,19 @@ import type { DoneRecordPorts } from "./session-sync";
 // (both below, inside the class). "One code path, two call sites."
 // ---------------------------------------------------------------------------
 
-/** 50 minutes. GitHub expires an installation token after 60 (see
- *  src/github/app.ts's mintInstallationToken doc comment); refreshing at 50
- *  leaves a 10-minute margin against the mint round trip and clock drift —
+/** 40 minutes. GitHub expires an installation token after 60 (see
+ *  src/github/app.ts's mintInstallationToken doc comment); refreshing at 40
+ *  leaves a 20-minute margin against the mint round trip and clock drift —
  *  the same conservative-margin idea as appJwt's own 60s iat skew
  *  allowance, one file over. */
-export const REFRESH_SECONDS = 3000;
+export const REFRESH_SECONDS = 2400;
 
 /** PR #292 review item 2: DO storage key for the last minted read token. */
 const READ_REPOS_TOKEN_KEY = "readReposToken";
+
+/** Issue #1187: DO storage key for the consecutive refresh-failure streak that
+ *  drives the re-arm backoff. Cleared (0) on a success. */
+const REFRESH_FAIL_STREAK_KEY = "refreshFailStreak";
 
 export { SHIP_TRANSCRIPT_SECONDS } from "./ship-cadence";
 import { SHIP_TRANSCRIPT_SECONDS } from "./ship-cadence";
@@ -264,6 +268,9 @@ export interface RefreshDeps {
   /** Issue #283: the studio's git identity, set on every credential write.
    *  Absent = STUDIO_GIT_IDENTITY (credentials.ts). */
   gitIdentity?: GitIdentity;
+  /** Issue #1187: the work repo slug, for the shadow drop + post-write verify.
+   *  Absent = this caller predates the fix; no heal and no verify run. */
+  workRepo?: string;
   recordStudio: (status: StudioStatus) => Promise<void>;
   /** Telegram alert. do.ts's real instance plugs in sendCard against
    *  OPERATOR_ID — see the import comment above for why that recipient. */
@@ -308,10 +315,20 @@ export async function runRefreshCredential(
     }
     const token = await deps.mintToken(mode);
     // Issue #283: the same exec also pins the studio's git identity.
-    const exec = refreshCredentialExec(token, deps.gitIdentity ?? STUDIO_GIT_IDENTITY);
+    const exec = refreshCredentialExec(token, deps.gitIdentity ?? STUDIO_GIT_IDENTITY, deps.workRepo);
     const res = await deps.sbExec(exec.cmd, exec.env);
     if (res.code !== 0) {
       throw new Error(`credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
+    }
+    // Issue #1187: confirm the write actually took for the work repo by asking
+    // git which password it now serves. The token is compared here in TS,
+    // never echoed into a shell line.
+    if (token !== null && deps.workRepo) {
+      const verify = await deps.sbExec(workCredentialVerifyCmd(deps.workRepo));
+      const pw = /password=(.*)/.exec(verify.stdout)?.[1];
+      if (verify.code !== 0 || pw !== token) {
+        throw new Error("credential verify failed: git credential fill did not return the fresh token for the work repo");
+      }
     }
     // Issue #291: the read-only sibling token, AFTER the primary and through
     // its own command — never the push credential's file or helper. PR #292
@@ -2840,6 +2857,17 @@ export function decideHeal(
  *  (clone 429 bursts, and a failed clone leaves the studio bare). */
 export function replaceHealDelaySeconds(random: () => number = Math.random): number {
   return 15 + Math.floor(random() * 120);
+}
+
+/** Issue #1187: how soon the refresh tick retries after a failure streak —
+ *  30 s, 2 m, 5 m, capped there. A dead mint (GitHub down, proxy 500) is
+ *  retried promptly but never hammered, and a success resets to the full
+ *  REFRESH_SECONDS interval so the steady state is unchanged. */
+export function refreshBackoffDelaySeconds(streak: number): number {
+  if (streak <= 0) return REFRESH_SECONDS;
+  if (streak === 1) return 30;
+  if (streak === 2) return 120;
+  return 300;
 }
 
 /** Issue #1146: true when an armed marker was set before this container's
@@ -6252,6 +6280,15 @@ export class StudioDO extends Sandbox<Env> {
       // org.json), never pushed to, so the mint itself is denied write from
       // the start rather than merely being scoped to the right repo.
       writeBlueprintCredential: async (blueprintRepo: string, _id: string, workRepoSlug: string) => {
+        // Issue #1187: when the blueprint repo IS the work repo, a scoped
+        // blueprint helper would answer the work repo's own push URL with a
+        // read-only 1 h token. Skip mint+write entirely and drop any shadow a
+        // prior provision left behind.
+        if (blueprintRepo.toLowerCase() === workRepoSlug.toLowerCase()) {
+          const res = await sbExec(this, blueprintCredentialDropCmd(blueprintRepo), EXEC_CLASSES.provision);
+          if (res.code !== 0) return { ok: false as const, error: `blueprint credential drop failed (${res.code}): ${res.stderr.slice(0, 500)}` };
+          return { ok: true as const };
+        }
         try {
           // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts);
           // work repo from provision, as memoryToken above.
@@ -6896,6 +6933,7 @@ export class StudioDO extends Sandbox<Env> {
       swapReadToken: (token) => swapStoredReadToken(this.readTokenStore(), token),
       sbExec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.refresh, env }),
       gitIdentity: studioGitIdentity(this.env),
+      workRepo: workRepoSlug,
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
       notify: async (message: string) => {
         const tg = telegramConfig(this.env);
@@ -8368,9 +8406,15 @@ export class StudioDO extends Sandbox<Env> {
     await runScheduledTick(
       this.ctx.storage,
       async () => {
-        await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(null)), this.ctx.storage, this.selfId());
+        const status = await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(null)), this.ctx.storage, this.selfId());
+        // Issue #1187: a failed refresh retries soon (30 s / 2 m / 5 m) rather
+        // than waiting out the full interval; a success resets the streak.
+        const streak = status.lastRefreshError !== null
+          ? ((await this.ctx.storage.get<number>(REFRESH_FAIL_STREAK_KEY)) ?? 0) + 1
+          : 0;
+        await this.ctx.storage.put(REFRESH_FAIL_STREAK_KEY, streak);
       },
-      () => this.rearm("refreshToken", REFRESH_SECONDS),
+      async () => this.rearm("refreshToken", refreshBackoffDelaySeconds((await this.ctx.storage.get<number>(REFRESH_FAIL_STREAK_KEY)) ?? 0)),
       "refreshToken",
     );
   }
