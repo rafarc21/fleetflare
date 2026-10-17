@@ -4,6 +4,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   CLOSING_KEYWORD_RE, closingKeywordFailure, leakFailure, mergePrecheckFailures,
+  COMPARE_TRUNCATED_FAILURE, truncationFailure,
 } from "../../src/gate/merge-precheck";
 
 const CLOSING = "closing keyword in PR title or body";
@@ -68,6 +69,17 @@ describe("leakFailure", () => {
   it("fails closed when a pattern cannot be scanned", () => {
     // `acme(` is not a valid regex: scanText throws, the scan refuses.
     expect(leakFailure(["acme("], ["AcmeClient"])).toBe(LEAK_SCAN_ERROR);
+  });
+});
+
+describe("truncationFailure", () => {
+  it("returns the failure string when the compare was truncated", () => {
+    expect(truncationFailure(true)).toBe(COMPARE_TRUNCATED_FAILURE);
+    expect(COMPARE_TRUNCATED_FAILURE).toBe("gate precheck: compare truncated, cannot scan full diff");
+  });
+
+  it("returns null when the compare was complete", () => {
+    expect(truncationFailure(false)).toBeNull();
   });
 });
 

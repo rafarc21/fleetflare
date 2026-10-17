@@ -12,6 +12,13 @@ export const CLOSING_KEYWORD_RE = /(^|[^a-z])(close[sd]?|fix(es|ed)?|resolve[sd]
 export const CLOSING_KEYWORD_FAILURE = "closing keyword in PR title or body";
 export const DENYLIST_UNAVAILABLE = "gate precheck: denylist unavailable";
 export const LEAK_SCAN_ERROR = "gate precheck: leak scan error";
+export const COMPARE_TRUNCATED_FAILURE = "gate precheck: compare truncated, cannot scan full diff";
+
+/** #1169: a compare whose file or commit list was cut short cannot be trusted
+ *  as a full leak scan — fail closed, same as a missing denylist. */
+export function truncationFailure(truncated: boolean): string | null {
+  return truncated ? COMPARE_TRUNCATED_FAILURE : null;
+}
 
 /** The closing-keyword failure description, or null when clean. */
 export function closingKeywordFailure(title: string, body: string): string | null {

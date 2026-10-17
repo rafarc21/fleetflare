@@ -61,6 +61,36 @@ describe("precheckSummary", () => {
     const out = precheckSummary({});
     expect(out.files).toEqual([]);
     expect(out.commits).toEqual([]);
+    expect(out.truncated).toBe(false);
+  });
+
+  it("sets truncated when the file list hits GitHub's 300-file cap", () => {
+    const files = Array.from({ length: 300 }, (_, i) => ({ filename: `f${i}.ts` }));
+    const out = precheckSummary({ files });
+    expect(out.truncated).toBe(true);
+  });
+
+  it("sets truncated when the commit list hits GitHub's 250-commit cap", () => {
+    const commits = Array.from({ length: 250 }, (_, i) => ({
+      commit: {
+        author: { name: `Acme Author ${i}`, email: `author${i}@example.com` },
+        committer: { name: `Acme Committer ${i}`, email: `committer${i}@example.com` },
+      },
+    }));
+    const out = precheckSummary({ commits });
+    expect(out.truncated).toBe(true);
+  });
+
+  it("is not truncated when both lists are below their caps", () => {
+    const files = Array.from({ length: 299 }, (_, i) => ({ filename: `f${i}.ts` }));
+    const commits = Array.from({ length: 249 }, (_, i) => ({
+      commit: {
+        author: { name: `Acme Author ${i}`, email: `author${i}@example.com` },
+        committer: { name: `Acme Committer ${i}`, email: `committer${i}@example.com` },
+      },
+    }));
+    const out = precheckSummary({ files, commits });
+    expect(out.truncated).toBe(false);
   });
 
   it("drops empty name or email when joining an identity", () => {

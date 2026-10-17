@@ -1093,6 +1093,9 @@ export async function commitDate(token: string, repo: string, sha: string): Prom
 /** The most files one compare call lists. A list at this cap may be cut short, so
  *  it cannot prove that nothing gated changed (#1095 round 3). */
 export const COMPARE_FILE_CAP = 300;
+/** GitHub's own compare endpoint caps commits at 250 (same cap compareAhead
+ *  notes). A list at this cap may be cut short, so a leak scan cannot trust it. */
+export const COMPARE_COMMIT_CAP = 250;
 
 export async function compareFiles(
   token: string, repo: string, base: string, head: string,
@@ -1164,7 +1167,7 @@ function precheckIdentity(p: { name?: string; email?: string } | null | undefine
  *  and identities, not the path/merge-base view compareSummary maps. Pure, so
  *  bun test proves the mapping without the network. */
 export function precheckSummary(c: PrecheckCompareResponse): {
-  files: PrecheckFile[]; commits: PrecheckCommitMeta[];
+  files: PrecheckFile[]; commits: PrecheckCommitMeta[]; truncated: boolean;
 } {
   return {
     files: (c.files ?? []).map((f) => ({
@@ -1176,6 +1179,7 @@ export function precheckSummary(c: PrecheckCompareResponse): {
       author: precheckIdentity(m.commit?.author),
       committer: precheckIdentity(m.commit?.committer),
     })),
+    truncated: (c.files?.length ?? 0) >= COMPARE_FILE_CAP || (c.commits?.length ?? 0) >= COMPARE_COMMIT_CAP,
   };
 }
 
@@ -1185,7 +1189,7 @@ export function precheckSummary(c: PrecheckCompareResponse): {
  *  rules read names only, and neither should pay for the other. */
 export async function comparePrecheckData(
   token: string, repo: string, base: string, head: string,
-): Promise<{ files: PrecheckFile[]; commits: PrecheckCommitMeta[] }> {
+): Promise<{ files: PrecheckFile[]; commits: PrecheckCommitMeta[]; truncated: boolean }> {
   const c = await ghJson<PrecheckCompareResponse>(
     token,
     `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
