@@ -25,25 +25,25 @@ export const GATE_WATCHDOG_LOOKBACK_MS = 2 * 60 * 60_000;
 export const GATE_WATCHDOG_FINAL_AGE_MS = GATE_WATCHDOG_LOOKBACK_MS - 5 * 60_000;
 
 /** Whether any leg's decisive stored result is red. `read` gets one stored result
- *  by key, undefined when absent. A leg's first try that is red is final unless
- *  its flake-retry passed (#1156 N1c): a red first try whose retry stored an error
- *  stays red, matching the run's own red-first rule (#1119). An infra first try's
- *  try-2 result decides over it (#1150 review). */
+ *  by key, undefined when absent. A red first try is final unless its retry
+ *  passed (#1156 N1c); a red retry is always red; an infra first try's try-2
+ *  result decides over it (#1150 review). */
 export async function hasRedResult(
   keys: string[], read: (key: string) => Promise<{ state?: string } | undefined>,
 ): Promise<boolean> {
   const bases = new Set(keys.map((k) => k.replace(/(\.retry\.json|-try2\.json|\.json)$/, "")));
   for (const base of bases) {
-    const firstKey = `${base}.json`;
-    const first = keys.includes(firstKey) ? await read(firstKey) : undefined;
-    if (first?.state === "failure") {
-      const retryKey = `${base}.retry.json`;
-      const retry = keys.includes(retryKey) ? await read(retryKey) : undefined;
-      if (retry?.state !== "success") return true;
-      continue; // flaky: the red first try passed on retry, so it is not red
-    }
+    const retryKey = `${base}.retry.json`;
+    const retry = keys.includes(retryKey) ? await read(retryKey) : undefined;
     const try2Key = `${base}-try2.json`;
-    if (keys.includes(try2Key) && (await read(try2Key))?.state === "failure") return true;
+    const try2 = keys.includes(try2Key) ? await read(try2Key) : undefined;
+    const jsonKey = `${base}.json`;
+    const json = keys.includes(jsonKey) ? await read(jsonKey) : undefined;
+    // try-2 decides over the original first attempt for an infra leg; the retry
+    // decides over a red first try only when it passed (#1156 N1c).
+    const first = try2 ?? json;
+    if (retry?.state === "failure") return true;
+    if (first?.state === "failure" && retry?.state !== "success") return true;
   }
   return false;
 }
@@ -174,15 +174,29 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
 /** Ends a stalled run with its final verdict. The progress stamp lands first
  *  (#1156 item 3): a concurrent sweep reads a fresh stamp, so a slow post is
  *  never re-stalled. The post lands before the end and the retire (#1156 item 4):
- *  a post that failed after its retries keeps the run live and its row in the
- *  sweep, so the next sweep retries the verdict instead of losing it. */
+ *  a post that failed after its retries restores the pre-stamp progress and
+ *  rethrows so the next sweep retries the verdict — unless the run is at/over
+ *  the final age, when the row leaves the sweep regardless, so it ends and
+ *  retires, logging the lost verdict. */
 async function endRunFinal(
   deps: WatchdogDeps, row: StalledRun, now: number,
   args: { state: "error" | "failure"; description: string },
 ): Promise<WatchdogOutcome> {
+  const stamped = row.progressedAt ?? 0;
   await deps.index.progress(row.repo, row.pr, row.runId, now);
   const postFailed = await deps.post(row.repo, row.headSha, args);
-  if (postFailed) throw new Error(`gate watchdog: final status post failed for ${row.runId}`);
+  if (postFailed) {
+    // At the final age the row leaves the sweep next minute regardless, so end
+    // and retire it and log the lost verdict rather than restore and retry.
+    if (now - stamped >= GATE_WATCHDOG_FINAL_AGE_MS) {
+      console.error(`gate watchdog: final status post failed at the final age for ${row.runId}; verdict lost`);
+      await endRunOrThrow(deps.workflow, row.runId);
+      await deps.index.retire(row.repo, row.pr, row.runId, now);
+      return "final";
+    }
+    await deps.index.progress(row.repo, row.pr, row.runId, stamped);
+    throw new Error(`gate watchdog: final status post failed for ${row.runId}`);
+  }
   await endRunOrThrow(deps.workflow, row.runId);
   await deps.index.retire(row.repo, row.pr, row.runId, now);
   return "final";
