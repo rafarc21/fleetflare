@@ -367,6 +367,7 @@ describe("commentEnvelope verifies PR artifacts", () => {
       createIssue: vi.fn(async () => task(labels)),
       getIssue: vi.fn(async () => task(labels)),
       listIssues: vi.fn(async () => [task(labels)]),
+      countIssues: vi.fn(async () => 0),
       addLabels: vi.fn(async () => {}),
       removeLabel: vi.fn(async () => {}),
       createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/7#issuecomment-1" })),

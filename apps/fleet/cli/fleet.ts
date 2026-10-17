@@ -2656,12 +2656,19 @@ export function reapDeps(
       return studios;
     },
     listBoard: async () => {
-      const body = await boardRead(`/tasks?${repoQ}`);
+      const body = await boardRead(`/tasks?${repoQ}&open=1`);
       if (!Array.isArray(body)) throw new Error("board listing was not a JSON array");
       return body as BoardTask[];
     },
+    boardTotal: async () => {
+      const body = await boardRead(`/tasks/count?${repoQ}`);
+      if (typeof body !== "object" || body === null || Array.isArray(body) || typeof (body as { count?: unknown }).count !== "number") {
+        throw new Error("board count was not { count: number }");
+      }
+      return (body as { count: number }).count;
+    },
     studioTasks: async (id) => {
-      const body = await boardRead(`/tasks?${repoQ}&assignedTo=${encodeURIComponent(id)}`);
+      const body = await boardRead(`/tasks?${repoQ}&open=1&assignedTo=${encodeURIComponent(id)}`);
       if (!Array.isArray(body)) throw new Error("task listing was not a JSON array");
       return body as BoardTask[];
     },

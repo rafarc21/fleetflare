@@ -168,7 +168,7 @@ describe("reap — the happy path", () => {
     const out = await runReap(flags(), f.deps);
     expect(out.exitCode).toBe(0);
     expect(f.calls).toEqual([
-      "board", `inspect:${PILOT}`, `rescue:${PILOT}`, `tasks:${PILOT}`, `inspect:${PILOT}`, `destroy:${PILOT}`,
+      "board", "total", `inspect:${PILOT}`, `rescue:${PILOT}`, `tasks:${PILOT}`, `inspect:${PILOT}`, `destroy:${PILOT}`,
     ]);
     expect(f.lines.some((l) => l.startsWith(`REAPED ${PILOT}`))).toBe(true);
   });
@@ -224,7 +224,7 @@ describe("reap — never a studio with a running turn", () => {
       board: HISTORY,
     });
     await runReap(flags(), f.deps);
-    expect(f.calls).toEqual(["board"]);
+    expect(f.calls).toEqual(["board", "total"]);
   });
 
   test("the live pane shows a running turn at destroy time -> no destroy", async () => {
@@ -447,7 +447,7 @@ describe("reap — F1: bounded gap between live read and destroy", () => {
     const f = fake({ studios: [IDLE_45()], board: HISTORY });
     f.deps.heartbeat = async () => { throw new Error("lock gone"); };
     await runReap(flags(), f.deps);
-    expect(f.calls).toEqual(["board"]);
+    expect(f.calls).toEqual(["board", "total"]);
   });
 
   test("REAP_LIVE_READ_MAX_MS is at most 30s", () => {
@@ -539,14 +539,18 @@ describe("reap — F4/F5: scope and state", () => {
   test("a studio with no repoSlug is never reaped, even when its id matches", async () => {
     const f = fake({ studios: [studio(PILOT, activity("idle", 45 * MIN), { repoSlug: null })], board: HISTORY });
     await runReap(flags(), f.deps);
-    expect(f.calls).toEqual(["board"]);
+    expect(f.calls).toEqual(["board", "total"]);
   });
 
-  test("zero board rows -> reap nothing this poll (a board with history is never empty)", async () => {
+  // Issue #1121: the listing is now `state=open`, which CAN be legitimately
+  // empty (every task closed) — zero open rows is no longer a bad read. The
+  // total (boardTotal) is what the floor checks now, and a fresh repo with no
+  // issues at all still proceeds.
+  test("issue #1121: an empty open board with an empty total proceeds (a fresh repo has no history)", async () => {
     const f = fake({ studios: [IDLE_45()], board: [] });
     const out = await runReap(flags(), f.deps);
-    expect(out.exitCode).toBe(1);
-    expect(f.calls).toEqual(["board"]);
+    expect(out.exitCode).toBe(0);
+    expect(f.calls).toContain(`destroy:${PILOT}`);
   });
 
   test("state unreadable -> floor unknown -> reap nothing this poll", async () => {
@@ -562,7 +566,7 @@ describe("reap — F4/F5: scope and state", () => {
     const f = fake({ studios: [IDLE_45()], board: HISTORY, state });
     const out = await runReap(flags({ repo: "Example-Org/AcmeClient" }), f.deps);
     expect(out.exitCode).toBe(1);
-    expect(f.calls).toEqual(["board"]);
+    expect(f.calls).toEqual(["board", "total"]);
   });
 });
 
@@ -576,17 +580,17 @@ describe("reap — board read failure and floor", () => {
 
   test("board rows fall below half the last good read -> reap nothing this poll, keep the baseline", async () => {
     const state = { ...emptyReapState(), boardRows: { [REPO]: 10 } };
-    const f = fake({ studios: [IDLE_45()], board: HISTORY, state });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, boardTotal: 1, state });
     const out = await runReap(flags(), f.deps);
     expect(out.exitCode).toBe(1);
-    expect(f.calls).toEqual(["board"]);
+    expect(f.calls).toEqual(["board", "total"]);
     expect(f.saved()!.boardRows[REPO]).toBe(10);
   });
 
   test("board rows at or above half the last good read -> proceeds, baseline updated", async () => {
     const state = { ...emptyReapState(), boardRows: { [REPO]: 10 } };
     const rows = [1, 2, 3, 4, 5].map((n) => task(n, WEB, "completed"));
-    const f = fake({ studios: [IDLE_45()], board: rows, state });
+    const f = fake({ studios: [IDLE_45()], board: rows, boardTotal: 5, state });
     await runReap(flags(), f.deps);
     expect(f.calls).toContain(`destroy:${PILOT}`);
     expect(f.saved()!.boardRows[REPO]).toBe(5);
@@ -641,7 +645,7 @@ describe("reap — rescue failure, 409 and backoff", () => {
     const state = { ...emptyReapState(), backoffUntil: { [PILOT]: new Date(NOW.getTime() + 10 * MIN).toISOString() } };
     const inside = fake({ studios: [IDLE_45()], board: HISTORY, state });
     await runReap(flags(), inside.deps);
-    expect(inside.calls).toEqual(["board"]);
+    expect(inside.calls).toEqual(["board", "total"]);
     const after = fake({ studios: [IDLE_45()], board: HISTORY, state, now: new Date(NOW.getTime() + 11 * MIN) });
     await runReap(flags(), after.deps);
     // Attempted again: the live pre-check runs (the fake's DO stamp is stale by now, so it stops there).
@@ -674,7 +678,7 @@ describe("reap — dry-run", () => {
     const f = fake({ studios: [IDLE_45(), studio(WEB, activity("working", 45 * MIN))], board: HISTORY });
     const out = await runReap(flags({ apply: false }), f.deps);
     expect(out.exitCode).toBe(0);
-    expect(f.calls).toEqual(["board"]);
+    expect(f.calls).toEqual(["board", "total"]);
     const line = f.lines.find((l) => l.startsWith(`would reap ${PILOT}`));
     expect(line).toContain("IDLE 45m");
     expect(line).toContain("no open task");
@@ -687,7 +691,7 @@ describe("reap — registry derived each poll, scope", () => {
     const other = studio("otherrepo--pilot", activity("idle", 45 * MIN), { repoSlug: "example-org/otherrepo" });
     const f = fake({ studios: [other], board: HISTORY });
     await runReap(flags(), f.deps);
-    expect(f.calls).toEqual(["board"]);
+    expect(f.calls).toEqual(["board", "total"]);
   });
 
   test("state entries for studios no longer in the registry are dropped", async () => {
