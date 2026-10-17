@@ -1280,16 +1280,33 @@ fleet_mcp_config() {
   fi
   mkdir -p "${file%/*}" || return 1
   MCP_PATH="$file" MCP_NAMES="$names" python3 -c '
-import json, os, sys
-known = {"playwright": {"command": "bun", "args": ["x", "@playwright/mcp@latest"]}}
+import json, os, shutil, sys
+known = {"playwright": {"command": "bun", "args": ["x", "@playwright/mcp@latest"]}, "codebase-memory": {"command": "/usr/local/bin/codebase-memory-mcp"}}
 servers = {}
 for n in [n for n in os.environ["MCP_NAMES"].split(",") if n]:
-    if n in known:
-        servers[n] = known[n]
-    else:
+    if n not in known:
         print("studio-bringup: declared mcp server \"%s\" is not in the known-server map -- skipped" % n, file=sys.stderr)
-with open(os.environ["MCP_PATH"], "w") as f:
-    json.dump({"mcpServers": servers}, f)
+        continue
+    cmd = known[n].get("command", "")
+    # An absolute-path command is a static binary the image bakes. When it is
+    # not resolvable on PATH (an old image from before this server shipped),
+    # skip it with a stderr line rather than land a config whose binary claude
+    # would fail to spawn. Never fail the boot over it. Checked by basename so
+    # a test can shadow the binary on PATH; the config still writes the
+    # absolute path claude spawns directly. A non-absolute command
+    # (the playwright `bun`) is never existence-checked.
+    if cmd.startswith("/") and shutil.which(os.path.basename(cmd)) is None:
+        print("studio-bringup: mcp server \"%s\" binary %s absent -- skipped" % (n, cmd), file=sys.stderr)
+        continue
+    servers[n] = known[n]
+if servers:
+    with open(os.environ["MCP_PATH"], "w") as f:
+        json.dump({"mcpServers": servers}, f)
+else:
+    try:
+        os.remove(os.environ["MCP_PATH"])
+    except OSError:
+        pass
 '
 }
 

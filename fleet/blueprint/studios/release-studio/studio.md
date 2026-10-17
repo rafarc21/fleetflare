@@ -4,6 +4,7 @@ title: Release Studio
 lead: Release Manager
 skills: [release-verification-checklist, qa, agent-lifecycle, ego-browser]
 secrets: []
+mcp: [codebase-memory]
 allowedTools: Bash(git *) Bash(gh *) Bash(bun *) Bash(fleet *) Read Glob Grep
 keep_alive: false
 ---

@@ -1,6 +1,7 @@
 ---
 name: scratch
 skills: []
+mcp: [codebase-memory]
 allowedTools: Bash(git *) Bash(gh *) Bash(bun *) Bash(fleet *) Edit Write
 may_spawn: []
 reports_to: operator

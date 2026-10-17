@@ -53,7 +53,7 @@ ENV DISABLE_AUTOUPDATER=1
 # but never applied to the app (a push that landed, then a failed apply):
 # "no changes" forever. >= 4.141 applies it (EDIT ... @sha256); package.json
 # pins that, and scripts/deploy.sh runs only the pinned binary.
-LABEL fleet.image.rev="p9-reproducible-images"
+LABEL fleet.image.rev="p10-codebase-memory-mcp"
 
 # tmux hosts the long-lived `studio` session; git/curl/ca-certificates are
 # runtime deps of the bring-up script and the tailscale installer below
@@ -272,6 +272,21 @@ COPY --from=src /src/ego/ /
 RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
     && cd /opt/fleet/ego-browser && bun install --production \
     && ln -sf /opt/fleet/ego-browser/cli.ts /usr/local/bin/ego-browser \
+    && repro-seal end
+
+# codebase-memory-mcp (issue #1167): every studio gets the code-graph MCP
+# server. MIT, one static C binary, indexes locally, no API key. v0.11.0
+# pinned (2026-09-15); v0.12.x (10-15/10-16) too fresh to ride an image
+# window. sha256 is from the release's checksums.txt, hardcoded so a
+# mismatch fails the build. No install.sh, no curl|bash, no client
+# auto-config -- the tar also ships those, so only the one member is
+# extracted and the rest never touch the image.
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && curl -fsSL -o /tmp/cbm.tar.gz https://github.com/DeusData/codebase-memory-mcp/releases/download/v0.11.0/codebase-memory-mcp-linux-amd64-portable.tar.gz \
+    && echo "1f9e8293eb2bc5c05cfa27a7e8fc033da6d729ffad525ccfcdaa3fd606306683  /tmp/cbm.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/cbm.tar.gz -C /tmp codebase-memory-mcp \
+    && install -m 0755 /tmp/codebase-memory-mcp /usr/local/bin/codebase-memory-mcp \
+    && rm -f /tmp/cbm.tar.gz /tmp/codebase-memory-mcp \
     && repro-seal end
 
 # P4a-1: superpowers (always) + caveman (operator opt-in, issue #330 — see
