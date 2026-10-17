@@ -533,6 +533,38 @@ describe("startEditedGateRun: an edit re-runs under its own -e id (#1176)", () =
     expect(terminated).toEqual([]);
     expect(runs.get(first.runId)!.status).toBe("complete");
   });
+
+  it("ends every live run of the sha — a prior -e run and the plain run — before creating the new one (#1203)", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const baseId = await gateRunId(PR_REPO, HEAD);
+    const eOldId = `${baseId}-eOLD`;
+    // Two live runs gate the same head sha: the plain-sha run and an earlier
+    // -e run the index still records as this PR's latest. Both are stale gates
+    // of the pre-edit title/body once a new edit arrives.
+    await wf.create({ id: baseId, params: { repo: PR_REPO, pr: 7 } });
+    await wf.create({ id: eOldId, params: { repo: PR_REPO, pr: 7 } });
+    const { index, heads } = fakeIndex();
+    heads.set(`${PR_REPO}#7`, { headSha: HEAD, runId: eOldId, progressedAt: T1 });
+    const out = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    expect(terminated).toEqual([baseId, eOldId]);
+    expect(runs.get(baseId)!.status).toBe("terminated");
+    expect(runs.get(eOldId)!.status).toBe("terminated");
+    // Only the new -e run stays live.
+    expect(runs.get(out.runId)!.status).toBe("running");
+  });
+
+  it("a recorded latest of a different head sha is not ended by an edit (#1203)", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const baseId = await gateRunId(PR_REPO, HEAD);
+    const otherShaRunId = `gate-other`;
+    await wf.create({ id: baseId, params: { repo: PR_REPO, pr: 7 } });
+    await wf.create({ id: otherShaRunId, params: { repo: PR_REPO, pr: 7 } });
+    const { index, heads } = fakeIndex();
+    heads.set(`${PR_REPO}#7`, { headSha: BASE, runId: otherShaRunId, progressedAt: T1 });
+    await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    expect(terminated).toEqual([baseId]);
+    expect(runs.get(otherShaRunId)!.status).toBe("running");
+  });
 });
 
 describe("autoRunPullRequest: every gated PR starts a run; the Workflow decides (#1132)", () => {

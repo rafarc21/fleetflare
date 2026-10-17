@@ -219,6 +219,11 @@ export async function startEditedGateRun(
 ): Promise<{ runId: string; reused: boolean }> {
   const baseId = await gateRunId(input.repo, input.headSha);
   await endIfLive(wf, baseId);
+  // #1203: an earlier -e (or -r) run of the same head sha that the index still
+  // records as this PR's latest is also a stale gate of the pre-edit
+  // title/body — end it too. endIfLive no-ops on a non-live or missing run.
+  const latest = await index.latest(input.repo, input.pr);
+  if (latest !== null && latest.headSha === input.headSha) await endIfLive(wf, latest.runId);
   if (postPending) await postPending(input.repo, input.headSha);
   const runId = `${baseId}-e${now().toString(36)}`;
   await wf.create({ id: runId, params: { repo: input.repo, pr: input.pr } });
