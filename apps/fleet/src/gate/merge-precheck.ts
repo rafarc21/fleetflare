@@ -14,6 +14,7 @@ export const CLOSING_KEYWORD_COMMIT_FAILURE = "closing keyword in a commit messa
 export const DENYLIST_UNAVAILABLE = "gate precheck: denylist unavailable";
 export const LEAK_SCAN_ERROR = "gate precheck: leak scan error";
 export const COMPARE_TRUNCATED_FAILURE = "gate precheck: compare truncated, cannot scan full diff";
+export const UNSCANNABLE_FILE_FAILURE = "gate precheck: no diff to scan: ";
 
 /** #1169: a compare whose file or commit list was cut short cannot be trusted
  *  as a full leak scan — fail closed, same as a missing denylist. */
@@ -44,6 +45,49 @@ export function leakFailure(patterns: string[], blobs: string[]): string | null 
   return hits.length > 0 ? leakHitMessage(hits) : null;
 }
 
+/** #1176: added (`+`) lines of one patch — context and removed lines never
+ *  reach the scan, so a PR that REMOVES a leak can go green. */
+export function addedLines(patch: string): string {
+  return patch
+    .split("\n")
+    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+    .map((l) => l.slice(1))
+    .join("\n");
+}
+
+/** #1176: files the scan cannot see — no patch (binary or oversized) and not a
+ *  removal. Unscannable = red, never a silent pass. A missing status reads as
+ *  changed, so fail closed. */
+export function unscannableFiles(files: { filename: string; patch?: string; status?: string }[]): string[] {
+  return files
+    .filter((f) => f.patch === undefined && f.status !== "removed")
+    .map((f) => f.filename);
+}
+
+/** #1176: every text the precheck scans, assembled from one compare view:
+ *  title, body, whole file paths, ADDED patch lines only, commit identities and
+ *  messages. */
+export function precheckBlobs(input: {
+  title: string;
+  body: string;
+  files: { filename: string; previous_filename?: string; patch?: string; status?: string }[];
+  commits: { author: string; committer: string; message: string }[];
+}): string[] {
+  return [
+    input.title,
+    input.body,
+    ...input.files.flatMap((f) => [f.filename, f.previous_filename ?? "", addedLines(f.patch ?? "")]),
+    ...input.commits.flatMap((c) => [c.author, c.committer, c.message]),
+  ];
+}
+
+/** #1176: GitHub 422s a status description over 140 chars — an uncapped
+ *  description would drop the failure POST entirely and auto-merge would see
+ *  nothing. */
+export function capStatusDescription(s: string): string {
+  return s.slice(0, 140).trimEnd();
+}
+
 /** Both prechecks, as a list of failure descriptions ([] = clean). */
 export interface MergePrecheckInput {
   title: string;
@@ -57,6 +101,8 @@ export interface MergePrecheckInput {
   /** #1176: commit messages join the keyword and leak scans (a squash body builds
    *  from them, so a keyword there closes issues at merge). */
   commitMessages?: string[];
+  /** #1176: the compare's files, for the patchless-file fail-closed check. */
+  files?: { filename: string; previous_filename?: string; patch?: string; status?: string }[];
 }
 
 export function mergePrecheckFailures(input: MergePrecheckInput): string[] {
@@ -78,6 +124,10 @@ export function mergePrecheckFailures(input: MergePrecheckInput): string[] {
     // guard applies — the same whole-scan skip board/leak.ts makes. Only a
     // CONFIRMED private repo takes this path, never an unknown visibility.
     return out;
+  }
+  const unscannable = unscannableFiles(input.files ?? []);
+  if (unscannable.length > 0) {
+    out.push(capStatusDescription(UNSCANNABLE_FILE_FAILURE + unscannable.join(", ")));
   }
   const leak = leakFailure(input.patterns, [...input.blobs, ...(input.commitMessages ?? [])]);
   if (leak !== null) out.push(leak);

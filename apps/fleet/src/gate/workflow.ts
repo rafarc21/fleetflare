@@ -20,7 +20,7 @@ import {
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
 import { resolveOpsRepo } from "../ops-repo";
-import { mergePrecheckFailures } from "./merge-precheck";
+import { mergePrecheckFailures, precheckBlobs } from "./merge-precheck";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import { bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
@@ -138,15 +138,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // cannot leave it (board/leak.ts's own skip), so the fetch is pure waste.
       const patterns = resolved.private ? [] : opsRepo === null ? [] : parseDenylist(
         await fetchRepoFile(await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }), opsRepo, OPS_DENYLIST_PATH, "HEAD"));
-      const blobs = [
-        resolved.title, resolved.body,
-        ...compare.files.flatMap((f) => [f.filename, f.previous_filename ?? "", f.patch ?? ""]),
-        ...compare.commits.flatMap((c) => [c.author, c.committer, c.message]),
-      ];
       return mergePrecheckFailures({
-        title: resolved.title, body: resolved.body, patterns, blobs,
+        title: resolved.title, body: resolved.body, patterns,
+        blobs: precheckBlobs({ title: resolved.title, body: resolved.body, files: compare.files, commits: compare.commits }),
         private: resolved.private, truncated: compare.truncated,
         commitMessages: compare.commits.map((c) => c.message),
+        files: compare.files,
       });
     }).catch(() => ["gate precheck failed closed"] as string[]);
 

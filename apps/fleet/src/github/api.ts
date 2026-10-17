@@ -1145,12 +1145,12 @@ export function comparedFilePaths(
  *  (and a rename's old name), plus every commit's author/committer identity
  *  and message (#1176: a squash body builds from commit messages, so a closing
  *  keyword there closes issues at merge). */
-export interface PrecheckFile { filename: string; previous_filename?: string; patch?: string }
+export interface PrecheckFile { filename: string; previous_filename?: string; patch?: string; status?: string }
 export interface PrecheckCommitMeta { author: string; committer: string; message: string }
 
 /** The raw compare fields precheckSummary maps from (#1169). */
 export interface PrecheckCompareResponse {
-  files?: { filename: string; previous_filename?: string; patch?: string }[];
+  files?: { filename: string; previous_filename?: string; patch?: string; status?: string }[];
   commits?: {
     commit?: {
       author?: { name?: string; email?: string } | null;
@@ -1177,6 +1177,7 @@ export function precheckSummary(c: PrecheckCompareResponse): {
       filename: f.filename,
       ...(f.previous_filename === undefined ? {} : { previous_filename: f.previous_filename }),
       ...(f.patch === undefined ? {} : { patch: f.patch }),
+      ...(f.status === undefined ? {} : { status: f.status }),
     })),
     commits: (c.commits ?? []).map((m) => ({
       author: precheckIdentity(m.commit?.author),

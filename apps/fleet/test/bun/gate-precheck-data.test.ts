@@ -29,6 +29,20 @@ describe("precheckSummary", () => {
     ]);
   });
 
+  it("maps a file's status through (#1176)", () => {
+    const out = precheckSummary({
+      files: [{ filename: "a.ts", patch: "@@ -1 +1 @@", status: "modified" }],
+    });
+    expect(out.files).toEqual([
+      { filename: "a.ts", patch: "@@ -1 +1 @@", status: "modified" },
+    ]);
+  });
+
+  it("omits status when GitHub sends none", () => {
+    const out = precheckSummary({ files: [{ filename: "b.ts" }] });
+    expect("status" in out.files[0]).toBe(false);
+  });
+
   it("maps author and committer identities", () => {
     const out = precheckSummary({
       commits: [{

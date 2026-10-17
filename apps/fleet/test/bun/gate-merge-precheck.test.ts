@@ -4,7 +4,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   CLOSING_KEYWORD_RE, closingKeywordFailure, leakFailure, mergePrecheckFailures,
-  COMPARE_TRUNCATED_FAILURE, truncationFailure,
+  COMPARE_TRUNCATED_FAILURE, truncationFailure, addedLines, unscannableFiles, precheckBlobs,
 } from "../../src/gate/merge-precheck";
 
 const CLOSING = "closing keyword in PR title or body";
@@ -197,5 +197,103 @@ describe("mergePrecheckFailures: commit messages are scanned", () => {
       private: true,
     });
     expect(failures).toEqual(["closing keyword in a commit message"]);
+  });
+});
+
+// #1176: the leak scan sees only ADDED lines, and a file with no patch (binary
+// or oversized) fails closed — never a silent pass.
+describe("addedLines", () => {
+  it("extracts added lines only, stripping the + and the header", () => {
+    expect(addedLines("@@ -1,2 +1,2 @@\n context\n+added line\n-removed line\n+++ b/f\n+keep me")).toBe(
+      "added line\nkeep me",
+    );
+  });
+
+  it("returns empty for a patch with no additions", () => {
+    expect(addedLines("@@ -1 +1 @@\n-removed only\n context")).toBe("");
+  });
+});
+
+describe("unscannableFiles", () => {
+  it("flags a patchless, non-removed file", () => {
+    expect(unscannableFiles([{ filename: "bin/blob.png", status: "modified" }])).toEqual(["bin/blob.png"]);
+  });
+
+  it("flags a patchless file with no status at all (GitHub omitted it)", () => {
+    expect(unscannableFiles([{ filename: "bin/blob.png" }])).toEqual(["bin/blob.png"]);
+  });
+
+  it("does not flag a removed file with no patch", () => {
+    expect(unscannableFiles([{ filename: "old.ts", status: "removed" }])).toEqual([]);
+  });
+
+  it("does not flag a file that has a patch", () => {
+    expect(unscannableFiles([{ filename: "a.ts", patch: "diff", status: "modified" }])).toEqual([]);
+  });
+});
+
+describe("mergePrecheckFailures: patchless files fail closed, added lines only", () => {
+  it("a PR that only removes a leak goes green: removed lines are never scanned", () => {
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: precheckBlobs({
+        title: "plain title", body: "",
+        files: [{ filename: "notes.md", status: "modified", patch: "@@ -1 +1 @@\n-leaked acmeclient\n+clean" }],
+        commits: [],
+      }),
+      files: [{ filename: "notes.md", status: "modified", patch: "@@ -1 +1 @@\n-leaked acmeclient\n+clean" }],
+    });
+    expect(failures).toEqual([]);
+  });
+
+  it("an added line that leaks is caught", () => {
+    const files = [{ filename: "notes.md", status: "modified", patch: "@@ -1 +1 @@\n+added AcmeClient here" }];
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: precheckBlobs({ title: "plain title", body: "", files, commits: [] }),
+      files,
+    });
+    expect(failures).toEqual([expect.stringContaining("#1")]);
+  });
+
+  it("a patchless binary file fails closed, naming it", () => {
+    const files = [{ filename: "bin/blob.png", status: "modified" }];
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: precheckBlobs({ title: "plain title", body: "", files, commits: [] }),
+      files,
+    });
+    expect(failures).toEqual([expect.stringContaining("no diff to scan")]);
+    expect(failures[0]).toContain("bin/blob.png");
+  });
+
+  it("a filename itself still scans whole: a path can carry a client name", () => {
+    const files = [{ filename: "notes/acmeclient-notes.md", status: "modified", patch: "@@ -1 +1 @@\n+plain" }];
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: precheckBlobs({ title: "plain title", body: "", files, commits: [] }),
+      files,
+    });
+    expect(failures).toEqual([expect.stringContaining("#1")]);
+  });
+
+  it("a rename's previous_filename is scanned whole too", () => {
+    const files = [{ filename: "new.md", previous_filename: "old-acmeclient.md", patch: "@@ -1 +1 @@\n+plain" }];
+    const failures = mergePrecheckFailures({
+      title: "plain title",
+      body: "",
+      patterns: ["acmeclient"],
+      blobs: precheckBlobs({ title: "plain title", body: "", files, commits: [] }),
+      files,
+    });
+    expect(failures).toEqual([expect.stringContaining("#1")]);
   });
 });
