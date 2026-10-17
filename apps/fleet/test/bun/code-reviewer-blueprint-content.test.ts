@@ -10,7 +10,7 @@ describe("code-reviewer blueprint — Spec + Standards axes (#162)", () => {
   test("still parses as a valid read-only member", () => {
     const m = validateMemberFile("code-reviewer.md", raw);
     expect(m.name).toBe("code-reviewer");
-    expect(m.tools).toBe("Read, Glob, Grep, Bash(git diff *), Bash(git log *), Bash(git show *)");
+    expect(m.tools).toBe("Read, Glob, Grep, Bash(git diff *), Bash(git log *), Bash(git show *), mcp__codebase-memory__*");
   });
 
   test("declares both axes by name", () => {
@@ -48,13 +48,18 @@ describe("code-reviewer blueprint — Spec + Standards axes (#162)", () => {
 describe("code-reviewer blueprint — read-only git (#166)", () => {
   test("tools grant read-only git alongside the existing read-only toolset", () => {
     const m = validateMemberFile("code-reviewer.md", raw);
-    expect(m.tools).toBe("Read, Glob, Grep, Bash(git diff *), Bash(git log *), Bash(git show *)");
+    expect(m.tools).toBe("Read, Glob, Grep, Bash(git diff *), Bash(git log *), Bash(git show *), mcp__codebase-memory__*");
   });
 
   test("prompt explains the git access is read-only, no tree-changing form", () => {
     expect(raw).toMatch(/git diff/);
     expect(raw).toMatch(/git log/);
     expect(raw).toMatch(/git show/);
+  });
+
+  test("index_repository with persistence:true is forbidden", () => {
+    expect(raw).toMatch(/index_repository/);
+    expect(raw).toMatch(/persistence:\s*true/);
   });
 });
 
@@ -63,4 +68,16 @@ describe("code-reviewer blueprint — deny --output/-o on git reads (#167)", () 
     expect(raw).toMatch(/--output/);
     expect(raw).toMatch(/-o\b/);
   });
+});
+
+const MEMBERS_ROOT = join(import.meta.dir, "../../../../fleet/blueprint/studios/web-studio/members");
+
+describe("web-studio members carry codebase-memory tools (#1184)", () => {
+  for (const name of ["backend-developer", "frontend-developer", "code-reviewer"]) {
+    test(`${name}.md tools include the mcp__codebase-memory__* wildcard`, () => {
+      const raw = readFileSync(join(MEMBERS_ROOT, `${name}.md`), "utf8");
+      const m = validateMemberFile(`${name}.md`, raw);
+      expect(m.tools).toContain("mcp__codebase-memory__*");
+    });
+  }
 });
