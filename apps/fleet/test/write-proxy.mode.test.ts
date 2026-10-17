@@ -109,9 +109,9 @@ describe("studioCredential", () => {
     expect(mint).toHaveBeenCalledWith(app, REPO);
   });
 
-  it("proxy: a failed read mint = null (credential cleared), never a stale write token", async () => {
+  it("proxy: a failed read mint THROWS, so a refresh degrades and retries instead of null-wiping the credential", async () => {
     const mint = vi.fn(async () => { throw new Error("mint 500"); });
-    expect(await studioCredential(envOf(APP), REPO, "proxy", mint)).toBeNull();
+    await expect(studioCredential(envOf(APP), REPO, "proxy", mint)).rejects.toThrow("mint 500");
   });
 
   it("proxy = the read credential", async () => {
