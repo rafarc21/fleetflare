@@ -89,8 +89,11 @@ describe("runRefreshCredential — read-repos (issue #291)", () => {
   });
 
   // Issue #1187: workRepo enables the post-write verify; the read grant is
-  // unaffected by it — the two ride separate exec calls.
-  it("workRepo adds a verify exec AFTER the primary; a read grant still lists the own repo (that guard lives in read-repos.ts)", async () => {
+  // unaffected by it — the two ride separate exec calls. The read-repos exec
+  // runs BEFORE the verify: the verify can fail (a stale own-repo read key
+  // still shadows the fresh token), and the read-repos rewrite is the heal
+  // that drops that stale key — it must never be skipped by a failed verify.
+  it("workRepo adds a verify exec AFTER the read-repos exec; a read grant still lists the own repo (that guard lives in read-repos.ts)", async () => {
     const d = deps({
       workRepo: "acme-org/websites",
       readRepos: vi.fn(async () => ({ token: "ghs_read", repos: ["acme-org/alpha"] })),
@@ -101,9 +104,32 @@ describe("runRefreshCredential — read-repos (issue #291)", () => {
     });
     expect((await runRefreshCredential(d)).ok).toBe(true);
     const calls = vi.mocked(d.sbExec).mock.calls.map(([cmd]) => cmd);
-    expect(calls[0]).toBe(refreshCredentialExec("ghs_primary", STUDIO_GIT_IDENTITY, "acme-org/websites").cmd);
-    expect(calls[1]).toBe(workCredentialVerifyCmd("acme-org/websites"));
-    expect(calls[2]).toBe(readReposCredentialWriteCmd(["acme-org/alpha"]));
+    expect(calls).toEqual([
+      refreshCredentialExec("ghs_primary", STUDIO_GIT_IDENTITY, "acme-org/websites").cmd,
+      readReposCredentialWriteCmd(["acme-org/alpha"]),
+      workCredentialVerifyCmd("acme-org/websites"),
+    ]);
+  });
+
+  // Issue #1187: the read-repos heal must run even when the verify is about
+  // to fail — the heal is what drops a stale own-repo read key that makes the
+  // verify return the wrong token, so it is load-bearing, not best-effort.
+  it("a failing verify still runs the read-repos exec first — the heal is never skipped by the verify's own failure", async () => {
+    const d = deps({
+      workRepo: "acme-org/websites",
+      readRepos: vi.fn(async () => ({ token: "ghs_read", repos: ["acme-org/alpha"] })),
+      sbExec: vi.fn(async (cmd: string) => (
+        cmd === workCredentialVerifyCmd("acme-org/websites")
+          ? { code: 0, stdout: "password=ghs_stale\n", stderr: "" } : { code: 0, stdout: "", stderr: "" }
+      )),
+    });
+    expect((await runRefreshCredential(d)).ok).toBe(false);
+    const calls = vi.mocked(d.sbExec).mock.calls.map(([cmd]) => cmd);
+    expect(calls).toEqual([
+      refreshCredentialExec("ghs_primary", STUDIO_GIT_IDENTITY, "acme-org/websites").cmd,
+      readReposCredentialWriteCmd(["acme-org/alpha"]),
+      workCredentialVerifyCmd("acme-org/websites"),
+    ]);
   });
 
   it("do.ts wires the port into refreshDeps (source pin: StudioDO cannot be constructed under test)", () => {

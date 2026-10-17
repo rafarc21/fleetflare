@@ -320,16 +320,6 @@ export async function runRefreshCredential(
     if (res.code !== 0) {
       throw new Error(`credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
     }
-    // Issue #1187: confirm the write actually took for the work repo by asking
-    // git which password it now serves. The token is compared here in TS,
-    // never echoed into a shell line.
-    if (token !== null && deps.workRepo) {
-      const verify = await deps.sbExec(workCredentialVerifyCmd(deps.workRepo));
-      const pw = /password=(.*)/.exec(verify.stdout)?.[1];
-      if (verify.code !== 0 || pw !== token) {
-        throw new Error("credential verify failed: git credential fill did not return the fresh token for the work repo");
-      }
-    }
     // Issue #291: the read-only sibling token, AFTER the primary and through
     // its own command — never the push credential's file or helper. PR #292
     // review item 1: NEVER fatal. The primary credential above is what keeps
@@ -337,7 +327,20 @@ export async function runRefreshCredential(
     // sibling, over the cap, a failed write) clears the read helper, revokes
     // the old read token, logs, and the refresh still succeeds. The task
     // itself is told by studioReadReposCredential's board comment.
+    // Issue #1187: this also runs BEFORE the verify below — a stale own-repo
+    // read key shadows the fresh work token, the read rewrite is the heal
+    // that drops it, so it must never be skipped by a failed verify.
     if (deps.readRepos) await refreshReadRepos(deps, deps.readRepos);
+    // Issue #1187: confirm the write actually took for the work repo by asking
+    // git which password it now serves. The token is compared here in TS,
+    // never echoed into a shell line. Runs LAST, after the read heal above.
+    if (token !== null && deps.workRepo) {
+      const verify = await deps.sbExec(workCredentialVerifyCmd(deps.workRepo));
+      const pw = /password=(.*)/.exec(verify.stdout)?.[1];
+      if (verify.code !== 0 || pw !== token) {
+        throw new Error("credential verify failed: git credential fill did not return the fresh token for the work repo");
+      }
+    }
     return { ok: true, lastRefresh: deps.now() };
   } catch (err) {
     return { ok: false, error: redactSecrets(err instanceof Error ? err.message : String(err)) };
