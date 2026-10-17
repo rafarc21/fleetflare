@@ -662,9 +662,9 @@ export function streamPrelude(id: string, model: string): string[] {
 const THINK_OPEN = "<think>";
 const THINK_CLOSE = "</think>";
 const TOOL_CALL_TAG = /<tool_call>([\s\S]*?)<\/tool_call>/g;
-/** Anything that looks like a tool call, even one that will not parse. A
- *  `"name": "..."` match alone is common in reasoning prose, so it only
- *  counts toward the error path when the turn also has no visible output. */
+/** Latches the runaway scan's payload flag when a think region may carry a
+ *  tool-call payload (issue #1099). The unrecovered-tool-call error path no
+ *  longer keys on this marker — see recoverThinkToolCalls (issue #1186). */
 const TOOL_CALL_MARKER = /<tool_call\b|"name"\s*:\s*"/;
 const UNRECOVERED_TOOL_CALL_MESSAGE =
   "upstream emitted a tool call inside its reasoning block that could not be recovered; retry the turn";
@@ -721,7 +721,9 @@ function routeContent(state: StreamState, content: string, events: string[]): vo
     const tag = state.thinking ? THINK_CLOSE : THINK_OPEN;
     const at = input.indexOf(tag);
     if (at === -1) {
-      const keep = partialTagSuffix(input, tag);
+      const keep = state.thinking
+        ? partialTagSuffix(input, tag)
+        : Math.max(partialTagSuffix(input, THINK_OPEN), partialTagSuffix(input, THINK_CLOSE));
       pushSegment(state, input.slice(0, input.length - keep), events);
       state.pendingTag = input.slice(input.length - keep);
       return;
@@ -761,7 +763,7 @@ function recoverThinkToolCalls(thinkText: string): { calls: Array<{ name: string
     for (const m of tagged) take(m[1]);
     return { calls, hadToolCallAttempt: true };
   }
-  // Bare-JSON form: only an attempt when the whole body looks like an object.
+  // Bare-JSON form: an attempt only when the body starts like an object.
   if (thinkText.trim().startsWith("{")) {
     take(thinkText);
     return { calls, hadToolCallAttempt: true };

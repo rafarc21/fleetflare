@@ -1,12 +1,12 @@
-# Plan — LLM router: drop stray `<response>`, error on unrecovered in-think tool call (#1186)
+# Plan — LLM router: drop stray `</think>`, error on unrecovered in-think tool call (#1186)
 
 Two candidate causes of the live OSS lead stalls (#1112), both in `apps/fleet/src/llm/translate.ts`, both found in the #1183 review and identical on `main`.
 
 ## Defects
 
-1. `routeContent` (translate.ts:712): while not inside `<thinking>`, the scanner only looks for `THINK_OPEN` (`<thinking>`). A stray `THINK_CLOSE` (`<response>`) with no preceding open is never matched, so `pushSegment` emits it as visible text. The lead's screen shows a literal `<response>`.
+1. `routeContent` (translate.ts:712): while not inside `<think>`, the scanner only looks for `THINK_OPEN` (`<think>`). A stray `THINK_CLOSE` (`</think>`) with no preceding open is never matched, so `pushSegment` emits it as visible text. The lead's screen shows a literal `</think>`.
 
-2. `closeStreamOrError` (translate.ts:1014): the unrecovered-in-think-tool-call guard requires `state.nextIndex === 0`. When the lead narrates first (visible text opens block index 0), then emits an unrecoverable tool call inside `<thinking>`, `nextIndex > 0`, the guard is skipped, and `closeStream` closes with `stop_reason: end_turn` and no `tool_use`. The client sees a turn that ended without the tool call — the narrate-and-stop stall. The recovery needs `nextIndex === 0`, so any prior narration defeats it.
+2. `closeStreamOrError` (translate.ts:1014): the unrecovered-in-think-tool-call guard requires `state.nextIndex === 0`. When the lead narrates first (visible text opens block index 0), then emits an unrecoverable tool call inside `<think>`, `nextIndex > 0`, the guard is skipped, and `closeStream` closes with `stop_reason: end_turn` and no `tool_use`. The client sees a turn that ended without the tool call — the narrate-and-stop stall. The recovery needs `nextIndex === 0`, so any prior narration defeats it.
 
 ## Fix
 
@@ -19,10 +19,10 @@ Two candidate causes of the live OSS lead stalls (#1112), both in `apps/fleet/sr
 
 ## RED tests (apps/fleet/test/bun/llm-translate-stream.test.ts)
 
-- Stray closer: content `answer text<response>` (no open) → visible text is `answer text`, no `<response>` delta; `end_turn`, `ok`.
-- Narrate then unrecoverable tagged tool call: `I will look now<thinking><tool_call>{not valid json</tool_call><response>` → retryable error frame, no `message_stop`, `ok: false`.
-- Narrate then bare-JSON attempt: `I will look now<thinking>{"name":"Read","arguments":{oops<response>` → retryable error, `ok: false`.
-- No false positive: prose mention of a name in reasoning after narration (`...<thinking>the field "name": "x" matters<response>`) → `ok: true`, no error frame, `end_turn`.
+- Stray closer: content `answer text</think>` (no open) → visible text is `answer text`, no `</think>` delta; `end_turn`, `ok`.
+- Narrate then unrecoverable tagged tool call: `I will look now<think><tool_call>{not valid json</tool_call></think>` → retryable error frame, no `message_stop`, `ok: false`.
+- Narrate then bare-JSON attempt: `I will look now<think>{"name":"Read","arguments":{oops</think>` → retryable error, `ok: false`.
+- No false positive: prose mention of a name in reasoning after narration (`...<think>the field "name": "x" matters</think>`) → `ok: true`, no error frame, `end_turn`.
 
 ## Steps
 

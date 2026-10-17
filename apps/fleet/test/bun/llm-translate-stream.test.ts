@@ -518,6 +518,15 @@ describe("stray closer and narrate-then-unrecoverable tool call (issue #1186)", 
       .toMatchObject({ delta: { stop_reason: "end_turn" } });
   });
 
+  test("a stray closer split across deltas is dropped, not emitted", () => {
+    const splitAt = Math.floor(CLOSE.length / 2);
+    const { frames, closed } = runThinkStream(["answer" + CLOSE.slice(0, splitAt), CLOSE.slice(splitAt)], "stop");
+    const texts = frames.map(parseFrame).filter((f) => f.event === "content_block_delta")
+      .map((f) => (f.data as { delta: { text?: string } }).delta.text ?? "");
+    expect(texts.join("")).toBe("answer");
+    expect(closed.ok).toBe(true);
+  });
+
   test("narrate then an unrecoverable tagged tool call inside OPEN..CLOSE ends with a retryable error, not end_turn", () => {
     const { frames, closed } = runThinkStream(["I will look now" + OPEN + "<tool_call>{not valid json</tool_call>" + CLOSE], "stop");
     expect(closed.ok).toBe(false);
