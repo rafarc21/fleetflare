@@ -1,18 +1,18 @@
-// #1191/#1203: drive GateWorkflow.run() end to end through the real Workflows
-// engine (vitest-pool-workers). The SKIP path never touches the GATE_RUNNER DO;
-// the RUN path does, through the test-only GateRunnerStub bound in
-// wrangler.test.jsonc (the real container-backed GateRunnerDO cannot boot under
-// vitest). The precheck must fail on a commit-message closing keyword BEFORE
-// the skip returns success, and both the skip-path and the success-path recheck
-// must post a gate/verdict failure naming a title edited to a closing keyword
-// after the precheck passed. Neutral fixtures only (acme/example): this file
-// ships public.
+// #1191/#1203/#1205: drive GateWorkflow.run() end to end through the real
+// Workflows engine (vitest-pool-workers). The SKIP path never touches the
+// GATE_RUNNER DO; the RUN path answers it with an inline fake namespace in
+// this file (the real container-backed GateRunnerDO cannot boot under
+// vitest), so no wrangler binding or test entrypoint is needed. The precheck
+// must fail on a commit-message closing keyword BEFORE the skip returns
+// success, and both the skip-path and the success-path recheck must post a
+// gate/verdict failure naming a title edited to a closing keyword after the
+// precheck passed. Neutral fixtures only (acme/example): this file ships
+// public.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { env, introspectWorkflowInstance } from "cloudflare:test";
 import type { Env } from "../src/env";
 import { CLOSING_KEYWORD_COMMIT_FAILURE, CLOSING_KEYWORD_FAILURE } from "../src/gate/merge-precheck";
 import { GATE_STATUS_CONTEXT } from "../src/gate/status-post";
-import { requestedLegs } from "./helpers/gate-runner-stub";
 
 const REPO = "acme/example";
 const PR = 7;
@@ -34,6 +34,20 @@ const RUN_FLEET_JSON = JSON.stringify({
 });
 
 type Recorded = { method: string; url: string; body: unknown };
+
+// #1205: an inline fake GATE_RUNNER namespace — idFromName/get/fetch answer a
+// green LegResult for every leg, so run() reaches a success verdict without the
+// real container-backed DO (which vitest cannot spawn). No wrangler binding.
+const greenRunner = {
+  idFromName: (name: string) => name as unknown as DurableObjectId,
+  get: (_id: unknown) => ({
+    fetch: async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { leg?: string };
+      recorded.push({ method: init.method ?? "POST", url: _url, body });
+      return Response.json({ leg: body.leg ?? "merge-tree", state: "success" });
+    },
+  }),
+};
 
 let recorded: Recorded[] = [];
 let realFetch: typeof globalThis.fetch;
@@ -133,7 +147,6 @@ beforeEach(() => {
   pullsCalls = 0;
   commitMessage = "Fix #9";
   fleetJson = FLEET_JSON;
-  requestedLegs.length = 0;
   realFetch = globalThis.fetch;
   globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
 });
@@ -251,10 +264,10 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
     }
   }, 60_000);
 
-  // #1203: the success-path recheck (workflow.ts:290) fires only when
+  // #1203/#1205: the success-path recheck (workflow.ts:290) fires only when
   // final.state === "success", reached after real legs run. The real
   // GateRunnerDO is container-backed and cannot boot under vitest-pool-workers,
-  // so wrangler.test.jsonc binds the test-only GateRunnerStub under GATE_RUNNER:
+  // so the test sets an inline fake GATE_RUNNER namespace (greenRunner above):
   // it answers /run-leg with a success LegResult, the always-planned merge-tree
   // leg goes green, and the run reaches the success-path recheck — whose
   // title/body re-read then flips to a closing keyword and posts failure.
@@ -271,6 +284,8 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
     // pathRules docs/** matches the compare's docs/readme.md, so decideGateRun
     // is "run", not "skip"; legs [] leaves exactly the merge-tree leg.
     fleetJson = RUN_FLEET_JSON;
+    // #1205: the inline fake answers every /run-leg green, no wrangler binding.
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
 
     const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-fix4");
     try {
@@ -293,9 +308,12 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
         description: CLOSING_KEYWORD_FAILURE,
       });
 
-      // The merge-tree leg ran once (the run path touched GATE_RUNNER), and the
-      // stub's success verdict is what carried the run to the success recheck.
-      expect(requestedLegs).toEqual(["merge-tree"]);
+      // The merge-tree leg was dispatched through the inline fake (the run path
+      // touched GATE_RUNNER), and its success verdict is what carried the run
+      // to the success recheck.
+      const runLeg = recorded.find((r) => /\/run-leg/.test(r.url));
+      expect(runLeg).toBeDefined();
+      expect((runLeg!.body as { leg?: string }).leg).toBe("merge-tree");
     } finally {
       await instance.dispose();
     }
