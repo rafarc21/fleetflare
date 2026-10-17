@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   createIssue, getIssue, listIssues, addLabels, removeLabel,
   createComment, listComments, listMilestones, BOARD_PAGE_SIZE, BOARD_MAX_PAGES,
-  listIssueTexts, TASK_TEXTS_MAX_PAGES,
+  listIssueTexts, TASK_TEXTS_MAX_PAGES, countIssues,
 } from "../src/board/api";
 
 // Same fetch-mocking shape as test/github.api.test.ts — these are the same
@@ -334,6 +334,34 @@ describe("listMilestones", () => {
     const list = await listMilestones("tok", "o/r");
     expect(calls[0].url).toContain("state=all");
     expect(list).toEqual([{ number: 3, title: "Sprint 1" }, { number: 4, title: "Sprint 2" }]);
+  });
+});
+
+// Issue #1121: reap's board-read floor needs a monotone signal (GitHub's
+// non-PR issue count, all states) in one GraphQL call. This pins both the
+// request shape AND the fail-closed posture: a missing total is a bad read,
+// never a valid zero — a spurious 0 would pass the floor when no baseline
+// exists and then be persisted as one, after which the half-check could
+// never trip.
+describe("countIssues", () => {
+  it("counts non-PR issues over GraphQL, all states, and returns the total verbatim", async () => {
+    respond = () => Response.json({ data: { repository: { issues: { totalCount: 630 } } } });
+
+    const count = await countIssues("tok", "o/r");
+
+    expect(count).toBe(630);
+    expect(calls[0].url).toBe("https://api.github.com/graphql");
+    expect(calls[0].method).toBe("POST");
+    // GraphQL's `issues` connection excludes PRs by construction — pin that
+    // the query leans on it rather than on REST's pull_request filtering.
+    expect(calls[0].body.query).toContain("issues");
+    expect(calls[0].body.query).not.toContain("pullRequests");
+    expect(calls[0].body.variables).toEqual({ owner: "o", repo: "r" });
+  });
+
+  it("throws rather than reading a missing repository as zero", async () => {
+    respond = () => Response.json({ data: { repository: null } });
+    await expect(countIssues("tok", "o/r")).rejects.toThrow(/no total count/);
   });
 });
 

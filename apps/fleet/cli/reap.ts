@@ -93,7 +93,7 @@ export interface ReapState {
   backoffUntil: Record<string, string>;
   /** studio id -> ISO instant of its last STALL line. */
   stallAlarmAt: Record<string, string>;
-  /** lowercased repo -> row count of the last board listing that passed the floor. */
+  /** lowercased repo -> GitHub's non-PR issue count across all states, of the last read that passed the floor (issue #1121). */
   boardRows: Record<string, number>;
   /** studio id -> live-read refusals in a row while a candidate. */
   refusals: Record<string, number>;
@@ -134,7 +134,7 @@ export function destroyRaceOutcome(
 export interface ReapDeps {
   now: () => Date;
   listStudios: () => Promise<StudioStatus[]>;
-  /** Every task of the scope repo (state=all). Throws on any failure. */
+  /** Open/live tasks of the scope repo (state=open, issue #1121). Throws on any failure. */
   listBoard: () => Promise<BoardTask[]>;
   /** GitHub's non-PR issue count (all states), one call (issue #1121). Throws on failure. */
   boardTotal: () => Promise<number>;

@@ -268,6 +268,12 @@ export async function listIssues(token: string, repo: string, query: ListIssuesQ
  * for a full `state=all` paginated walk when a caller only needs the total.
  * One call instead of up to BOARD_MAX_PAGES; monotone (it only grows), which
  * is the property the reap board-read floor needs.
+ *
+ * This fails closed: a null/missing `repository` or `issues.totalCount` is a bad
+ * read (repo gone, permission revoked, or an unexpected schema), never a valid
+ * zero. Returning 0 would let the reap floor accept a spurious baseline and
+ * then never trip, so instead it throws the same `GitHubError(502, ...)` shape
+ * `ghGraphQL` uses for "GraphQL returned no data".
  */
 export async function countIssues(token: string, repo: string): Promise<number> {
   const [owner, name] = repo.split("/");
@@ -277,7 +283,11 @@ export async function countIssues(token: string, repo: string): Promise<number> 
     { owner, repo: name },
     `count issues for ${repo}`,
   );
-  return data.repository?.issues?.totalCount ?? 0;
+  const count = data.repository?.issues?.totalCount;
+  if (typeof count !== "number") {
+    throw new GitHubError(502, `count issues for ${repo} failed: GraphQL returned no total count`);
+  }
+  return count;
 }
 
 export async function addLabels(token: string, repo: string, number: number, labels: string[]): Promise<void> {
