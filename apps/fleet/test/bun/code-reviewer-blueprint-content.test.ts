@@ -56,6 +56,11 @@ describe("code-reviewer blueprint — read-only git (#166)", () => {
     expect(raw).toMatch(/git log/);
     expect(raw).toMatch(/git show/);
   });
+
+  test("index_repository with persistence:true is forbidden", () => {
+    expect(raw).toMatch(/index_repository/);
+    expect(raw).toMatch(/persistence:\s*true/);
+  });
 });
 
 describe("code-reviewer blueprint — deny --output/-o on git reads (#167)", () => {
