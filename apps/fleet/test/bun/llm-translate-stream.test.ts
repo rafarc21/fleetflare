@@ -583,9 +583,9 @@ describe("runaway output detection (issue #1099)", () => {
   test("10k newline-free 3-char deltas never call String.prototype.split (#1127)", () => {
     const originalSplit = String.prototype.split;
     let splitCalls = 0;
-    String.prototype.split = function (...args: Parameters<typeof originalSplit>) {
+    String.prototype.split = function (this: string, separator: any, limit?: number): string[] {
       splitCalls++;
-      return originalSplit.apply(this, args);
+      return originalSplit.call(this, separator, limit);
     };
     try {
       const state = createStreamState();

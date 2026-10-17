@@ -583,12 +583,15 @@ function scanForRunaway(state: StreamState, text: string): void {
   scan.chars += text.length;
   // Issue #1099 (review, finding 3 / round 3 finding 2): kimi's tool call sits
   // inside <think> and only registers at </think>. Issue #1127: the OPEN tag
-  // itself can arrive split across deltas (<thi + nk>), so while thinkTags is
-  // on the probe runs on every delta — thinking is not yet set and the delta
-  // does not hold the whole tag when the tool marker's bytes arrive (#1127).
-  // The marker is matched on the tail of the think text plus this delta, so a
-  // marker split across deltas still latches the payload.
-  if (state.thinkTags || state.thinking || text.includes(THINK_OPEN)) {
+  // can arrive split across deltas (<thi + nk>), so the held-back tag bytes
+  // (pendingTag) plus this delta are checked for the whole  thinking tag.
+  // #1185: latch only while a think region is open or being opened. Latching
+  // on state.thinkTags ran the probe on every delta for the whole turn, so
+  // visible text and reasoning_content that never opened a region skipped the
+  // repeat-line scan — a genuine runaway there went uncaught. The marker is
+  // matched on the tail of the think text plus this delta, so a marker split
+  // across deltas still latches the payload.
+  if (state.thinking || (state.pendingTag + text).includes(THINK_OPEN)) {
     const probe = scan.tail + text;
     if (TOOL_CALL_MARKER.test(probe)) scan.payload = true;
     scan.tail = probe.slice(-PAYLOAD_PROBE_CHARS);
