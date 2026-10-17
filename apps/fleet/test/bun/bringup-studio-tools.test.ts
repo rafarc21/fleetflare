@@ -28,7 +28,7 @@ function tmp(prefix: string): string {
  *  dedicated dir instead of letting PATH reach the host's /usr/bin, because a
  *  host can carry a real `az` there (the CI runner does), and the region's
  *  `command -v az` would then find it and never reach the install branch. */
-const SYS_TOOLS = ["sh", "bash", "sed", "grep", "date", "printf", "echo", "mkdir", "rm", "cat", "tr", "cut", "env", "dirname", "basename", "head", "tail"];
+const SYS_TOOLS = ["sh", "bash", "sed", "grep", "date", "printf", "echo", "mkdir", "rm", "cat", "tr", "cut", "env", "dirname", "basename", "head", "tail", "timeout", "awk", "mktemp", "chmod"];
 
 function sysBin(): string {
   const dir = tmp("fleet-tools-sys-");
@@ -51,6 +51,15 @@ function fakeBin(withAz: boolean): string {
     writeFileSync(az, "#!/bin/sh\nexit 0\n");
     chmodSync(az, 0o755);
   }
+  // fake curl: write a stub key to the -o target, exit 0 (no network).
+  const curl = join(bin, "curl");
+  writeFileSync(curl, '#!/bin/sh\nout=""\nwhile [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done\nprintf "stub-microsoft-key\\n" > "$out"\nexit 0\n');
+  chmodSync(curl, 0o755);
+  // fake gpg: --dearmor copies its input to the -o target; anything else
+  // prints the pinned fingerprint, so the fingerprint check can run.
+  const gpg = join(bin, "gpg");
+  writeFileSync(gpg, '#!/bin/sh\nif [ "$1" = "--dearmor" ]; then cat "$4" > "$3"; exit 0; fi\nprintf "fpr:::::::::BC528686B50D79E339D3721CEB3E94ADBE1229CF\\n"\nexit 0\n');
+  chmodSync(gpg, 0o755);
   return bin;
 }
 
@@ -63,7 +72,7 @@ interface Run {
   marker: string;
 }
 
-function runRegion(opts: { tools: string; withAz?: boolean; aptExit?: number; preMarker?: boolean }): Run {
+function runRegion(opts: { tools: string; withAz?: boolean; aptExit?: number; preMarker?: boolean; toolsUnset?: boolean }): Run {
   const ws = tmp("fleet-tools-ws-");
   const bin = fakeBin(opts.withAz ?? false);
   const aptLog = join(ws, "apt.log");
@@ -71,17 +80,18 @@ function runRegion(opts: { tools: string; withAz?: boolean; aptExit?: number; pr
   const marker = join(ws, ".fleet", "tools-down");
   mkdirSync(join(ws, ".fleet"), { recursive: true });
   if (opts.preMarker) writeFileSync(marker, "tools: not installed\n");
+  const env: Record<string, string> = {
+    FLEET_WORKSPACE: ws,
+    FLEET_BRINGUP_LOG: bringupLog,
+    FLEET_BRINGUP_RUN_ID: "run-test",
+    APT_LOG: aptLog,
+    APT_EXIT: String(opts.aptExit ?? 0),
+    PATH: `${bin}:${sysBin()}`,
+  };
+  if (!opts.toolsUnset) env.STUDIO_TOOLS = opts.tools;
   const r = runSnippet({
     shell: "bash",
-    env: {
-      FLEET_WORKSPACE: ws,
-      FLEET_BRINGUP_LOG: bringupLog,
-      FLEET_BRINGUP_RUN_ID: "run-test",
-      APT_LOG: aptLog,
-      APT_EXIT: String(opts.aptExit ?? 0),
-      STUDIO_TOOLS: opts.tools,
-      PATH: `${bin}:${sysBin()}`,
-    },
+    env,
     script:
       "set -euo pipefail\n" +
       `${extractShellFunc(BRINGUP, "bringup_redact")}\n` +
@@ -154,5 +164,36 @@ describe("studio-tools region", () => {
     expect(r.code).toBe(0);
     expect(r.aptCalls.some((c) => c.includes("azure-cli"))).toBe(true);
     expect(r.markerExists).toBe(true);
+  });
+
+  test("STUDIO_TOOLS genuinely unset: no apt, no curl, no key fetch", () => {
+    const r = runRegion({ tools: "", toolsUnset: true });
+    expect(r.code).toBe(0);
+    expect(r.aptCalls).toEqual([]);
+    expect(r.markerExists).toBe(false);
+  });
+
+  test("install pin survives a substring mutant: exact pinned version in the apt argv", () => {
+    const r = runRegion({ tools: "azure-cli" });
+    expect(r.aptCalls.some((c) => c.includes("install -y --no-install-recommends azure-cli=2.91.0-1~jammy"))).toBe(true);
+  });
+
+  test("apt-get update still runs before install (a mutant that drops update dies)", () => {
+    const r = runRegion({ tools: "azure-cli" });
+    expect(r.aptCalls.some((c) => c.includes("update"))).toBe(true);
+  });
+
+  test("the Microsoft signing-key fingerprint is checked in the region", () => {
+    expect(REGION).toContain("BC528686B50D79E339D3721CEB3E94ADBE1229CF");
+  });
+
+  test("install reads the temp source list (a mutant that drops the flags cannot locate azure-cli)", () => {
+    const r = runRegion({ tools: "azure-cli" });
+    expect(r.aptCalls.some((c) => c.includes("install") && c.includes("Dir::Etc::sourcelist=") && c.includes("Dir::Etc::sourceparts=-"))).toBe(true);
+  });
+
+  test("the signing key is made apt-readable (0755 home, 0644 key)", () => {
+    expect(REGION).toContain("chmod 0755 \"$tools_gpg_home\"");
+    expect(REGION).toContain("chmod 0644 \"$tools_key\"");
   });
 });

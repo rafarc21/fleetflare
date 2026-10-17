@@ -335,6 +335,10 @@ fi
 # A repo opts in with `studio.tools` in its own fleet.json; provision.ts passes
 # the names here as STUDIO_TOOLS (comma- or space-separated). Only names on
 # this case list are installed. Each install runs only when the tool is
+# Install comes from a verified source only: the Microsoft apt repo, key
+# fingerprint-checked, package pinned to the exact version the #1160 smoke
+# measured, every network call under a 180 s timeout (a hung apt must never
+# stall lead start).
 # missing, so a re-run is a no-op. Nothing here blocks bring-up: a failure is
 # logged and leaves a marker that the READY check shows. The marker is one
 # fixed line, never apt's own output, which goes to the redacted log.
@@ -355,14 +359,35 @@ for tool in ${tools_list//,/ }; do
       if command -v az >/dev/null 2>&1; then
         bringup_log "tools azure-cli present"
         echo "studio-bringup: tools azure-cli already installed"
-      elif apt-get update -qq >/dev/null 2>&1 \
-        && apt-get install -y --no-install-recommends azure-cli >/dev/null 2>&1; then
-        bringup_log "tools azure-cli installed"
-        echo "studio-bringup: tools azure-cli installed"
       else
-        bringup_log "tools azure-cli install-failed"
-        echo "studio-bringup: tools azure-cli install failed -- bring-up continues without it" >&2
-        tools_failed=1
+        # Verified source, never curl|bash (maestro review, #1198). The base
+        # image (Ubuntu 22.04) ships no Microsoft apt source, so a bare
+        # `apt-get install azure-cli` cannot work. Key fetched from
+        # packages.microsoft.com, fingerprint-checked, apt source written
+        # under a temp dir (container-local, removed after), package pinned
+        # to the exact version the #1160 smoke measured working.
+        tools_gpg_home="$(mktemp -d /tmp/fleet-azure-cli-gpg.XXXXXX 2>/dev/null || echo /tmp/fleet-azure-cli-gpg.$$)"
+        tools_apt_log="$(mktemp /tmp/fleet-azure-cli-apt.XXXXXX 2>/dev/null || echo /tmp/fleet-azure-cli-apt.$$)"
+        tools_key="$tools_gpg_home/microsoft.gpg"
+        tools_src="$tools_gpg_home/azure-cli.list"
+        if timeout -k 2 180 curl -fsSL -o "$tools_gpg_home/microsoft.asc" https://packages.microsoft.com/keys/microsoft.asc 2>>"$tools_apt_log" \
+          && GNUPGHOME="$tools_gpg_home" gpg --dearmor -o "$tools_key" "$tools_gpg_home/microsoft.asc" 2>>"$tools_apt_log" \
+          && tools_fpr="$(GNUPGHOME="$tools_gpg_home" gpg --show-keys --with-colons "$tools_key" 2>>"$tools_apt_log" | awk -F: '/^fpr:/ {print $10; exit}')" \
+          && [ "$tools_fpr" = "BC528686B50D79E339D3721CEB3E94ADBE1229CF" ] \
+          && printf 'deb [signed-by=%s] https://packages.microsoft.com/repos/azure-cli jammy main\n' "$tools_key" > "$tools_src" \
+          && chmod 0755 "$tools_gpg_home" && chmod 0644 "$tools_key" \
+          && timeout -k 2 180 apt-get update -qq -o Dir::Etc::sourcelist="$tools_src" -o Dir::Etc::sourceparts=- 2>>"$tools_apt_log" \
+          && timeout -k 2 180 apt-get install -y --no-install-recommends azure-cli=2.91.0-1~jammy -o Dir::Etc::sourcelist="$tools_src" -o Dir::Etc::sourceparts=- 2>>"$tools_apt_log"; then
+          bringup_log "tools azure-cli installed"
+          echo "studio-bringup: tools azure-cli installed"
+        else
+          bringup_log "tools azure-cli install-failed"
+          bringup_log "tools azure-cli apt output: $(tail -n 20 "$tools_apt_log" 2>/dev/null | tr '\n' ' ' | head -c 2000 || true)"
+          echo "studio-bringup: tools azure-cli install failed -- bring-up continues without it" >&2
+          tools_failed=1
+        fi
+        rm -rf "$tools_gpg_home" 2>/dev/null || true
+        rm -f "$tools_apt_log" 2>/dev/null || true
       fi
       ;;
     *)
