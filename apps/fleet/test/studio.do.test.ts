@@ -448,7 +448,7 @@ describe("runShipTickWithObservation — onIdleAutoContinue (issue #1193)", () =
 
   const run = (pane: string, now: Date, storage: ReturnType<typeof fakeStorage>, cb: () => Promise<void>) =>
     runShipTickWithObservation(
-      shipDeps(pane, now), storage, "websites--pilot", undefined, 5000, undefined, undefined, undefined, undefined, cb,
+      shipDeps(pane, now), storage, "websites--pilot", undefined, 5000, undefined, undefined, undefined, cb,
     );
 
   it("does NOT fire while idle is still under 10 minutes", async () => {
