@@ -189,6 +189,13 @@ export interface Observed {
    *  the DO's own current token again. Never advanced by a later tick while
    *  still set — see the ship-tick task's own doc comment for why. */
   replacedAt: string | null;
+  /** Issue #1146: when the bare-container auto-heal last armed for THIS
+   *  replacement. READY reads it to say `auto-heal running` or
+   *  `auto-heal failed: <reason>` instead of a plain `not brought up`.
+   *  Cleared when a heal is returned (rollout-killed), so READY never reports
+   *  an attempt that never ran. OPTIONAL like the trailing fields above:
+   *  absent reads as `null`, so older rows and fixtures keep working. */
+  healAttemptedAt?: string | null;
   /** Consecutive ship-tick exec failures/timeouts. Reset to 0 on the first
    *  success after any failures. */
   execFailures: number;
@@ -614,6 +621,10 @@ export interface ObservedStorage {
   get(key: typeof OBSERVED_KEY): Promise<Observed | undefined>;
   put(key: typeof OBSERVED_KEY, value: Observed): Promise<void>;
 }
+
+/** Issue #1152 review: the minimum gap between two heals of one studio. Lives
+ *  here (a pure module) so READY can show when the next heal may run. */
+export const HEAL_COOLDOWN_MS = 30 * 60_000;
 
 export function emptyObserved(): Observed {
   return {

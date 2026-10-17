@@ -169,6 +169,9 @@ export async function getIssue(token: string, repo: string, number: number): Pro
 export interface ListIssuesQuery {
   milestone?: number;
   labels?: string[];
+  /** Issue #1121: list only OPEN issues (one flag, `state=open`). Absent or
+   *  false keeps today's `state=all`. */
+  open?: boolean;
 }
 
 /**
@@ -202,12 +205,14 @@ export interface ListIssuesQuery {
  * Link header, so seeing it logged means something upstream of this function
  * is wrong.
  *
- * `state=all` always: GitHub's open/closed is not the board's state
+ * `state=all` by default: GitHub's open/closed is not the board's state
  * vocabulary, so a task that reached `completed` still reports its board state
- * after sprint close closes the issue.
+ * after sprint close closes the issue. Issue #1121 adds `open: true` ->
+ * `state=open`, for callers (reap) that only need live tasks and would
+ * otherwise pay for the whole all-state paginated walk.
  */
 export async function listIssues(token: string, repo: string, query: ListIssuesQuery): Promise<BoardTask[]> {
-  const params = new URLSearchParams({ state: "all", per_page: String(BOARD_PAGE_SIZE) });
+  const params = new URLSearchParams({ state: query.open === true ? "open" : "all", per_page: String(BOARD_PAGE_SIZE) });
   if (query.milestone !== undefined) params.set("milestone", String(query.milestone));
   if (query.labels?.length) params.set("labels", query.labels.join(","));
 
@@ -254,6 +259,35 @@ export async function listIssues(token: string, repo: string, query: ListIssuesQ
     );
   }
   return raw.filter((i) => i.pull_request === undefined).map(toBoardTask);
+}
+
+/**
+ * GitHub's non-PR issue count for a repo, over GraphQL (issue #1121). This is
+ * the SAME number `listIssues`'s output length equals — issues only, all
+ * states, PRs excluded by GraphQL's `issues` connection — so it can stand in
+ * for a full `state=all` paginated walk when a caller only needs the total.
+ * One call instead of up to BOARD_MAX_PAGES; monotone (it only grows), which
+ * is the property the reap board-read floor needs.
+ *
+ * This fails closed: a null/missing `repository` or `issues.totalCount` is a bad
+ * read (repo gone, permission revoked, or an unexpected schema), never a valid
+ * zero. Returning 0 would let the reap floor accept a spurious baseline and
+ * then never trip, so instead it throws the same `GitHubError(502, ...)` shape
+ * `ghGraphQL` uses for "GraphQL returned no data".
+ */
+export async function countIssues(token: string, repo: string): Promise<number> {
+  const [owner, name] = repo.split("/");
+  const data = await ghGraphQL<{ repository?: { issues?: { totalCount?: number } } }>(
+    token,
+    `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { issues { totalCount } } }`,
+    { owner, repo: name },
+    `count issues for ${repo}`,
+  );
+  const count = data.repository?.issues?.totalCount;
+  if (typeof count !== "number") {
+    throw new GitHubError(502, `count issues for ${repo} failed: GraphQL returned no total count`);
+  }
+  return count;
 }
 
 export async function addLabels(token: string, repo: string, number: number, labels: string[]): Promise<void> {

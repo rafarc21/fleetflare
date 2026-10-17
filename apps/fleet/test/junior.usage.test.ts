@@ -84,6 +84,20 @@ describe("insertJuniorUsage — call duration and attempts (issue #335)", () => 
     ]);
   });
 
+  // Issue #1155 item 1: time_to_headers — ms from request start to the
+  // first possible response (migration 0010, lead rows only). Same
+  // NULL-when-absent rule as duration_ms/attempts above.
+  it("stores time_to_headers when the row carries it, NULL when it does not (issue #1155)", async () => {
+    await insertJuniorUsage(env.DB, { id: "h1", ts: 1, studioId: ME, mode: "lead", model: "m", inputTokens: 1, outputTokens: 1, ok: true, durationMs: 1234, attempts: 1, timeToHeaders: 42 });
+    await insertJuniorUsage(env.DB, { id: "h2", ts: 2, studioId: ME, mode: "lead", model: "m", inputTokens: 1, outputTokens: 1, ok: true, durationMs: 10, attempts: 1 });
+    const res = await env.DB.prepare("SELECT id, time_to_headers AS timeToHeaders FROM junior_usage_log ORDER BY ts")
+      .all<{ id: string; timeToHeaders: number | null }>();
+    expect(res.results).toEqual([
+      { id: "h1", timeToHeaders: 42 },
+      { id: "h2", timeToHeaders: null },
+    ]);
+  });
+
   function missingColumnDb(missing: string[]) {
     const sqls: string[] = [];
     const db = {
@@ -110,6 +124,19 @@ describe("insertJuniorUsage — call duration and attempts (issue #335)", () => 
     expect(sqls).toHaveLength(2);
     expect(sqls[1]).toContain("error");
     expect(sqls[1]).not.toContain("duration_ms");
+  });
+
+  // Issue #1155 item 1: before migration 0010 lands, a row carrying
+  // timeToHeaders still inserts — the fallback drops only time_to_headers,
+  // keeping duration_ms/attempts/error.
+  it("before migration 0010 lands, a row with timeToHeaders still inserts (drops only time_to_headers)", async () => {
+    const { db, sqls } = missingColumnDb(["time_to_headers"]);
+    await insertJuniorUsage(db, { id: "f1", ts: 1, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: false, error: "no_finish_reason", durationMs: 5, attempts: 1, timeToHeaders: 42 });
+    expect(sqls).toHaveLength(2);
+    expect(sqls[1]).not.toContain("time_to_headers");
+    expect(sqls[1]).toContain("duration_ms");
+    expect(sqls[1]).toContain("attempts");
+    expect(sqls[1]).toContain("error");
   });
 
   it("before migrations 0005 and 0006 land, the call is still counted (legacy columns only)", async () => {

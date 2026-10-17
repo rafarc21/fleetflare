@@ -220,11 +220,12 @@ export function gateMapHasInvalidEntry(fleetJson: unknown): boolean {
   return Object.values(gates).some((entry) => parseGateBlock(entry) === null);
 }
 
-/** The verdict a gated repo's PR fails with when its base sha has no gate block
- *  and the PR does not add one (#1132). Visible on the head, never a success:
- *  the description names the base and the fix. GitHub caps a description at 140. */
+/** The verdict a gated repo's PR fails with when its base sha has no valid gate
+ *  config (absent, malformed, or a malformed gates entry) and the PR does not
+ *  add one (#1132). Visible on the head, never a success: the description names
+ *  the base. GitHub caps a description at 140. */
 export function noGateBlockFailure(baseSha: string): string {
-  return `no gate block at base ${baseSha.slice(0, 8)}: merge gated base into branch`;
+  return `no valid gate config at base ${baseSha.slice(0, 8)}`;
 }
 
 /** What the gate Workflow does with one PR, decided from its inputs alone (#1091

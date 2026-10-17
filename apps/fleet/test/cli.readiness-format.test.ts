@@ -156,7 +156,7 @@ describe("readyOverride (cli/readiness-format.ts)", () => {
       readiness: { kind: "provisioned", checkedAt: "2026-09-24T11:59:00.000Z" },
       observed: { ...emptyObserved(), replacedAt: "2026-09-24T11:54:00.000Z" },
     });
-    expect(readyOverride(s, NOW)).toBe("replaced 6m ago — not brought up");
+    expect(readyOverride(s, NOW)).toBe("bare: replaced 6m — auto-heal pending");
   });
 
   // T1b
@@ -311,7 +311,7 @@ describe("readyOverride (cli/readiness-format.ts)", () => {
         unreachableSince: "2026-09-24T11:50:00.000Z",
       },
     });
-    expect(readyOverride(s, NOW)).toBe("replaced 6m ago — not brought up");
+    expect(readyOverride(s, NOW)).toBe("bare: replaced 6m — auto-heal pending");
   });
 });
 

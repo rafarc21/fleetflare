@@ -927,7 +927,7 @@ describe("runProvision wiring — rescue-branch discovery runs after the clone, 
     const body = (sig: string) => methodBody(src, sig);
     expect(src.split("resolveRescueTarget(").length - 1).toBe(1);
     expect(body("  private rescueTarget(")).toContain("resolveRescueTarget(");
-    expect(body("  private deps(): ProvisionDeps {"))
+    expect(body("  private deps("))
       .toContain(`rescueTarget: (slug: string) => this.rescueTarget(async () => slug, "discovery"),`);
     expect(body("  private syncDeps("))
       .toContain("rescueTarget: () => this.rescueTarget(() => this.workRepoSlug(null)),");

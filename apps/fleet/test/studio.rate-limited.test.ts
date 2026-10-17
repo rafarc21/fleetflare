@@ -561,7 +561,7 @@ describe("READY override vs. rate-limited — one wins outright, the other rende
       observed: { ...emptyObserved(), replacedAt: "2026-09-24T12:14:00.000Z" },
     };
     const rendered = readyOverride(s, NOW) ?? formatReady(s.readiness, s, NOW);
-    expect(rendered).toBe("replaced 6m ago — not brought up");
+    expect(rendered).toBe("bare: replaced 6m — auto-heal pending");
     expect(rendered).not.toContain("rate-limited");
   });
 

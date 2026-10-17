@@ -149,9 +149,10 @@ export function leadStreamIdleMs(env: { LEAD_STREAM_IDLE_MS?: string }): number 
  *  path sends one SSE `event: ping` (the clock runs from the last byte written
  *  to the client, not the last upstream chunk — a busy upstream whose output
  *  the client never sees still earns pings). 15s sits well under Claude Code's
- *  own client idle timeout and well over a normal gap, so a healthy stream
- *  never sends one. `LEAD_STREAM_PING_MS` (env.ts) — same garbage-in ->
- *  default rule as the idle timer. */
+ *  own client idle timeout, so a ping fires on any client-visible gap —
+ *  including a long reasoning/prefill stretch with nothing to show — and never
+ *  trips the client's own timeout. `LEAD_STREAM_PING_MS` (env.ts) — same
+ *  garbage-in -> default rule as the idle timer. */
 export const LEAD_STREAM_PING_MS_DEFAULT = 15_000;
 
 export function leadStreamPingMs(env: { LEAD_STREAM_PING_MS?: string }): number {
@@ -726,9 +727,9 @@ const USAGE_MODE = "lead";
  *  the request actually hit. */
 function logUsage(
   env: Env, ctx: ExecutionContext, studioId: string,
-  call: { model: string; stream: boolean; inputTokens: number; outputTokens: number; ok: boolean; failure?: string; startedAt: number; attempts: number },
+  call: { model: string; stream: boolean; inputTokens: number; outputTokens: number; ok: boolean; failure?: string; startedAt: number; attempts: number; timeToHeaders: number },
 ): void {
-  const { stream, inputTokens, outputTokens, ok, attempts } = call;
+  const { stream, inputTokens, outputTokens, ok, attempts, timeToHeaders } = call;
   const durationMs = Math.max(0, Math.round(Date.now() - call.startedAt));
   const error = ok || call.failure === undefined
     ? undefined
@@ -740,7 +741,7 @@ function logUsage(
   }
   ctx.waitUntil(insertJuniorUsage(env.DB, {
     id: crypto.randomUUID(), ts: Date.now(), studioId, mode: USAGE_MODE, model: call.model,
-    inputTokens, outputTokens, ok, ...(error === undefined ? {} : { error }), durationMs, attempts,
+    inputTokens, outputTokens, ok, ...(error === undefined ? {} : { error }), durationMs, attempts, timeToHeaders,
   }).catch((e) => console.error("[glm-lead] usage insert failed", e instanceof Error ? e.message : String(e))));
 }
 
@@ -902,6 +903,7 @@ export async function handleFleetAnthropicMessages(
   const stream = body.stream === true;
   const overflow = await runModelPoolOverflow(ai, order, body, gatewayId, leadAiRetryBaseMs(env), retryDeps);
   const { usedModel, attempts } = overflow;
+  const headersAt = Date.now();
 
   if (!overflow.ok) {
     // Spec Component 4: "all exhausted -> 429 + retry-after (shortest known
@@ -916,7 +918,7 @@ export async function handleFleetAnthropicMessages(
       : classifyAiError(lastMessage);
     logUsage(env, ctx, studio.id, {
       model: usedModel, stream, inputTokens: 0, outputTokens: 0, ok: false,
-      failure: `ai_run_error ${status} ${type}: ${lastMessage}`, startedAt, attempts,
+      failure: `ai_run_error ${status} ${type}: ${lastMessage}`, startedAt, attempts, timeToHeaders: headersAt - startedAt,
     });
     const res = json(anthropicErrorBody(type, overrideMessage ?? lastMessage), status);
     if (status === 429) {
@@ -940,7 +942,7 @@ export async function handleFleetAnthropicMessages(
       // anyway is translated through the non-streaming path rather than
       // crashing on `.getReader()`.
       const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
-      logUsage(env, ctx, studio.id, { model: usedModel, stream: true, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
+      logUsage(env, ctx, studio.id, { model: usedModel, stream: true, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts, timeToHeaders: headersAt - startedAt });
       return json(anthropic, 200);
     }
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -970,7 +972,7 @@ export async function handleFleetAnthropicMessages(
           const runaway = result.failure?.startsWith("runaway:") === true;
           // The aborted upstream never reports prompt tokens; estimate them (see requestInputEstimate).
           const inputTokens = runaway && result.inputTokens === 0 ? requestInputEstimate() : result.inputTokens;
-          logUsage(env, ctx, studio.id, { model: usedModel, stream: true, ...result, inputTokens, startedAt, attempts });
+          logUsage(env, ctx, studio.id, { model: usedModel, stream: true, ...result, inputTokens, startedAt, attempts, timeToHeaders: headersAt - startedAt });
           // Issue #1099: the retry (a 529 the client re-sends) moves to the next model.
           if (runaway && avoidOn) {
             ctx.waitUntil(markRunawayAvoid(env.DB, studio.id, usedModel).catch(() => {}));
@@ -978,7 +980,7 @@ export async function handleFleetAnthropicMessages(
         })
         .catch((e) => logUsage(env, ctx, studio.id, {
           model: usedModel, stream: true, inputTokens: 0, outputTokens: 0, ok: false,
-          failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`, startedAt, attempts,
+          failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`, startedAt, attempts, timeToHeaders: headersAt - startedAt,
         }))
         .finally(() => { writer.close().catch((e) => console.error("[glm-lead] writer close failed after stream end", e instanceof Error ? e.message : String(e))); }),
     );
@@ -994,7 +996,7 @@ export async function handleFleetAnthropicMessages(
   // usage row, completely unclamped.
   if (!(upstream instanceof ReadableStream)) {
     const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
-    logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
+    logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts, timeToHeaders: headersAt - startedAt });
     return json(anthropic, 200);
   }
   // Issue #1099 (review round 3, finding 3): the reply is folded from the stream
@@ -1008,7 +1010,7 @@ export async function handleFleetAnthropicMessages(
   } catch (e) {
     logUsage(env, ctx, studio.id, {
       model: usedModel, stream: false, inputTokens: 0, outputTokens: 0, ok: false,
-      failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`, startedAt, attempts,
+      failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`, startedAt, attempts, timeToHeaders: headersAt - startedAt,
     });
     return json(anthropicErrorBody("api_error", "upstream stream failed"), 500);
   }
@@ -1024,7 +1026,7 @@ export async function handleFleetAnthropicMessages(
   if (result.failure === "client_abort") {
     logUsage(env, ctx, studio.id, {
       model: usedModel, stream: false, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ok: false,
-      failure: "client_abort", startedAt, attempts,
+      failure: "client_abort", startedAt, attempts, timeToHeaders: headersAt - startedAt,
     });
     return json(anthropicErrorBody("api_error", "client disconnected"), 499);
   }
@@ -1032,7 +1034,7 @@ export async function handleFleetAnthropicMessages(
     const reason = result.failure.slice("runaway:".length);
     logUsage(env, ctx, studio.id, {
       model: usedModel, stream: false, inputTokens: result.inputTokens || requestInputEstimate(), outputTokens: result.outputTokens,
-      ok: false, failure: result.failure, startedAt, attempts,
+      ok: false, failure: result.failure, startedAt, attempts, timeToHeaders: headersAt - startedAt,
     });
     if (avoidOn) ctx.waitUntil(markRunawayAvoid(env.DB, studio.id, usedModel).catch(() => {}));
     return json(anthropicErrorBody("overloaded_error", runawayErrorMessage(reason)), 529);
@@ -1042,11 +1044,11 @@ export async function handleFleetAnthropicMessages(
     const { status, type, message: overrideMessage } = classifyAiError(message);
     logUsage(env, ctx, studio.id, {
       model: usedModel, stream: false, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ok: false,
-      failure: `upstream_error ${type}: ${message}`, startedAt, attempts,
+      failure: `upstream_error ${type}: ${message}`, startedAt, attempts, timeToHeaders: headersAt - startedAt,
     });
     return json(anthropicErrorBody(type, overrideMessage ?? message), status);
   }
-  logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ok: true, startedAt, attempts });
+  logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ok: true, startedAt, attempts, timeToHeaders: headersAt - startedAt });
   return json(foldAnthropicFrames(sse), 200);
 }
 

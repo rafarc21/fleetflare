@@ -354,7 +354,7 @@ describe("StudioDO wiring — watchContainer's D1 write also goes through withOb
 // EXEC_CLASSES.provision (600s, sized for BRINGUP_CMD itself).
 describe("StudioDO wiring — the bring-up probe runs on EXEC_CLASSES.inspect, not provision (issue #85)", () => {
   it("deps()'s observationExec field is wired to EXEC_CLASSES.inspect", () => {
-    const body = methodBody(doSrc, "  private deps(): ProvisionDeps {");
+    const body = methodBody(doSrc, "  private deps(");
     expect(body).toMatch(/observationExec:\s*\(cmd: string\) => sbExec\(this, cmd, EXEC_CLASSES\.inspect\)/);
   });
 });
@@ -368,7 +368,7 @@ describe("StudioDO wiring — the bring-up probe runs on EXEC_CLASSES.inspect, n
 // catching it.
 describe("StudioDO wiring — deps()'s r2Head is wired to STUDIO_ARCHIVE.head (issue #85 review round 3, MUST-FIX 8b)", () => {
   it("deps()'s r2Head field calls this.env.STUDIO_ARCHIVE.head", () => {
-    const body = methodBody(doSrc, "  private deps(): ProvisionDeps {");
+    const body = methodBody(doSrc, "  private deps(");
     expect(body).toMatch(/r2Head:\s*async \(key: string\) => \{[\s\S]*?this\.env\.STUDIO_ARCHIVE\.head\(key\)/);
   });
 });

@@ -62,8 +62,9 @@ describe("isLeadInferenceSilent (#1142 item 2)", () => {
     expect(isLeadInferenceSilent(working({}, { since: minutesAgo(0) }), undefined, true, NOW)).toBe(false);
   });
 
-  it("an unparseable working-since stamp is not silent: NaN must not pass the 5 min floor", () => {
+  it("an unparseable activity timestamp is not silent: NaN must never read as a long-running turn", () => {
     expect(isLeadInferenceSilent(working({}, { since: "not-a-date" }), undefined, true, NOW)).toBe(false);
+    expect(isLeadInferenceSilent(working({}, { observedAt: "not-a-date" }), undefined, true, NOW)).toBe(false);
   });
 
   it("a REPLACED row is not silent: leadGate says 'replaced', not working", () => {

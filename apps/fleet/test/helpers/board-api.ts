@@ -30,6 +30,7 @@ export function fakeApi(overrides: Partial<BoardApi> = {}, buildTask: () => Boar
     createIssue: vi.fn(async () => buildTask()),
     getIssue: vi.fn(async () => buildTask()),
     listIssues: vi.fn(async () => [buildTask()]),
+    countIssues: vi.fn(async () => 0),
     addLabels: vi.fn(async () => {}),
     removeLabel: vi.fn(async () => {}),
     createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/12#issuecomment-1" })),

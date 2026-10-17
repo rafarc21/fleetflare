@@ -44,6 +44,10 @@ export interface BoardApi {
   createIssue: (repo: string, input: IssueInput) => Promise<BoardTask>;
   getIssue: (repo: string, number: number) => Promise<BoardTask>;
   listIssues: (repo: string, query: ListIssuesQuery) => Promise<BoardTask[]>;
+  /** GitHub's non-PR issue count across ALL states, one GraphQL call
+   *  (issue #1121). Stands in for a full `state=all` walk when a caller only
+   *  needs the total. */
+  countIssues: (repo: string) => Promise<number>;
   addLabels: (repo: string, number: number, labels: string[]) => Promise<void>;
   removeLabel: (repo: string, number: number, label: string) => Promise<void>;
   createComment: (repo: string, number: number, body: string) => Promise<{ id: number; url: string }>;
@@ -885,6 +889,8 @@ export interface ListTasksQuery {
   milestone?: string;
   /** One board state label. */
   state?: string;
+  /** Issue #1121: list only OPEN issues (`state=open`). Absent keeps `all`. */
+  open?: boolean;
   /**
    * One studio id. Applied as a LABEL filter, which means GitHub drops every
    * other studio's task before the response is built — the scoping a studio
@@ -933,6 +939,7 @@ export async function listTasks(
     // above rather than replacing it.
     apiQuery.labels = [...(apiQuery.labels ?? []), studioLabel(query.assignedTo)];
   }
+  if (query.open !== undefined) apiQuery.open = query.open;
   if (query.milestone !== undefined) {
     const milestone = await resolveMilestone(api, repo, query.milestone);
     if (!milestone.ok) return milestone;

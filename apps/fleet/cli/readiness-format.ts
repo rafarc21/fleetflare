@@ -11,7 +11,7 @@ import type { StudioStatus } from "../src/studio/types";
 import { SHIP_TRANSCRIPT_SECONDS } from "../src/studio/ship-cadence";
 import { SYNC_SESSION_SECONDS } from "../src/studio/session-sync";
 import { formatRateLimited, type RateLimitObservation } from "../src/studio/rate-limit";
-import { isUnreachable, type Observed } from "../src/studio/observed";
+import { isUnreachable, HEAL_COOLDOWN_MS, type Observed } from "../src/studio/observed";
 import { leadAccountMismatch } from "../src/studio/lead-route";
 import type { Activity } from "../src/studio/activity";
 import type { MemberAlert } from "../src/studio/member-alerts";
@@ -189,11 +189,54 @@ export function isLeadInferenceSilent(
   if (leadGate(status, now).kind !== "activity") return false;
   const activity = status.observed?.activity;
   if (activity?.state !== "working") return false;
-  if (ageSeconds(activity.observedAt, now) > ACTIVITY_MIRROR_STALE_SECONDS) return false;
+  // A timestamp that does not parse is no evidence either way: NaN compares false
+  // against every threshold, and ageSeconds reads an unparseable mirror as age 0
+  // (fresh), so both stamps are rejected up front.
+  const observedMs = Date.parse(activity.observedAt);
   const sinceMs = Date.parse(activity.since);
-  if (!Number.isFinite(sinceMs) || now.getTime() - sinceMs < INFER_SILENT_MIN_WORKING_MS) return false;
+  if (!Number.isFinite(observedMs) || !Number.isFinite(sinceMs)) return false;
+  if (ageSeconds(activity.observedAt, now) > ACTIVITY_MIRROR_STALE_SECONDS) return false;
+  if (now.getTime() - sinceMs < INFER_SILENT_MIN_WORKING_MS) return false;
   return (u?.calls ?? 0) === 0;
 }
+
+/**
+ * Issue #1146: what the bare-container auto-heal is doing about a replaced
+ * container, for the READY column. `pending` until a heal arms for THIS
+ * replacement; `running` from that attempt until a verdict newer than it
+ * lands; `failed: <reason>` when that verdict is still bare. An unattempted
+ * heal is never rendered as `running`.
+ */
+function autoHealState(status: StudioStatus, replacedAt: string, now: Date): string {
+  // Issue #1152 review: a Claude-booted OSS lead is never healed (decideHeal),
+  // so "pending" would promise a heal that will not come.
+  if (leadAccountMismatch(status)) return "skipped: OSS lead";
+  const attempted = status.observed?.healAttemptedAt ?? null;
+  if (attempted === null || Date.parse(attempted) < Date.parse(replacedAt)) {
+    // Issue #1152 review: an earlier attempt still inside the cooldown holds the
+    // next heal back; say until when, not "pending".
+    if (attempted !== null && now.getTime() < Date.parse(attempted) + HEAL_COOLDOWN_MS) {
+      const until = new Date(Date.parse(attempted) + HEAL_COOLDOWN_MS).toISOString().slice(11, 16);
+      return `cooling down until ${until}`;
+    }
+    return "pending";
+  }
+  const r = status.readiness;
+  if (r?.kind === "bare" && Date.parse(r.checkedAt) > Date.parse(attempted)) {
+    return `failed: ${r.reason.replace(/\s+/g, " ")}`;
+  }
+  // Issue #1152 review: "running" only inside the window a restart needs to
+  // produce a verdict. Past it, with no verdict, the attempt has failed quietly.
+  if (now.getTime() - Date.parse(attempted) > AUTO_HEAL_RUNNING_WINDOW_MS) {
+    return "failed: no verdict since the attempt";
+  }
+  return "running";
+}
+
+/** Issue #1152 review: how long READY keeps saying `auto-heal running`. A
+ *  worst-case restart is two 600 s bring-ups (~20 min), so 25 min leaves
+ *  margin before READY calls the attempt failed. */
+const AUTO_HEAL_RUNNING_WINDOW_MS = 25 * 60_000;
 
 /**
  * Issue #85 — READY overrides, `state: "running"` only, first match wins:
@@ -210,7 +253,7 @@ export function readyOverride(status: StudioStatus, now: Date): string | null {
   if (status.state !== "running") return null;
   const observed = status.observed;
   if (observed?.replacedAt != null) {
-    return `replaced ${formatAge(ageSeconds(observed.replacedAt, now))} ago — not brought up`;
+    return `bare: replaced ${formatAge(ageSeconds(observed.replacedAt, now))} — auto-heal ${autoHealState(status, observed.replacedAt, now)}`;
   }
   // Board issue #183 — replaces the old fixed `execFailures >= 3` gate
   // (issue #85 PR1, review round 3 MUST-FIX 7) with the maestro's own
@@ -455,7 +498,7 @@ function leadGate(status: StudioStatus, now: Date): LeadGate {
   // Issue #192 — a rollout can replace a running studio's container without
   // a clean onStop first, so the DO's `activity` key can still hold a word
   // left over from BEFORE the replacement; both renderers say "no lead"
-  // rather than contradict readyOverride's "replaced … not brought up".
+  // rather than contradict readyOverride's "replaced … auto-heal …".
   if (status.observed?.replacedAt != null) return { kind: "replaced", rl: null };
   return { kind: "activity", rl: null };
 }

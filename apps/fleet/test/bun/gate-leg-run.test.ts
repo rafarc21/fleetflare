@@ -503,6 +503,41 @@ describe("runLegStep: clone failure retries once (#1104)", () => {
       "gate/o/r/runs/1/i/shard-lint.retry.json",
     ]);
   });
+
+  it("a clone failure recovered from R2 is retried and a true pass is tagged flaky (#1178)", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      if (sent === 1) throw new Error("Network connection lost.");
+      return reply({ state: "success" });
+    };
+    const result = await runLegStep(step, dispatch, PLANNED, {
+      readResult: async () => ({ state: "error", description: CLONE }),
+    });
+    // The R2 prefix must not hide the clone-failed match: the retry earns a flaky success.
+    expect(result).toEqual({
+      ms: expect.any(Number), leg: "lint", state: "success",
+      description: `flaky: passed on retry; first: result read from R2 after transport loss: ${CLONE}`,
+    });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(sent).toBe(2);
+  });
+
+  it("an R2-recovered error with an unrelated cause stays final: no retry (#1178)", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; throw new Error("Network connection lost."); };
+    const result = await runLegStep(step, dispatch, PLANNED, {
+      readResult: async () => ({ state: "error", description: "disk quota exceeded" }),
+    });
+    expect(result).toEqual({
+      ms: expect.any(Number), leg: "lint", state: "error",
+      description: "result read from R2 after transport loss: disk quota exceeded",
+    });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+    expect(sent).toBe(1);
+  });
 });
 
 describe("runLegStep: install failure retries once (#1092)", () => {
@@ -516,6 +551,18 @@ describe("runLegStep: install failure retries once (#1092)", () => {
     expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "success", description: `flaky: passed on retry; first: ${INSTALL}` });
     expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
     expect(sent).toBe(2);
+  });
+
+  it("an install-failed result read from R2 is retried once (#1126)", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; throw new Error("Network connection lost."); };
+    const result = await runLegStep(step, dispatch, PLANNED, {
+      readResult: async () => ({ state: "error", description: INSTALL }),
+    });
+    // The R2 prefix must not hide the install-failed match: one fresh-container retry.
+    expect(sent).toBe(2);
+    expect(result.description).toContain("result read from R2 after transport loss");
   });
 
   it("install failed twice: the retry's error is final, and its description notes the first cause", async () => {

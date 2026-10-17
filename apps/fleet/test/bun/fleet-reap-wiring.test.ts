@@ -67,6 +67,9 @@ beforeAll(() => {
         if (slowBoardMs > 0) return Bun.sleep(slowBoardMs).then(() => Response.json(body));
         return Response.json(body);
       }
+      if (u.pathname === "/studio/board/tasks/count") {
+        return Response.json({ repo: REPO, count: (openTasks ?? HISTORY).length });
+      }
       if (u.pathname === `/studio/${ID}/wake` && req.method === "POST") {
         return req.text().then((body) => {
           wakes.push(body);
@@ -122,10 +125,11 @@ test("reap --apply hits list, board (scoped), rescue, inspect, per-studio tasks,
   const repoQ = `repo=${encodeURIComponent(REPO)}`;
   expect(seen).toEqual([
     "GET /studio/",
-    `GET /studio/board/tasks?${repoQ}`,
+    `GET /studio/board/tasks?${repoQ}&open=1`,
+    `GET /studio/board/tasks/count?${repoQ}`,
     `GET /studio/${ID}/inspect`,
     `POST /studio/${ID}/rescue`,
-    `GET /studio/board/tasks?${repoQ}&assignedTo=${ID}`,
+    `GET /studio/board/tasks?${repoQ}&open=1&assignedTo=${ID}`,
     `GET /studio/${ID}/inspect`,
     `POST /studio/${ID}/destroy`,
   ]);
@@ -179,7 +183,7 @@ test("issue #1117: a slow board read inside the budget succeeds and logs its ela
   );
   expect(out.exitCode).toBe(0);
   const timed = lines.filter((l) => /^fleet reap: board read \d+ ms$/.test(l));
-  expect(timed.length).toBe(1);
+  expect(timed.length).toBe(2);
   expect(Number(/(\d+) ms$/.exec(timed[0]!)![1])).toBeGreaterThanOrEqual(350);
 });
 
