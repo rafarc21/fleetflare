@@ -13,8 +13,7 @@ lands in bringup.log, not the marker.
 
 All in apps/fleet/test/bun/bringup-studio-tools.test.ts, plus fake bins.
 
-1. Add `sleepBin`: fake `sleep` that records its argv and exits 0; drop
-   `sleep` from sysBin so the region's `timeout` runs the fake.
+1. Add a fake `sleep` to fakeBin(): records its argv, then execs the host sleep so the region's `timeout` is the only bound (SYS_TOOLS never contained sleep, so nothing to drop).
 2. Fake `apt-get` gains a `sleep` mode: when APT_SLEEP=1, exec `sleep 30`
    then exit 100. Region install with STUDIO_TOOLS_TIMEOUT=1 → run returns
    under 5 s wall, exit 0, marker written.
