@@ -1049,13 +1049,14 @@ pt.append({
 # always did. A failure here is logged and skipped: the lead-gate entries
 # above still land and bring-up continues without this hook (fail open).
 stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])
-if isinstance(stop, list):
-    stop[:] = [e for e in stop if "oss-lead-continue.sh" not in json.dumps(e)]
-    stop.append({"hooks": [{"type": "command", "command": "S=\"$HOME/.claude/hooks/oss-lead-continue.sh\"; [ -x \"$S\" ] && exec \"$S\" || exit 0"}]})
-else:
-    os.write(2, ("studio-bringup: Stop not a list, oss-lead-continue hook not registered -- leaving settings untouched\n").encode())
+if not isinstance(stop, list):
+    os.write(2, ("studio-bringup: Stop not a list (was %s), reset to [] so oss-lead-continue registers\n" % json.dumps(stop)).encode())
+    stop = cfg["hooks"]["Stop"] = []
+stop[:] = [e for e in stop if "oss-lead-continue.sh" not in json.dumps(e)]
+stop.append({"hooks": [{"type": "command", "command": "S=\"$HOME/.claude/hooks/oss-lead-continue.sh\"; [ -x \"$S\" ] && exec \"$S\" || exit 0"}]})
 tmp = path + ".tmp"
-with open(tmp, "w") as f:
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
     json.dump(cfg, f, indent=2)
 os.replace(tmp, path)
 '
@@ -1129,12 +1130,17 @@ entry = {"hooks": [{"type": "command", "command": guarded}]}
 for evt in ("SessionStart", "UserPromptSubmit", "Stop", "Notification"):
     arr = cfg.setdefault("hooks", {}).setdefault(evt, [])
     if not isinstance(arr, list):
-        os.write(2, ("studio-bringup: %s not a list, activity-heartbeat hook not registered -- leaving settings untouched\n" % evt).encode())
-        continue
+        if evt == "Stop":
+            os.write(2, ("studio-bringup: Stop not a list (was %s), reset to [] so activity-heartbeat registers\n" % json.dumps(arr)).encode())
+            arr = cfg["hooks"][evt] = []
+        else:
+            os.write(2, ("studio-bringup: %s not a list, activity-heartbeat hook not registered -- leaving settings untouched\n" % evt).encode())
+            continue
     arr[:] = [e for e in arr if "activity-heartbeat.sh" not in json.dumps(e)]
     arr.append(entry)
 tmp = path + ".tmp"
-with open(tmp, "w") as f:
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
     json.dump(cfg, f, indent=2)
 os.replace(tmp, path)
 '
@@ -1206,13 +1212,14 @@ guarded = (
     "exec \"$S\""
 )
 entry = {"hooks": [{"type": "command", "command": guarded}]}
-if isinstance(stop, list):
-    stop[:] = [e for e in stop if "completion-gate.sh" not in json.dumps(e)]
-    stop.append(entry)
-else:
-    os.write(2, ("studio-bringup: Stop not a list, completion-gate hook not registered -- leaving settings untouched\n").encode())
+if not isinstance(stop, list):
+    os.write(2, ("studio-bringup: Stop not a list (was %s), reset to [] so completion-gate registers\n" % json.dumps(stop)).encode())
+    stop = cfg["hooks"]["Stop"] = []
+stop[:] = [e for e in stop if "completion-gate.sh" not in json.dumps(e)]
+stop.append(entry)
 tmp = path + ".tmp"
-with open(tmp, "w") as f:
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
     json.dump(cfg, f, indent=2)
 os.replace(tmp, path)
 '
