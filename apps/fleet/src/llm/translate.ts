@@ -781,6 +781,10 @@ function recoverThinkToolCalls(thinkText: string): {
   if (tagged.length > 0) {
     let failedTagged = false;
     for (const m of tagged) if (!take(m[1])) failedTagged = true;
+    // A truncated sibling after the last complete close is still a lost call,
+    // never silently dropped (issue #1209).
+    const last = tagged[tagged.length - 1].index! + tagged[tagged.length - 1][0].length;
+    if (UNTERMINATED_TOOL_CALL.test(thinkText.slice(last))) failedTagged = true;
     return { calls, hadToolCallAttempt: true, failedTagged };
   }
   // Unterminated opener with no closer: still an attempt, never silent.
