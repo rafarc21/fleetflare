@@ -204,14 +204,25 @@ describe("mergePrecheckFailures: commit messages are scanned", () => {
 // #1176: the leak scan sees only ADDED lines, and a file with no patch (binary
 // or oversized) fails closed — never a silent pass.
 describe("addedLines", () => {
-  it("extracts added lines only, stripping the + and the header", () => {
-    expect(addedLines("@@ -1,2 +1,2 @@\n context\n+added line\n-removed line\n+++ b/f\n+keep me")).toBe(
+  // GitHub patches carry no +++/--- file headers (see #1191), so the hunk
+  // header (@@) is excluded only because it does not start with `+`, and an
+  // added line's leading `+` is the only thing stripped.
+  it("extracts added lines only, stripping the leading +", () => {
+    expect(addedLines("@@ -1,2 +1,2 @@\n context\n+added line\n-removed line\n+keep me")).toBe(
       "added line\nkeep me",
     );
   });
 
   it("returns empty for a patch with no additions", () => {
     expect(addedLines("@@ -1 +1 @@\n-removed only\n context")).toBe("");
+  });
+
+  // #1191: GitHub patches carry no +++/--- file headers, so the `!+++` guard
+  // wrongly drops an added line whose CONTENT starts with `++` (its patch line
+  // reads `+++...`). Only the one leading `+` is ever stripped.
+  it("keeps a line whose content starts with + (only the leading + is stripped)", () => {
+    expect(addedLines("+a\n++b\n-c\nctx\n")).toBe("a\n+b");
+    expect(addedLines("+++lead\n")).toBe("++lead");
   });
 });
 

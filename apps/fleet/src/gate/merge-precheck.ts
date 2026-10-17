@@ -46,11 +46,12 @@ export function leakFailure(patterns: string[], blobs: string[]): string | null 
 }
 
 /** #1176: added (`+`) lines of one patch — context and removed lines never
- *  reach the scan, so a PR that REMOVES a leak can go green. */
+ *  reach the scan, so a PR that REMOVES a leak can go green. GitHub patches
+ *  carry no `+++` file headers, so a `++`-content line must not be dropped. */
 export function addedLines(patch: string): string {
   return patch
     .split("\n")
-    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+    .filter((l) => l.startsWith("+"))
     .map((l) => l.slice(1))
     .join("\n");
 }
