@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseRoleFile, roleBringupEnv } from "../../src/studio/blueprint";
@@ -118,5 +118,21 @@ describe("bring-up MCP config — roles honor mcp: (issue #276)", () => {
     const out = bringUp({ ROLE_MCP: "playwright" }, home);
     expect(out.args).toEqual([]);
     expect(out.stderr).toContain("studio-bringup:");
+  });
+
+  test("codebase-memory in ROLE_MCP -> server written with the bare binary command", () => {
+    const out = bringUp({ ROLE_MCP: "codebase-memory" });
+    expect(out.config?.mcpServers["codebase-memory"]).toEqual({ command: "/usr/local/bin/codebase-memory-mcp" });
+    expect(out.args).toEqual(["--mcp-config", out.file]);
+  });
+
+  test("codebase-memory binary absent -> skipped with a stderr line, boot never fails", () => {
+    const home = fakeHome();
+    const bin = join(home, "bin");
+    mkdirSync(bin, { recursive: true });
+    const out = bringUp({ ROLE_MCP: "codebase-memory", PATH: `${bin}:${process.env.PATH ?? ""}` }, home);
+    expect(out.config?.mcpServers["codebase-memory"]).toBeUndefined();
+    expect(out.args).toEqual([]);
+    expect(out.stderr).toContain("codebase-memory");
   });
 });
