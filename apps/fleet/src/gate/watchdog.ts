@@ -24,32 +24,32 @@ export const GATE_WATCHDOG_LOOKBACK_MS = 2 * 60 * 60_000;
  *  verdict posts before the row leaves the sweep. */
 export const GATE_WATCHDOG_FINAL_AGE_MS = GATE_WATCHDOG_LOOKBACK_MS - 5 * 60_000;
 
-/** The stored leg-result keys that decide each leg, as the run's own verdict reads
- *  them (leg-run.ts): a retry's result over the try-2 infra result over the first
- *  try. A red first try whose retry passed is flaky, not red (#1150 review). */
-export function decisiveResultKeys(keys: string[]): string[] {
-  const bases = new Set(keys.map((k) => k.replace(/(\.retry\.json|-try2\.json|\.json)$/, "")));
-  const decisive: string[] = [];
-  for (const base of bases) {
-    const pick = [`${base}.retry.json`, `${base}-try2.json`, `${base}.json`].find((k) => keys.includes(k));
-    if (pick !== undefined) decisive.push(pick);
-  }
-  return decisive;
-}
-
 /** Whether any leg's decisive stored result is red. `read` gets one stored result
- *  by key, undefined when absent. The watchdog reads the same results the run wrote. */
+ *  by key, undefined when absent. A red first try is final unless its retry
+ *  passed (#1156 N1c); a red retry is always red; an infra first try's try-2
+ *  result decides over it (#1150 review). */
 export async function hasRedResult(
   keys: string[], read: (key: string) => Promise<{ state?: string } | undefined>,
 ): Promise<boolean> {
-  for (const key of decisiveResultKeys(keys)) {
-    if ((await read(key))?.state === "failure") return true;
+  const bases = new Set(keys.map((k) => k.replace(/(\.retry\.json|-try2\.json|\.json)$/, "")));
+  for (const base of bases) {
+    const retryKey = `${base}.retry.json`;
+    const retry = keys.includes(retryKey) ? await read(retryKey) : undefined;
+    const try2Key = `${base}-try2.json`;
+    const try2 = keys.includes(try2Key) ? await read(try2Key) : undefined;
+    const jsonKey = `${base}.json`;
+    const json = keys.includes(jsonKey) ? await read(jsonKey) : undefined;
+    // try-2 decides over the original first attempt for an infra leg; the retry
+    // decides over a red first try only when it passed (#1156 N1c).
+    const first = try2 ?? json;
+    if (retry?.state === "failure") return true;
+    if (first?.state === "failure" && retry?.state !== "success") return true;
   }
   return false;
 }
 
 /** The slice of the run index the watchdog reads and writes. */
-export interface WatchdogIndex extends Pick<GateRunIndex, "latest" | "handOff"> {
+export interface WatchdogIndex extends Pick<GateRunIndex, "latest" | "handOff" | "progress"> {
   /** Stamps the runs with no progress stamp (0) with `at`, so each gets a full stall window before it can be ended (#1148 item 3). */
   adoptUnknown(at: number): Promise<void>;
   /** The pointers whose progress is at or before `before` and no older than `notBefore`, oldest first. */
@@ -70,8 +70,9 @@ export interface WatchdogWorkflow {
 export interface WatchdogDeps {
   index: WatchdogIndex;
   workflow: WatchdogWorkflow;
-  /** Posts a commit status on the head: the real GitHub call in the Worker, a recorder in tests. */
-  post: (repo: string, headSha: string, args: { state: "pending" | "error" | "failure"; description: string }) => Promise<unknown>;
+  /** Posts a commit status on the head: the real GitHub call in the Worker, a recorder in tests.
+   *  Returns true when the post failed after its retries (postGateStatus's contract), false when it landed. */
+  post: (repo: string, headSha: string, args: { state: "pending" | "error" | "failure"; description: string }) => Promise<boolean>;
   /** Whether the gate runner is on for a repo. A repo it is off for is never read past this check (#1148 review). */
   gated?: (repo: string) => boolean;
   /** Whether any leg of the run stored a red result. A red result is final, never rerun (#1119). */
@@ -105,7 +106,13 @@ export async function sweepStalledRuns(deps: WatchdogDeps): Promise<WatchdogRun[
 
 async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promise<WatchdogOutcome> {
   const { repo, pr, headSha, runId } = row;
-  if (deps.gated !== undefined && !deps.gated(repo)) return "skipped";
+  // A repo the gate runner is off for is retired at once, so its row never holds
+  // one of the sweep's 20 slots (#1156 item 2). Retire is conditional on the
+  // stamp, so a moved pointer is left alone.
+  if (deps.gated !== undefined && !deps.gated(repo)) {
+    await deps.index.retire(repo, pr, runId, row.progressedAt ?? 0);
+    return "skipped";
+  }
   // The pointer moved on: a newer run owns this head, so this row is not the one to end.
   const latest = await deps.index.latest(repo, pr);
   if (latest?.runId !== runId) return "skipped";
@@ -120,14 +127,22 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
   }
 
   const minutes = Math.round(GATE_STALL_MS / 60_000);
-  const red = await deps.hasRedLeg(repo, pr, runId);
+  let red: boolean;
+  try {
+    red = await deps.hasRedLeg(repo, pr, runId);
+  } catch (err) {
+    // The red check resolves the canonical repo name via GitHub (#1156 item 1):
+    // before the final age a failed check rethrows (the row is kept, retried next
+    // minute); at the final age the run ends with the final error verdict.
+    if (now - (row.progressedAt ?? 0) < GATE_WATCHDOG_FINAL_AGE_MS) throw err;
+    return await endRunFinal(deps, row, now, {
+      state: "error", description: `no progress for ${minutes} min; could not check leg results (run ${runId})`,
+    });
+  }
   if (red || isRerunInstance(runId)) {
-    await endRunOrThrow(deps.workflow, runId);
-    await deps.index.retire(repo, pr, runId, row.progressedAt ?? 0);
-    await deps.post(repo, headSha, red
+    return await endRunFinal(deps, row, now, red
       ? { state: "failure", description: `a leg failed before the run stalled (run ${runId})` }
       : { state: "error", description: `no progress for ${minutes} min after its infra rerun (run ${runId}); a rerun is final` });
-    return "final";
   }
 
   // The rerun takes the pointer before the first run is ended. An unknown start
@@ -143,10 +158,9 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
     });
   } catch (err) {
     if (now - (row.progressedAt ?? 0) < GATE_WATCHDOG_FINAL_AGE_MS) throw err;
-    await endRunOrThrow(deps.workflow, runId);
-    await deps.index.retire(repo, pr, runId, row.progressedAt ?? 0);
-    await deps.post(repo, headSha, { state: "error", description: `no progress for ${minutes} min; the infra rerun did not start (run ${runId})` });
-    return "final";
+    return await endRunFinal(deps, row, now, {
+      state: "error", description: `no progress for ${minutes} min; the infra rerun did not start (run ${runId})`,
+    });
   }
   if (outcome === "superseded") {
     await endRunLogged(deps.workflow, runId);
@@ -155,6 +169,39 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
   await deps.post(repo, headSha, rerunStatusArgs(runId));
   await endRunLogged(deps.workflow, runId);
   return "rerun";
+}
+
+/** Ends a stalled run with its final verdict. The progress stamp lands first
+ *  (#1156 item 3): a concurrent sweep reads a fresh stamp, so a slow post is
+ *  never re-stalled. The post lands before the end and the retire (#1156 item 4):
+ *  a post that failed after its retries restores the pre-stamp progress and
+ *  rethrows so the next sweep retries the verdict — unless the run is at/over
+ *  the final age, when the row leaves the sweep regardless, so it ends and
+ *  retires, logging the lost verdict. */
+async function endRunFinal(
+  deps: WatchdogDeps, row: StalledRun, now: number,
+  args: { state: "error" | "failure"; description: string },
+): Promise<WatchdogOutcome> {
+  const prior = row.progressedAt ?? 0;
+  await deps.index.progress(row.repo, row.pr, row.runId, now);
+  const postFailed = await deps.post(row.repo, row.headSha, args);
+  if (postFailed) {
+    // At the final age the row leaves the sweep next minute regardless, so end
+    // and retire it and log the lost verdict rather than restore and retry.
+    if (now - prior >= GATE_WATCHDOG_FINAL_AGE_MS) {
+      console.error(
+        `gate watchdog: final status post failed at the final age for ${row.runId}; verdict lost (${args.state}: ${args.description})`,
+      );
+      await endRunOrThrow(deps.workflow, row.runId);
+      await deps.index.retire(row.repo, row.pr, row.runId, now);
+      return "final";
+    }
+    await deps.index.progress(row.repo, row.pr, row.runId, prior);
+    throw new Error(`gate watchdog: final status post failed for ${row.runId}`);
+  }
+  await endRunOrThrow(deps.workflow, row.runId);
+  await deps.index.retire(row.repo, row.pr, row.runId, now);
+  return "final";
 }
 
 /** Ends the first run once its rerun has the pointer. A failed end is logged: the

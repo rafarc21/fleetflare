@@ -155,7 +155,7 @@ describe("the watchdog sweep on the real table: finished runs never starve a hun
         };
       },
     };
-    const post = async () => true;
+    const post = async () => false;
     const first = await sweepStalledRuns({ index: d1WatchdogIndex(env.DB), workflow, post, hasRedLeg: async () => false, now: () => now });
     expect(first.filter((r) => r.runId.startsWith("gate-fin-")).every((r) => r.outcome === "skipped")).toBe(true);
     const second = await sweepStalledRuns({ index: d1WatchdogIndex(env.DB), workflow, post, hasRedLeg: async () => false, now: () => now });

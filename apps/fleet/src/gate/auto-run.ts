@@ -122,9 +122,12 @@ export function isLiveStatus(status: string | null): boolean {
 
 /** A live run whose progress is at least GATE_STALL_MS old. A progress stamp of
  *  0 is unknown, never stalled: a run from before the stamp existed gets its
- *  stamp on its next leg (#1148 item 3). */
+ *  stamp on its next leg (#1148 item 3). A stamp of -1 is the retire marker:
+ *  the sweep retired the row, so if the pointer still names it the run is ended,
+ *  never reattached. */
 export function isStalled(run: GateRunRecord, now: number): boolean {
-  return run.progressedAt !== undefined && run.progressedAt > 0 && now - run.progressedAt >= GATE_STALL_MS;
+  return run.progressedAt === -1
+    || (run.progressedAt !== undefined && run.progressedAt > 0 && now - run.progressedAt >= GATE_STALL_MS);
 }
 
 /** Ends the run when it is still live. Returns true only when it was ended: a
