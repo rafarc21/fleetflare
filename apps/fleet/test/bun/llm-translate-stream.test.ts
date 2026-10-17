@@ -529,6 +529,20 @@ describe("runaway output detection (issue #1099)", () => {
     expect(state.runaway).toBe("repeat_line");
   });
 
+  test("a thinkTags stream whose visible text repeats must still trip repeat_line (#1185)", () => {
+    const state = createStreamState({ thinkTags: true });
+    applyOpenAIStreamChunk(state, delta({ content: "{\"name\": \"demo\"}\n" }));
+    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ content: "the same looping visible sentence, again and again\n" }));
+    expect(state.runaway).toBe("repeat_line");
+  });
+
+  test("a thinkTags stream whose reasoning_content repeats must still trip repeat_line (#1185)", () => {
+    const state = createStreamState({ thinkTags: true });
+    applyOpenAIStreamChunk(state, delta({ reasoning_content: "{\"name\": \"demo\"}\n" }));
+    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ reasoning_content: "the same looping reasoning sentence, again and again\n" }));
+    expect(state.runaway).toBe("repeat_line");
+  });
+
   test("a line under 40 chars repeated many times does not trip (`}` and `---` style lines)", () => {
     const state = createStreamState();
     for (let i = 0; i < 200; i++) applyOpenAIStreamChunk(state, delta({ content: "  {\"a\": 1},\n" }));
@@ -564,6 +578,23 @@ describe("runaway output detection (issue #1099)", () => {
     applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] });
     expect(state.runaway).toBeNull();
     expect(closeStreamOrError(state, 32000).ok).toBe(true);
+  });
+
+  test("10k newline-free 3-char deltas never call String.prototype.split (#1127)", () => {
+    const originalSplit = String.prototype.split;
+    let splitCalls = 0;
+    String.prototype.split = function (this: string, separator: any, limit?: number): string[] {
+      splitCalls++;
+      return originalSplit.call(this, separator, limit);
+    };
+    try {
+      const state = createStreamState();
+      for (let i = 0; i < 10000; i++) applyOpenAIStreamChunk(state, delta({ content: "abc" }));
+      expect(splitCalls).toBe(0);
+      expect(state.scan.partial.length).toBe(30000);
+    } finally {
+      String.prototype.split = originalSplit;
+    }
   });
 
   // Review case: a 60-element JSON array of identical short objects is legit.
@@ -616,6 +647,19 @@ describe("kimi in-think tool payload is never scanned as reasoning (issue #1099 
     const pieces = [`<think>Plan the file.\n`, ...Array.from({ length: Math.ceil(payload.length / 3) }, (_, i) => payload.slice(i * 3, i * 3 + 3)), "</think>"];
     for (const p of pieces) applyOpenAIStreamChunk(state, delta({ content: p }));
     expect(state.runaway).toBeNull();
+  });
+
+  test("a <think> tag split across deltas still latches the tool payload before its repeated argument lines (#1127)", () => {
+    const state = createStreamState({ thinkTags: true });
+    const row = "a very long repeated row value here for the guard test";
+    const rows = Array.from({ length: 60 }, () => `  "${row}"`);
+    const payload = `{"name":"Write","input":{"rows":[\n${rows.join(",\n")}\n]}}`;
+    const pieces = ["<thi", `nk>${payload}`, "</think>"];
+    const frames: string[] = [];
+    for (const p of pieces) frames.push(...applyOpenAIStreamChunk(state, delta({ content: p })));
+    expect(state.runaway).toBeNull();
+    const start = frames.map(parseFrame).find((f) => f.event === "content_block_start");
+    expect(start?.data).toMatchObject({ content_block: { type: "tool_use", name: "Write" } });
   });
 
   test("reasoning in a think region with no tool call and a repeated line still trips", () => {
