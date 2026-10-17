@@ -315,6 +315,20 @@ describe("createTask — duplicate-task refusal (#1133)", () => {
     expect(api.createIssue).toHaveBeenCalledTimes(1);
   });
 
+  it("an unlabelled open issue (state null) is NOT a task and is allowed (#1208)", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 12, state: null, labels: [], open: true })) });
+    const res = await createTask(api, "o/r", { ...brief, title: "#12 gate" });
+    expect(res.ok).toBe(true);
+    expect(api.createIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("a closed issue still carrying a live label (open false) is allowed (#1208)", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 12, state: "working", labels: ["working"], open: false })) });
+    const res = await createTask(api, "o/r", { ...brief, title: "#12 gate" });
+    expect(res.ok).toBe(true);
+    expect(api.createIssue).toHaveBeenCalledTimes(1);
+  });
+
   it("a brief with no issue reference never reads getIssue (no extra read)", async () => {
     const api = fakeApi();
     const res = await createTask(api, "o/r", brief);
