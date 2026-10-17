@@ -310,15 +310,23 @@ export function blueprintCredentialWriteCmd(blueprintRepo: string): string {
  *  scoped keys (the suffixless stale one and the `.git.helper` one) and remove
  *  the store file. Run at provision when the blueprint repo IS the work repo:
  *  a read-only 1 h token answering the work repo's own push URL is exactly
- *  the shadow that breaks every push. Repeat-safe, like the write itself. */
+ *  the shadow that breaks every push. Repeat-safe, like the write itself.
+ *
+ *  Git's config keys are case-sensitive, so a prior provision whose
+ *  `blueprint.repo` differed in casing left a shadow key under THAT casing,
+ *  and a drop keyed on the current casing would miss it (while still
+ *  removing the store file the dangling key points at). The keys for the
+ *  lowercase form are unset too, deduped when the given string is already
+ *  lowercase. */
 export function blueprintCredentialDropCmd(blueprintRepo: string): string {
   if (!SAFE_REPO.test(blueprintRepo)) throw new Error(`blueprint drop: unsafe repo name ${JSON.stringify(blueprintRepo)}`);
-  const base = `credential.https://github.com/${blueprintRepo}`;
   const drop = (k: string) => `{ git config --global --unset-all '${k}' 2>/dev/null || true; }`;
-  return (
-    `${drop(`${base}.helper`)} && ${drop(`${base}.git.helper`)} && ` +
-    `rm -f ${BLUEPRINT_CREDENTIAL_PATH}`
-  );
+  const keys = (repo: string) => [
+    `credential.https://github.com/${repo}.helper`,
+    `credential.https://github.com/${repo}.git.helper`,
+  ];
+  const names = [...new Set([...keys(blueprintRepo), ...keys(blueprintRepo.toLowerCase())])];
+  return names.map(drop).join(" && ") + ` && rm -f ${BLUEPRINT_CREDENTIAL_PATH}`;
 }
 
 /** Issue #1187: the refresh-side heal for a live studio provisioned before

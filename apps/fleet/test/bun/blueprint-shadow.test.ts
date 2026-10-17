@@ -111,6 +111,23 @@ describe("blueprintCredentialDropCmd, asked of git", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("a shadow keyed under the repo's OTHER casing is dropped too", () => {
+    // fresh() writes the blueprint credential for the lowercase WORK_REPO —
+    // what a prior provision with a lowercase blueprint.repo would have left.
+    // The drop is called with the mixed-case form (the current blueprint.repo),
+    // so the lowercase key is what a case-sensitive drop misses.
+    const { dir, env } = fresh();
+    try {
+      expect(passwordFor(workUrl, env)).toBe(BLUEPRINT_TOKEN);
+      const r = run(blueprintCredentialDropCmd("Acme-Org/Sample"), dir, env);
+      expect(r.code).toBe(0);
+      expect(passwordFor(workUrl, env)).toBe(WORK_TOKEN);
+      expect(existsSync(localize(BLUEPRINT_CREDENTIAL_PATH, dir))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("blueprintShadowDropCmd (the refresh heal), asked of git", () => {
