@@ -5,6 +5,7 @@ import { describe, expect, it } from "bun:test";
 import {
   CLOSING_KEYWORD_RE, closingKeywordFailure, leakFailure, mergePrecheckFailures,
   COMPARE_TRUNCATED_FAILURE, truncationFailure, addedLines, unscannableFiles, precheckBlobs, recheckFailures,
+  capStatusDescription, UNSCANNABLE_FILE_FAILURE,
 } from "../../src/gate/merge-precheck";
 
 const CLOSING = "closing keyword in PR title or body";
@@ -321,5 +322,23 @@ describe("recheckFailures", () => {
 
   it("is clean for a plain re-read", () => {
     expect(recheckFailures({ title: "plain", body: "plain", patterns: ["acmeclient"], private: false })).toEqual([]);
+  });
+});
+
+// #1176: GitHub 422s a status description over 140 chars.
+describe("capStatusDescription", () => {
+  it("caps a long description at 140 chars, starting with the failure prefix", () => {
+    const long = UNSCANNABLE_FILE_FAILURE + Array.from({ length: 60 }, (_, i) => `file${i}.png`).join(", ");
+    const capped = capStatusDescription(long);
+    expect(capped.length).toBeLessThanOrEqual(140);
+    expect(capped.startsWith("gate precheck: no diff to scan: file0.png")).toBe(true);
+  });
+
+  it("leaves a short description unchanged", () => {
+    expect(capStatusDescription("closing keyword in PR title or body")).toBe("closing keyword in PR title or body");
+  });
+
+  it("trims trailing whitespace after the cut", () => {
+    expect(capStatusDescription("short description   ")).toBe("short description");
   });
 });
