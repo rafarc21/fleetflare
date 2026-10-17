@@ -518,6 +518,18 @@ describe("runLegStep: install failure retries once (#1092)", () => {
     expect(sent).toBe(2);
   });
 
+  it("an install-failed result read from R2 is retried once (#1126)", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; throw new Error("Network connection lost."); };
+    const result = await runLegStep(step, dispatch, PLANNED, {
+      readResult: async () => ({ state: "error", description: INSTALL }),
+    });
+    // The R2 prefix must not hide the install-failed match: one fresh-container retry.
+    expect(sent).toBe(2);
+    expect(result.description).toContain("result read from R2 after transport loss");
+  });
+
   it("install failed twice: the retry's error is final, and its description notes the first cause", async () => {
     const step = fakeStep();
     let sent = 0;

@@ -99,6 +99,10 @@ export function withStepDeadline<T>(work: Promise<T>, ms: number, message: strin
 /** A leg's result as the container wrote it to R2: state and description, no leg name. */
 export type StoredLegResult = { state: LegResult["state"]; description?: string };
 
+/** The description prefix a result read back from R2 carries (#1122). Kept in one
+ *  place so isRetryable can strip it before matching the underlying cause. */
+export const R2_PREFIX = "result read from R2 after transport loss: ";
+
 /** Runs one leg: a start-<leg> step, and when that returns state "failure"
  *  (a red test, possibly flaky), an "install failed" error (#1092), or a
  *  "clone failed" error (#1104) a single retry-<leg> step with a fresh container. Never throws: every failure becomes
@@ -210,7 +214,10 @@ export function isRetryable(first: LegRunResult): boolean {
   if (first.state === "failure") return true;
   if (first.state !== "error") return false;
   const description = first.description ?? "";
-  return description.startsWith("install failed") || description.startsWith("clone failed:");
+  // Strip the R2 read-back prefix so a result recovered after transport loss
+  // matches on its underlying cause (#1126).
+  const stripped = description.startsWith(R2_PREFIX) ? description.slice(R2_PREFIX.length) : description;
+  return stripped.startsWith("install failed") || stripped.startsWith("clone failed:");
 }
 
 /** The minimal R2 bucket shape the reader needs: the real R2Bucket satisfies it. */
@@ -247,7 +254,7 @@ export async function storedLegResult(
     const text = stored.description ?? stored.state;
     return {
       state: stored.state,
-      description: `result read from R2 after transport loss: ${text}`.slice(0, MAX_DESCRIPTION_CHARS),
+      description: `${R2_PREFIX}${text}`.slice(0, MAX_DESCRIPTION_CHARS),
     };
   } catch {
     return undefined;
