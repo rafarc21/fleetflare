@@ -189,9 +189,14 @@ export function isLeadInferenceSilent(
   if (leadGate(status, now).kind !== "activity") return false;
   const activity = status.observed?.activity;
   if (activity?.state !== "working") return false;
-  if (ageSeconds(activity.observedAt, now) > ACTIVITY_MIRROR_STALE_SECONDS) return false;
+  // A timestamp that does not parse is no evidence either way: NaN compares false
+  // against every threshold, and ageSeconds reads an unparseable mirror as age 0
+  // (fresh), so both stamps are rejected up front.
+  const observedMs = Date.parse(activity.observedAt);
   const sinceMs = Date.parse(activity.since);
-  if (!Number.isFinite(sinceMs) || now.getTime() - sinceMs < INFER_SILENT_MIN_WORKING_MS) return false;
+  if (!Number.isFinite(observedMs) || !Number.isFinite(sinceMs)) return false;
+  if (ageSeconds(activity.observedAt, now) > ACTIVITY_MIRROR_STALE_SECONDS) return false;
+  if (now.getTime() - sinceMs < INFER_SILENT_MIN_WORKING_MS) return false;
   return (u?.calls ?? 0) === 0;
 }
 
