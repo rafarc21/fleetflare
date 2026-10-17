@@ -248,15 +248,22 @@ describe("sweepStalledRuns: the final verdict is stamped before its post (#1156 
 });
 
 describe("sweepStalledRuns: a final post that failed is retried, not silently retired (#1156 item 4)", () => {
-  it("the failed post keeps the run live and its row, so a later sweep reposts the verdict", async () => {
+  it("the failed post keeps the run live and restores its row's stamp, so a later sweep reposts the verdict", async () => {
     const h = harness({ redLeg: true, postFails: true });
     expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "failed" }]);
     expect(h.engine.terminated).toEqual([]);
     expect(h.head()?.runId).toBe("gate-x");
-    expect(h.head()?.progressedAt).toBe(T0 + GATE_STALL_MS);
+    expect(h.head()?.progressedAt).toBe(T0); // the stamp is restored, so the row stays in the sweep
     h.opts.postFails = false;
     const later = T0 + GATE_STALL_MS + GATE_STALL_MS + 60_000;
     expect(await h.sweep(later)).toEqual([{ runId: "gate-x", outcome: "final" }]);
+    expect(h.engine.terminated).toEqual(["gate-x"]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a final post that fails at the watch edge is ended and retired anyway, logging the lost verdict (#1196 B)", async () => {
+    const h = harness({ redLeg: true, postFails: true });
+    expect(await h.sweep(T0 + GATE_WATCHDOG_FINAL_AGE_MS)).toEqual([{ runId: "gate-x", outcome: "final" }]);
     expect(h.engine.terminated).toEqual(["gate-x"]);
     expect(h.head()?.progressedAt).toBe(-1);
   });
@@ -343,6 +350,26 @@ describe("hasRedResult: a leg's decisive stored result decides red, as the run's
 
   it("a red first try whose retry stored an error stays red: the run's red-first rule is final (#1156 N1c)", async () => {
     const files = { [`${P}/shard-lint.json`]: "failure", [`${P}/shard-lint.retry.json`]: "error" };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
+  });
+
+  it("a try-2 that is red with a green retry is not red: the retry's success decides the leg (#1196 A1)", async () => {
+    const files = { [`${P}/shard-lint-try2.json`]: "failure", [`${P}/shard-lint.retry.json`]: "success" };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(false);
+  });
+
+  it("an install error first try whose retry is red IS red: a red retry is the leg's verdict (#1196 A2)", async () => {
+    const files = { [`${P}/shard-lint.json`]: "error", [`${P}/shard-lint.retry.json`]: "failure" };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
+  });
+
+  it("a try-2 error with a red retry IS red: a red retry is the leg's verdict (#1196 A3)", async () => {
+    const files = { [`${P}/shard-lint-try2.json`]: "error", [`${P}/shard-lint.retry.json`]: "failure" };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
+  });
+
+  it("a try-2 that is red alone IS red: its retry was lost, the try-2 is the verdict (#1196 A4)", async () => {
+    const files = { [`${P}/shard-lint-try2.json`]: "failure" };
     expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
   });
 });

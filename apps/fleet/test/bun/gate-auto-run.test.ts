@@ -387,6 +387,19 @@ describe("startManualGateRun: a live run with no progress is hung, so it is ende
     const failing = { ...fakeIndex().index, progress: async () => { throw new Error("D1 down"); } };
     await expect(markRunProgress(failing, PR_REPO, 7, "gate-x", T1)).resolves.toBeUndefined();
   });
+
+  it("a run the sweep retired (progressedAt -1) is ended and a fresh run starts, never reattached (#1196 C)", async () => {
+    const { wf, creates, terminated } = fakeWorkflow();
+    const { index, heads } = fakeIndex();
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    // A switched-off repo's sweep retired the run: the pointer still names it with the -1 retire stamp.
+    heads.set(`${PR_REPO}#7`, { headSha: HEAD, runId: first.runId, progressedAt: -1 });
+    const second = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1 + 60_000);
+    expect(terminated).toEqual([first.runId]);
+    expect(second.reused).toBe(false);
+    expect(second.runId).not.toBe(first.runId);
+    expect(creates).toHaveLength(2);
+  });
 });
 
 describe("startManualGateRun: the manual start's edges around a live run (#1148 items 2, 3 and the handoff race)", () => {
