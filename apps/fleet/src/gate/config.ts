@@ -293,3 +293,12 @@ export function guardSuccessStatus(
   const failure = sharedHeadFailure(headSha, baseRef, pr, lookup.open);
   return failure === null ? args : { state: "failure", description: failure };
 }
+
+/** The head's open PRs from a full open list (#1172): those whose head sha
+ *  matches, as { number, baseRef }. Pure so bun test reaches the filter, which
+ *  the untestable workflow.ts driver then only calls. */
+export function openPullsForHead(
+  headSha: string, pulls: { number: number; headSha: string; baseRef: string }[],
+): SharedHeadPull[] {
+  return pulls.filter((p) => p.headSha === headSha).map((p) => ({ number: p.number, baseRef: p.baseRef }));
+}

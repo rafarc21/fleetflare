@@ -7,32 +7,36 @@ an earlier green. Fix has two halves, TDD failing-first.
 
 ## 1. Shared-head guard before every success post (config.ts + workflow.ts)
 
-Pure helper in config.ts:
+Pure helpers in config.ts:
 
-`sharedHeadFailure(headSha, open: { number: number; baseSha: string }[], baseSha)` ->
-`head <sha8> shared with PR #N` for the first sibling open PR (number != current,
-different base), else null. Different base = baseSha differs. Lookup error is not
-a helper input: the caller fails closed.
+`sharedHeadFailure(headSha, baseRef, pr, open[])` -> `head <sha8> shared with PR #N`
+for the first sibling open PR (number != current, different base), else null. Different
+base = baseRef differs (the PR list's base branch, not a second getBranchSha call).
+`guardSuccessStatus(...)` wraps a success post: a lookup error or a shared head
+downgrades to failure ("gate: cannot list shared-head PRs" / the shared-head text).
+`openPullsForHead(headSha, pulls)` keeps only the head's PRs, as `{ number, baseRef }`.
 
-workflow.ts: before post-skip-status (line 126) and before post-verdict (line 233),
-list open PRs whose head.sha equals the resolved head (new github/api `listOpenPulls`,
-refs not shas), map each to `{ number, baseSha }` via `getBranchSha`. A helper error
-posts failure "gate: cannot list shared-head PRs" (fail closed), never success.
+workflow.ts: before post-skip-status and before post-verdict, list open PRs via the
+new github/api `listOpenPulls` (paged, `truncated` flagged), keep the head's via
+`openPullsForHead`, and run the guard. A lookup error OR a truncated list posts
+failure (fail closed), never success. Failure/error verdicts post as-is.
 
 ## 2. Per-PR fresh run (auto-run.ts)
 
-Run id becomes `gateRunId(repo, pr, headSha)`: repo hash + pr + sha, so PR A and PR B
-sharing a sha get distinct instances. In startGateRun's catch (existing-id path), when
-`index.latest(repo, pr).headSha !== headSha`, start a fresh `-r<base36time>` run like the
-#1170-reverted code, else reuse. One live run per (pr, sha): a second start of the SAME
-(pr, sha) still reuses; only a DIFFERENT pr sharing the sha starts fresh.
+Run id stays `gateRunId(repo, headSha)`; a second PR sharing a sha starts a fresh
+`-p<pr>` run in startGateRun's catch (existing-id path), only when
+`index.latest(repo, pr).headSha !== headSha`. The `-p<pr>` id is deterministic, so
+create-idempotency dedupes concurrent first-starts: one live run per (pr, sha). A
+second start of the SAME (pr, sha) still reuses; only a DIFFERENT pr sharing the sha
+starts fresh.
 
 ## Tests (failing first)
 
-- config.test.ts: sharedHeadFailure — sibling different base -> text; same base / self / empty -> null.
-- auto-run.test.ts: PR A red-then-PR B green ends red; B green-then-A red ends red (fresh run,
-  distinct id); same-base pair reuses (green); one live run per (pr, sha).
-- api-queries.test.ts: listOpenPulls maps number + head/base refs; throws on non-2xx.
+- config.test.ts: sharedHeadFailure / guardSuccessStatus / openPullsForHead.
+- auto-run.test.ts: PR A red-then-PR B green ends red; B green-then-A red ends red
+  (fresh run, distinct id); same-base pair reuses (green); one live run per (pr, sha).
+- api-queries.test.ts: listOpenPulls maps number + head/base, pages, flags truncation,
+  throws on non-2xx.
 
 ## Verification
 

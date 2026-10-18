@@ -20,7 +20,10 @@ import {
 import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
-import { bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, guardSuccessStatus, type GateConfig } from "./config";
+import {
+  bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, guardSuccessStatus, openPullsForHead,
+  type GateConfig, type SharedHeadLookup,
+} from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
   bundleKeyFor, outcomeLegs, pendingStatusArgs, planBundleLeg, planUnionLegs, verdictToStatusArgs,
@@ -255,16 +258,16 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
 /** #1172: the shared-head guard lookup. Lists the head's open PRs and keeps
  *  those whose head sha matches, as { number, baseRef }. A lookup that throws
- *  is an error the caller fails closed on — never a silent green. */
+ *  or truncates the open list is an error the caller fails closed on — never
+ *  a silent green. */
 async function sharedHeadLookup(
   mintToken: (repo: string) => Promise<string>, repo: string, headSha: string,
-): Promise<{ open: { number: number; baseRef: string }[] } | { error: string }> {
+): Promise<SharedHeadLookup> {
   try {
     const token = await mintToken(repo);
-    const pulls = await listOpenPulls(token, repo);
-    return {
-      open: pulls.filter((p) => p.headSha === headSha).map((p) => ({ number: p.number, baseRef: p.baseRef })),
-    };
+    const { pulls, truncated } = await listOpenPulls(token, repo);
+    if (truncated) return { error: "open PR list truncated" };
+    return { open: openPullsForHead(headSha, pulls) };
   } catch (err) {
     console.error("gate: shared-head lookup failed", err);
     return { error: "lookup failed" };
