@@ -151,3 +151,74 @@ describe("TRIAGE_ROUTER_TOKEN is accepted on no other route", () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe("#1221 triage key edge cases (maestro security review amend)", () => {
+  it("empty configured key + empty x-api-key header gives 401", async () => {
+    const run = vi.fn(aiOk);
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, TRIAGE_ROUTER_TOKEN: "" } as unknown as Env;
+    const rows = async () => [];
+    const r = await handleFleetAnthropicMessages(
+      new Request(`https://w${ANTHROPIC_MESSAGES_PATH}`, {
+        method: "POST", headers: { "x-api-key": "" }, body: JSON.stringify(good),
+      }), e, ctx, rows,
+    );
+    expect(r.status).toBe(401);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("FLEET_JUNIOR off + a valid triage key gives 404", async () => {
+    const run = vi.fn(aiOk);
+    const e = { ...env, FLEET_JUNIOR: "off", AI: { run }, TRIAGE_ROUTER_TOKEN: TRIAGE_SECRET } as unknown as Env;
+    const rows = async () => [];
+    const r = await handleFleetAnthropicMessages(req({ token: TRIAGE_SECRET }), e, ctx, rows);
+    expect(r.status).toBe(404);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("count_tokens rate limit returns 429 for triage--daemon", async () => {
+    const run = vi.fn(aiOk);
+    const e = triageEnv(run, { LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "1" });
+    const rows = async () => [];
+    const first = await handleFleetAnthropicCountTokens(
+      req({ token: TRIAGE_SECRET, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
+    );
+    expect(first.status).toBe(200);
+    const second = await handleFleetAnthropicCountTokens(
+      req({ token: TRIAGE_SECRET, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
+    );
+    expect(second.status).toBe(429);
+    expect(second.headers.get("retry-after")).not.toBeNull();
+  });
+
+  it("a second wrong key sharing the first hex char is rejected", async () => {
+    const run = vi.fn(aiOk);
+    const e = triageEnv(run);
+    const rows = async () => [];
+    // "other" hashes to 0d... — same first hex char as TRIAGE_SECRET's d6...
+    const r = await handleFleetAnthropicMessages(req({ token: "other" }), e, ctx, rows);
+    expect(r.status).toBe(401);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("a real registry row with the reserved id triage--daemon is rejected", async () => {
+    const run = vi.fn(aiOk);
+    const e = triageEnv(run);
+    const token = mintSpawnToken();
+    const rows = async () => [row(DAEMON_ID, await hashSpawnToken(token), "glm")];
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(401);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("a spawn-shaped value is never accepted as the triage key", async () => {
+    const run = vi.fn(aiOk);
+    const e = triageEnv(run);
+    const rows = async () => [];
+    // A spawn-shaped value routes to spawn-token resolution, never the triage
+    // compare — with no matching row it must 401, not fall through to the key.
+    const spawnShaped = `fsp_${"0".repeat(64)}`;
+    const r = await handleFleetAnthropicMessages(req({ token: spawnShaped }), e, ctx, rows);
+    expect(r.status).toBe(401);
+    expect(run).not.toHaveBeenCalled();
+  });
+});

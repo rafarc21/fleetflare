@@ -697,6 +697,9 @@ async function authenticateGlmLeadRequest(
     // #1218: a presented value that is not spawn-token-shaped may still be the
     // scoped router-only triage credential. Accepted ONLY here — the spawn
     // token path above never sees it, and no other route reads this secret.
+    // #1221: that shape gate is exactly why a spawn-shaped value can never be
+    // the triage key — a value matching the spawn-token shape routes to
+    // spawn-token resolution below and is never compared against this secret.
     if (await isTriageDaemonToken(env, presented)) {
       return {
         studio: { id: TRIAGE_DAEMON_ID, repo: "oss-triage", role: "daemon" },
@@ -708,6 +711,10 @@ async function authenticateGlmLeadRequest(
   const allRows = await rows();
   const studio: SpawnParent | null = await resolveSpawnParent(allRows, presented);
   if (!studio) return { response: text("unauthorized", 401) };
+  // #1221: TRIAGE_DAEMON_ID is reserved for the synthetic credential above —
+  // a real registry row must never claim it, or its spawn token would pass
+  // this gate and spend (rate limit + usage) under the daemon's id.
+  if (studio.id === TRIAGE_DAEMON_ID) return { response: text("unauthorized", 401) };
   // MAJOR 2 (BLOCKER-adjacent): spawn-token validity alone used to be the
   // entire gate — ANY studio's token, any leadType, could spend Workers AI
   // budget here with zero spend controls. `SpawnParent` (spawn.ts) carries
