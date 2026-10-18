@@ -548,6 +548,9 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
         context: GATE_STATUS_CONTEXT,
         description: "gate: cannot list shared-head PRs",
       });
+      // No leg ran: the SKIP path and its guard never touch GATE_RUNNER.
+      const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
+      expect(legCalls).toEqual([]);
       // Retried once: the first throw and the retry's throw both hit the endpoint.
       expect(openPullsCalls).toBeGreaterThanOrEqual(2);
     } finally {
