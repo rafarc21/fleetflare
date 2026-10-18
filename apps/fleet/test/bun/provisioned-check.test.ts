@@ -79,8 +79,33 @@ describe("harnessExpectation — the mcp token (issue #1216)", () => {
     expect(dec.split("\n")).not.toContain("mcp");
   });
 
-  test("a role env returns null — roles get MCP coverage via ask 2, not ask 3", () => {
+  test("a studio harness starts with the kind studio marker", () => {
+    const dec = atob(harnessExpectation(studioEnv("codebase-memory"))!);
+    expect(dec.split("\n")[0]).toBe("kind studio");
+  });
+
+  test("a role with ROLE_MCP names carries the mcp token, marked kind role", () => {
     const roleEnv: RoleEnv = { ROLE_PROMPT_B64: "aGk=", ROLE_ALLOWED_TOOLS: "", ROLE_EFFORT: "", ROLE_MCP: "playwright" };
+    const dec = atob(harnessExpectation(roleEnv)!);
+    expect(dec.split("\n")[0]).toBe("kind role");
+    expect(dec.split("\n")).toContain("mcp");
+  });
+
+  test("a role with no ROLE_MCP returns null", () => {
+    const roleEnv: RoleEnv = { ROLE_PROMPT_B64: "aGk=", ROLE_ALLOWED_TOOLS: "", ROLE_EFFORT: "" };
     expect(harnessExpectation(roleEnv)).toBeNull();
+  });
+
+  test("a role harness asserts mcp only — the studio-only lead-gate/caveman checks are gated behind kind studio", () => {
+    const roleEnv: RoleEnv = { ROLE_PROMPT_B64: "aGk=", ROLE_ALLOWED_TOOLS: "", ROLE_EFFORT: "", ROLE_MCP: "playwright" };
+    const dec = atob(harnessExpectation(roleEnv)!);
+    // The role blob asserts the MCP config and nothing studio-only.
+    expect(dec.split("\n")).toEqual(["kind role", "mcp", "end"]);
+    // The command still COMPILES the lead-gate/caveman checks (same as every
+    // harness), but wraps them in a `kind studio` guard so a role never takes
+    // them at runtime — the marker, not the text, is what excludes a role.
+    const cmd = provisionedCheckCmd(ABSENT, harnessExpectation(roleEnv));
+    expect(cmd).toContain('if [ "$kind" = studio ]; then');
+    expect(cmd).toContain("fleet-mcp.json");
   });
 });

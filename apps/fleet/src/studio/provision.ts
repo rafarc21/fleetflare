@@ -1384,15 +1384,19 @@ async function verifyBringupLanded(
 }
 
 /**
- * What bring-up MUST have materialized inside a studio container, encoded for
- * the check to read back. One line per assertion, base64'd:
+ * What bring-up MUST have materialized inside a container, encoded for the
+ * check to read back. One line per assertion, base64'd:
  *
+ *   kind studio|role   which shape this blob is; the check gates its
+ *                      studio-only checks on it (see harnessCheckSnippet)
  *   s <skill-name>     a declared skill, resolvable to a real skill dir
  *   m <member-file>    a declared member, present in ~/.claude/agents/
  *   g                  the Tier-0 completion gate (Stop hook) must be
  *                      installed — present only when STUDIO_COMPLETION_GATE
  *                      is set (a code-writing roster); never for the
  *                      Maestro or any other non-implementing studio
+ *   mcp                ~/.claude/fleet-mcp.json must exist (a blueprint that
+ *                      declares mcp: must actually have its config written)
  *   end                sentinel — a decode that produces nothing is a broken
  *                      check, not an empty expectation (see PROVISIONED_UNKNOWN)
  *
@@ -1403,15 +1407,30 @@ async function verifyBringupLanded(
  * cannot express either, and a value read from a variable is never re-parsed
  * by the shell.
  *
- * `null` for a ROLE (no STUDIO_NAME): a plain role provisions correctly with
- * no hooks, no members and no skills — measured live on `websites--pilot`
- * (HOOK=0 SKILLS=0) — so asserting on them would fail a healthy studio. The
- * asymmetry is the point: this Worker knows which of the two it resolved, and
- * that knowledge is what makes "no gate" detectable at all.
+ * A ROLE with no `mcp:` keeps the old null: a plain role provisions correctly
+ * with no hooks, no members and no skills — measured live on `websites--pilot`
+ * (HOOK=0 SKILLS=0) — so asserting on those would fail a healthy studio. But a
+ * role whose blueprint DOES declare `mcp:` gets a minimal `kind role` + `mcp`
+ * harness: the ask-3 degraded case (declared mcp, config missing) applies to
+ * roles as much as studios, and it must not stay invisible just because the
+ * harness was once studio-only. The asymmetry is the point: this Worker knows
+ * which shape it resolved, and that knowledge is what makes "no gate" and
+ * "no mcp config" detectable at all.
  */
 export function harnessExpectation(env: RoleEnv | StudioEnv | null | undefined): string | null {
-  if (!env || !("STUDIO_NAME" in env) || env.STUDIO_NAME === "") return null;
-  const lines: string[] = [];
+  if (!env) return null;
+  if (!("STUDIO_NAME" in env) || env.STUDIO_NAME === "") {
+    // Role (or a studio whose stored STUDIO_NAME emptied — degenerately
+    // role-shaped): only the mcp check applies, and only when the role's own
+    // ROLE_MCP is non-empty. A role declaring no mcp keeps the old null
+    // (two-marker) behavior.
+    const mcpNames = ("ROLE_MCP" in env ? env.ROLE_MCP ?? "" : "").split(",").filter((n) => n !== "");
+    if (mcpNames.length === 0) return null;
+    return btoa(["kind role", "mcp", "end"].join("\n"));
+  }
+  // env is StudioEnv from here down (STUDIO_NAME present and non-empty).
+  const mcpNames = env.STUDIO_MCP.split(",").filter((n) => n !== "");
+  const lines: string[] = ["kind studio"];
   for (const skill of env.STUDIO_SKILLS.split(",")) {
     if (skill !== "") lines.push(`s ${skill}`);
   }
@@ -1439,7 +1458,6 @@ export function harnessExpectation(env: RoleEnv | StudioEnv | null | undefined):
   // exactly as falsy as "" — see StudioEnv.STUDIO_COMPLETION_GATE's own doc
   // comment.
   if (env.STUDIO_COMPLETION_GATE) lines.push("g");
-  const mcpNames = env.STUDIO_MCP.split(",").filter((n) => n !== "");
   if (mcpNames.length > 0) lines.push("mcp");
   lines.push("end");
   return btoa(lines.join("\n"));
@@ -1643,13 +1661,18 @@ function harnessCheckSnippet(harness: string): string {
     // reporting a healthy studio as bare, or a bare studio as healthy.
     `dec="$(printf '%s' '${harness}' | base64 -d 2>/dev/null)"; ` +
     `if [ -z "$dec" ]; then echo "${PROVISIONED_UNKNOWN} harness expectation did not decode in the container"; else ` +
-    // Bounded wait for caveman's SessionStart flag — see this file's doc
-    // comment above on why claude can be "running" a beat before it fires.
-    `j=0; while [ "$j" -lt ${CAVEMAN_FLAG_TRIES} ]; do if [ -f ${flag} ]; then break; fi; j=$((j+1)); sleep 1; done; ` +
+    // First line of a blob this Worker builds is `kind studio` or `kind role`.
+    // Anything else (a foreign/malformed blob) falls toward `studio` — the
+    // shape that asserts MORE — so an unrecognised blob can never silently
+    // skip the lead-gate/caveman checks.
+    `kind="$(printf '%s\\n' "$dec" | { read -r k; [ "$k" = "kind role" ] && printf role || printf studio; })"; ` +
+    `if [ "$kind" = studio ]; then j=0; while [ "$j" -lt ${CAVEMAN_FLAG_TRIES} ]; do if [ -f ${flag} ]; then break; fi; j=$((j+1)); sleep 1; done; fi; ` +
     `miss="$( { ` +
+    `if [ "$kind" = studio ]; then ` +
     `[ -x ${gate} ] || echo "lead-gate hook missing or not executable (~/.claude/hooks/lead-gate.sh)"; ` +
     `grep -q lead-gate.sh ${settings} 2>/dev/null || echo "settings.json does not reference the lead-gate hook"; ` +
     `[ -f ${flag} ] || echo "caveman never activated (no ~/.claude/.caveman-active flag: the plugin hooks did not fire)"; ` +
+    `fi; ` +
     // `case` is deliberately NOT used here: its patterns carry an unbalanced
     // `)`, and inside a `$( ... )` the shell reads that as the end of the
     // substitution (measured — the whole block died with "syntax error near
