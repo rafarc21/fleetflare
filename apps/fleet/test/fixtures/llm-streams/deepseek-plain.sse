@@ -1,0 +1,8 @@
+: #1210 fixture — deepseek, thinkTags OFF. NOT-live-captured (see stray-closer.sse).
+data: {"choices":[{"delta":{"content":"Note: ` thinking` is literal for this model."},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{"content":" No parsing happens."},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":15}}

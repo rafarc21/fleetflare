@@ -1,0 +1,12 @@
+: #1210 fixture — kimi, thinkTags ON. NOT-live-captured: hand-built from the
+: documented wire shapes in translate.ts and llm-translate-stream.test.ts; a
+: studio container cannot record live upstream bytes (no Cloudflare credential).
+data: {"choices":[{"delta":{"content":"Thinking complete."},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{"content":"</think>"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{"content":" Here is the result."},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":12}}

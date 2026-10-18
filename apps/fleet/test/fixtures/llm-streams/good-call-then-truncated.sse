@@ -1,0 +1,8 @@
+: #1210 fixture — kimi, thinkTags ON. NOT-live-captured (see stray-closer.sse).
+data: {"choices":[{"delta":{"content":"Let me check that."},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{"content":"<think><tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"/workspace/acme/README.md\"}}</tool_call><tool_call>{\"name\":\"Bash\",\"arguments\":{\"command\":\"ls -la\"}"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{"content":"</think>"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
