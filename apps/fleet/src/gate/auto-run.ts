@@ -1,12 +1,13 @@
 // #1072 (refs #715): the gate's auto-run. A pull_request delivery for a gated
 // repo (GATE_RUNNER_REPOS, FLEET_GATE_RUNNER on, not a draft) starts one gate
-// run per head sha, before the PR is final. The manual start route
+// run per (pr, head sha), before the PR is final. The manual start route
 // (/studio/gate/start) keys its run the same way, so a `fleet gate run` of a
 // sha with a LIVE run reattaches to it. A finished run is not reused by the
 // manual start (#1085): it starts a fresh run instead (startManualGateRun).
 //
-// Run identity is the Workflows instance id: a hash of the repo plus the head
-// sha. Creating an instance under an id that already exists is the dedupe.
+// Run identity is the Workflows instance id: the base id is a hash of the repo
+// plus the head sha, and a second PR sharing the sha starts a `-p<pr>` fresh
+// run (#1172). Creating an instance under an id that already exists is the dedupe.
 import { isGateRunnerRepo } from "./config";
 
 /** The params a gate run is created with: the GateWorkflow's own payload shape
@@ -192,13 +193,23 @@ export async function startGateRun(
     }
     // #1172: the id is (repo, head sha). A run under this id whose per-PR
     // pointer does not name this head belongs to another PR that shared the
-    // sha: reuse would inherit that PR's verdict. Start a fresh -r run, so each
-    // PR runs and posts its own decision. The pointer naming this head means the
-    // PR already owns a run of it: reattach to that run, never a third instance.
+    // sha: reuse would inherit that PR's verdict. Start a fresh run keyed
+    // (repo, pr, sha), so each PR runs and posts its own decision and a
+    // concurrent first-start of the same PR collides on the SAME id (Workflows
+    // create-idempotency) instead of starting a second live run.
     const latest = await index.latest(input.repo, input.pr);
     if (latest?.headSha === input.headSha) return { runId: latest.runId, reused: true };
-    const freshId = `${runId}-r${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 6)}`;
-    await wf.create({ id: freshId, params: { repo: input.repo, pr: input.pr } });
+    const freshId = `${runId}-p${input.pr}`;
+    try {
+      await wf.create({ id: freshId, params: { repo: input.repo, pr: input.pr } });
+    } catch (freshErr) {
+      try {
+        await wf.get(freshId);
+      } catch {
+        throw freshErr;
+      }
+      return { runId: freshId, reused: true };
+    }
     return recordRun(wf, input, index, freshId, Date.now);
   }
   return recordRun(wf, input, index, runId, Date.now);

@@ -532,7 +532,7 @@ describe("startGateRun: a shared head sha does not inherit another PR's verdict 
     const out = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
     expect(out.reused).toBe(false);
     expect(out.runId).not.toBe(foreignRunId);
-    expect(out.runId.startsWith(`${foreignRunId}-r`)).toBe(true);
+    expect(out.runId).toBe(`${foreignRunId}-p7`);
     expect(runs.size).toBe(2);
   });
 
@@ -544,6 +544,18 @@ describe("startGateRun: a shared head sha does not inherit another PR's verdict 
     const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
     expect(fresh.reused).toBe(false);
     expect(again).toEqual({ runId: fresh.runId, reused: true });
+    expect(runs.size).toBe(2);
+  });
+
+  it("a fresh run already live under the PR's deterministic id is reused, never a third instance (concurrent first-starts)", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    const freshId = `${await gateRunId(PR_REPO, HEAD)}-p7`;
+    // A concurrent first-start of PR 7 already created the deterministic fresh id.
+    await wf.create({ id: freshId, params: { repo: PR_REPO, pr: 7 } });
+    const out = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(out).toEqual({ runId: freshId, reused: true });
     expect(runs.size).toBe(2);
   });
 });
