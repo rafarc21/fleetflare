@@ -3,7 +3,7 @@ import {
   listRepoTree, listOpenPullNumbers, listPullsForCommit, listPullCommits, closeIssue,
   closingIssuesForPull, getPullRequest, commitReachableFromBranch, getIssueCloser,
   pullsWithClosingIssuesForCommits, pullClaimsIssue,
-  listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES,
+  listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES, listOpenPulls,
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
 } from "../src/github/api";
@@ -136,6 +136,52 @@ describe("listAllBranchNames", () => {
     const result = await listAllBranchNames("tok", "o/r");
     expect(calls).toHaveLength(BRANCH_NAMES_MAX_PAGES);
     expect(result.truncated).toBe(true);
+  });
+});
+
+describe("listOpenPulls", () => {
+  it("GETs open PRs and returns number + head sha + base ref + state, untruncated", async () => {
+    respond = () => Response.json([
+      { number: 7, head: { sha: "abc1234567890" }, base: { ref: "main" }, state: "open" },
+      { number: 8, head: { sha: "abc1234567890" }, base: { ref: "staging" }, state: "closed" },
+    ]);
+    const { pulls, truncated } = await listOpenPulls("tok", "o/r");
+    expect(pulls).toEqual([
+      { number: 7, headSha: "abc1234567890", baseRef: "main", state: "open" },
+      { number: 8, headSha: "abc1234567890", baseRef: "staging", state: "closed" },
+    ]);
+    expect(truncated).toBe(false);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toContain("/repos/o/r/pulls?");
+    expect(calls[0].url).toContain("state=open");
+  });
+
+  it("pages through the Link header to collect beyond one page", async () => {
+    let page = 0;
+    respond = () => {
+      page++;
+      return page === 1
+        ? new Response(JSON.stringify([{ number: 1, head: { sha: "a" }, base: { ref: "main" }, state: "open" }]), {
+            headers: { link: '<https://api.github.com/repos/o/r/pulls?state=open&per_page=100&page=2>; rel="next"' },
+          })
+        : Response.json([{ number: 2, head: { sha: "b" }, base: { ref: "main" }, state: "open" }]);
+    };
+    const { pulls, truncated } = await listOpenPulls("tok", "o/r");
+    expect(pulls.map((p) => p.number)).toEqual([1, 2]);
+    expect(truncated).toBe(false);
+  });
+
+  it("flags a still-paginating list after the page cap as truncated", async () => {
+    respond = () => new Response(JSON.stringify([{ number: 1, head: { sha: "a" }, base: { ref: "main" }, state: "open" }]), {
+      headers: { link: '<https://api.github.com/repos/o/r/pulls?state=open&per_page=100&page=2>; rel="next"' },
+    });
+    const { truncated } = await listOpenPulls("tok", "o/r");
+    expect(truncated).toBe(true);
+  });
+
+  it("throws GitHub's own words on a non-2xx", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    await expect(listOpenPulls("tok", "o/r")).rejects.toThrow(/Not Found/);
   });
 });
 

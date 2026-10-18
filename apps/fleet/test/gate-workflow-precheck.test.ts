@@ -67,17 +67,19 @@ let commitMessage = "Fix #9";
 // The fleet.json body served (FLEET_JSON or RUN_FLEET_JSON), so a test can
 // pick the skip path or the run path.
 let fleetJson = FLEET_JSON;
-// #1214: the guard's listPullsForCommit endpoint. A test throws a 5xx on the
-// FIRST call so step.do's retry re-fetches and the run still ends green.
-let pullsForCommitCalls = 0;
-let pullsForCommitThrowsFirst = false;
+// #1215: the guard's listOpenPulls endpoint (paged ?state=open). A test serves
+// an arbitrary body, throws on the FIRST call (step.do retries), throws on
+// EVERY call (fails closed after retries), or emits a next Link every page
+// (truncated -> fail closed).
+let openPullsCalls = 0;
+let openPullsBody: unknown[] = [];
+let openPullsThrowsFirst = false;
+let openPullsAlwaysThrows = false;
+let openPullsTruncated = false;
 // #1214: the /pulls/<n> title mock flips to a closing keyword at the recheck
 // (call 3) by default (#1203). A guard test keeps the title clean so the run
 // reaches the verdict guard instead of failing the success recheck.
 let titleFlipsOnRecheck = true;
-// #1214 S3: the listPullsForCommit raw body served, so a test can return a
-// sibling PR whose tip sha differs from the gated head (a stacked PR).
-let pullsForCommitBody: unknown[] = [];
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -105,14 +107,18 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       title: titleFlipsOnRecheck && pullsCalls >= 3 ? "Fix #2" : "Docs update", body: "Readme tweak",
     }));
   }
-  if (method === "GET" && /\/commits\/[0-9a-f]{40}\/pulls$/.test(url)) {
-    // #1214: listPullsForCommit — the shared-head guard. One call, head-sha
-    // scoped; empty means no sibling PRs (guard stays green).
-    pullsForCommitCalls++;
-    if (pullsForCommitThrowsFirst && pullsForCommitCalls === 1) {
+  if (method === "GET" && /\/pulls\?state=open/.test(url)) {
+    // #1215: listOpenPulls — the shared-head guard. Paged; an empty body means
+    // no sibling PRs (guard stays green).
+    openPullsCalls++;
+    if (openPullsAlwaysThrows || (openPullsThrowsFirst && openPullsCalls === 1)) {
       return Promise.reject(new Error("boom 500"));
     }
-    return Promise.resolve(json(pullsForCommitBody));
+    const headers: Record<string, string> = {};
+    if (openPullsTruncated) {
+      headers.link = '<https://api.github.com/repos/acme/example/pulls?state=open&per_page=100&page=2>; rel="next"';
+    }
+    return Promise.resolve(new Response(JSON.stringify(openPullsBody), { status: 200, headers }));
   }
   if (method === "GET" && /\/commits\/main$/.test(url)) {
     return Promise.resolve(json({ sha: BASE }));
@@ -167,10 +173,12 @@ beforeEach(() => {
   pullsCalls = 0;
   commitMessage = "Fix #9";
   fleetJson = FLEET_JSON;
-  pullsForCommitCalls = 0;
-  pullsForCommitThrowsFirst = false;
+  openPullsCalls = 0;
+  openPullsBody = [];
+  openPullsThrowsFirst = false;
+  openPullsAlwaysThrows = false;
+  openPullsTruncated = false;
   titleFlipsOnRecheck = true;
-  pullsForCommitBody = [];
   realFetch = globalThis.fetch;
   globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
 });
@@ -355,9 +363,9 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
     fleetJson = RUN_FLEET_JSON;
     titleFlipsOnRecheck = false;
     e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
-    // The guard's first listPullsForCommit throws 5xx; step.do retries and the
+    // The guard's first listOpenPulls throws 5xx; step.do retries and the
     // second call returns [] (no sibling PRs) -> guarded success.
-    pullsForCommitThrowsFirst = true;
+    openPullsThrowsFirst = true;
 
     const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-guard-retry-green");
     try {
@@ -368,7 +376,7 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       const out = await instance.getOutput() as { state: string; description?: string };
       expect(out.state).toBe("success");
       // The guard threw once and was retried (a second call succeeded).
-      expect(pullsForCommitCalls).toBeGreaterThanOrEqual(2);
+      expect(openPullsCalls).toBeGreaterThanOrEqual(2);
 
       const post = recorded.find((r) =>
         r.method === "POST" && /\/statuses\//.test(r.url) && (r.body as { state?: string }).state === "success");
@@ -391,7 +399,7 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
     // A sibling OPEN PR #8 with a DIFFERENT tip sha (stacked PR) and a different
     // base. Without the head-sha filter the guard falsely reports it as "shared
     // with PR #8"; the guard must keep only the gated head's own PRs -> green.
-    pullsForCommitBody = [{ number: 8, base: { ref: "staging" }, head: { ref: "other", sha: "c".repeat(40) }, state: "open" }];
+    openPullsBody = [{ number: 8, base: { ref: "staging" }, head: { sha: "c".repeat(40) }, state: "open" }];
 
     const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-guard-headsha-filter");
     try {
@@ -401,6 +409,167 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
 
       const out = await instance.getOutput() as { state: string; description?: string };
       expect(out.state).toBe("success");
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("skip path: a sibling open PR on the same head with a different base fails both the post and the result (#1215)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    // The guard's own PR #7 (main) and a sibling open PR #8 on the SAME head sha
+    // with a DIFFERENT base (staging): a shared head, red must win across both.
+    openPullsBody = [
+      { number: PR, head: { sha: HEAD }, base: { ref: "main" }, state: "open" },
+      { number: 8, head: { sha: HEAD }, base: { ref: "staging" }, state: "open" },
+    ];
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-guard-skip-shared");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-guard-skip-shared", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("failure");
+      expect(out.description).toBe("head aaaaaaaa shared with PR #8");
+
+      const post = recorded.find((r) =>
+        r.method === "POST" && /\/statuses\//.test(r.url) && (r.body as { state?: string }).state === "failure");
+      expect(post).toBeDefined();
+      expect(post!.body).toEqual({
+        state: "failure",
+        context: GATE_STATUS_CONTEXT,
+        description: "head aaaaaaaa shared with PR #8",
+      });
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("verdict path: a sibling open PR on the same head with a different base fails both the post and the result (#1215)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+    openPullsBody = [
+      { number: PR, head: { sha: HEAD }, base: { ref: "main" }, state: "open" },
+      { number: 8, head: { sha: HEAD }, base: { ref: "staging" }, state: "open" },
+    ];
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-guard-verdict-shared");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-guard-verdict-shared", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("failure");
+      expect(out.description).toBe("head aaaaaaaa shared with PR #8");
+
+      const post = recorded.find((r) =>
+        r.method === "POST" && /\/statuses\//.test(r.url) && (r.body as { state?: string }).state === "failure");
+      expect(post).toBeDefined();
+      expect(post!.body).toEqual({
+        state: "failure",
+        context: GATE_STATUS_CONTEXT,
+        description: "head aaaaaaaa shared with PR #8",
+      });
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("a listing error that never clears fails closed after the step retries (#1215)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+    // listOpenPulls throws on EVERY call: step.do retries once, both throw, and
+    // the .catch fails closed — a swallowed error must never read as green.
+    openPullsAlwaysThrows = true;
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-guard-error-failclosed");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-guard-error-failclosed", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("failure");
+      expect(out.description).toBe("gate: cannot list shared-head PRs");
+      // Retried once: the first throw and the retry's throw both hit the endpoint.
+      expect(openPullsCalls).toBeGreaterThanOrEqual(2);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("a closed sibling is ignored, the run stays green (#1215)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+    // A sibling #8 on the SAME head sha with a DIFFERENT base but CLOSED: the
+    // open-state filter must ignore it — only an OPEN shared head is red.
+    openPullsBody = [
+      { number: PR, head: { sha: HEAD }, base: { ref: "main" }, state: "open" },
+      { number: 8, head: { sha: HEAD }, base: { ref: "staging" }, state: "closed" },
+    ];
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-guard-closed-sibling");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-guard-closed-sibling", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("success");
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("a truncated open-PR list fails closed (#1215 item 1)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+    // Every page still offers a next Link, so listOpenPulls hits its page cap and
+    // reports truncated — the guard must fail closed, never read a prefix green.
+    openPullsTruncated = true;
+    openPullsBody = [];
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-guard-truncated");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-guard-truncated", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("failure");
+      expect(out.description).toBe("gate: cannot list shared-head PRs");
     } finally {
       await instance.dispose();
     }
