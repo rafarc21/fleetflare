@@ -2850,6 +2850,29 @@ export const NO_ROLE_ENV_ERROR =
   "or provisioned before the role env was persisted). Bring-up would launch " +
   "claude with no system prompt and no tool policy. Fix: POST /studio/<id>/provision";
 
+/** Re-resolves a studio's/role's MCP names from the current blueprint so a
+ *  heal/restart does not replay the stored (possibly stale) value. Reads the
+ *  same fleet.json -> blueprint-ref chain `resolveBringupEnv` does; `pinnedRef`
+ *  is the ref the original provision resolved (StudioEnv.BLUEPRINT_REF), so a
+ *  pinned studio re-resolves against its pin, not `main`. Returns null when
+ *  the studio file no longer resolves (tryFetchStudio 404/parse failure), in
+ *  which case runRestart replays the stored env unchanged. */
+export async function resolveMcpOverride(
+  deps: ProvisionDeps, fleetRepoSlug: string, name: string,
+  isStudio: boolean, pinnedRef?: string,
+): Promise<{ STUDIO_MCP?: string; ROLE_MCP?: string } | null> {
+  const fleet = parseFleetJson(await deps.fetchBlueprintFile(fleetRepoSlug, FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF));
+  const ref = pinnedRef ?? fleet.blueprint.ref;
+  if (isStudio) {
+    const studio = await tryFetchStudio(deps, fleet.blueprint.repo, name, ref);
+    if (studio === null) return null;
+    return { STUDIO_MCP: studio.mcp.join(",") };
+  }
+  assertRoleInFleet(fleet, name);
+  const role = parseRoleFile(await deps.fetchBlueprintFile(fleet.blueprint.repo, roleFilePath(name), ref));
+  return { ROLE_MCP: (role.mcp ?? []).join(",") };
+}
+
 /** Bring-up only (no clone) — restart heals/recreates the tmux session
  *  without re-touching the checkout. Same success/failure shape as
  *  runProvision's tail. `idFallback` covers the "never provisioned" edge:
@@ -2876,22 +2899,6 @@ export const NO_ROLE_ENV_ERROR =
  *  stored role env) has no container to toggle keepAlive on, so it is
  *  skipped there too, deliberately mirroring `roleEnv`'s own null-guard
  *  rather than running unconditionally before it. */
-export async function resolveMcpOverride(
-  deps: ProvisionDeps, fleetRepoSlug: string, name: string,
-  isStudio: boolean,
-): Promise<{ STUDIO_MCP?: string; ROLE_MCP?: string } | null> {
-  const fleet = parseFleetJson(await deps.fetchBlueprintFile(fleetRepoSlug, FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF));
-  const ref = fleet.blueprint.ref;
-  if (isStudio) {
-    const studio = await tryFetchStudio(deps, fleet.blueprint.repo, name, ref);
-    if (studio === null) return null;
-    return { STUDIO_MCP: studio.mcp.join(",") };
-  }
-  assertRoleInFleet(fleet, name);
-  const role = parseRoleFile(await deps.fetchBlueprintFile(fleet.blueprint.repo, roleFilePath(name), ref));
-  return { ROLE_MCP: (role.mcp ?? []).join(",") };
-}
-
 export async function runRestart(
   deps: ProvisionDeps, existing: StudioStatus | null, idFallback: string, roleEnv: RoleEnv | StudioEnv | null,
   keepAlive: boolean, fleetRepoSlug: string,
@@ -2920,7 +2927,8 @@ export async function runRestart(
   const mcpName = isStudio ? (roleEnv as StudioEnv).STUDIO_NAME : (parseStudioId(status.id)?.role ?? null);
   if (mcpName !== null) {
     try {
-      const mcpOverride = await resolveMcpOverride(deps, fleetRepoSlug, mcpName, isStudio);
+      const pinnedRef = isStudio ? (roleEnv as StudioEnv).BLUEPRINT_REF : undefined;
+      const mcpOverride = await resolveMcpOverride(deps, fleetRepoSlug, mcpName, isStudio, pinnedRef);
       if (mcpOverride) bringupEnv = { ...roleEnv, ...mcpOverride };
     } catch (err) {
       console.warn(`studio ${status.id}: MCP re-resolve failed, replaying stored env`, err instanceof Error ? err.message : String(err));

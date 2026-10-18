@@ -1262,4 +1262,28 @@ describe("runRestart — re-resolves STUDIO_MCP from the current blueprint (issu
     expect(bringup).toBeDefined();
     expect(bringup!.env?.STUDIO_MCP).toBe("");
   });
+
+  it("re-resolves against the stored BLUEPRINT_REF pin, not main", async () => {
+    const refs: string[] = [];
+    const deps = {
+      ...mcpRestartDeps(),
+      fetchBlueprintFile: vi.fn(async (repo: string, path: string, ref: string) => {
+        refs.push(ref);
+        if (path === "fleet.json") return FLEET_JSON;
+        if (path === "fleet/blueprint/studios/release-studio/studio.md") return STUDIO_MD;
+        throw new Error(`unexpected path: ${path}`);
+      }),
+    } as ProvisionDeps;
+    const stored = { ...STUDIO_ENV, STUDIO_MCP: "", BLUEPRINT_REF: "pinned-sha" };
+    const result = await runRestart(
+      deps,
+      status({ id: STUDIO_ID, repoSlug: "acme-org/acme-os" }),
+      STUDIO_ID,
+      stored,
+      true,
+      "rafarc21/fleetflare",
+    );
+    expect(result.state).toBe("running");
+    expect(refs).toContain("pinned-sha");
+  });
 });
