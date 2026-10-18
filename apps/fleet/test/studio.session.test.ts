@@ -4822,8 +4822,10 @@ describe("provisionedCheckCmd — the Tier-0 completion gate (Stop hook)", () =>
 
   it("is gated behind the decoded 'g' marker, not unconditional like the lead-gate/caveman checks — this is what keeps a Maestro from ever being checked for it", () => {
     // lead-gate and caveman sit OUTSIDE the per-line `while` loop, inside
-    // the unconditional `miss="$( { ... } )"` block, because EVERY studio
-    // must carry them. The completion-gate check instead lives INSIDE that
+    // the `miss="$( { ... } )"` block, gated only by the decoded `kind studio`
+    // marker (not by any per-studio token), because EVERY studio must carry
+    // them and no role must be checked for hooks it never installs. The
+    // completion-gate check instead lives INSIDE that
     // loop's dispatch, behind `[ "$k" = g ]`: it only runs for a decoded
     // blob that actually contains a "g" line, and harnessExpectation adds
     // that line only when THIS studio's own STUDIO_COMPLETION_GATE is set

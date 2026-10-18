@@ -1384,15 +1384,19 @@ async function verifyBringupLanded(
 }
 
 /**
- * What bring-up MUST have materialized inside a studio container, encoded for
- * the check to read back. One line per assertion, base64'd:
+ * What bring-up MUST have materialized inside a container, encoded for the
+ * check to read back. One line per assertion, base64'd:
  *
+ *   kind studio|role   which shape this blob is; the check gates its
+ *                      studio-only checks on it (see harnessCheckSnippet)
  *   s <skill-name>     a declared skill, resolvable to a real skill dir
  *   m <member-file>    a declared member, present in ~/.claude/agents/
  *   g                  the Tier-0 completion gate (Stop hook) must be
  *                      installed — present only when STUDIO_COMPLETION_GATE
  *                      is set (a code-writing roster); never for the
  *                      Maestro or any other non-implementing studio
+ *   mcp                ~/.claude/fleet-mcp.json must exist (a blueprint that
+ *                      declares mcp: must actually have its config written)
  *   end                sentinel — a decode that produces nothing is a broken
  *                      check, not an empty expectation (see PROVISIONED_UNKNOWN)
  *
@@ -1403,15 +1407,30 @@ async function verifyBringupLanded(
  * cannot express either, and a value read from a variable is never re-parsed
  * by the shell.
  *
- * `null` for a ROLE (no STUDIO_NAME): a plain role provisions correctly with
- * no hooks, no members and no skills — measured live on `websites--pilot`
- * (HOOK=0 SKILLS=0) — so asserting on them would fail a healthy studio. The
- * asymmetry is the point: this Worker knows which of the two it resolved, and
- * that knowledge is what makes "no gate" detectable at all.
+ * A ROLE with no `mcp:` keeps the old null: a plain role provisions correctly
+ * with no hooks, no members and no skills — measured live on `websites--pilot`
+ * (HOOK=0 SKILLS=0) — so asserting on those would fail a healthy studio. But a
+ * role whose blueprint DOES declare `mcp:` gets a minimal `kind role` + `mcp`
+ * harness: the ask-3 degraded case (declared mcp, config missing) applies to
+ * roles as much as studios, and it must not stay invisible just because the
+ * harness was once studio-only. The asymmetry is the point: this Worker knows
+ * which shape it resolved, and that knowledge is what makes "no gate" and
+ * "no mcp config" detectable at all.
  */
 export function harnessExpectation(env: RoleEnv | StudioEnv | null | undefined): string | null {
-  if (!env || !("STUDIO_NAME" in env) || env.STUDIO_NAME === "") return null;
-  const lines: string[] = [];
+  if (!env) return null;
+  if (!("STUDIO_NAME" in env) || env.STUDIO_NAME === "") {
+    // Role (or a studio whose stored STUDIO_NAME emptied — degenerately
+    // role-shaped): only the mcp check applies, and only when the role's own
+    // ROLE_MCP is non-empty. A role declaring no mcp keeps the old null
+    // (two-marker) behavior.
+    const mcpNames = ("ROLE_MCP" in env ? env.ROLE_MCP ?? "" : "").split(",").filter((n) => n !== "");
+    if (mcpNames.length === 0) return null;
+    return btoa(["kind role", "mcp", "end"].join("\n"));
+  }
+  // env is StudioEnv from here down (STUDIO_NAME present and non-empty).
+  const mcpNames = env.STUDIO_MCP.split(",").filter((n) => n !== "");
+  const lines: string[] = ["kind studio"];
   for (const skill of env.STUDIO_SKILLS.split(",")) {
     if (skill !== "") lines.push(`s ${skill}`);
   }
@@ -1439,6 +1458,7 @@ export function harnessExpectation(env: RoleEnv | StudioEnv | null | undefined):
   // exactly as falsy as "" — see StudioEnv.STUDIO_COMPLETION_GATE's own doc
   // comment.
   if (env.STUDIO_COMPLETION_GATE) lines.push("g");
+  if (mcpNames.length > 0) lines.push("mcp");
   lines.push("end");
   return btoa(lines.join("\n"));
 }
@@ -1641,13 +1661,18 @@ function harnessCheckSnippet(harness: string): string {
     // reporting a healthy studio as bare, or a bare studio as healthy.
     `dec="$(printf '%s' '${harness}' | base64 -d 2>/dev/null)"; ` +
     `if [ -z "$dec" ]; then echo "${PROVISIONED_UNKNOWN} harness expectation did not decode in the container"; else ` +
-    // Bounded wait for caveman's SessionStart flag — see this file's doc
-    // comment above on why claude can be "running" a beat before it fires.
-    `j=0; while [ "$j" -lt ${CAVEMAN_FLAG_TRIES} ]; do if [ -f ${flag} ]; then break; fi; j=$((j+1)); sleep 1; done; ` +
+    // First line of a blob this Worker builds is `kind studio` or `kind role`.
+    // Anything else (a foreign/malformed blob) falls toward `studio` — the
+    // shape that asserts MORE — so an unrecognised blob can never silently
+    // skip the lead-gate/caveman checks.
+    `kind="$(printf '%s\\n' "$dec" | { read -r k; [ "$k" = "kind role" ] && printf role || printf studio; })"; ` +
+    `if [ "$kind" = studio ]; then j=0; while [ "$j" -lt ${CAVEMAN_FLAG_TRIES} ]; do if [ -f ${flag} ]; then break; fi; j=$((j+1)); sleep 1; done; fi; ` +
     `miss="$( { ` +
+    `if [ "$kind" = studio ]; then ` +
     `[ -x ${gate} ] || echo "lead-gate hook missing or not executable (~/.claude/hooks/lead-gate.sh)"; ` +
     `grep -q lead-gate.sh ${settings} 2>/dev/null || echo "settings.json does not reference the lead-gate hook"; ` +
     `[ -f ${flag} ] || echo "caveman never activated (no ~/.claude/.caveman-active flag: the plugin hooks did not fire)"; ` +
+    `fi; ` +
     // `case` is deliberately NOT used here: its patterns carry an unbalanced
     // `)`, and inside a `$( ... )` the shell reads that as the end of the
     // substitution (measured — the whole block died with "syntax error near
@@ -1678,6 +1703,8 @@ function harnessCheckSnippet(harness: string): string {
     `elif [ "$k" = g ]; then ` +
     `[ -x ${completionGate} ] || echo "completion-gate hook missing or not executable (~/.claude/hooks/completion-gate.sh)"; ` +
     `grep -q completion-gate.sh ${settings} 2>/dev/null || echo "settings.json does not reference the completion-gate hook"; ` +
+    `elif [ "$k" = mcp ]; then ` +
+    `[ -f "$HOME/.claude/fleet-mcp.json" ] || echo "mcp config missing (~/.claude/fleet-mcp.json)"; ` +
     `fi; ` +
     `done; } )"; ` +
     `if [ -z "$miss" ]; then echo "${PROVISIONED_OK}"; ` +
@@ -2846,6 +2873,29 @@ export const NO_ROLE_ENV_ERROR =
   "or provisioned before the role env was persisted). Bring-up would launch " +
   "claude with no system prompt and no tool policy. Fix: POST /studio/<id>/provision";
 
+/** Re-resolves a studio's/role's MCP names from the current blueprint so a
+ *  heal/restart does not replay the stored (possibly stale) value. Reads the
+ *  same fleet.json -> blueprint-ref chain `resolveBringupEnv` does; `pinnedRef`
+ *  is the ref the original provision resolved (StudioEnv.BLUEPRINT_REF), so a
+ *  pinned studio re-resolves against its pin, not `main`. Returns null when
+ *  the studio file no longer resolves (tryFetchStudio 404/parse failure), in
+ *  which case runRestart replays the stored env unchanged. */
+export async function resolveMcpOverride(
+  deps: ProvisionDeps, fleetRepoSlug: string, name: string,
+  isStudio: boolean, pinnedRef?: string,
+): Promise<{ STUDIO_MCP?: string; ROLE_MCP?: string } | null> {
+  const fleet = parseFleetJson(await deps.fetchBlueprintFile(fleetRepoSlug, FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF));
+  const ref = pinnedRef ?? fleet.blueprint.ref;
+  if (isStudio) {
+    const studio = await tryFetchStudio(deps, fleet.blueprint.repo, name, ref);
+    if (studio === null) return null;
+    return { STUDIO_MCP: studio.mcp.join(",") };
+  }
+  assertRoleInFleet(fleet, name);
+  const role = parseRoleFile(await deps.fetchBlueprintFile(fleet.blueprint.repo, roleFilePath(name), ref));
+  return { ROLE_MCP: (role.mcp ?? []).join(",") };
+}
+
 /** Bring-up only (no clone) — restart heals/recreates the tmux session
  *  without re-touching the checkout. Same success/failure shape as
  *  runProvision's tail. `idFallback` covers the "never provisioned" edge:
@@ -2875,7 +2925,7 @@ export const NO_ROLE_ENV_ERROR =
 export async function runRestart(
   deps: ProvisionDeps, existing: StudioStatus | null, idFallback: string, roleEnv: RoleEnv | StudioEnv | null,
   keepAlive: boolean, fleetRepoSlug: string,
-): Promise<StudioStatus> {
+): Promise<{ status: StudioStatus; bringupEnv: RoleEnv | StudioEnv | null }> {
   let status: StudioStatus = {
     ...(existing ?? freshStatus(idFallback)), state: "provisioning",
     // Review round 2 (#210), finding 2 — same defense-in-depth clear
@@ -2886,7 +2936,7 @@ export async function runRestart(
   if (roleEnv === null) {
     status = { ...status, state: "degraded", error: NO_ROLE_ENV_ERROR, sessionAdoption: null };
     await deps.recordStudio(status);
-    return status;
+    return { status, bringupEnv: null };
   }
   // Issue #38 part 2: the repo segment of this studio's own id IS the
   // directory the checkout lives in (`/workspace/<repo>`, the same
@@ -2896,6 +2946,25 @@ export async function runRestart(
   // stays untouched.
   const repo = parseStudioId(status.id)?.repo ?? null;
   const isStudio = "STUDIO_NAME" in roleEnv && roleEnv.STUDIO_NAME !== "";
+  let bringupEnv: RoleEnv | StudioEnv = roleEnv;
+  // Re-resolve MCP only when the stored value is empty (the pre-#1181 stale
+  // case). A non-empty value was already resolved by provision, so re-fetching
+  // the blueprint on every heal/restart would burn the fleet-wide GitHub rate
+  // limit for nothing.
+  const storedMcpNames = (isStudio ? (roleEnv as StudioEnv).STUDIO_MCP : ((roleEnv as RoleEnv).ROLE_MCP ?? ""))
+    .split(",").filter((n) => n !== "");
+  if (storedMcpNames.length === 0) {
+    const mcpName = isStudio ? (roleEnv as StudioEnv).STUDIO_NAME : (parseStudioId(status.id)?.role ?? null);
+    if (mcpName !== null) {
+      try {
+        const pinnedRef = isStudio ? (roleEnv as StudioEnv).BLUEPRINT_REF : undefined;
+        const mcpOverride = await resolveMcpOverride(deps, fleetRepoSlug, mcpName, isStudio, pinnedRef);
+        if (mcpOverride) bringupEnv = { ...roleEnv, ...mcpOverride };
+      } catch (err) {
+        console.warn(`studio ${status.id}: MCP re-resolve failed, replaying stored env`, err instanceof Error ? err.message : String(err));
+      }
+    }
+  }
   let firstFailure: string | null = null;
   // Survives into the success path below for the same reason `firstFailure`
   // does: a restart that came up "fine" while refusing to put the checkout
@@ -3084,12 +3153,12 @@ export async function runRestart(
     };
     try {
       seen(await adoptBeforeBringup(deps, repo));
-      await bringUpAndVerify(deps, roleEnv, repo, isStudio, seen);
+      await bringUpAndVerify(deps, bringupEnv, repo, isStudio, seen);
     } catch (err) {
       firstFailure = redactSecrets(err instanceof Error ? err.message : String(err));
       await recordRetryAttempt(deps, firstFailure);
       seen(await adoptBeforeBringup(deps, repo));
-      await bringUpAndVerify(deps, roleEnv, repo, isStudio, seen);
+      await bringUpAndVerify(deps, bringupEnv, repo, isStudio, seen);
     }
 
     status = {
@@ -3123,7 +3192,13 @@ export async function runRestart(
     };
   }
   await deps.recordStudio(status);
-  return status;
+  // Issue #1216: return the env the restart actually brought up with so the
+  // wrapper can persist it back to ROLE_ENV_KEY. The stored env was the input;
+  // when the MCP re-resolve above succeeded, bringupEnv carries the re-resolved
+  // STUDIO_MCP/ROLE_MCP, and persisting it is what keeps the ask-3 READY check
+  // (which reads ROLE_ENV_KEY) agreeing with the container a heal just launched
+  // instead of forever replaying the stale `""` the issue is about.
+  return { status, bringupEnv };
 }
 
 /** One bring-up exec plus the on-disk verification that it actually landed —
@@ -4077,10 +4152,11 @@ export async function restartWithStorage(
   const alreadyLocked = operationLockFresh(await storage.get(OPERATION_KEY), new Date(deps.now()));
   if (!alreadyLocked) await storage.put(OPERATION_KEY, { op: "restart", since: deps.now() });
   let status: StudioStatus;
+  let bringupEnv: RoleEnv | StudioEnv | null = null;
   try {
-    status = await runRestart(
+    ({ status, bringupEnv } = await runRestart(
       { ...provisionDeps, recordStudio: guardRecordStudio(deps, ctx) }, existing, idFallback, roleEnv, keepAlive, fleetRepoSlug,
-    );
+    ));
     // Review round 3 (issue #85 PR1), MUST-FIX 9 — same placement fix as
     // provisionWithStorage's identical block above: inside the op-lock try,
     // before the finally, with its own try/catch.
@@ -4106,6 +4182,11 @@ export async function restartWithStorage(
     return (await storage.get(STATUS_KEY)) ?? status;
   }
   await storage.put(STATUS_KEY, status);
+  // Issue #1216: persist the env the restart actually used, so the ask-3 READY
+  // check (storedHarness -> ROLE_ENV_KEY) sees the same MCP names the container
+  // just launched with. Null only on the degraded no-role-env path, where
+  // writing null would clobber nothing that exists anyway and is skipped.
+  if (bringupEnv !== null) await storage.put(ROLE_ENV_KEY, bringupEnv);
   // Issue #100 N1: same as provisionWithStorage.
   await storage.put(DESTROYING_KEY, null);
   return status;

@@ -2499,8 +2499,10 @@ export async function checkProvisionedGated(
  * already carrying STUDIO_NAME/STUDIO_SKILLS/STUDIO_MEMBERS_B64 — the three
  * fields the expectation is built from — so it is checked as fully as a fresh
  * one, with no migration. A ROLE's stored env has no STUDIO_NAME and
- * `harnessExpectation` returns null for it, which is what keeps the check on
- * `websites--pilot` exactly what it was.
+ * `harnessExpectation` returns a `kind role` harness for it only when the role
+ * declares `mcp:` (see provision.ts's harnessExpectation); a role with no mcp
+ * keeps the old null, which is what keeps the check on a no-mcp role exactly
+ * what it was.
  */
 async function storedHarness(storage: StudioStorage): Promise<string | null> {
   return harnessExpectation((await storage.get(ROLE_ENV_KEY)) ?? null);
