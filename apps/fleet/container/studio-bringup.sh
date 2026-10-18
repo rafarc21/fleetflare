@@ -1046,16 +1046,18 @@ pt.append({
 })
 # OSS-lead continue hook (issue #1112, layer 2): a Stop entry in this SAME
 # write, so one bring-up installs every settings hook or fails the way it
-# always did. A failure here is logged and skipped: the lead-gate entries
-# above still land and bring-up continues without this hook (fail open).
-try:
-    stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])
-    stop[:] = [e for e in stop if "oss-lead-continue.sh" not in json.dumps(e)]
-    stop.append({"hooks": [{"type": "command", "command": "S=\"$HOME/.claude/hooks/oss-lead-continue.sh\"; [ -x \"$S\" ] && exec \"$S\" || exit 0"}]})
-except Exception as e:
-    os.write(2, ("studio-bringup: oss-lead-continue Stop hook not registered (%s) -- continuing without it\n" % e).encode())
-with open(path, "w") as f:
+# always did. A non-list Stop is logged, reset to [], and the hook registers normally.
+stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])
+if not isinstance(stop, list):
+    os.write(2, ("studio-bringup: Stop not a list (was %s), reset to [] so oss-lead-continue registers\n" % json.dumps(stop)).encode())
+    stop = cfg["hooks"]["Stop"] = []
+stop[:] = [e for e in stop if "oss-lead-continue.sh" not in json.dumps(e)]
+stop.append({"hooks": [{"type": "command", "command": "S=\"$HOME/.claude/hooks/oss-lead-continue.sh\"; [ -x \"$S\" ] && exec \"$S\" || exit 0"}]})
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
     json.dump(cfg, f, indent=2)
+os.replace(tmp, path)
 '
 # <<< lead-gate-settings-merge <<<
 
@@ -1126,10 +1128,20 @@ guarded = (
 entry = {"hooks": [{"type": "command", "command": guarded}]}
 for evt in ("SessionStart", "UserPromptSubmit", "Stop", "Notification"):
     arr = cfg.setdefault("hooks", {}).setdefault(evt, [])
+    if not isinstance(arr, list):
+        if evt == "Stop":
+            os.write(2, ("studio-bringup: Stop not a list (was %s), reset to [] so activity-heartbeat registers\n" % json.dumps(arr)).encode())
+            arr = cfg["hooks"][evt] = []
+        else:
+            os.write(2, ("studio-bringup: %s not a list, activity-heartbeat hook not registered -- leaving settings untouched\n" % evt).encode())
+            continue
     arr[:] = [e for e in arr if "activity-heartbeat.sh" not in json.dumps(e)]
     arr.append(entry)
-with open(path, "w") as f:
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
     json.dump(cfg, f, indent=2)
+os.replace(tmp, path)
 '
   # <<< activity-heartbeat-settings-merge <<<
 
@@ -1183,6 +1195,7 @@ with open(path, "w") as f:
     # is there (a deleted script, a lost chmod and a different $HOME all used
     # to let the call through silently).
     mkdir -p ~/.claude
+    # >>> completion-gate-settings-merge >>>
     python3 -c '
 import json, os
 path = os.path.expanduser("~/.claude/settings.json")
@@ -1198,11 +1211,18 @@ guarded = (
     "exec \"$S\""
 )
 entry = {"hooks": [{"type": "command", "command": guarded}]}
+if not isinstance(stop, list):
+    os.write(2, ("studio-bringup: Stop not a list (was %s), reset to [] so completion-gate registers\n" % json.dumps(stop)).encode())
+    stop = cfg["hooks"]["Stop"] = []
 stop[:] = [e for e in stop if "completion-gate.sh" not in json.dumps(e)]
 stop.append(entry)
-with open(path, "w") as f:
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
     json.dump(cfg, f, indent=2)
+os.replace(tmp, path)
 '
+    # <<< completion-gate-settings-merge <<<
   fi
 
   # --- fail closed on the gate ----------------------------------------------
