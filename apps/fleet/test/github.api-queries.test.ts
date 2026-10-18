@@ -144,12 +144,16 @@ describe("listAllBranchNames", () => {
 // everything else in those two files is pure and DI'd over fakes.
 
 describe("listPullsForCommit", () => {
-  it("GETs the commit's pulls endpoint and returns number + base/head refs", async () => {
+  it("GETs the commit's pulls endpoint and returns number + base/head refs + state", async () => {
     respond = () => Response.json([
-      { number: 7, base: { ref: "staging" }, head: { ref: "feat/x" } },
+      { number: 7, base: { ref: "staging" }, head: { ref: "feat/x" }, state: "open" },
+      { number: 9, base: { ref: "staging" }, head: { ref: "feat/x" }, state: "closed" },
     ]);
     const pulls = await listPullsForCommit("tok", "o/r", "abc123");
-    expect(pulls).toEqual([{ number: 7, base: "staging", head: "feat/x" }]);
+    expect(pulls).toEqual([
+      { number: 7, base: "staging", head: "feat/x", state: "open" },
+      { number: 9, base: "staging", head: "feat/x", state: "closed" },
+    ]);
     expect(calls[0].method).toBe("GET");
     expect(calls[0].url).toBe("https://api.github.com/repos/o/r/commits/abc123/pulls");
     expect(calls[0].headers.authorization).toBe("Bearer tok");
