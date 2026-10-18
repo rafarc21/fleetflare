@@ -112,6 +112,16 @@ describe("TRIAGE_ROUTER_TOKEN (scoped router-only credential)", () => {
     const noRows = async () => [];
     expect((await handleFleetAnthropicMessages(req({ token: TRIAGE_SECRET }), e, ctx, noRows)).status).toBe(401);
 
+    // Empty secret rejects the same as unset: TRIAGE_ROUTER_TOKEN="" must not
+    // authenticate an empty presented bearer (built inline — req()'s own
+    // `if (opts.token)` guard would skip an empty string).
+    const eEmpty = { ...env, FLEET_JUNIOR: "on", AI: { run }, TRIAGE_ROUTER_TOKEN: "" } as unknown as Env;
+    const emptyReq = new Request(`https://w${ANTHROPIC_MESSAGES_PATH}`, {
+      method: "POST", headers: { authorization: "Bearer " },
+      body: JSON.stringify(good),
+    });
+    expect((await handleFleetAnthropicMessages(emptyReq, eEmpty, ctx, noRows)).status).toBe(401);
+
     const token = mintSpawnToken();
     const rows = async () => [row(ME, await hashSpawnToken(token))];
     const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);

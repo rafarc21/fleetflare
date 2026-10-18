@@ -47,8 +47,8 @@ export const ANTHROPIC_COUNT_TOKENS_PATH = "/fleet/llm/anthropic/v1/messages/cou
 
 /** #1218: the synthetic studio id the triage daemon authenticates as. The
  *  messages/count_tokens routes' rate limits and usage rows key on this id,
- *  so the daemon draws its own lead-rate bucket and logs under its own id —
- *  never a real studio's. */
+ *  so the daemon draws its own lead-rate bucket and logs under a reserved id —
+ *  never a real studio's spawn-token row. */
 export const TRIAGE_DAEMON_ID = "triage--daemon";
 
 // deno-lint-ignore no-explicit-any
