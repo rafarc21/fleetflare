@@ -261,3 +261,35 @@ export function decideGateRun(input: {
   }
   return { action: "run" };
 }
+
+/** One open PR of the resolved head, with the base branch it targets (#1172). */
+export interface SharedHeadPull { number: number; baseRef: string }
+
+/** The failure a gated PR's success post becomes when a sibling open PR shares
+ *  the head sha with a different base (#1172): red must win across PRs sharing
+ *  a head, because one gate/verdict status serves them all. Null when every
+ *  open PR of the head shares the base (or only the PR itself is open). */
+export function sharedHeadFailure(
+  headSha: string, baseRef: string, pr: number, open: SharedHeadPull[],
+): string | null {
+  for (const pull of open) {
+    if (pull.number !== pr && pull.baseRef !== baseRef) {
+      return `head ${headSha.slice(0, 8)} shared with PR #${pull.number}`;
+    }
+  }
+  return null;
+}
+
+/** The shared-head guard's lookup: the head's open PRs, or an error (fail closed). */
+export type SharedHeadLookup = { open: SharedHeadPull[] } | { error: string };
+
+/** The guarded (state, description) of a success post (#1172). A lookup error
+ *  fails closed, never success. */
+export function guardSuccessStatus(
+  headSha: string, baseRef: string, pr: number, lookup: SharedHeadLookup,
+  args: { state: "success"; description: string },
+): { state: "success" | "failure"; description: string } {
+  if ("error" in lookup) return { state: "failure", description: "gate: cannot list shared-head PRs" };
+  const failure = sharedHeadFailure(headSha, baseRef, pr, lookup.open);
+  return failure === null ? args : { state: "failure", description: failure };
+}

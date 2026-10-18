@@ -1,12 +1,13 @@
 // #1072 (refs #715): the gate's auto-run. A pull_request delivery for a gated
 // repo (GATE_RUNNER_REPOS, FLEET_GATE_RUNNER on, not a draft) starts one gate
-// run per head sha, before the PR is final. The manual start route
+// run per (pr, head sha), before the PR is final. The manual start route
 // (/studio/gate/start) keys its run the same way, so a `fleet gate run` of a
 // sha with a LIVE run reattaches to it. A finished run is not reused by the
 // manual start (#1085): it starts a fresh run instead (startManualGateRun).
 //
-// Run identity is the Workflows instance id: a hash of the repo plus the head
-// sha. Creating an instance under an id that already exists is the dedupe.
+// Run identity is the Workflows instance id: the base id is a hash of the repo
+// plus the head sha, and a second PR sharing the sha starts a `-p<pr>` fresh
+// run (#1172). Creating an instance under an id that already exists is the dedupe.
 import { isGateRunnerRepo } from "./config";
 
 /** The params a gate run is created with: the GateWorkflow's own payload shape
@@ -69,19 +70,21 @@ export interface PullRequestAutoRun {
   pr: number;
   headSha: string;
   baseSha: string;
-  /** #1176: an edit of the title/body re-runs the precheck under its own run id
-   *  (the head sha is unchanged, so the plain sha id would dedupe-skip). */
+  /** #1176: an edit of the title/body/base re-runs the precheck under its own
+   *  run id (the head sha is unchanged, so the plain sha id would dedupe-skip). */
   edited?: boolean;
+  /** #1214 round 2: a reopen must re-gate the head, never reuse a finished run. */
+  reopened?: boolean;
 }
 
-const AUTO_RUN_ACTIONS: ReadonlySet<string> = new Set(["opened", "synchronize", "ready_for_review", "edited"]);
+const AUTO_RUN_ACTIONS: ReadonlySet<string> = new Set(["opened", "synchronize", "ready_for_review", "edited", "reopened"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 /** The gate-runner switches a pull_request decision reads. */
 export interface GateRunnerSwitches { FLEET_GATE_RUNNER?: string; GATE_RUNNER_REPOS?: string }
 
 /** The gated PR a pull_request delivery should auto-run, or null when it should
- *  start nothing: an action other than opened / synchronize / ready_for_review,
+ *  start nothing: an action other than opened / synchronize / ready_for_review / edited / reopened,
  *  a draft, a repo outside GATE_RUNNER_REPOS, the gate runner off, or a body
  *  that is not a PR delivery with both shas. Pure: no GitHub call. */
 export function pullRequestAutoRun(body: string, env: GateRunnerSwitches): PullRequestAutoRun | null {
@@ -90,15 +93,16 @@ export function pullRequestAutoRun(body: string, env: GateRunnerSwitches): PullR
   if (typeof parsed !== "object" || parsed === null) return null;
   const e = parsed as {
     action?: unknown;
-    changes?: { title?: unknown; body?: unknown };
+    changes?: { title?: unknown; body?: unknown; base?: unknown };
     repository?: { full_name?: unknown };
     pull_request?: { number?: unknown; draft?: unknown; head?: { sha?: unknown }; base?: { sha?: unknown } };
   };
   if (typeof e.action !== "string" || !AUTO_RUN_ACTIONS.has(e.action)) return null;
-  // #1176: an edit fires only for a title or body change — GitHub sends a
-  // `changes` object naming what moved. Any other edit (labels, base, ...) is
-  // the dedupe case for the unchanged head sha.
-  if (e.action === "edited" && e.changes?.title === undefined && e.changes?.body === undefined) return null;
+  // #1176: an edit fires only for a title, body or BASE change — GitHub sends a
+  // `changes` object naming what moved. Any other edit (labels, ...) is the
+  // dedupe case for the unchanged head sha. A base move (#1214 round 2) re-runs:
+  // the gated base differs, so the prior verdict no longer applies.
+  if (e.action === "edited" && e.changes?.title === undefined && e.changes?.body === undefined && e.changes?.base === undefined) return null;
   const pr = e.pull_request;
   const repo = e.repository?.full_name;
   if (pr === undefined || typeof repo !== "string" || typeof pr.number !== "number") return null;
@@ -107,7 +111,11 @@ export function pullRequestAutoRun(body: string, env: GateRunnerSwitches): PullR
   const baseSha = pr.base?.sha;
   if (typeof headSha !== "string" || !SHA_PATTERN.test(headSha) || typeof baseSha !== "string") return null;
   if (env.FLEET_GATE_RUNNER !== "on" || !isGateRunnerRepo(env.GATE_RUNNER_REPOS, repo)) return null;
-  return { repo, pr: pr.number, headSha, baseSha, ...(e.action === "edited" ? { edited: true } : {}) };
+  return {
+    repo, pr: pr.number, headSha, baseSha,
+    ...(e.action === "edited" ? { edited: true } : {}),
+    ...(e.action === "reopened" ? { reopened: true } : {}),
+  };
 }
 
 /** The Workflows instance id for one repo and head sha: deterministic, so a
@@ -185,9 +193,16 @@ async function recordRun(
 /** Starts the gate run for one head sha, or reuses the run already started for
  *  it. Only a create that fails because the id exists reuses; any other create
  *  failure is rethrown. A new run records itself as the PR's latest and ends the
- *  previous sha's run if that one is still live (#1082). A reuse changes nothing. */
+ *  previous sha's run if that one is still live (#1082). A reuse changes nothing.
+ *
+ *  #1214 round 2: (a) `postPending` fires BEFORE the fresh -p<pr> create, so
+ *  GitHub never sees the head without a pending gate/verdict; (b) a -p<pr> id
+ *  already existing is reused only while it is LIVE; a finished one starts a
+ *  fresh `-p<pr>-r<base36 now>` (injected `now`, like startManualGateRun). */
 export async function startGateRun(
-  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex,
+  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string; reopened?: boolean }, index: GateRunIndex,
+  now: () => number = Date.now,
+  postPending?: (repo: string, headSha: string) => Promise<void>,
 ): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
   const runId = await gateRunId(input.repo, input.headSha);
   try {
@@ -198,12 +213,45 @@ export async function startGateRun(
     } catch {
       throw err;
     }
-    return { runId, reused: true };
+    // #1172: the id is (repo, head sha). A run under this id whose per-PR
+    // pointer does not name this head belongs to another PR that shared the
+    // sha: reuse would inherit that PR's verdict. Start a fresh run keyed
+    // (repo, pr, sha), so each PR runs and posts its own decision and a
+    // concurrent first-start of the same PR collides on the SAME id (Workflows
+    // create-idempotency) instead of starting a second live run.
+    const latest = await index.latest(input.repo, input.pr);
+    // The base-id run this PR owns is reused even finished (dedupe-by-sha,
+    // unchanged) — UNLESS this is a reopen, which must re-gate the head against
+    // the current base, never hand back a stale verdict. A -p fresh run of a
+    // shared head is likewise NOT reused finished: it falls through to the
+    // fresh create below, whose collision path reuses only a LIVE one and
+    // starts -p<pr>-r<time> for a finished one (#1214 round 2).
+    if (latest?.headSha === input.headSha && latest.runId === runId && input.reopened !== true) {
+      return { runId: latest.runId, reused: true };
+    }
+    // #1214 round 2: put a pending gate/verdict up BEFORE the fresh create.
+    if (postPending) await postPending(input.repo, input.headSha);
+    const freshId = `${runId}-p${input.pr}`;
+    try {
+      await wf.create({ id: freshId, params: { repo: input.repo, pr: input.pr } });
+    } catch (freshErr) {
+      const status = await statusOf(wf, freshId);
+      if (status === null) throw freshErr;
+      // Reuse only a LIVE -p run; a finished one is stale and starts a fresh
+      // -p<pr>-r<time> run so the push is gated anew, never handed a dead verdict.
+      // A reopen is never reused even live: it re-gates against the current base.
+      if (isLiveStatus(status) && input.reopened !== true) return { runId: freshId, reused: true };
+      const rerunId = `${freshId}-r${now().toString(36)}`;
+      await wf.create({ id: rerunId, params: { repo: input.repo, pr: input.pr } });
+      return recordRun(wf, input, index, rerunId, now);
+    }
+    return recordRun(wf, input, index, freshId, now);
   }
-  return recordRun(wf, input, index, runId, Date.now);
+  return recordRun(wf, input, index, runId, now);
 }
 
-/** #1176: a title/body edit re-runs the precheck under its own id. The head sha
+/** #1176/#1214: a title/body/base edit re-runs the precheck under its own id.
+ *  The head sha
  *  is unchanged, so the plain sha id would dedupe-skip or reattach — an edit's
  *  recheck must be a fresh run. It records itself as the PR's latest WITHOUT
  *  ending the plain sha run through recordRun. Mirrors startManualGateRun's
@@ -306,7 +354,9 @@ export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDe
     return "started";
   }
   const { reused } = await startGateRun(
-    deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index,
+    deps.workflow,
+    { repo: pr.repo, pr: pr.pr, headSha: pr.headSha, ...(pr.reopened === true ? { reopened: true } : {}) },
+    deps.index, Date.now, deps.postPending,
   );
   return reused ? "reused" : "started";
 }

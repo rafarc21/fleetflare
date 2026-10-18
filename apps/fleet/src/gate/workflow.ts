@@ -15,7 +15,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listRepoTree, postCommitStatus,
+  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree, postCommitStatus,
 } from "../github/api";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
@@ -23,7 +23,10 @@ import { resolveOpsRepo } from "../ops-repo";
 import { capStatusDescription, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
-import { bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
+import {
+  bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, guardSuccessStatus,
+  type GateConfig, type SharedHeadLookup,
+} from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
   bundleKeyFor, outcomeLegs, pendingStatusArgs, planBundleLeg, planUnionLegs, verdictToStatusArgs,
@@ -178,10 +181,17 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       const recheckFailure = await step.do("precheck-recheck", recheck).catch(() => ["gate precheck failed closed"] as string[]);
       if (recheckFailure.length > 0) return postRecheckFailure(recheckFailure);
       // Post success so the required context is not left pending forever. (A guess: localci.sh's own skip path is the model.)
+      // #1172: the guard runs first, so a shared head with a different base fails, never skips green.
+      const shared = await step.do("shared-head-guard-skip", async () =>
+        sharedHeadLookup(mintToken, repo, resolved.headSha))
+        .catch(() => SHARED_HEAD_LOOKUP_FAILED);
+      // #1214 round 2: return the GUARDED (state, description), so the status
+      // route and CLI report the same red the downgraded skip posts to GitHub.
+      const guarded = guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
+        { state: "success", description: "no gated paths changed" });
       const statusPostFailed = await step.do("post-skip-status", async () =>
-        postGateStatus(this.statusPort(), repo, resolved.headSha,
-          { state: "success", description: "no gated paths changed" }));
-      return { skipped: decision.reason, statusPostFailed };
+        postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
+      return { ...guarded, statusPostFailed, legs: [] };
     }
 
     // The bun-test lane is the head's own test files under each block's root,
@@ -293,13 +303,49 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     }
 
     // Wrapped in a step so a Workflow replay never posts the status twice.
+    // #1172: a success verdict still fails when a sibling PR shares the head
+    // with a different base. The guard runs before the post; a failure or error
+    // verdict posts as-is.
+    const verdictArgs = verdictToStatusArgs(final, {
+      expected: legs.map((l) => l.leg), results, runId: event.instanceId,
+    });
+    const shared = await step.do("shared-head-guard-verdict", async () =>
+      sharedHeadLookup(mintToken, repo, resolved.headSha))
+      .catch(() => SHARED_HEAD_LOOKUP_FAILED);
+    const guarded = verdictArgs.state === "success"
+      ? guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
+        { state: "success", description: verdictArgs.description })
+      : verdictArgs;
     const statusPostFailed = await step.do("post-verdict", async () =>
-      postGateStatus(this.statusPort(), repo, resolved.headSha, verdictToStatusArgs(final, {
-        expected: legs.map((l) => l.leg), results, runId: event.instanceId,
-      })));
-    // Per-leg output (#1049) rides in the final result, in plan order.
-    return { ...final, statusPostFailed, legs: outcomeLegs(results) };
+      postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
+    // Per-leg output (#1049) rides in the final result, in plan order. #1214
+    // round 2: `guarded` (not `final`) rides, so a downgraded success reports
+    // failure here exactly as GitHub sees it.
+    return { ...guarded, statusPostFailed, legs: outcomeLegs(results) };
   }
+}
+
+/** The shared-head guard step's fail-closed result: a lookup error becomes the
+ *  "cannot list shared-head PRs" failure, never a silent green (#1172). */
+const SHARED_HEAD_LOOKUP_FAILED: SharedHeadLookup = { error: "lookup failed" };
+
+/** #1172/#1215: the shared-head guard lookup. Lists the repo's OPEN pulls via
+ *  the paged listOpenPulls — the commits/{sha}/pulls endpoint never lists OPEN
+ *  PRs once the sha is on the default branch, so it would false-green — and
+ *  keeps the OPEN ones OF THIS HEAD as { number, baseRef }: a sibling whose tip
+ *  sha differs, or that is closed, is a different head, never "shared" (#1214
+ *  S3). THROWS on an error, so Workflows retries the step once (a transient 5xx
+ *  ends green) and fails closed only after retries run out. A truncated page cap
+ *  fails closed immediately. */
+async function sharedHeadLookup(
+  mintToken: (repo: string) => Promise<string>, repo: string, headSha: string,
+): Promise<SharedHeadLookup> {
+  const token = await mintToken(repo);
+  const { pulls, truncated } = await listOpenPulls(token, repo);
+  if (truncated) return { error: "open PR list truncated" };
+  return {
+    open: pulls.filter((p) => p.state === "open" && p.headSha === headSha).map((p) => ({ number: p.number, baseRef: p.baseRef })),
+  };
 }
 
 /** The lane files for one gate block, from the run's head tree. None when the block has no bun lane. */

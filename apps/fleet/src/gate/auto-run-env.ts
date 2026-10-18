@@ -77,16 +77,16 @@ export function d1WatchdogIndex(db: D1Database): WatchdogIndex {
   };
 }
 
-/** #1191: the pending-status post an edited run puts up before it is created, so
- *  GitHub never sees the head without a pending gate/verdict. A failed POST
+/** #1191/#1214: the pending-status post a fresh run puts up before it is created,
+ *  so GitHub never sees the head without a pending gate/verdict. A failed POST
  *  returns true (postGateStatus's contract) and is swallowed here: a pending
  *  post must never block the run that follows it. */
-function editedPendingPost(env: Env) {
+function pendingPost(env: Env, description: string) {
   return async (repo: string, headSha: string): Promise<void> => {
     await postGateStatus(
       { mintToken: repoTokenMinter(env), postCommitStatus },
       repo, headSha,
-      { state: "pending", description: "running (edited title/body recheck)" },
+      { state: "pending", description },
     );
   };
 }
@@ -98,7 +98,7 @@ export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<
     const outcome = await autoRunPullRequest(pr, {
       workflow: env.GATE_WORKFLOW,
       index: d1RunIndex(env.DB),
-      ...(pr.edited === true ? { postPending: editedPendingPost(env) } : {}),
+      postPending: pendingPost(env, pr.edited === true ? "running (edited title/body recheck)" : "running (fresh gate run)"),
     });
     console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: ${outcome}`);
   } catch (err) {

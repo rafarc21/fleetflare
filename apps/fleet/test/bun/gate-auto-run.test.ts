@@ -1,5 +1,5 @@
 // #1072 (refs #715): the gate's auto-run on a pull_request delivery. A gated
-// PR's push starts one gate run per head sha; a manual `fleet gate run` of that
+// PR's push starts one gate run per (pr, head sha); a manual `fleet gate run` of that
 // sha reuses it; drafts, other actions and ungated repos start nothing. #1082:
 // a new head sha ends the still-live run of the sha it replaces. The
 // GATE_WORKFLOW binding and the PR's run index are fakes at the boundary; the
@@ -19,7 +19,7 @@ const THIRD = "c".repeat(40);
 const BLOCK = { install: "bun install", legs: ["lint"], pathRules: ["src/**"] };
 const ON = { FLEET_GATE_RUNNER: "on", GATE_RUNNER_REPOS: PR_REPO };
 
-function payload(over: { action?: string; draft?: boolean; repo?: string; changes?: { title?: unknown; body?: unknown } } = {}): string {
+function payload(over: { action?: string; draft?: boolean; repo?: string; changes?: { title?: unknown; body?: unknown; base?: unknown } } = {}): string {
   return JSON.stringify({
     action: over.action ?? "opened",
     number: 7,
@@ -100,9 +100,18 @@ describe("pullRequestAutoRun: which deliveries start a run", () => {
   });
 
   it("any other action starts nothing", () => {
-    for (const action of ["closed", "labeled", "reopened", "converted_to_draft"]) {
+    for (const action of ["closed", "labeled", "converted_to_draft"]) {
       expect(pullRequestAutoRun(payload({ action }), ON)).toBeNull();
     }
+  });
+
+  it("a reopen starts a run (round 2 item 2)", () => {
+    expect(pullRequestAutoRun(payload({ action: "reopened" }), ON)).toEqual({ ...PR, reopened: true });
+  });
+
+  it("a base change fires with edited:true and the same head sha (round 2 item 2)", () => {
+    const out = pullRequestAutoRun(payload({ action: "edited", changes: { base: { from: "main" } } }), ON);
+    expect(out).toEqual({ ...PR, edited: true });
   });
 
   it("an edit of the title fires with edited:true and the same head sha", () => {
@@ -621,6 +630,149 @@ describe("autoRunPullRequest: every gated PR starts a run; the Workflow decides 
     await autoRunPullRequest(PR, deps);
     expect(await autoRunPullRequest({ ...PR, headSha: THIRD }, deps)).toBe("started");
     expect(terminated).toEqual([await gateRunId(PR_REPO, HEAD)]);
+  });
+});
+
+describe("startGateRun: a shared head sha does not inherit another PR's verdict (#1172)", () => {
+  it("a run under this head owned by another PR starts a fresh -p<pr> run, never a reuse", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    // Another PR (#8) opened first with this head: its run owns the (repo, sha) id.
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    const foreignRunId = await gateRunId(PR_REPO, HEAD);
+    expect(runs.get(foreignRunId)!.status).toBe("running");
+    // This PR (#7) shares the head but has no pointer of its own.
+    const out = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(out.reused).toBe(false);
+    expect(out.runId).not.toBe(foreignRunId);
+    expect(out.runId).toBe(`${foreignRunId}-p7`);
+    expect(runs.size).toBe(2);
+  });
+
+  it("one live run per (pr, sha): a second start reuses the fresh run, never a third instance", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    const fresh = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(fresh.reused).toBe(false);
+    expect(again).toEqual({ runId: fresh.runId, reused: true });
+    expect(runs.size).toBe(2);
+  });
+
+  it("a fresh run already live under the PR's deterministic id is reused, never a third instance (concurrent first-starts)", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    const freshId = `${await gateRunId(PR_REPO, HEAD)}-p7`;
+    // A concurrent first-start of PR 7 already created the deterministic fresh id.
+    await wf.create({ id: freshId, params: { repo: PR_REPO, pr: 7 } });
+    const out = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(out).toEqual({ runId: freshId, reused: true });
+    expect(runs.size).toBe(2);
+  });
+});
+
+describe("startGateRun: pending-first + live-only reuse of the -p run (round 2)", () => {
+  const T1 = 1_700_000_000_000;
+
+  it("posts pending BEFORE the fresh -p<pr> create, exactly once (round 2 item 1)", async () => {
+    const { wf } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    const log: string[] = [];
+    const wrapped: GateRunStarter = {
+      create: async (opts) => {
+        if (opts.id !== undefined && opts.id.endsWith("-p7")) log.push(`create:${opts.id}`);
+        return wf.create(opts);
+      },
+      get: (id) => wf.get(id),
+    };
+    const out = await startGateRun(wrapped, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1,
+      async (repo, headSha) => { log.push(`pending:${repo}:${headSha}`); });
+    expect(out.runId).toBe(`${await gateRunId(PR_REPO, HEAD)}-p7`);
+    // pending fires before the -p7 create, and never before the foreign sha-id create (which already threw).
+    expect(log).toEqual([`pending:${PR_REPO}:${HEAD}`, `create:${out.runId}`]);
+  });
+
+  it("reuses a LIVE -p<pr> run, never a third instance (round 2 item 1)", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    const fresh = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(fresh.reused).toBe(false);
+    const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(again).toEqual({ runId: fresh.runId, reused: true });
+    expect(runs.size).toBe(2);
+  });
+
+  it("a FINISHED -p<pr> run starts a fresh -p<pr>-r<time>, never reused (round 2 item 1)", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    runs.get(first.runId)!.status = "complete"; // finished
+    const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    expect(again.reused).toBe(false);
+    expect(again.runId).toBe(`${first.runId}-r${T1.toString(36)}`);
+    expect(runs.size).toBe(3);
+  });
+
+  it("a recorded latest for a DIFFERENT head is not reused when the sha id is foreign (kills latest !== null mutant)", async () => {
+    const { wf } = fakeWorkflow();
+    const { index } = fakeIndex();
+    // PR 7's latest points at BASE.
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index);
+    // PR 8 owns the HEAD sha id.
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    // PR 7 pushes HEAD (shared with PR 8): fresh -p7, never BASE's run.
+    const out = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(out.reused).toBe(false);
+    expect(out.runId).toBe(`${await gateRunId(PR_REPO, HEAD)}-p7`);
+  });
+
+  it("the fresh -p<pr> run is recorded as the PR's latest (kills dropped recordRun mutant)", async () => {
+    const { wf } = fakeWorkflow();
+    const { index, heads } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    const out = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    expect(heads.get(`${PR_REPO}#7`)).toMatchObject({ headSha: HEAD, runId: out.runId });
+  });
+
+  it("a reopen never reuses a finished base-id run: it starts a fresh run (S1)", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    runs.get(first.runId)!.status = "complete"; // prior verdict finished
+    const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, reopened: true }, index, () => T1);
+    expect(again.reused).toBe(false);
+    expect(again.runId).not.toBe(first.runId);
+    expect(runs.size).toBe(2);
+  });
+
+  it("a reopen with a still-live base-id run also starts fresh (S1)", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    // still live
+    const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, reopened: true }, index, () => T1);
+    expect(again.reused).toBe(false);
+    expect(again.runId).not.toBe(first.runId);
+    expect(runs.get(first.runId)!.status).toBe("terminated"); // recordRun ends the superseded live run
+  });
+
+  it("a reopen with a still-live -p<pr> run also starts fresh, never reuses it (S1 -p path)", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    // PR 8 owns the HEAD base-id run; PR 7's -p7 run is still live.
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    // PR 7 reopens after its base moved: it must NOT reuse the live -p7 run.
+    const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, reopened: true }, index, () => T1);
+    expect(again.reused).toBe(false);
+    expect(again.runId).toBe(`${first.runId}-r${T1.toString(36)}`);
+    expect(runs.get(first.runId)!.status).toBe("terminated"); // recordRun ends the superseded live -p7
+    expect(runs.size).toBe(3);
   });
 });
 

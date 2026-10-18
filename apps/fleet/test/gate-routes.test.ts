@@ -190,37 +190,6 @@ describe("POST /studio/gate/start after the sha's run finished (#1085)", () => {
 // FakeEnv's own property type: its Env half demands a full WorkflowInstance,
 // while the fake implements only status().
 describe("GET /studio/gate/status with a skipped run", () => {
-  it("skipped output -> success with the skip reason in the description", async () => {
-    const env = fakeEnv();
-    env.GATE_WORKFLOW.get = vi.fn(async () => ({
-      status: vi.fn(async () => ({
-        status: "complete",
-        output: { skipped: "no gated paths changed", statusPostFailed: false },
-      })),
-    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
-    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
-    const res = await handleGateRoute(req, env);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      state: "success", description: "skipped: no gated paths changed", statusPostFailed: false,
-    });
-  });
-
-  it("a paths skip with a failed status post stays success and carries statusPostFailed", async () => {
-    const env = fakeEnv();
-    env.GATE_WORKFLOW.get = vi.fn(async () => ({
-      status: vi.fn(async () => ({
-        status: "complete",
-        output: { skipped: "no gated paths changed", statusPostFailed: true },
-      })),
-    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
-    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
-    const res = await handleGateRoute(req, env);
-    expect(await res.json()).toEqual({
-      state: "success", description: "skipped: no gated paths changed", statusPostFailed: true,
-    });
-  });
-
   it("a no-gate-block skip posted nothing to GitHub: error, never a false green", async () => {
     const env = fakeEnv();
     env.GATE_WORKFLOW.get = vi.fn(async () => ({
@@ -248,6 +217,41 @@ describe("GET /studio/gate/status with a skipped run", () => {
     const res = await handleGateRoute(req, env);
     expect(await res.json()).toEqual({
       state: "error", description: "skipped: head moved since the infra error", statusPostFailed: false,
+    });
+  });
+});
+
+// #1214 round 2: the workflow returns the GUARDED state/description now, so the
+// route and CLI report the same red a downgraded success posts to GitHub.
+describe("GET /studio/gate/status with a guarded run (#1214 round 2)", () => {
+  it("a skip downgraded by the shared-head guard reports failure, never success", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({
+        status: "complete",
+        output: { state: "failure", description: "head aaaaaaaa shared with PR #7", statusPostFailed: false },
+      })),
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      state: "failure", description: "head aaaaaaaa shared with PR #7", statusPostFailed: false,
+    });
+  });
+
+  it("a clean skip now carries state success (not the skipped field), passed through", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({
+        status: "complete",
+        output: { state: "success", description: "no gated paths changed", statusPostFailed: false, legs: [] },
+      })),
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(await res.json()).toEqual({
+      state: "success", description: "no gated paths changed", statusPostFailed: false, legs: [],
     });
   });
 });

@@ -59,11 +59,11 @@ async function gateRunStatus(env: Env, runId: string): Promise<Response> {
     return j({ state: "pending" });
   }
   if (out?.skipped !== undefined) {
-    // Only the "no gated paths changed" skip posts success to GitHub, so only
-    // it reads success here. Any other skip (the #1125 "head moved" skip
-    // included) posted nothing, so it is an error, never a false green.
-    const state = out.skipped.startsWith("no gated paths changed") ? "success" : "error";
-    return j({ state, description: `skipped: ${out.skipped}`, statusPostFailed: out.statusPostFailed });
+    // The only skip that still carries `skipped` is the #1125 "head moved"
+    // skip, which posted nothing to GitHub: error, never a false green. The
+    // "no gated paths changed" skip returns its guarded state/description
+    // directly (the `out.state` branch below) since #1214 round 2.
+    return j({ state: "error", description: `skipped: ${out.skipped}`, statusPostFailed: out.statusPostFailed });
   }
   if (!out?.state) {
     return j({ state: "error", description: "gate workflow instance errored" });
