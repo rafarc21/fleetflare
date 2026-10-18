@@ -21,6 +21,15 @@ describe("authored studio files", () => {
       }
     }
   });
+
+  test("web-studio and release-studio declare codebase-memory; maestro stays []", () => {
+    const web = parseStudioFile(readFileSync(join(ROOT, "web-studio", "studio.md"), "utf8"));
+    const release = parseStudioFile(readFileSync(join(ROOT, "release-studio", "studio.md"), "utf8"));
+    const maestro = parseStudioFile(readFileSync(join(ROOT, "maestro", "studio.md"), "utf8"));
+    expect(web.mcp).toEqual(["codebase-memory"]);
+    expect(release.mcp).toEqual(["codebase-memory"]);
+    expect(maestro.mcp).toEqual([]);
+  });
 });
 
 // Board issue #160. Every authored file that already states the #98 one-heavy-

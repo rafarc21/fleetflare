@@ -67,4 +67,13 @@ describe("container images pin ENV IS_SANDBOX=1", () => {
   it("Dockerfile (headless batch/task image, server.ts's runClaude)", () => {
     expect(env.TEST_DOCKERFILE_TASK_SRC).toContain("ENV IS_SANDBOX=1");
   });
+
+  it("Dockerfile.studio installs codebase-memory-mcp by pinned tag + sha256", () => {
+    const src = env.TEST_DOCKERFILE_STUDIO_SRC;
+    expect(src).toContain("codebase-memory-mcp-linux-amd64-portable.tar.gz");
+    expect(src).toContain("v0.11.0");
+    expect(src).toContain("1f9e8293eb2bc5c05cfa27a7e8fc033da6d729ffad525ccfcdaa3fd606306683");
+    expect(src).toContain("/usr/local/bin/codebase-memory-mcp");
+    expect(src).toContain("sha256sum -c");
+  });
 });
