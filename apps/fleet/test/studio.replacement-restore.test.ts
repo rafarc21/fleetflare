@@ -1289,3 +1289,43 @@ describe("runRestart — re-resolves STUDIO_MCP from the current blueprint (issu
     expect(refs).toContain("pinned-sha");
   });
 });
+
+describe("restartWithStorage — persists the re-resolved MCP to ROLE_ENV_KEY (issue #1216)", () => {
+  const FLEET_JSON = JSON.stringify({
+    blueprint: { repo: "rafarc21/fleetflare", ref: "main" },
+    roles: [],
+    instance_type: "standard-2",
+  });
+  const STUDIO_MD = [
+    "---",
+    "name: release-studio",
+    "title: Release Studio",
+    "lead: Release Lead",
+    "skills: []",
+    "secrets: []",
+    "mcp: [codebase-memory]",
+    "allowedTools: Bash(git *)",
+    "---",
+    "release studio prompt body",
+  ].join("\n");
+
+  it("a heal that re-resolves MCP writes it back to storage, so the READY check agrees with the container", async () => {
+    const deps: ProvisionDeps = {
+      sbExec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+      recordStudio: async () => {},
+      now: () => NOW,
+      fetchBlueprintFile: vi.fn(async (repo: string, path: string) => {
+        if (path === "fleet.json") return FLEET_JSON;
+        if (path === "fleet/blueprint/studios/release-studio/studio.md") return STUDIO_MD;
+        throw new Error(`unexpected path: ${path}`);
+      }),
+    };
+    const stored = { ...STUDIO_ENV, STUDIO_MCP: "" };
+    const storage = fakeStorage({ status: status({ id: STUDIO_ID, repoSlug: "acme-org/acme-os" }), roleEnv: stored });
+
+    await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare", "heal", storage);
+
+    const persisted = (await storage.get(ROLE_ENV_KEY)) as StudioEnv;
+    expect(persisted.STUDIO_MCP).toBe("codebase-memory");
+  });
+});
