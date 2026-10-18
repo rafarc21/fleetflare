@@ -190,7 +190,16 @@ export async function startGateRun(
     } catch {
       throw err;
     }
-    return { runId, reused: true };
+    // #1172: the id is (repo, head sha). A run under this id whose per-PR
+    // pointer does not name this head belongs to another PR that shared the
+    // sha: reuse would inherit that PR's verdict. Start a fresh -r run, so each
+    // PR runs and posts its own decision. The pointer naming this head means the
+    // PR already owns a run of it: reattach to that run, never a third instance.
+    const latest = await index.latest(input.repo, input.pr);
+    if (latest?.headSha === input.headSha) return { runId: latest.runId, reused: true };
+    const freshId = `${runId}-r${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 6)}`;
+    await wf.create({ id: freshId, params: { repo: input.repo, pr: input.pr } });
+    return recordRun(wf, input, index, freshId, Date.now);
   }
   return recordRun(wf, input, index, runId, Date.now);
 }

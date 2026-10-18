@@ -592,6 +592,25 @@ export async function listOpenPullNumbers(token: string, repo: string): Promise<
   return raw.map((p) => p.number);
 }
 
+/** One open PR with the head sha and base ref the shared-head guard (#1172)
+ *  reads. */
+export interface OpenPull { number: number; headSha: string; baseRef: string }
+
+/** Every open PR on a repo, with the head sha and base ref — the shared-head
+ *  guard (#1172) reads it before every success post. One page (GitHub's own
+ *  100 max), same posture as listOpenPullNumbers. THROWS on any non-2xx,
+ *  deliberately: the guard's caller fails CLOSED on a listing error. */
+export async function listOpenPulls(token: string, repo: string): Promise<OpenPull[]> {
+  const params = new URLSearchParams({ state: "open", per_page: "100" });
+  const raw = await ghJson<{ number: number; head: { sha: string }; base: { ref: string } }[]>(
+    token,
+    `https://api.github.com/repos/${repo}/pulls?${params.toString()}`,
+    { method: "GET" },
+    `list open pulls for ${repo}`,
+  );
+  return raw.map((p) => ({ number: p.number, headSha: p.head.sha, baseRef: p.base.ref }));
+}
+
 /**
  * Every open PR on a repo, WITH the files each one changed — board issue
  * #112 / #70 ask 8's own path-claim check (src/board/board.ts's

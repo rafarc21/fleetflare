@@ -15,12 +15,12 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, getBranchSha, getPullRequest, getPullRequestHeadSha, listRepoTree, postCommitStatus,
+  compareFiles, getBranchSha, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree, postCommitStatus,
 } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
-import { bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
+import { bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, guardSuccessStatus, type GateConfig } from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
   bundleKeyFor, outcomeLegs, pendingStatusArgs, planBundleLeg, planUnionLegs, verdictToStatusArgs,
@@ -123,9 +123,13 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     }
     if (decision.action === "skip") {
       // Post success so the required context is not left pending forever. (A guess: localci.sh's own skip path is the model.)
+      // #1172: the guard runs first, so a shared head with a different base fails, never skips green.
+      const shared = await step.do("shared-head-guard-skip", async () =>
+        sharedHeadLookup(mintToken, repo, resolved.headSha));
       const statusPostFailed = await step.do("post-skip-status", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha,
-          { state: "success", description: "no gated paths changed" }));
+          guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
+            { state: "success", description: "no gated paths changed" })));
       return { skipped: decision.reason, statusPostFailed };
     }
 
@@ -230,12 +234,40 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     }
 
     // Wrapped in a step so a Workflow replay never posts the status twice.
+    // #1172: a success verdict still fails when a sibling PR shares the head
+    // with a different base. The guard runs before the post; a failure or error
+    // verdict posts as-is.
+    const verdictArgs = verdictToStatusArgs(final, {
+      expected: legs.map((l) => l.leg), results, runId: event.instanceId,
+    });
+    const shared = await step.do("shared-head-guard-verdict", async () =>
+      sharedHeadLookup(mintToken, repo, resolved.headSha));
     const statusPostFailed = await step.do("post-verdict", async () =>
-      postGateStatus(this.statusPort(), repo, resolved.headSha, verdictToStatusArgs(final, {
-        expected: legs.map((l) => l.leg), results, runId: event.instanceId,
-      })));
+      postGateStatus(this.statusPort(), repo, resolved.headSha,
+        verdictArgs.state === "success"
+          ? guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
+            { state: "success", description: verdictArgs.description })
+          : verdictArgs));
     // Per-leg output (#1049) rides in the final result, in plan order.
     return { ...final, statusPostFailed, legs: outcomeLegs(results) };
+  }
+}
+
+/** #1172: the shared-head guard lookup. Lists the head's open PRs and keeps
+ *  those whose head sha matches, as { number, baseRef }. A lookup that throws
+ *  is an error the caller fails closed on — never a silent green. */
+async function sharedHeadLookup(
+  mintToken: (repo: string) => Promise<string>, repo: string, headSha: string,
+): Promise<{ open: { number: number; baseRef: string }[] } | { error: string }> {
+  try {
+    const token = await mintToken(repo);
+    const pulls = await listOpenPulls(token, repo);
+    return {
+      open: pulls.filter((p) => p.headSha === headSha).map((p) => ({ number: p.number, baseRef: p.baseRef })),
+    };
+  } catch (err) {
+    console.error("gate: shared-head lookup failed", err);
+    return { error: "lookup failed" };
   }
 }
 
