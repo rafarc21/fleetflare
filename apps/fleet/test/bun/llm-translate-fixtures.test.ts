@@ -50,11 +50,11 @@ function texts(frames: string[]): string {
 }
 
 describe("llm-stream fixtures (#1210)", () => {
-  test("stray-closer.sse — kimi: a stray ` response` is dropped, turn ends clean", () => {
+  test("stray-closer.sse — kimi: a stray THINK_CLOSE closer is dropped, turn ends clean", () => {
     const { frames, closed } = replay("stray-closer.sse", true);
     expect(closed.ok).toBe(true);
     expect(texts(frames)).toBe("Thinking complete. Here is the result.");
-    expect(texts(frames)).not.toContain(" response");
+    expect(texts(frames)).not.toContain("</think>");
     const delta = closed.frames.map(parseFrame).find((f) => f.event === "message_delta");
     expect((delta?.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("end_turn");
   });
