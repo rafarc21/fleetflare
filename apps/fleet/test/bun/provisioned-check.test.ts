@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSnippet } from "./exec-snippet";
-import { provisionedCheckCmd } from "../../src/studio/provision";
+import { provisionedCheckCmd, harnessExpectation } from "../../src/studio/provision";
+import type { RoleEnv, StudioEnv } from "../../src/studio/provision";
 
 // A repo name that cannot exist on disk sends the command down its FIRST
 // branch, so this runs instantly and needs no tmux, no claude, no container.
@@ -52,5 +53,34 @@ describe("provisionedCheckCmd, executed", () => {
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
+  });
+});
+
+describe("harnessExpectation — the mcp token (issue #1216)", () => {
+  const studioEnv = (mcp: string): StudioEnv => ({
+    ROLE_PROMPT_B64: "aGk=",
+    ROLE_ALLOWED_TOOLS: "",
+    ROLE_EFFORT: "",
+    STUDIO_NAME: "release-studio",
+    STUDIO_SKILLS: "",
+    STUDIO_MEMBERS_B64: "e30=",
+    STUDIO_MCP: mcp,
+    STUDIO_LEAD_DISALLOWED: "",
+    BLUEPRINT_REPO: "rafarc21/fleetflare",
+  });
+
+  test("a studio with STUDIO_MCP names carries the mcp token", () => {
+    const dec = atob(harnessExpectation(studioEnv("codebase-memory"))!);
+    expect(dec.split("\n")).toContain("mcp");
+  });
+
+  test("a studio with empty STUDIO_MCP carries no mcp token", () => {
+    const dec = atob(harnessExpectation(studioEnv(""))!);
+    expect(dec.split("\n")).not.toContain("mcp");
+  });
+
+  test("a role env returns null — roles get MCP coverage via ask 2, not ask 3", () => {
+    const roleEnv: RoleEnv = { ROLE_PROMPT_B64: "aGk=", ROLE_ALLOWED_TOOLS: "", ROLE_EFFORT: "", ROLE_MCP: "playwright" };
+    expect(harnessExpectation(roleEnv)).toBeNull();
   });
 });

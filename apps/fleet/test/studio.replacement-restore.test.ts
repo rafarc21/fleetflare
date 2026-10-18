@@ -1182,3 +1182,84 @@ You are scratch. Sandbox role, low stakes.
     expect(observed.session?.restore).toBe("not-attempted");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #1216 — runRestart re-resolves STUDIO_MCP from the current blueprint
+// ---------------------------------------------------------------------------
+
+describe("runRestart — re-resolves STUDIO_MCP from the current blueprint (issue #1216)", () => {
+  const FLEET_JSON = JSON.stringify({
+    blueprint: { repo: "rafarc21/fleetflare", ref: "main" },
+    roles: [],
+    instance_type: "standard-2",
+  });
+  const STUDIO_MD = [
+    "---",
+    "name: release-studio",
+    "title: Release Studio",
+    "lead: Release Lead",
+    "skills: []",
+    "secrets: []",
+    "mcp: [codebase-memory]",
+    "allowedTools: Bash(git *)",
+    "---",
+    "release studio prompt body",
+  ].join("\n");
+
+  /** A deps whose sbExec records every exec's {cmd, env} and answers 0 for all. */
+  function mcpRestartDeps(opts: { throwOnFetch?: boolean } = {}) {
+    const execs: { cmd: string; env?: Record<string, string> }[] = [];
+    const sbExec = vi.fn(async (cmd: string, env?: Record<string, string>) => {
+      execs.push({ cmd, env });
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const fetchBlueprintFile = vi.fn(async (repo: string, path: string) => {
+      if (opts.throwOnFetch) throw new Error("blueprint fetch failed");
+      if (path === "fleet.json") return FLEET_JSON;
+      if (path === "fleet/blueprint/studios/release-studio/studio.md") return STUDIO_MD;
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const deps: ProvisionDeps & { execs: typeof execs } = {
+      sbExec,
+      recordStudio: async () => {},
+      now: () => NOW,
+      fetchBlueprintFile,
+      execs,
+    };
+    return deps;
+  }
+
+  it("re-resolves STUDIO_MCP from the current blueprint", async () => {
+    const deps = mcpRestartDeps();
+    const stored = { ...STUDIO_ENV, STUDIO_MCP: "" };
+    const result = await runRestart(
+      deps,
+      status({ id: STUDIO_ID, repoSlug: "acme-org/acme-os" }),
+      STUDIO_ID,
+      stored,
+      true,
+      "rafarc21/fleetflare",
+    );
+    expect(result.state).toBe("running");
+    const bringup = deps.execs.find((e) => e.cmd === BRINGUP_CMD);
+    expect(bringup).toBeDefined();
+    expect(bringup!.env?.STUDIO_MCP).toBe("codebase-memory");
+  });
+
+  it("a blueprint fetch failure replays the stored env unchanged", async () => {
+    const deps = mcpRestartDeps({ throwOnFetch: true });
+    const stored = { ...STUDIO_ENV, STUDIO_MCP: "" };
+    const result = await runRestart(
+      deps,
+      status({ id: STUDIO_ID, repoSlug: "acme-org/acme-os" }),
+      STUDIO_ID,
+      stored,
+      true,
+      "rafarc21/fleetflare",
+    );
+    expect(result.state).toBe("running");
+    const bringup = deps.execs.find((e) => e.cmd === BRINGUP_CMD);
+    expect(bringup).toBeDefined();
+    expect(bringup!.env?.STUDIO_MCP).toBe("");
+  });
+});

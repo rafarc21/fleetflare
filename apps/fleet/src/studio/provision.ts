@@ -1439,6 +1439,8 @@ export function harnessExpectation(env: RoleEnv | StudioEnv | null | undefined):
   // exactly as falsy as "" — see StudioEnv.STUDIO_COMPLETION_GATE's own doc
   // comment.
   if (env.STUDIO_COMPLETION_GATE) lines.push("g");
+  const mcpNames = ("STUDIO_MCP" in env ? env.STUDIO_MCP : env.ROLE_MCP ?? "").split(",").filter((n) => n !== "");
+  if (mcpNames.length > 0) lines.push("mcp");
   lines.push("end");
   return btoa(lines.join("\n"));
 }
@@ -1678,6 +1680,8 @@ function harnessCheckSnippet(harness: string): string {
     `elif [ "$k" = g ]; then ` +
     `[ -x ${completionGate} ] || echo "completion-gate hook missing or not executable (~/.claude/hooks/completion-gate.sh)"; ` +
     `grep -q completion-gate.sh ${settings} 2>/dev/null || echo "settings.json does not reference the completion-gate hook"; ` +
+    `elif [ "$k" = mcp ]; then ` +
+    `[ -f "$HOME/.claude/fleet-mcp.json" ] || echo "mcp config missing (~/.claude/fleet-mcp.json)"; ` +
     `fi; ` +
     `done; } )"; ` +
     `if [ -z "$miss" ]; then echo "${PROVISIONED_OK}"; ` +
@@ -2872,6 +2876,22 @@ export const NO_ROLE_ENV_ERROR =
  *  stored role env) has no container to toggle keepAlive on, so it is
  *  skipped there too, deliberately mirroring `roleEnv`'s own null-guard
  *  rather than running unconditionally before it. */
+export async function resolveMcpOverride(
+  deps: Pick<ProvisionDeps, "fetchBlueprintFile">, fleetRepoSlug: string, name: string,
+  isStudio: boolean,
+): Promise<{ STUDIO_MCP?: string; ROLE_MCP?: string } | null> {
+  const fleet = parseFleetJson(await deps.fetchBlueprintFile(fleetRepoSlug, FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF));
+  const ref = fleet.blueprint.ref;
+  if (isStudio) {
+    const studio = await tryFetchStudio(deps, fleet.blueprint.repo, name, ref);
+    if (studio === null) return null;
+    return { STUDIO_MCP: studio.mcp.join(",") };
+  }
+  assertRoleInFleet(fleet, name);
+  const role = parseRoleFile(await deps.fetchBlueprintFile(fleet.blueprint.repo, roleFilePath(name), ref));
+  return { ROLE_MCP: (role.mcp ?? []).join(",") };
+}
+
 export async function runRestart(
   deps: ProvisionDeps, existing: StudioStatus | null, idFallback: string, roleEnv: RoleEnv | StudioEnv | null,
   keepAlive: boolean, fleetRepoSlug: string,
@@ -2896,6 +2916,16 @@ export async function runRestart(
   // stays untouched.
   const repo = parseStudioId(status.id)?.repo ?? null;
   const isStudio = "STUDIO_NAME" in roleEnv && roleEnv.STUDIO_NAME !== "";
+  let bringupEnv: RoleEnv | StudioEnv = roleEnv;
+  const mcpName = isStudio ? (roleEnv as StudioEnv).STUDIO_NAME : (parseStudioId(status.id)?.role ?? null);
+  if (mcpName !== null) {
+    try {
+      const mcpOverride = await resolveMcpOverride(deps, fleetRepoSlug, mcpName, isStudio);
+      if (mcpOverride) bringupEnv = { ...roleEnv, ...mcpOverride };
+    } catch (err) {
+      console.warn(`studio ${status.id}: MCP re-resolve failed, replaying stored env`, err instanceof Error ? err.message : String(err));
+    }
+  }
   let firstFailure: string | null = null;
   // Survives into the success path below for the same reason `firstFailure`
   // does: a restart that came up "fine" while refusing to put the checkout
@@ -3084,12 +3114,12 @@ export async function runRestart(
     };
     try {
       seen(await adoptBeforeBringup(deps, repo));
-      await bringUpAndVerify(deps, roleEnv, repo, isStudio, seen);
+      await bringUpAndVerify(deps, bringupEnv, repo, isStudio, seen);
     } catch (err) {
       firstFailure = redactSecrets(err instanceof Error ? err.message : String(err));
       await recordRetryAttempt(deps, firstFailure);
       seen(await adoptBeforeBringup(deps, repo));
-      await bringUpAndVerify(deps, roleEnv, repo, isStudio, seen);
+      await bringUpAndVerify(deps, bringupEnv, repo, isStudio, seen);
     }
 
     status = {
