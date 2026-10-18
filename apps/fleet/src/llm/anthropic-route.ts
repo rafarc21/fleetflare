@@ -45,6 +45,12 @@ export const ANTHROPIC_MESSAGES_PATH = "/fleet/llm/anthropic/v1/messages";
  *  see `handleFleetAnthropicCountTokens`'s own doc comment for the rest. */
 export const ANTHROPIC_COUNT_TOKENS_PATH = "/fleet/llm/anthropic/v1/messages/count_tokens";
 
+/** #1218: the synthetic studio id the triage daemon authenticates as. The
+ *  messages/count_tokens routes' rate limits and usage rows key on this id,
+ *  so the daemon draws its own lead-rate bucket and logs under its own id —
+ *  never a real studio's. */
+export const TRIAGE_DAEMON_ID = "triage--daemon";
+
 // deno-lint-ignore no-explicit-any
 type Json = any;
 
@@ -645,6 +651,27 @@ function foldAnthropicFrames(sse: string): Json {
  *  failing) or the resolved `studio`/`allRows` the caller needs to proceed —
  *  a caller only has work left to do once it gets the latter back.
  */
+/** #1218: SHA-256 hex of a string, same helper shape org.ts's hashSpawnToken
+ *  uses. */
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** #1218: constant-time "presented token equals TRIAGE_ROUTER_TOKEN". Both
+ *  sides are hashed, then the two digests are compared byte-by-byte with XOR
+ *  accumulation so the comparison cost never depends on how much of the
+ *  secret matched (workerd has no timingSafeEqual). Unset or empty secret is
+ *  a clean false — behaviour unchanged when the operator has not set it. */
+async function isTriageDaemonToken(env: Env, presented: string | null): Promise<boolean> {
+  const secret = env.TRIAGE_ROUTER_TOKEN;
+  if (presented === null || secret === undefined || secret.length === 0) return false;
+  const [a, b] = await Promise.all([sha256Hex(presented), sha256Hex(secret)]);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 async function authenticateGlmLeadRequest(
   req: Request, expectedPath: string, env: Env, rows: () => Promise<StudioStatus[]>,
 ): Promise<{ response: Response } | { studio: SpawnParent; allRows: StudioStatus[] }> {
@@ -666,7 +693,18 @@ async function authenticateGlmLeadRequest(
   }
 
   const presented = extractPresentedToken(req);
-  if (!isSpawnTokenShaped(presented)) return { response: text("unauthorized", 401) };
+  if (!isSpawnTokenShaped(presented)) {
+    // #1218: a presented value that is not spawn-token-shaped may still be the
+    // scoped router-only triage credential. Accepted ONLY here — the spawn
+    // token path above never sees it, and no other route reads this secret.
+    if (await isTriageDaemonToken(env, presented)) {
+      return {
+        studio: { id: TRIAGE_DAEMON_ID, repo: "oss-triage", role: "daemon" },
+        allRows: [],
+      };
+    }
+    return { response: text("unauthorized", 401) };
+  }
   const allRows = await rows();
   const studio: SpawnParent | null = await resolveSpawnParent(allRows, presented);
   if (!studio) return { response: text("unauthorized", 401) };

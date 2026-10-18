@@ -5,6 +5,7 @@
 // GITHUB_APP_PRIVATE_KEY for a GitHub App, GITHUB_WEBHOOK_SECRET, plus
 // ACCESS_TEAM_DOMAIN and ACCESS_AUD for the Cloudflare Access app in front
 // of /studio. See ../../docs/threat-model.md.
+// Board #1218 (oss-triage daemon) optionally adds TRIAGE_ROUTER_TOKEN — a scoped router-only credential for the local triage daemon; unset means no daemon access.
 // Board #350 (install cache, opt-in via INSTALL_CACHE_REPOS below) needs
 // three more if you turn it on: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
 // R2_SECRET_ACCESS_KEY — an R2 API token scoped to ONLY the bucket named

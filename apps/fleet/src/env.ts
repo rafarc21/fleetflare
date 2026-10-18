@@ -131,6 +131,17 @@ export interface Env {
    */
   LEAD_AI_RETRY_BASE_MS?: string;
   /**
+   * #1218: a scoped router-only credential for the local oss-triage daemon.
+   * When set (a Worker secret), the presented value on
+   * /fleet/llm/anthropic/v1/messages and .../count_tokens that equals it
+   * (constant-time) authenticates as the synthetic id "triage--daemon"
+   * (see anthropic-route.ts's TRIAGE_DAEMON_ID) — no spawn token, no
+   * registry row. Unset or empty = behaviour unchanged. Never accepted on
+   * any other route, and never logged in plaintext (only its synthetic id
+   * is). The operator sets the secret after deploy.
+   */
+  TRIAGE_ROUTER_TOKEN?: string;
+  /**
    * Workers AI binding (`"ai": { "binding": "AI" }`). junior and the
    * glm-lead route (anthropic-route.ts) both use it; the glm-lead route's
    * every call carries the third `options.gateway` argument (Task 4, spec
