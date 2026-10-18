@@ -239,7 +239,8 @@ export async function startGateRun(
       if (status === null) throw freshErr;
       // Reuse only a LIVE -p run; a finished one is stale and starts a fresh
       // -p<pr>-r<time> run so the push is gated anew, never handed a dead verdict.
-      if (isLiveStatus(status)) return { runId: freshId, reused: true };
+      // A reopen is never reused even live: it re-gates against the current base.
+      if (isLiveStatus(status) && input.reopened !== true) return { runId: freshId, reused: true };
       const rerunId = `${freshId}-r${now().toString(36)}`;
       await wf.create({ id: rerunId, params: { repo: input.repo, pr: input.pr } });
       return recordRun(wf, input, index, rerunId, now);
@@ -249,7 +250,8 @@ export async function startGateRun(
   return recordRun(wf, input, index, runId, now);
 }
 
-/** #1176: a title/body edit re-runs the precheck under its own id. The head sha
+/** #1176/#1214: a title/body/base edit re-runs the precheck under its own id.
+ *  The head sha
  *  is unchanged, so the plain sha id would dedupe-skip or reattach — an edit's
  *  recheck must be a fresh run. It records itself as the PR's latest WITHOUT
  *  ending the plain sha run through recordRun. Mirrors startManualGateRun's

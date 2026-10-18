@@ -333,9 +333,8 @@ const SHARED_HEAD_LOOKUP_FAILED: SharedHeadLookup = { error: "lookup failed" };
  *  listPullsForCommit (head-sha-scoped, one call, merged + open, no paging) and
  *  keeps the OPEN ones OF THIS HEAD as { number, baseRef } — a sibling PR whose
  *  tip sha differs is a different head, never "shared" (#1214 S3). THROWS on any
- *  error — the caller wraps the step in `.catch`, so Workflows retries the throw
- *  and fails closed only after the retries run out (a transient 5xx ends green,
- *  never red). */
+ *  error: the caller wraps the step in `.catch`, so Workflows retries the throw
+ *  once (a transient 5xx ends green) and fails closed only after retries run out. */
 async function sharedHeadLookup(
   mintToken: (repo: string) => Promise<string>, repo: string, headSha: string,
 ): Promise<SharedHeadLookup> {
