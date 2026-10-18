@@ -1439,7 +1439,7 @@ export function harnessExpectation(env: RoleEnv | StudioEnv | null | undefined):
   // exactly as falsy as "" — see StudioEnv.STUDIO_COMPLETION_GATE's own doc
   // comment.
   if (env.STUDIO_COMPLETION_GATE) lines.push("g");
-  const mcpNames = ("STUDIO_MCP" in env ? env.STUDIO_MCP : env.ROLE_MCP ?? "").split(",").filter((n) => n !== "");
+  const mcpNames = env.STUDIO_MCP.split(",").filter((n) => n !== "");
   if (mcpNames.length > 0) lines.push("mcp");
   lines.push("end");
   return btoa(lines.join("\n"));
@@ -2877,7 +2877,7 @@ export const NO_ROLE_ENV_ERROR =
  *  skipped there too, deliberately mirroring `roleEnv`'s own null-guard
  *  rather than running unconditionally before it. */
 export async function resolveMcpOverride(
-  deps: Pick<ProvisionDeps, "fetchBlueprintFile">, fleetRepoSlug: string, name: string,
+  deps: ProvisionDeps, fleetRepoSlug: string, name: string,
   isStudio: boolean,
 ): Promise<{ STUDIO_MCP?: string; ROLE_MCP?: string } | null> {
   const fleet = parseFleetJson(await deps.fetchBlueprintFile(fleetRepoSlug, FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF));
