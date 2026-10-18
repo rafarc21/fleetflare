@@ -1206,7 +1206,7 @@ describe("handleStudio", () => {
 
   // --- Fleet Spawn P3, Task 4 (R-P3-6): per-role keep_alive plumb ------------
 
-  it("provision resolves the role's keep_alive:false and calls setKeepAlive(false); restart re-derives the same value with no blueprint refetch", async () => {
+  it("provision resolves the role's keep_alive:false and calls setKeepAlive(false); restart re-derives the same value and re-resolves MCP when the stored ROLE_MCP is empty", async () => {
     authorized();
     const sbExecFake = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
     const fetchBlueprintFile = vi.fn(async (_repo: string, path: string) => {
@@ -1222,11 +1222,12 @@ describe("handleStudio", () => {
     const res = await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/restart`, { method: "POST" }), testEnv);
     expect(((await res.json()) as StudioStatus).state).toBe("running");
     expect(fakeNs.setKeepAliveCalls).toEqual([false, false]);
-    // Restart never refetches the blueprint — the 4 calls are all provision's
-    // (fleet.json, the Task 7 studio-first probe, role file, org.json).
-    // #341: back to 4 -- the memory index comes from the memory store
-    // (FLEET_OPS_REPO), unset in this env, so there is no index fetch.
-    expect(fetchBlueprintFile).toHaveBeenCalledTimes(4);
+    // Restart re-resolves MCP when the stored ROLE_MCP is empty (issue #1216):
+    // 2 more fetches (fleet.json + role file) on top of provision's 4
+    // (fleet.json, the Task 7 studio-first probe, role file, org.json). The
+    // memory index comes from the memory store (FLEET_OPS_REPO), unset in this
+    // env, so there is no index fetch.
+    expect(fetchBlueprintFile).toHaveBeenCalledTimes(6);
   });
 
   it("provision defaults keep_alive to true when the role frontmatter omits it, and calls setKeepAlive(true)", async () => {
