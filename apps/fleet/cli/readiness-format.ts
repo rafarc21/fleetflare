@@ -540,10 +540,12 @@ export function formatActivity(status: StudioStatus, now: Date, staleAfterSecond
   // branch above, LIMIT included: the alert axis (a member/background
   // process) is independent of the lead's own state a limit describes.
   const alerts = status.observed?.memberAlerts ?? null;
+  const autoNudges = status.observed?.autoContinues ?? null;
+  const autoNote = autoNudges !== null && autoNudges > 0 ? `auto-continued ${autoNudges}x` : null;
   if (alerts && alerts.length > 0) {
-    return `${base} · ${formatMemberAlert(alerts[0], now)}`;
+    return `${base} · ${formatMemberAlert(alerts[0], now)}${autoNote ? ` · ${autoNote}` : ""}`;
   }
-  return base;
+  return autoNote ? `${base} · ${autoNote}` : base;
 }
 
 /** Issue #70 ask 4: one studio's lead, machine-readable (`fleet ls --json`). */

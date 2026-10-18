@@ -1124,6 +1124,9 @@ export async function commitDate(token: string, repo: string, sha: string): Prom
 /** The most files one compare call lists. A list at this cap may be cut short, so
  *  it cannot prove that nothing gated changed (#1095 round 3). */
 export const COMPARE_FILE_CAP = 300;
+/** GitHub's own compare endpoint caps commits at 250 (same cap compareAhead
+ *  notes). A list at this cap may be cut short, so a leak scan cannot trust it. */
+export const COMPARE_COMMIT_CAP = 250;
 
 export async function compareFiles(
   token: string, repo: string, base: string, head: string,
@@ -1167,6 +1170,74 @@ export function comparedFilePaths(
 ): string[] {
   return (files ?? []).flatMap((f) => (f.previous_filename === undefined
     ? [f.filename] : [f.filename, f.previous_filename]));
+}
+
+/** #1169: the compare fields the merge precheck scans — each file's patch
+ *  (and a rename's old name), plus every commit's author/committer identity
+ *  and message (#1176: a squash body builds from commit messages, so a closing
+ *  keyword there closes issues at merge). */
+export interface PrecheckFile {
+  filename: string; previous_filename?: string; patch?: string; status?: string;
+  /** #1191: changed-line count — a move-only rename/copy (0) has no diff to scan. */
+  changes?: number;
+}
+export interface PrecheckCommitMeta { author: string; committer: string; message: string }
+
+/** The raw compare fields precheckSummary maps from (#1169). */
+export interface PrecheckCompareResponse {
+  files?: { filename: string; previous_filename?: string; patch?: string; status?: string; changes?: number }[];
+  commits?: {
+    commit?: {
+      author?: { name?: string; email?: string } | null;
+      committer?: { name?: string; email?: string } | null;
+      message?: string;
+    };
+  }[];
+}
+
+/** precheckSummary's mapping of one commit identity: name and email joined,
+ *  or "" when GitHub omits it (a null author on some merge commits). */
+function precheckIdentity(p: { name?: string; email?: string } | null | undefined): string {
+  return [p?.name ?? "", p?.email ?? ""].filter((s) => s !== "").join(" ");
+}
+
+/** #1169: what the merge precheck takes from one compare response — patches
+ *  and identities, not the path/merge-base view compareSummary maps. Pure, so
+ *  bun test proves the mapping without the network. */
+export function precheckSummary(c: PrecheckCompareResponse): {
+  files: PrecheckFile[]; commits: PrecheckCommitMeta[]; truncated: boolean;
+} {
+  return {
+    files: (c.files ?? []).map((f) => ({
+      filename: f.filename,
+      ...(f.previous_filename === undefined ? {} : { previous_filename: f.previous_filename }),
+      ...(f.patch === undefined ? {} : { patch: f.patch }),
+      ...(f.status === undefined ? {} : { status: f.status }),
+      ...(f.changes === undefined ? {} : { changes: f.changes }),
+    })),
+    commits: (c.commits ?? []).map((m) => ({
+      author: precheckIdentity(m.commit?.author),
+      committer: precheckIdentity(m.commit?.committer),
+      message: m.commit?.message ?? "",
+    })),
+    truncated: (c.files?.length ?? 0) >= COMPARE_FILE_CAP || (c.commits?.length ?? 0) >= COMPARE_COMMIT_CAP,
+  };
+}
+
+/** #1169: the compare call behind the merge precheck — each file's patch (and
+ *  a rename's old name), plus every commit's author/committer identity.
+ *  Separate from compareFiles: the precheck reads text bodies, the gate's path
+ *  rules read names only, and neither should pay for the other. */
+export async function comparePrecheckData(
+  token: string, repo: string, base: string, head: string,
+): Promise<{ files: PrecheckFile[]; commits: PrecheckCommitMeta[]; truncated: boolean }> {
+  const c = await ghJson<PrecheckCompareResponse>(
+    token,
+    `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+    { method: "GET" },
+    `read ${repo} precheck compare ${base}...${head}`,
+  );
+  return precheckSummary(c);
 }
 
 /**

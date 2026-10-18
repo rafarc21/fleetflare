@@ -69,6 +69,12 @@
   "r2_buckets": [
     { "binding": "STUDIO_ARCHIVE", "bucket_name": "fleet-test-archive" }
   ],
+  // #715 gate runner (Phase 1): the `gate` Workflow that fans a PR's legs out
+  // to GateRunnerDO containers. Mirrors wrangler.example.jsonc's workflows[]
+  // (name/binding/class_name) so vitest can drive GateWorkflow.run() directly.
+  "workflows": [
+    { "name": "gate", "binding": "GATE_WORKFLOW", "class_name": "GateWorkflow" }
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "AGENT", "class_name": "AgentDO" },

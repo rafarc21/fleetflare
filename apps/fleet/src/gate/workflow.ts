@@ -15,9 +15,12 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, getBranchSha, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree, postCommitStatus,
+  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree, postCommitStatus,
 } from "../github/api";
-import { repoTokenMinter } from "../github/auth";
+import { mintRepoToken, repoTokenMinter } from "../github/auth";
+import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
+import { resolveOpsRepo } from "../ops-repo";
+import { capStatusDescription, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import {
@@ -83,6 +86,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       return {
         headSha, baseSha, mergeBaseSha: compare.mergeBaseSha, baseRef: pull.baseRef,
         changedFiles: compare.files, truncated: compare.truncated, private: pull.baseRepoPrivate,
+        title: pull.title, body: pull.body,
       };
     });
 
@@ -124,7 +128,58 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: decision.description }));
       return { state: "failure", description: decision.description, statusPostFailed, legs: [] };
     }
+    // #1169: the merge prechecks GitHub auto-merge would otherwise skip —
+    // closing keyword + leak scan on title/body/diff/commit identities. Runs
+    // before the skip return so a docs-only PR with a keyword still goes red.
+    // Fail closed: a missing denylist or scanner error is a red verdict, never
+    // a silent pass (leak-gate.ts's own rule).
+    const precheckFailure = await step.do("precheck", async () => {
+      const token = await mintToken(repo);
+      const compare = await comparePrecheckData(token, repo, resolved.baseSha, resolved.headSha);
+      const opsRepo = resolveOpsRepo(this.env);
+      // #1176: a confirmed-private repo never reads the ops denylist — leaks
+      // cannot leave it (board/leak.ts's own skip), so the fetch is pure waste.
+      const patterns = resolved.private ? [] : opsRepo === null ? [] : parseDenylist(
+        await fetchRepoFile(await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }), opsRepo, OPS_DENYLIST_PATH, "HEAD"));
+      return mergePrecheckFailures({
+        title: resolved.title, body: resolved.body, patterns,
+        blobs: precheckBlobs({ title: resolved.title, body: resolved.body, files: compare.files, commits: compare.commits }),
+        private: resolved.private, truncated: compare.truncated,
+        commitMessages: compare.commits.map((c) => c.message),
+        files: compare.files,
+      });
+    }).catch(() => ["gate precheck failed closed"] as string[]);
+
+    if (precheckFailure.length > 0) {
+      const description = capStatusDescription(precheckFailure[0]);
+      const statusPostFailed = await step.do("post-precheck-failure", async () =>
+        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description }));
+      return { state: "failure", description, statusPostFailed, legs: [] };
+    }
+
+    // #1176: a green run must not certify a title/body edited after the run
+    // started — re-read them and re-run the pure precheck (keyword + leak on the
+    // fresh title/body, diff not refetched) before either success post. Fail
+    // closed on error. Only one of the two call sites executes per run, so the
+    // shared step name replays correctly.
+    const recheck = async (): Promise<string[]> => {
+      const token = await mintToken(repo);
+      const pull = await getPullRequest(token, repo, pr);
+      const opsRepo = resolveOpsRepo(this.env);
+      const patterns = resolved.private ? [] : opsRepo === null ? [] : parseDenylist(
+        await fetchRepoFile(await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }), opsRepo, OPS_DENYLIST_PATH, "HEAD"));
+      return recheckFailures({ title: pull.title, body: pull.body, patterns, private: resolved.private });
+    };
+    const postRecheckFailure = async (failures: string[]) => {
+      const description = capStatusDescription(failures[0]);
+      const statusPostFailed = await step.do("post-recheck-failure", async () =>
+        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description }));
+      return { state: "failure" as const, description, statusPostFailed, legs: [] };
+    };
+
     if (decision.action === "skip") {
+      const recheckFailure = await step.do("precheck-recheck", recheck).catch(() => ["gate precheck failed closed"] as string[]);
+      if (recheckFailure.length > 0) return postRecheckFailure(recheckFailure);
       // Post success so the required context is not left pending forever. (A guess: localci.sh's own skip path is the model.)
       // #1172: the guard runs first, so a shared head with a different base fails, never skips green.
       const shared = await step.do("shared-head-guard-skip", async () =>
@@ -234,6 +289,14 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       });
       // A step result cached before the outcome became a string replays as `true` (#1150 review).
       if (rerunStarted(started)) return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results) };
+    }
+
+    // #1176: before the verdict post, re-read title/body once more — only a
+    // GREEN verdict can certify a PR for auto-merge, so only that one is gated
+    // by the recheck; a red verdict posts red either way.
+    if (final.state === "success") {
+      const recheckFailure = await step.do("precheck-recheck", recheck).catch(() => ["gate precheck failed closed"] as string[]);
+      if (recheckFailure.length > 0) return postRecheckFailure(recheckFailure);
     }
 
     // Wrapped in a step so a Workflow replay never posts the status twice.

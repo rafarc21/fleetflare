@@ -55,6 +55,12 @@ export interface TaskBrief {
    * already draws for its own authorization half.
    */
   security?: boolean;
+  /**
+   * Issue #1133: `--allow-duplicate` — the caller explicitly accepts a second
+   * open task for an issue an existing task already references. Absent = the
+   * ordinary refusal. Boolean-only, same discipline as `junior`/`security`.
+   */
+  allowDuplicate?: boolean;
 }
 
 // GitHub's own limits, not ours — a longer title/body is refused by the API
@@ -146,11 +152,16 @@ export function parseBrief(raw: unknown): BriefResult {
   if (rawSecurity !== undefined && rawSecurity !== null && typeof rawSecurity !== "boolean") {
     return { ok: false, message: "security must be a boolean" };
   }
+  const rawAllowDuplicate = body.allowDuplicate;
+  if (rawAllowDuplicate !== undefined && rawAllowDuplicate !== null && typeof rawAllowDuplicate !== "boolean") {
+    return { ok: false, message: "allowDuplicate must be a boolean" };
+  }
 
   const brief: TaskBrief = {
     title, objective, outputFormat, boundaries, milestone, assignee,
     ...(rawJunior === true ? { junior: true } : {}),
     ...(rawSecurity === true ? { security: true } : {}),
+    ...(rawAllowDuplicate === true ? { allowDuplicate: true } : {}),
   };
   const rawKey = body.idempotencyKey;
   if (rawKey !== undefined && rawKey !== null) {
@@ -263,4 +274,25 @@ export function renderBriefPrompt(
       "Never label, close or reopen the issue yourself — not with `gh`, not by hand.",
     "",
   ].join("\n");
+}
+
+/**
+ * Issue #1133: the issue numbers a brief references — `#N` anywhere in its
+ * title, or the board's canonical `refs #N` in title or objective (the same
+ * form pr-awaiting-merge.ts reads on PRs). `continues` ("Continues #7.") is
+ * NOT a reference: a follow-up legitimately reopens the issue a merge just
+ * closed. Pure, so the extraction rule is directly tested.
+ */
+export function refsInBrief(title: string, objective: string): number[] {
+  const seen = new Set<number>();
+  const out: number[] = [];
+  for (const m of title.matchAll(/#(\d+)\b/g)) {
+    const n = Number(m[1]);
+    if (!seen.has(n)) { seen.add(n); out.push(n); }
+  }
+  for (const m of `${title}\n${objective}`.matchAll(/\brefs #(\d+)\b/gi)) {
+    const n = Number(m[1]);
+    if (!seen.has(n)) { seen.add(n); out.push(n); }
+  }
+  return out;
 }

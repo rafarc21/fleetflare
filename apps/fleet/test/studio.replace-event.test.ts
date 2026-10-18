@@ -39,7 +39,7 @@ describe("runShipTickWithObservation — onReplaced (issue #1146)", () => {
     const deps: ShipDeps = { exec: vi.fn(async () => shipStdout("")), r2Put: vi.fn(async () => {}), now: () => T0 };
 
     await runShipTickWithObservation(
-      deps, storage as never, STUDIO_ID, undefined, undefined, undefined, undefined, undefined, onReplaced,
+      deps, storage as never, STUDIO_ID, undefined, undefined, undefined, undefined, undefined, undefined, onReplaced,
     );
 
     expect(onReplaced).toHaveBeenCalledTimes(1);
@@ -57,10 +57,10 @@ describe("runShipTickWithObservation — onReplaced (issue #1146)", () => {
     const deps: ShipDeps = { exec: vi.fn(async () => shipStdout("")), r2Put: vi.fn(async () => {}), now: () => T0 };
 
     await runShipTickWithObservation(
-      deps, storage as never, STUDIO_ID, undefined, undefined, undefined, undefined, undefined, onReplaced,
+      deps, storage as never, STUDIO_ID, undefined, undefined, undefined, undefined, undefined, undefined, onReplaced,
     );
     await runShipTickWithObservation(
-      deps, storage as never, STUDIO_ID, undefined, undefined, undefined, undefined, undefined, onReplaced,
+      deps, storage as never, STUDIO_ID, undefined, undefined, undefined, undefined, undefined, undefined, onReplaced,
     );
 
     expect(onReplaced).toHaveBeenCalledTimes(1);
@@ -72,7 +72,7 @@ describe("runShipTickWithObservation — onReplaced (issue #1146)", () => {
     const deps: ShipDeps = { exec: vi.fn(async () => shipStdout(OLD_TOKEN)), r2Put: vi.fn(async () => {}), now: () => T0 };
 
     await runShipTickWithObservation(
-      deps, storage as never, STUDIO_ID, undefined, undefined, undefined, undefined, undefined, onReplaced,
+      deps, storage as never, STUDIO_ID, undefined, undefined, undefined, undefined, undefined, undefined, onReplaced,
     );
 
     expect(onReplaced).not.toHaveBeenCalled();
@@ -85,7 +85,7 @@ describe("runShipTickWithObservation — onReplaced (issue #1146)", () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await expect(runShipTickWithObservation(
-      deps, storage as never, STUDIO_ID, undefined, undefined, undefined, undefined, undefined, onReplaced,
+      deps, storage as never, STUDIO_ID, undefined, undefined, undefined, undefined, undefined, undefined, onReplaced,
     )).resolves.toBeDefined();
 
     expect((await getObserved(storage as never)).replacedAt).toBe(T0.toISOString());

@@ -606,6 +606,18 @@ describe("parseCliArgs: task", () => {
     expect(parseCliArgs(["task", "ls", "--junior"]).cmd).toBe("usage");
   });
 
+  // Issue #1133: `--allow-duplicate` opts a task out of the duplicate-task
+  // refusal — same bare-boolean shape `--junior` already uses.
+  it("task new --allow-duplicate is a bare boolean flag, anywhere after new", () => {
+    const a = parseCliArgs(["task", "new", ...flags, "--allow-duplicate"]);
+    expect(a.cmd === "task-new" && a.brief.allowDuplicate).toBe(true);
+    const b = parseCliArgs(["task", "new", "--allow-duplicate", ...flags]);
+    expect(b.cmd === "task-new" && b.brief.allowDuplicate).toBe(true);
+    const c = parseCliArgs(["task", "new", ...flags]);
+    expect(c.cmd === "task-new" && c.brief.allowDuplicate).toBeUndefined();
+    expect(parseCliArgs(["task", "ls", "--allow-duplicate"]).cmd).toBe("usage");
+  });
+
   // Task 5 review: the naive `rest.includes("--junior")` extraction is
   // positionally blind — it matches the literal string "--junior" no matter
   // WHERE it sits, including inside another flag's VALUE slot. Here
