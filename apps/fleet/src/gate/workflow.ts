@@ -184,9 +184,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // #1172: the guard runs first, so a shared head with a different base fails, never skips green.
       const shared = await step.do("shared-head-guard-skip", async () =>
         sharedHeadLookup(mintToken, repo, resolved.headSha))
-        .catch(() => ({ error: "lookup failed" }) as SharedHeadLookup);
+        .catch(() => SHARED_HEAD_LOOKUP_FAILED);
       // #1214 round 2: return the GUARDED (state, description), so the status
-      // route and CLI report the same red a downgraded skip posts to GitHub.
+      // route and CLI report the same red the downgraded skip posts to GitHub.
       const guarded = guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
         { state: "success", description: "no gated paths changed" });
       const statusPostFailed = await step.do("post-skip-status", async () =>
@@ -311,7 +311,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     });
     const shared = await step.do("shared-head-guard-verdict", async () =>
       sharedHeadLookup(mintToken, repo, resolved.headSha))
-      .catch(() => ({ error: "lookup failed" }) as SharedHeadLookup);
+      .catch(() => SHARED_HEAD_LOOKUP_FAILED);
     const guarded = verdictArgs.state === "success"
       ? guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
         { state: "success", description: verdictArgs.description })
@@ -324,6 +324,10 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     return { ...guarded, statusPostFailed, legs: outcomeLegs(results) };
   }
 }
+
+/** The shared-head guard step's fail-closed result: a lookup error becomes the
+ *  "cannot list shared-head PRs" failure, never a silent green (#1172). */
+const SHARED_HEAD_LOOKUP_FAILED: SharedHeadLookup = { error: "lookup failed" };
 
 /** #1172/#1214: the shared-head guard lookup. Lists the head's PRs via
  *  listPullsForCommit (head-sha-scoped, one call, merged + open, no paging) and

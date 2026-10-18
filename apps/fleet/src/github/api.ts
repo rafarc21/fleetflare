@@ -592,37 +592,6 @@ export async function listOpenPullNumbers(token: string, repo: string): Promise<
   return raw.map((p) => p.number);
 }
 
-/** One open PR with the head sha and base ref the shared-head guard (#1172)
- *  reads. */
-export interface OpenPull { number: number; headSha: string; baseRef: string }
-
-/** Page size and page cap for listOpenPulls (below), the same Link-header page
- *  shape as listAllBranchNames: capped so a huge repo cannot loop forever. */
-export const OPEN_PULLS_PAGE_SIZE = 100;
-export const OPEN_PULLS_MAX_PAGES = 10;
-
-/** Every open PR on a repo, with the head sha and base ref — the shared-head
- *  guard (#1172) reads it before every success post. Paged by GitHub's Link
- *  header like listAllBranchNames: `truncated` means the page cap was hit while
- *  GitHub still offered a `next` link, so the result is a prefix and the guard
- *  must fail closed on it — a prefix read as "no shared head" is the false
- *  green #1172 exists to prevent. THROWS on any non-2xx, deliberately: the
- *  guard's caller fails CLOSED on a listing error. */
-export async function listOpenPulls(token: string, repo: string): Promise<{ pulls: OpenPull[]; truncated: boolean }> {
-  const pulls: OpenPull[] = [];
-  let url: string | null = `https://api.github.com/repos/${repo}/pulls?state=open&per_page=${OPEN_PULLS_PAGE_SIZE}`;
-  for (let page = 1; page <= OPEN_PULLS_MAX_PAGES && url !== null; page++) {
-    const { res, text } = await ghRequest(
-      token, url, { method: "GET", headers: GH_HEADERS_GET(token) }, `list open pulls for ${repo}`,
-    );
-    for (const p of JSON.parse(text) as { number: number; head: { sha: string }; base: { ref: string } }[]) {
-      pulls.push({ number: p.number, headSha: p.head.sha, baseRef: p.base.ref });
-    }
-    url = nextPageLink(res.headers.get("link"));
-  }
-  return { pulls, truncated: url !== null };
-}
-
 /**
  * Every open PR on a repo, WITH the files each one changed — board issue
  * #112 / #70 ask 8's own path-claim check (src/board/board.ts's

@@ -5,7 +5,7 @@ import {
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR, legTimeoutMin,
   GATE_IMAGES, fleetJsonChanged, gateDecision, decideGateRun, headFleetJsonFailure,
   gateMapHasInvalidEntry,
-  guardSuccessStatus, openPullsForHead, sharedHeadFailure,
+  guardSuccessStatus, sharedHeadFailure,
 } from "../../src/gate/config";
 import FLEET_JSON from "../../../../fleet.json";
 
@@ -458,17 +458,5 @@ describe("sharedHeadFailure / guardSuccessStatus: red wins across PRs sharing a 
     expect(guarded).toEqual({ state: "failure", description: `head ${HEAD.slice(0, 8)} shared with PR #7` });
     const clean = guardSuccessStatus(HEAD, "main", 8, { open: [open(7, "main"), open(8, "main")] }, { state: "success", description: "2/2 green" });
     expect(clean).toEqual({ state: "success", description: "2/2 green" });
-  });
-
-  it("openPullsForHead keeps only the head's PRs as { number, baseRef }", () => {
-    const pulls = [
-      { number: 7, headSha: HEAD, baseRef: "main" },
-      { number: 8, headSha: HEAD, baseRef: "staging" },
-      { number: 9, headSha: "e".repeat(40), baseRef: "main" },
-    ];
-    expect(openPullsForHead(HEAD, pulls)).toEqual([
-      { number: 7, baseRef: "main" },
-      { number: 8, baseRef: "staging" },
-    ]);
   });
 });
