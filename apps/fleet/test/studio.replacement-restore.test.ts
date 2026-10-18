@@ -1288,6 +1288,25 @@ describe("runRestart — re-resolves STUDIO_MCP from the current blueprint (issu
     expect(result.status.state).toBe("running");
     expect(refs).toContain("pinned-sha");
   });
+
+  it("a restart with a non-empty stored STUDIO_MCP does not refetch the blueprint", async () => {
+    const fetchBlueprintFile = vi.fn(async () => {
+      throw new Error("non-empty stored MCP must not refetch the blueprint");
+    });
+    const deps = { ...mcpRestartDeps(), fetchBlueprintFile } as ProvisionDeps;
+    const stored = { ...STUDIO_ENV, STUDIO_MCP: "codebase-memory" };
+    const result = await runRestart(
+      deps,
+      status({ id: STUDIO_ID, repoSlug: "acme-org/acme-os" }),
+      STUDIO_ID,
+      stored,
+      true,
+      "rafarc21/fleetflare",
+    );
+    expect(result.status.state).toBe("running");
+    expect(result.bringupEnv).toEqual(stored);
+    expect(fetchBlueprintFile).not.toHaveBeenCalled();
+  });
 });
 
 describe("restartWithStorage — persists the re-resolved MCP to ROLE_ENV_KEY (issue #1216)", () => {

@@ -2947,14 +2947,22 @@ export async function runRestart(
   const repo = parseStudioId(status.id)?.repo ?? null;
   const isStudio = "STUDIO_NAME" in roleEnv && roleEnv.STUDIO_NAME !== "";
   let bringupEnv: RoleEnv | StudioEnv = roleEnv;
-  const mcpName = isStudio ? (roleEnv as StudioEnv).STUDIO_NAME : (parseStudioId(status.id)?.role ?? null);
-  if (mcpName !== null) {
-    try {
-      const pinnedRef = isStudio ? (roleEnv as StudioEnv).BLUEPRINT_REF : undefined;
-      const mcpOverride = await resolveMcpOverride(deps, fleetRepoSlug, mcpName, isStudio, pinnedRef);
-      if (mcpOverride) bringupEnv = { ...roleEnv, ...mcpOverride };
-    } catch (err) {
-      console.warn(`studio ${status.id}: MCP re-resolve failed, replaying stored env`, err instanceof Error ? err.message : String(err));
+  // Re-resolve MCP only when the stored value is empty (the pre-#1181 stale
+  // case). A non-empty value was already resolved by provision, so re-fetching
+  // the blueprint on every heal/restart would burn the fleet-wide GitHub rate
+  // limit for nothing.
+  const storedMcpNames = (isStudio ? (roleEnv as StudioEnv).STUDIO_MCP : ((roleEnv as RoleEnv).ROLE_MCP ?? ""))
+    .split(",").filter((n) => n !== "");
+  if (storedMcpNames.length === 0) {
+    const mcpName = isStudio ? (roleEnv as StudioEnv).STUDIO_NAME : (parseStudioId(status.id)?.role ?? null);
+    if (mcpName !== null) {
+      try {
+        const pinnedRef = isStudio ? (roleEnv as StudioEnv).BLUEPRINT_REF : undefined;
+        const mcpOverride = await resolveMcpOverride(deps, fleetRepoSlug, mcpName, isStudio, pinnedRef);
+        if (mcpOverride) bringupEnv = { ...roleEnv, ...mcpOverride };
+      } catch (err) {
+        console.warn(`studio ${status.id}: MCP re-resolve failed, replaying stored env`, err instanceof Error ? err.message : String(err));
+      }
     }
   }
   let firstFailure: string | null = null;
