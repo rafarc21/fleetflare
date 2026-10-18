@@ -1323,7 +1323,7 @@ describe("restartWithStorage — persists the re-resolved MCP to ROLE_ENV_KEY (i
     const stored = { ...STUDIO_ENV, STUDIO_MCP: "" };
     const storage = fakeStorage({ status: status({ id: STUDIO_ID, repoSlug: "acme-org/acme-os" }), roleEnv: stored });
 
-    await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare", "heal", storage);
+    await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare", "heal");
 
     const persisted = (await storage.get(ROLE_ENV_KEY)) as StudioEnv;
     expect(persisted.STUDIO_MCP).toBe("codebase-memory");
