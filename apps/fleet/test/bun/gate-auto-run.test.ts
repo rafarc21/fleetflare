@@ -1,5 +1,5 @@
 // #1072 (refs #715): the gate's auto-run on a pull_request delivery. A gated
-// PR's push starts one gate run per head sha; a manual `fleet gate run` of that
+// PR's push starts one gate run per (pr, head sha); a manual `fleet gate run` of that
 // sha reuses it; drafts, other actions and ungated repos start nothing. #1082:
 // a new head sha ends the still-live run of the sha it replaces. The
 // GATE_WORKFLOW binding and the PR's run index are fakes at the boundary; the
@@ -521,7 +521,7 @@ describe("autoRunPullRequest: every gated PR starts a run; the Workflow decides 
 });
 
 describe("startGateRun: a shared head sha does not inherit another PR's verdict (#1172)", () => {
-  it("a run under this head owned by another PR starts a fresh -r run, never a reuse", async () => {
+  it("a run under this head owned by another PR starts a fresh -p<pr> run, never a reuse", async () => {
     const { wf, runs } = fakeWorkflow();
     const { index } = fakeIndex();
     // Another PR (#8) opened first with this head: its run owns the (repo, sha) id.
