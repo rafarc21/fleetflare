@@ -327,16 +327,18 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
 /** #1172/#1214: the shared-head guard lookup. Lists the head's PRs via
  *  listPullsForCommit (head-sha-scoped, one call, merged + open, no paging) and
- *  keeps the OPEN ones as { number, baseRef }. THROWS on any error — the caller
- *  wraps the step in `.catch`, so Workflows retries the throw and fails closed
- *  only after the retries run out (a transient 5xx ends green, never red). */
+ *  keeps the OPEN ones OF THIS HEAD as { number, baseRef } — a sibling PR whose
+ *  tip sha differs is a different head, never "shared" (#1214 S3). THROWS on any
+ *  error — the caller wraps the step in `.catch`, so Workflows retries the throw
+ *  and fails closed only after the retries run out (a transient 5xx ends green,
+ *  never red). */
 async function sharedHeadLookup(
   mintToken: (repo: string) => Promise<string>, repo: string, headSha: string,
 ): Promise<SharedHeadLookup> {
   const token = await mintToken(repo);
   const pulls = await listPullsForCommit(token, repo, headSha);
   return {
-    open: pulls.filter((p) => p.state === "open").map((p) => ({ number: p.number, baseRef: p.base })),
+    open: pulls.filter((p) => p.state === "open" && p.headSha === headSha).map((p) => ({ number: p.number, baseRef: p.base })),
   };
 }
 

@@ -75,6 +75,9 @@ let pullsForCommitThrowsFirst = false;
 // (call 3) by default (#1203). A guard test keeps the title clean so the run
 // reaches the verdict guard instead of failing the success recheck.
 let titleFlipsOnRecheck = true;
+// #1214 S3: the listPullsForCommit raw body served, so a test can return a
+// sibling PR whose tip sha differs from the gated head (a stacked PR).
+let pullsForCommitBody: unknown[] = [];
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -109,7 +112,7 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     if (pullsForCommitThrowsFirst && pullsForCommitCalls === 1) {
       return Promise.reject(new Error("boom 500"));
     }
-    return Promise.resolve(json([]));
+    return Promise.resolve(json(pullsForCommitBody));
   }
   if (method === "GET" && /\/commits\/main$/.test(url)) {
     return Promise.resolve(json({ sha: BASE }));
@@ -167,6 +170,7 @@ beforeEach(() => {
   pullsForCommitCalls = 0;
   pullsForCommitThrowsFirst = false;
   titleFlipsOnRecheck = true;
+  pullsForCommitBody = [];
   realFetch = globalThis.fetch;
   globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
 });
@@ -369,6 +373,34 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       const post = recorded.find((r) =>
         r.method === "POST" && /\/statuses\//.test(r.url) && (r.body as { state?: string }).state === "success");
       expect(post).toBeDefined();
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("a sibling PR with a different head sha is not a shared head (#1214 S3)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    // Clean precheck, run path, title stays clean through the success recheck.
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+    // A sibling OPEN PR #8 with a DIFFERENT tip sha (stacked PR) and a different
+    // base. Without the head-sha filter the guard falsely reports it as "shared
+    // with PR #8"; the guard must keep only the gated head's own PRs -> green.
+    pullsForCommitBody = [{ number: 8, base: { ref: "staging" }, head: { ref: "other", sha: "c".repeat(40) }, state: "open" }];
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-guard-headsha-filter");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-guard-headsha-filter", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("success");
     } finally {
       await instance.dispose();
     }
