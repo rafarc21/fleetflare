@@ -760,6 +760,20 @@ describe("startGateRun: pending-first + live-only reuse of the -p run (round 2)"
     expect(again.runId).not.toBe(first.runId);
     expect(runs.get(first.runId)!.status).toBe("terminated"); // recordRun ends the superseded live run
   });
+
+  it("a reopen with a still-live -p<pr> run also starts fresh, never reuses it (S1 -p path)", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    // PR 8 owns the HEAD base-id run; PR 7's -p7 run is still live.
+    await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    // PR 7 reopens after its base moved: it must NOT reuse the live -p7 run.
+    const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, reopened: true }, index, () => T1);
+    expect(again.reused).toBe(false);
+    expect(again.runId).toBe(`${first.runId}-r${T1.toString(36)}`);
+    expect(runs.get(first.runId)!.status).toBe("terminated"); // recordRun ends the superseded live -p7
+    expect(runs.size).toBe(3);
+  });
 });
 
 describe("startManualGateRun: one transient status read never ends a healthy run (#1148 review, LOW 4)", () => {
