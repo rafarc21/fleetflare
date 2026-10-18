@@ -194,7 +194,7 @@ describe("#1221 triage key edge cases (maestro security review amend)", () => {
     const run = vi.fn(aiOk);
     const e = triageEnv(run);
     const rows = async () => [];
-    // "other" hashes to 0d... — same first hex char as TRIAGE_SECRET's d6...
+    // "other" hashes to d9... — same first hex char as TRIAGE_SECRET's d6...
     const r = await handleFleetAnthropicMessages(req({ token: "other" }), e, ctx, rows);
     expect(r.status).toBe(401);
     expect(run).not.toHaveBeenCalled();
@@ -212,11 +212,13 @@ describe("#1221 triage key edge cases (maestro security review amend)", () => {
 
   it("a spawn-shaped value is never accepted as the triage key", async () => {
     const run = vi.fn(aiOk);
-    const e = triageEnv(run);
-    const rows = async () => [];
-    // A spawn-shaped value routes to spawn-token resolution, never the triage
-    // compare — with no matching row it must 401, not fall through to the key.
+    // A spawn-shaped VALUE must never authenticate as the triage key: it
+    // routes to spawn-token resolution, never the secret compare. Pin that by
+    // setting the secret itself spawn-shaped and presenting the exact same
+    // value — no matching registry row exists, so it must 401, not 200.
     const spawnShaped = `fsp_${"0".repeat(64)}`;
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, TRIAGE_ROUTER_TOKEN: spawnShaped } as unknown as Env;
+    const rows = async () => [];
     const r = await handleFleetAnthropicMessages(req({ token: spawnShaped }), e, ctx, rows);
     expect(r.status).toBe(401);
     expect(run).not.toHaveBeenCalled();
