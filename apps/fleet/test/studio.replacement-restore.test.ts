@@ -1240,10 +1240,11 @@ describe("runRestart — re-resolves STUDIO_MCP from the current blueprint (issu
       true,
       "rafarc21/fleetflare",
     );
-    expect(result.state).toBe("running");
+    expect(result.status.state).toBe("running");
     const bringup = deps.execs.find((e) => e.cmd === BRINGUP_CMD);
     expect(bringup).toBeDefined();
     expect(bringup!.env?.STUDIO_MCP).toBe("codebase-memory");
+    expect(result.bringupEnv).toEqual({ ...stored, STUDIO_MCP: "codebase-memory" });
   });
 
   it("a blueprint fetch failure replays the stored env unchanged", async () => {
@@ -1257,10 +1258,11 @@ describe("runRestart — re-resolves STUDIO_MCP from the current blueprint (issu
       true,
       "rafarc21/fleetflare",
     );
-    expect(result.state).toBe("running");
+    expect(result.status.state).toBe("running");
     const bringup = deps.execs.find((e) => e.cmd === BRINGUP_CMD);
     expect(bringup).toBeDefined();
     expect(bringup!.env?.STUDIO_MCP).toBe("");
+    expect(result.bringupEnv).toEqual(stored);
   });
 
   it("re-resolves against the stored BLUEPRINT_REF pin, not main", async () => {
@@ -1283,7 +1285,7 @@ describe("runRestart — re-resolves STUDIO_MCP from the current blueprint (issu
       true,
       "rafarc21/fleetflare",
     );
-    expect(result.state).toBe("running");
+    expect(result.status.state).toBe("running");
     expect(refs).toContain("pinned-sha");
   });
 });

@@ -2925,7 +2925,7 @@ export async function resolveMcpOverride(
 export async function runRestart(
   deps: ProvisionDeps, existing: StudioStatus | null, idFallback: string, roleEnv: RoleEnv | StudioEnv | null,
   keepAlive: boolean, fleetRepoSlug: string,
-): Promise<StudioStatus> {
+): Promise<{ status: StudioStatus; bringupEnv: RoleEnv | StudioEnv | null }> {
   let status: StudioStatus = {
     ...(existing ?? freshStatus(idFallback)), state: "provisioning",
     // Review round 2 (#210), finding 2 — same defense-in-depth clear
@@ -2936,7 +2936,7 @@ export async function runRestart(
   if (roleEnv === null) {
     status = { ...status, state: "degraded", error: NO_ROLE_ENV_ERROR, sessionAdoption: null };
     await deps.recordStudio(status);
-    return status;
+    return { status, bringupEnv: null };
   }
   // Issue #38 part 2: the repo segment of this studio's own id IS the
   // directory the checkout lives in (`/workspace/<repo>`, the same
@@ -3184,7 +3184,13 @@ export async function runRestart(
     };
   }
   await deps.recordStudio(status);
-  return status;
+  // Issue #1216: return the env the restart actually brought up with so the
+  // wrapper can persist it back to ROLE_ENV_KEY. The stored env was the input;
+  // when the MCP re-resolve above succeeded, bringupEnv carries the re-resolved
+  // STUDIO_MCP/ROLE_MCP, and persisting it is what keeps the ask-3 READY check
+  // (which reads ROLE_ENV_KEY) agreeing with the container a heal just launched
+  // instead of forever replaying the stale `""` the issue is about.
+  return { status, bringupEnv };
 }
 
 /** One bring-up exec plus the on-disk verification that it actually landed —
@@ -4138,10 +4144,11 @@ export async function restartWithStorage(
   const alreadyLocked = operationLockFresh(await storage.get(OPERATION_KEY), new Date(deps.now()));
   if (!alreadyLocked) await storage.put(OPERATION_KEY, { op: "restart", since: deps.now() });
   let status: StudioStatus;
+  let bringupEnv: RoleEnv | StudioEnv | null = null;
   try {
-    status = await runRestart(
+    ({ status, bringupEnv } = await runRestart(
       { ...provisionDeps, recordStudio: guardRecordStudio(deps, ctx) }, existing, idFallback, roleEnv, keepAlive, fleetRepoSlug,
-    );
+    ));
     // Review round 3 (issue #85 PR1), MUST-FIX 9 — same placement fix as
     // provisionWithStorage's identical block above: inside the op-lock try,
     // before the finally, with its own try/catch.
@@ -4167,6 +4174,11 @@ export async function restartWithStorage(
     return (await storage.get(STATUS_KEY)) ?? status;
   }
   await storage.put(STATUS_KEY, status);
+  // Issue #1216: persist the env the restart actually used, so the ask-3 READY
+  // check (storedHarness -> ROLE_ENV_KEY) sees the same MCP names the container
+  // just launched with. Null only on the degraded no-role-env path, where
+  // writing null would clobber nothing that exists anyway and is skipped.
+  if (bringupEnv !== null) await storage.put(ROLE_ENV_KEY, bringupEnv);
   // Issue #100 N1: same as provisionWithStorage.
   await storage.put(DESTROYING_KEY, null);
   return status;
