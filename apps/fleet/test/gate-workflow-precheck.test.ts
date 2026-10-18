@@ -518,6 +518,46 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
     }
   }, 60_000);
 
+  it("skip path: a listing error that never clears fails closed after the step retries (#1217)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    // #1217: listOpenPulls throws on EVERY call; the skip-path .catch must fail
+    // closed, never swap a lookup error for a silent green (#1213 review).
+    openPullsAlwaysThrows = true;
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-guard-skip-error");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-guard-skip-error", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("failure");
+      expect(out.description).toBe("gate: cannot list shared-head PRs");
+
+      const post = recorded.find((r) =>
+        r.method === "POST" && /\/statuses\//.test(r.url) && (r.body as { state?: string }).state === "failure");
+      expect(post).toBeDefined();
+      expect(post!.body).toEqual({
+        state: "failure",
+        context: GATE_STATUS_CONTEXT,
+        description: "gate: cannot list shared-head PRs",
+      });
+      // No leg ran: the SKIP path and its guard never touch GATE_RUNNER.
+      const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
+      expect(legCalls).toEqual([]);
+      // Retried once: the first throw and the retry's throw both hit the endpoint.
+      expect(openPullsCalls).toBeGreaterThanOrEqual(2);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
   it("a closed sibling is ignored, the run stays green (#1215)", async () => {
     const e = workflowEnv();
     e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
