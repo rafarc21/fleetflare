@@ -3,7 +3,7 @@ import {
   listRepoTree, listOpenPullNumbers, listPullsForCommit, listPullCommits, closeIssue,
   closingIssuesForPull, getPullRequest, commitReachableFromBranch, getIssueCloser,
   pullsWithClosingIssuesForCommits, pullClaimsIssue,
-  listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES, listOpenPulls,
+  listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES, listOpenPulls, OPEN_PULLS_MAX_PAGES,
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
 } from "../src/github/api";
@@ -177,6 +177,10 @@ describe("listOpenPulls", () => {
     });
     const { truncated } = await listOpenPulls("tok", "o/r");
     expect(truncated).toBe(true);
+    // Pin the cap, like the listAllBranchNames truncation test: a lowered cap
+    // would stop earlier and still read truncated, so the count is what proves
+    // the full window was scanned before giving up.
+    expect(calls).toHaveLength(OPEN_PULLS_MAX_PAGES);
   });
 
   it("throws GitHub's own words on a non-2xx", async () => {
