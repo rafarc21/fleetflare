@@ -15,7 +15,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listPullsForCommit, listRepoTree, postCommitStatus,
+  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree, postCommitStatus,
 } from "../github/api";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
@@ -329,19 +329,22 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
  *  "cannot list shared-head PRs" failure, never a silent green (#1172). */
 const SHARED_HEAD_LOOKUP_FAILED: SharedHeadLookup = { error: "lookup failed" };
 
-/** #1172/#1214: the shared-head guard lookup. Lists the head's PRs via
- *  listPullsForCommit (head-sha-scoped, one call, merged + open, no paging) and
- *  keeps the OPEN ones OF THIS HEAD as { number, baseRef } — a sibling PR whose
- *  tip sha differs is a different head, never "shared" (#1214 S3). THROWS on any
- *  error: the caller wraps the step in `.catch`, so Workflows retries the throw
- *  once (a transient 5xx ends green) and fails closed only after retries run out. */
+/** #1172/#1215: the shared-head guard lookup. Lists the repo's OPEN pulls via
+ *  the paged listOpenPulls — the commits/{sha}/pulls endpoint never lists OPEN
+ *  PRs once the sha is on the default branch, so it would false-green — and
+ *  keeps the OPEN ones OF THIS HEAD as { number, baseRef }: a sibling whose tip
+ *  sha differs, or that is closed, is a different head, never "shared" (#1214
+ *  S3). THROWS on an error, so Workflows retries the step once (a transient 5xx
+ *  ends green) and fails closed only after retries run out. A truncated page cap
+ *  fails closed immediately. */
 async function sharedHeadLookup(
   mintToken: (repo: string) => Promise<string>, repo: string, headSha: string,
 ): Promise<SharedHeadLookup> {
   const token = await mintToken(repo);
-  const pulls = await listPullsForCommit(token, repo, headSha);
+  const { pulls, truncated } = await listOpenPulls(token, repo);
+  if (truncated) return { error: "open PR list truncated" };
   return {
-    open: pulls.filter((p) => p.state === "open" && p.headSha === headSha).map((p) => ({ number: p.number, baseRef: p.base })),
+    open: pulls.filter((p) => p.state === "open" && p.headSha === headSha).map((p) => ({ number: p.number, baseRef: p.baseRef })),
   };
 }
 
