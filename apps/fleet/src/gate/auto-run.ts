@@ -70,9 +70,11 @@ export interface PullRequestAutoRun {
   pr: number;
   headSha: string;
   baseSha: string;
-  /** #1176: an edit of the title/body re-runs the precheck under its own run id
-   *  (the head sha is unchanged, so the plain sha id would dedupe-skip). */
+  /** #1176: an edit of the title/body/base re-runs the precheck under its own
+   *  run id (the head sha is unchanged, so the plain sha id would dedupe-skip). */
   edited?: boolean;
+  /** #1214 round 2: a reopen must re-gate the head, never reuse a finished run. */
+  reopened?: boolean;
 }
 
 const AUTO_RUN_ACTIONS: ReadonlySet<string> = new Set(["opened", "synchronize", "ready_for_review", "edited", "reopened"]);
@@ -82,7 +84,7 @@ const SHA_PATTERN = /^[0-9a-f]{40}$/;
 export interface GateRunnerSwitches { FLEET_GATE_RUNNER?: string; GATE_RUNNER_REPOS?: string }
 
 /** The gated PR a pull_request delivery should auto-run, or null when it should
- *  start nothing: an action other than opened / synchronize / ready_for_review,
+ *  start nothing: an action other than opened / synchronize / ready_for_review / edited / reopened,
  *  a draft, a repo outside GATE_RUNNER_REPOS, the gate runner off, or a body
  *  that is not a PR delivery with both shas. Pure: no GitHub call. */
 export function pullRequestAutoRun(body: string, env: GateRunnerSwitches): PullRequestAutoRun | null {
@@ -109,7 +111,11 @@ export function pullRequestAutoRun(body: string, env: GateRunnerSwitches): PullR
   const baseSha = pr.base?.sha;
   if (typeof headSha !== "string" || !SHA_PATTERN.test(headSha) || typeof baseSha !== "string") return null;
   if (env.FLEET_GATE_RUNNER !== "on" || !isGateRunnerRepo(env.GATE_RUNNER_REPOS, repo)) return null;
-  return { repo, pr: pr.number, headSha, baseSha, ...(e.action === "edited" ? { edited: true } : {}) };
+  return {
+    repo, pr: pr.number, headSha, baseSha,
+    ...(e.action === "edited" ? { edited: true } : {}),
+    ...(e.action === "reopened" ? { reopened: true } : {}),
+  };
 }
 
 /** The Workflows instance id for one repo and head sha: deterministic, so a
@@ -194,7 +200,7 @@ async function recordRun(
  *  already existing is reused only while it is LIVE; a finished one starts a
  *  fresh `-p<pr>-r<base36 now>` (injected `now`, like startManualGateRun). */
 export async function startGateRun(
-  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex,
+  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string; reopened?: boolean }, index: GateRunIndex,
   now: () => number = Date.now,
   postPending?: (repo: string, headSha: string) => Promise<void>,
 ): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
@@ -215,10 +221,14 @@ export async function startGateRun(
     // create-idempotency) instead of starting a second live run.
     const latest = await index.latest(input.repo, input.pr);
     // The base-id run this PR owns is reused even finished (dedupe-by-sha,
-    // unchanged). A -p fresh run of a shared head is NOT: it falls through to
-    // the fresh create below, whose collision path reuses only a LIVE one and
+    // unchanged) — UNLESS this is a reopen, which must re-gate the head against
+    // the current base, never hand back a stale verdict. A -p fresh run of a
+    // shared head is likewise NOT reused finished: it falls through to the
+    // fresh create below, whose collision path reuses only a LIVE one and
     // starts -p<pr>-r<time> for a finished one (#1214 round 2).
-    if (latest?.headSha === input.headSha && latest.runId === runId) return { runId: latest.runId, reused: true };
+    if (latest?.headSha === input.headSha && latest.runId === runId && input.reopened !== true) {
+      return { runId: latest.runId, reused: true };
+    }
     // #1214 round 2: put a pending gate/verdict up BEFORE the fresh create.
     if (postPending) await postPending(input.repo, input.headSha);
     const freshId = `${runId}-p${input.pr}`;
@@ -342,8 +352,9 @@ export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDe
     return "started";
   }
   const { reused } = await startGateRun(
-    deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index,
-    Date.now, deps.postPending,
+    deps.workflow,
+    { repo: pr.repo, pr: pr.pr, headSha: pr.headSha, ...(pr.reopened === true ? { reopened: true } : {}) },
+    deps.index, Date.now, deps.postPending,
   );
   return reused ? "reused" : "started";
 }

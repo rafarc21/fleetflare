@@ -106,7 +106,7 @@ describe("pullRequestAutoRun: which deliveries start a run", () => {
   });
 
   it("a reopen starts a run (round 2 item 2)", () => {
-    expect(pullRequestAutoRun(payload({ action: "reopened" }), ON)).toEqual(PR);
+    expect(pullRequestAutoRun(payload({ action: "reopened" }), ON)).toEqual({ ...PR, reopened: true });
   });
 
   it("a base change fires with edited:true and the same head sha (round 2 item 2)", () => {
@@ -737,6 +737,28 @@ describe("startGateRun: pending-first + live-only reuse of the -p run (round 2)"
     await startGateRun(wf, { repo: PR_REPO, pr: 8, headSha: HEAD }, index);
     const out = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
     expect(heads.get(`${PR_REPO}#7`)).toMatchObject({ headSha: HEAD, runId: out.runId });
+  });
+
+  it("a reopen never reuses a finished base-id run: it starts a fresh run (S1)", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    runs.get(first.runId)!.status = "complete"; // prior verdict finished
+    const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, reopened: true }, index, () => T1);
+    expect(again.reused).toBe(false);
+    expect(again.runId).not.toBe(first.runId);
+    expect(runs.size).toBe(2);
+  });
+
+  it("a reopen with a still-live base-id run also starts fresh (S1)", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    // still live
+    const again = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, reopened: true }, index, () => T1);
+    expect(again.reused).toBe(false);
+    expect(again.runId).not.toBe(first.runId);
+    expect(runs.get(first.runId)!.status).toBe("terminated"); // recordRun ends the superseded live run
   });
 });
 

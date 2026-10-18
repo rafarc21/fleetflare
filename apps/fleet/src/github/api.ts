@@ -748,18 +748,20 @@ interface CommitPull {
   number: number;
   base: string;
   head: string;
+  /** The head branch's tip sha — the guard filters shared heads on it (#1214). */
+  headSha: string;
   /** open | closed — the shared-head guard (#1172) keeps only "open". */
   state: string;
 }
 
 export async function listPullsForCommit(token: string, repo: string, sha: string): Promise<CommitPull[]> {
-  const raw = await ghJson<{ number: number; base: { ref: string }; head: { ref: string }; state: string }[]>(
+  const raw = await ghJson<{ number: number; base: { ref: string }; head: { ref: string; sha: string }; state: string }[]>(
     token,
     `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(sha)}/pulls`,
     { method: "GET" },
     `list pulls for commit ${sha}`,
   );
-  return raw.map((p) => ({ number: p.number, base: p.base.ref, head: p.head.ref, state: p.state }));
+  return raw.map((p) => ({ number: p.number, base: p.base.ref, head: p.head.ref, headSha: p.head.sha, state: p.state }));
 }
 
 /** One page of a PR's original commits — GitHub's own maximum of 100 per
