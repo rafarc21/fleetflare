@@ -67,6 +67,14 @@ let commitMessage = "Fix #9";
 // The fleet.json body served (FLEET_JSON or RUN_FLEET_JSON), so a test can
 // pick the skip path or the run path.
 let fleetJson = FLEET_JSON;
+// #1214: the guard's listPullsForCommit endpoint. A test throws a 5xx on the
+// FIRST call so step.do's retry re-fetches and the run still ends green.
+let pullsForCommitCalls = 0;
+let pullsForCommitThrowsFirst = false;
+// #1214: the /pulls/<n> title mock flips to a closing keyword at the recheck
+// (call 3) by default (#1203). A guard test keeps the title clean so the run
+// reaches the verdict guard instead of failing the success recheck.
+let titleFlipsOnRecheck = true;
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -91,8 +99,17 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       number: PR, merged: false, merge_commit_sha: null, state: "open",
       base: { ref: "main", repo: { full_name: REPO, private: false } },
       head: { ref: "feature", sha: HEAD },
-      title: pullsCalls >= 3 ? "Fix #2" : "Docs update", body: "Readme tweak",
+      title: titleFlipsOnRecheck && pullsCalls >= 3 ? "Fix #2" : "Docs update", body: "Readme tweak",
     }));
+  }
+  if (method === "GET" && /\/commits\/[0-9a-f]{40}\/pulls$/.test(url)) {
+    // #1214: listPullsForCommit — the shared-head guard. One call, head-sha
+    // scoped; empty means no sibling PRs (guard stays green).
+    pullsForCommitCalls++;
+    if (pullsForCommitThrowsFirst && pullsForCommitCalls === 1) {
+      return Promise.reject(new Error("boom 500"));
+    }
+    return Promise.resolve(json([]));
   }
   if (method === "GET" && /\/commits\/main$/.test(url)) {
     return Promise.resolve(json({ sha: BASE }));
@@ -147,6 +164,9 @@ beforeEach(() => {
   pullsCalls = 0;
   commitMessage = "Fix #9";
   fleetJson = FLEET_JSON;
+  pullsForCommitCalls = 0;
+  pullsForCommitThrowsFirst = false;
+  titleFlipsOnRecheck = true;
   realFetch = globalThis.fetch;
   globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
 });
@@ -314,6 +334,41 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       const runLeg = recorded.find((r) => /\/run-leg/.test(r.url));
       expect(runLeg).toBeDefined();
       expect((runLeg!.body as { leg?: string }).leg).toBe("merge-tree");
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("a shared-head lookup 5xx followed by success ends green (retry, not false red) (#1214)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    // Clean precheck (no closing keyword), run path (pathRules match the compare),
+    // and the title must stay clean through the success recheck so the run reaches
+    // the verdict guard.
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+    // The guard's first listPullsForCommit throws 5xx; step.do retries and the
+    // second call returns [] (no sibling PRs) -> guarded success.
+    pullsForCommitThrowsFirst = true;
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-guard-retry-green");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-guard-retry-green", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("success");
+      // The guard threw once and was retried (a second call succeeded).
+      expect(pullsForCommitCalls).toBeGreaterThanOrEqual(2);
+
+      const post = recorded.find((r) =>
+        r.method === "POST" && /\/statuses\//.test(r.url) && (r.body as { state?: string }).state === "success");
+      expect(post).toBeDefined();
     } finally {
       await instance.dispose();
     }
