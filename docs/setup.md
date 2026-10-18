@@ -423,6 +423,16 @@ bring-up: the studio comes up without a tailnet, `bringup.log` records
 `fleet attach` goes through the Worker and keeps working. Leaving the key
 unset is still the safe, supported state.
 
+**Studio tools** (issue #1160, opt-in per repo): a repo's own root
+`fleet.json` may declare `"studio": {"tools": ["azure-cli"]}`. Bring-up then
+installs each listed tool that is missing — from Microsoft's apt repo, with
+the signing key fingerprint-verified and the package pinned
+(`azure-cli=2.91.0-1~jammy`), each network call under a 180 s timeout,
+idempotent, and logged to `bringup.log`. Only names on the allow-list in `src/studio/studio-tools.ts`
+are accepted; an unknown name fails the provision. An install failure never
+blocks bring-up: the studio comes up without the tool, and `fleet ls` READY
+adds `tools: not installed`.
+
 **`FLEET_OPS_REPO`** (optional; not to be confused with `FLEET_OPS_DIR` above
 — that one is a local filesystem path `scripts/deploy.sh` reads on your own
 machine, this one is a Worker setting): the `owner/name` slug of a private
