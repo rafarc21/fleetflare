@@ -5,6 +5,7 @@ import {
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR, legTimeoutMin,
   GATE_IMAGES, fleetJsonChanged, gateDecision, decideGateRun, headFleetJsonFailure,
   gateMapHasInvalidEntry,
+  guardSuccessStatus, sharedHeadFailure,
 } from "../../src/gate/config";
 import FLEET_JSON from "../../../../fleet.json";
 
@@ -416,5 +417,46 @@ describe("decideGateRun with a bad head gates map (#1095 round 3)", () => {
   it("fails the run when the config changed and the head gates map is invalid", () => {
     expect(decideGateRun({ baseSha: BASE_SHA, changedFiles: ["fleet.json"], fleetJsonChanged: true, base: cfg, head: cfg, headGatesInvalid: true }))
       .toEqual({ action: "fail", description: "head fleet.json invalid" });
+  });
+});
+
+describe("sharedHeadFailure / guardSuccessStatus: red wins across PRs sharing a head (#1172)", () => {
+  const HEAD = "f".repeat(40);
+  const open = (number: number, baseRef: string, headSha = HEAD) => ({ number, baseRef, headSha });
+
+  it("A-red-then-B-green ends red: a sibling open PR with a different base fails the success", () => {
+    const openPulls = [open(7, "ungated-base"), open(8, "gated-base")];
+    expect(sharedHeadFailure(HEAD, "gated-base", 8, openPulls)).toBe(`head ${HEAD.slice(0, 8)} shared with PR #7`);
+  });
+
+  it("B-green-then-A-red ends red: order does not matter, the different-base sibling fails the success", () => {
+    const openPulls = [open(8, "gated-base"), open(7, "ungated-base")];
+    expect(sharedHeadFailure(HEAD, "ungated-base", 7, openPulls)).toBe(`head ${HEAD.slice(0, 8)} shared with PR #8`);
+  });
+
+  it("a same-base pair stays green: no sibling with a different base -> null", () => {
+    const openPulls = [open(7, "main"), open(8, "main")];
+    expect(sharedHeadFailure(HEAD, "main", 8, openPulls)).toBeNull();
+  });
+
+  it("the current PR is never its own sibling, and a different-head PR is ignored", () => {
+    const openPulls = [open(8, "main"), open(9, "main", "e".repeat(40))];
+    expect(sharedHeadFailure(HEAD, "main", 8, openPulls)).toBeNull();
+  });
+
+  it("an empty open list is green", () => {
+    expect(sharedHeadFailure(HEAD, "main", 8, [])).toBeNull();
+  });
+
+  it("guardSuccessStatus: a lookup error ends red (fail closed)", () => {
+    const args = guardSuccessStatus(HEAD, "main", 8, { error: "boom" }, { state: "success", description: "no gated paths changed" });
+    expect(args).toEqual({ state: "failure", description: "gate: cannot list shared-head PRs" });
+  });
+
+  it("guardSuccessStatus: a shared head downgrades success to failure, and passes a clean success through", () => {
+    const guarded = guardSuccessStatus(HEAD, "gated-base", 8, { open: [open(7, "ungated-base"), open(8, "gated-base")] }, { state: "success", description: "2/2 green" });
+    expect(guarded).toEqual({ state: "failure", description: `head ${HEAD.slice(0, 8)} shared with PR #7` });
+    const clean = guardSuccessStatus(HEAD, "main", 8, { open: [open(7, "main"), open(8, "main")] }, { state: "success", description: "2/2 green" });
+    expect(clean).toEqual({ state: "success", description: "2/2 green" });
   });
 });

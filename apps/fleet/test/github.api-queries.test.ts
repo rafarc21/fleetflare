@@ -3,7 +3,7 @@ import {
   listRepoTree, listOpenPullNumbers, listPullsForCommit, listPullCommits, closeIssue,
   closingIssuesForPull, getPullRequest, commitReachableFromBranch, getIssueCloser,
   pullsWithClosingIssuesForCommits, pullClaimsIssue,
-  listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES,
+  listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES, listOpenPulls,
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
 } from "../src/github/api";
@@ -996,5 +996,27 @@ describe("ghRequest's merge order (#311 finding 3)", () => {
     }, "read o/r");
     expect(calls[0].headers["content-type"]).toBeUndefined();
     expect(Object.hasOwn(calls[0].headers, "content-type")).toBe(false);
+  });
+});
+
+describe("listOpenPulls", () => {
+  it("GETs open PRs and returns number + head sha + base ref", async () => {
+    respond = () => Response.json([
+      { number: 7, head: { sha: "abc1234567890" }, base: { ref: "main" } },
+      { number: 8, head: { sha: "abc1234567890" }, base: { ref: "staging" } },
+    ]);
+    const pulls = await listOpenPulls("tok", "o/r");
+    expect(pulls).toEqual([
+      { number: 7, headSha: "abc1234567890", baseRef: "main" },
+      { number: 8, headSha: "abc1234567890", baseRef: "staging" },
+    ]);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toContain("/repos/o/r/pulls?");
+    expect(calls[0].url).toContain("state=open");
+  });
+
+  it("throws GitHub's own words on a non-2xx", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    await expect(listOpenPulls("tok", "o/r")).rejects.toThrow(/Not Found/);
   });
 });
