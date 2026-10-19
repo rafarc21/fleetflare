@@ -734,6 +734,17 @@ describe("gate start / gate watch", () => {
     expect(parseCliArgs(["gate", "run"]).cmd).toBe("usage");
     expect(parseCliArgs(["gate", "run", "abc"]).cmd).toBe("usage");
   });
+  // #1230: --failed-only parses before or after the PR number.
+  it("gate run --failed-only <pr> parses failedOnly: true", () => {
+    expect(parseCliArgs(["gate", "run", "--failed-only", "715"])).toEqual({
+      cmd: "gate-run", pr: 715, failedOnly: true,
+    });
+  });
+  it("gate run <pr> --failed-only parses failedOnly: true too", () => {
+    expect(parseCliArgs(["gate", "run", "715", "--failed-only"])).toEqual({
+      cmd: "gate-run", pr: 715, failedOnly: true,
+    });
+  });
   it("gate with no sub-verb -> usage", () => {
     expect(parseCliArgs(["gate"]).cmd).toBe("usage");
   });

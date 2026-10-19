@@ -50,6 +50,8 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     "lint: HTTP 503 after 0 min",
     "lint: Execution timed out after 30 min",
     "lint: The operation was aborted due to timeout after 28 min",
+    "lint: checkout failed: fatal: remote end hung up after 2 min",
+    "lint: clone failed: fatal: remote-curl: bad line length character: UNKNO after 1 min",
   ])("infra: %s", (description) => {
     expect(isInfraLegFailure({ leg: "lint", state: "error", description })).toBe(true);
   });

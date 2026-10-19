@@ -3446,7 +3446,7 @@ async function main(): Promise<void> {
     case "models-set":
       return cmdModelsSet(creds, parsed.state, parsed.model);
     case "gate-run":
-      return cmdGateRun(creds, parsed.pr);
+      return cmdGateRun(creds, parsed.pr, { failedOnly: parsed.failedOnly });
     case "gate-start":
       return cmdGateStart(creds, parsed.pr);
     case "gate-watch":
