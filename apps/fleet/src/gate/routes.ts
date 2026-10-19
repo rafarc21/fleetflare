@@ -115,7 +115,12 @@ async function carryGreenFromLatestRun(
   }
   return {
     headSha: latest.headSha, baseSha: statusBody.baseSha, planFingerprint: statusBody.planFingerprint,
-    legs: greenLegsOf(statusBody.legs).map((l) => ({ leg: l.leg, state: "success" as const, description: l.description })),
+    // ms/summary ride along too (#1230 review): OutcomeLeg already carries
+    // both, and the auto-infra-rerun carry (workflow.ts) passes full leg
+    // results through, so this carry must not be the one path that drops them.
+    legs: greenLegsOf(statusBody.legs).map((l) => (
+      { leg: l.leg, state: "success" as const, description: l.description, ms: l.ms, summary: l.summary }
+    )),
   };
 }
 

@@ -379,6 +379,46 @@ describe("POST /studio/gate/start with failedOnly (#1230)", () => {
     });
   });
 
+  // #1230 review: the auto-infra-rerun carry (workflow.ts) passes full leg
+  // results through, so ms/summary survive into the rerun's verdict. The
+  // --failed-only carry must do the same: a leg's wall time and test summary
+  // are real leg-run output (OutcomeLeg already carries both), not something
+  // this route should silently drop on the way into carryGreen.
+  it("a green leg's ms/summary survive into the --failed-only carry, not just leg/state/description", async () => {
+    const env = fakeEnv();
+    await d1RunIndex(env.DB).record(REPO, 205, { headSha: HEAD, runId: "run-205", progressedAt: Date.now() });
+    const legs = [
+      { leg: "merge-tree", state: "success", ms: 4321, summary: "1 passed" },
+      { leg: "lint", state: "failure", description: "3 errors" },
+    ];
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "run-205") {
+        return {
+          status: vi.fn(async () => ({
+            status: "complete",
+            output: { state: "failure", description: "1/2 green", statusPostFailed: false, legs, baseSha: "b".repeat(40), planFingerprint: "fp-11" },
+          })),
+        };
+      }
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 205, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(200);
+    expect(env.GATE_WORKFLOW.create).toHaveBeenCalledWith({
+      id: expect.any(String),
+      params: {
+        repo: REPO, pr: 205,
+        carryGreen: {
+          headSha: HEAD, baseSha: "b".repeat(40), planFingerprint: "fp-11",
+          legs: [{ leg: "merge-tree", state: "success", ms: 4321, summary: "1 passed" }],
+        },
+      },
+    });
+  });
+
   // #1230 review: the GET status handler wraps gateRunStatus in a
   // try/catch mapping a not-found instance to a clean 404; the failedOnly
   // branch called the same gateRunStatus with no such guard, so an
