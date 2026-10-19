@@ -264,6 +264,24 @@ describe("duplicate terminals — reconcile", () => {
     expect([first.kind, second.kind].sort()).toEqual(["created", "exists"]);
   });
 
+  // #1225: the real run must repair, not just report — a worktree that
+  // survived an Orca restart while its attach terminal went DEAD gets the
+  // dead terminal closed and a working one opened, so the run's "opened" line
+  // matches the plan's "open (attach DEAD)" rather than silently skipping.
+  test("#1225: ensure() closes a dead attach terminal and opens a working one", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--maestro"),
+      "terminal list": terminalEntries({ handle: "term_dead", title: "fleet", connected: true, orphaned: true }),
+      "terminal create": TERM_CREATED,
+    });
+    const outcome = await ensureStudioWorkspace("websites--maestro", TEST_TITLE, f.deps);
+    expect(outcome.kind).toBe("created");
+    const closes = f.calls.filter((c) => c[0] === "terminal" && c[1] === "close");
+    expect(closes.length).toBe(1);
+    expect(closes[0]).toContain("term_dead");
+    expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(true);
+  });
+
   test("re-opens only the attach terminal when the workspace exists without one", async () => {
     // "Exists without one" is represented as an EMPTY terminal list, not an
     // entry with `connected: false` — a terminal tied to a dead process/pty
@@ -422,18 +440,45 @@ describe("#216 — preview/plan", () => {
   // already does before ever creating anything), never a second way to answer
   // that question that could disagree with the real one.
 
-  test("previewStudioWorkspace reads \"open\" for a studio with no worktree yet — worktree list only, no create/terminal calls", async () => {
+  test("previewStudioWorkspace reads \"open (no worktree)\" for a studio with no worktree yet — worktree list only, no terminal/create calls", async () => {
     const f = fake({ "worktree list": worktrees("staging", "cto") });
     const preview = await previewStudioWorkspace("websites--maestro", f.deps);
-    expect(preview.kind).toBe("open");
+    expect(preview).toEqual({ kind: "open", detail: "no worktree" });
     expect(f.calls).toEqual([["worktree", "list", "--json"]]);
   });
 
-  test("previewStudioWorkspace reads \"has one\" for a studio whose worktree already exists — same worktree list, still no create/terminal calls", async () => {
-    const f = fake({ "worktree list": worktrees("staging", "studio-websites--maestro") });
+  test("previewStudioWorkspace reads \"has one\" only for a worktree whose attach terminal is healthy — worktree list + terminal list, still no create/close calls", async () => {
+    const f = fake({
+      "worktree list": worktrees("staging", "studio-websites--maestro"),
+      "terminal list": terminals(true),
+    });
     const preview = await previewStudioWorkspace("websites--maestro", f.deps);
-    expect(preview.kind).toBe("has one");
-    expect(f.calls).toEqual([["worktree", "list", "--json"]]);
+    expect(preview).toEqual({ kind: "has one" });
+    expect(f.calls).toEqual([
+      ["worktree", "list", "--json"],
+      ["terminal", "list", "--worktree", "id:repo-websites::/w/studio-websites--maestro", "--json"],
+    ]);
+  });
+
+  // #1225: the worktree alone proves nothing — an Orca restart can leave the
+  // worktree while its attach terminal is gone, and the plan must then say so
+  // rather than print a "has one" that contradicts `fleet ls` ROW's "NO attach".
+  test("#1225: a worktree with an empty terminal list previews \"open (no attach)\"", async () => {
+    const f = fake({
+      "worktree list": worktrees("staging", "studio-websites--maestro"),
+      "terminal list": terminals(),
+    });
+    const preview = await previewStudioWorkspace("websites--maestro", f.deps);
+    expect(preview).toEqual({ kind: "open", detail: "no attach" });
+  });
+
+  test("#1225: a worktree whose only attach terminal is dead previews \"open (attach DEAD)\"", async () => {
+    const f = fake({
+      "worktree list": worktrees("staging", "studio-websites--maestro"),
+      "terminal list": terminalEntries({ handle: "term_dead", title: "fleet", connected: true, orphaned: true }),
+    });
+    const preview = await previewStudioWorkspace("websites--maestro", f.deps);
+    expect(preview).toEqual({ kind: "open", detail: "attach DEAD" });
   });
 
   test("previewStudioWorkspace is skipped outside Orca, with zero calls", async () => {
@@ -444,7 +489,10 @@ describe("#216 — preview/plan", () => {
   });
 
   test("planStudioWorkspaces skips a stopped studio with ZERO orca calls, same as reconcileStudioWorkspaces", async () => {
-    const f = fake({ "worktree list": worktrees("staging", "studio-websites--maestro") });
+    const f = fake({
+      "worktree list": worktrees("staging", "studio-websites--maestro"),
+      "terminal list": terminals(true),
+    });
     const plan = await planStudioWorkspaces(
       [studio("websites--maestro", "running"), studio("websites--scratch", "stopped")],
       f.deps,
@@ -453,8 +501,12 @@ describe("#216 — preview/plan", () => {
       { id: "websites--maestro", kind: "has one" },
       { id: "websites--scratch", kind: "skipped", why: "stopped" },
     ]);
-    // Only the one live studio's read-only lookup ran.
-    expect(f.calls).toEqual([["worktree", "list", "--json"]]);
+    // Only the one live studio's read-only lookups ran — worktree list, then
+    // terminal list for its healthy attach.
+    expect(f.calls).toEqual([
+      ["worktree", "list", "--json"],
+      ["terminal", "list", "--worktree", "id:repo-websites::/w/studio-websites--maestro", "--json"],
+    ]);
   });
 
   test("the printed plan matches the real reconcile outcome, studio by studio", async () => {

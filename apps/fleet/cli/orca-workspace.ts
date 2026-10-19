@@ -1128,27 +1128,28 @@ export async function reconcileStudioWorkspaces(
 // Issue #216: the printed plan `fleet tabs` shows BEFORE it touches anything.
 //
 // `previewStudioWorkspace` answers the SAME "does this studio already have a
-// workspace?" question `ensure()` (above) answers for itself before ever
-// creating one — one read-only `worktree list --json` plus `findStudioWorktree`,
-// the exact lookup `ensure()`'s own `existing` local uses at line ~515.
-// Reusing it here rather than inventing a second way to ask is deliberate: two
+// healthy workspace?" question `ensure()` (above) answers for itself before
+// ever creating one — the same read-only `worktree list --json` + `findStudioWorktree`
+// lookup `ensure()`'s own `existing` local uses, THEN the same `terminal list`
+// + `isHealthyAttach` read `ensure()`'s `reconcileAttachTerminals` makes.
+// Reusing both rather than inventing a second way to ask is deliberate: two
 // independent answers to "does it exist" could disagree, and a plan that
 // disagrees with the run it precedes would be worse than no plan at all.
 //
-// This is deliberately SHALLOWER than `ensure()`'s full decision (which also
-// inspects the worktree's terminal for a HEALTHY attach, board #42/#124): a
-// worktree that exists but whose attach terminal is missing or unhealthy
-// still previews as "has one" here, even though the real run would then
-// repair it (an "opened" outcome). Checking that too would mean the preview
-// itself makes the `terminal list` call `ensure()` makes — doubling this
-// read-only pass's Orca I/O for a distinction the issue's own output format
-// does not ask for (`open` / `has one` / `skipped: reason`, not a health
-// verdict). The coarser question is what `reconcileStudioWorkspaces` skips
-// for free too (`state === "stopped"`, no Orca call at all), which is why
-// `planStudioWorkspaces` below mirrors that same skip.
+// Issue #1225: the plan MUST judge the attach terminal too, not only the
+// worktree. A worktree that survives an Orca restart while its attach
+// terminal is lost leaves a studio that `fleet ls` ROW reads "NO attach" and
+// `attach --print-handle` reads "none" — but the old worktree-only preview
+// still printed "has one" for it, and the real run then had to repair it (an
+// "opened" outcome). The printed plan contradicts the actions it precedes.
+// So "open" now carries the SAME health verdict `classifyStudioRow` (the ROW
+// column) gives: `open (no attach)` when the worktree's terminal list holds
+// no attach title at all, `open (attach DEAD)` when one is present but not
+// healthy (`orphaned` / `writable: false` / disconnected). Only a worktree
+// with a healthy attach reads "has one".
 
 type WorkspacePreview =
-  | { kind: "open" }
+  | { kind: "open"; detail: "no attach" | "attach DEAD" | "no worktree" }
   | { kind: "has one" }
   | { kind: "skipped"; why: string };
 
@@ -1157,14 +1158,24 @@ export async function previewStudioWorkspace(id: string, deps: OrcaDeps): Promis
   try {
     const listed = await orcaJson(deps, ["worktree", "list", "--json"], LIST_TIMEOUT_MS);
     const worktrees = listed.result?.worktrees ?? [];
-    return findStudioWorktree(id, worktrees, deps.registry) ? { kind: "has one" } : { kind: "open" };
+    const worktree = findStudioWorktree(id, worktrees, deps.registry);
+    if (!worktree) return { kind: "open", detail: "no worktree" };
+    // Same selector + same terminal read `ensure()`'s `reconcileAttachTerminals`
+    // makes (scoped to the worktree, `isAttachTerminal` idempotency filter, then
+    // `isHealthyAttach` health) — the plan must agree with the run it precedes,
+    // so it asks the SAME question, never a second way to ask it.
+    const selector = worktree.id ? `id:${worktree.id}` : `name:${studioWorkspaceName(id)}`;
+    const terms = await orcaJson(deps, ["terminal", "list", "--worktree", selector, "--json"], LIST_TIMEOUT_MS);
+    const attach = (terms.result?.terminals ?? []).filter((t) => isAttachTerminal(t, id));
+    if (attach.length === 0) return { kind: "open", detail: "no attach" };
+    return attach.some((t) => isHealthyAttach(t, id)) ? { kind: "has one" } : { kind: "open", detail: "attach DEAD" };
   } catch (err) {
     return { kind: "skipped", why: errText(err) };
   }
 }
 
 export type TabsPlanEntry =
-  | { id: string; kind: "open" }
+  | { id: string; kind: "open"; detail: "no attach" | "attach DEAD" | "no worktree" }
   | { id: string; kind: "has one" }
   | { id: string; kind: "skipped"; why: string };
 
@@ -1184,7 +1195,11 @@ export async function planStudioWorkspaces(studios: StudioStatus[], deps: OrcaDe
       continue;
     }
     const preview = await previewStudioWorkspace(s.id, deps);
-    plan.push(preview.kind === "skipped" ? { id: s.id, kind: "skipped", why: preview.why } : { id: s.id, kind: preview.kind });
+    plan.push(preview.kind === "skipped"
+      ? { id: s.id, kind: "skipped", why: preview.why }
+      : preview.kind === "has one"
+        ? { id: s.id, kind: "has one" }
+        : { id: s.id, kind: "open", detail: preview.detail });
   }
   return plan;
 }
