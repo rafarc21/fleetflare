@@ -60,9 +60,9 @@ export const FF_HELP = [
   "time, it does not buy more capacity, and a session limit stops all of them.",
   "",
   "The repo comes from `git remote origin` in the current directory; outside a",
-  "git repo, ff falls back to the fleet's default repo. A studio that is not",
-  "provisioned is provisioned first — ff waits for it and never attaches to a",
-  "half-built container.",
+  "git repo, ff refuses (run `fleet spawn <role> --repo owner/name` instead of",
+  "guessing a default). A studio that is not provisioned is provisioned first —",
+  "ff waits for it and never attaches to a half-built container.",
   "",
   "Both task forms need a repo: the task is assigned to <repo>--<role>, and",
   "outside a git repo there is no such name to assign it to.",
@@ -369,7 +369,16 @@ export function ffDecision(
   }
 
   const row = id === null ? undefined : rows.find((r) => r.id === id);
-  if (row === undefined) return { kind: "spawn", id };
+  // Issue #1229: with no candidate and no repo, spawning on the fleet's
+  // default repo is the silent-wrong-target this whole feature removes — the
+  // default is deployment config this side cannot see. Refuse and name the
+  // --repo escape hatch instead of letting the Worker pick a default.
+  if (row === undefined) {
+    if (id === null) {
+      return { kind: "error", message: `no git remote here; cd into the repo you mean, or run: fleet spawn ${role} --repo owner/name` };
+    }
+    return { kind: "spawn", id };
+  }
 
   // A row that predates dynamic repo selection carries `repoSlug: null` — it
   // was cloned from the fleet default, and there is nothing to disagree with.

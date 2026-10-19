@@ -115,10 +115,11 @@ describe("fleet spawn refuses a no-git-remote cwd (issue #1229)", () => {
 
     expect(r.code).toBe(0);
     // Exactly one spawn POST, carrying the --repo value as the body's repo.
-    expect(seen.length).toBe(1);
-    expect(seen[0]!.method).toBe("POST");
-    expect(seen[0]!.path).toBe("/studio/spawn");
-    expect(seen[0]!.body).toEqual({ role: "pilot", repo: "acme/faux" });
+    // (The success path also fires the Orca sidebar row title fetch —
+    // GET /studio/board/tasks — a pre-existing second request, out of scope.)
+    const spawnPosts = seen.filter((s) => s.method === "POST" && s.path === "/studio/spawn");
+    expect(spawnPosts.length).toBe(1);
+    expect(spawnPosts[0]!.body).toEqual({ role: "pilot", repo: "acme/faux" });
     // The --repo line and the post-spawn line both land on stderr.
     expect(r.err).toContain("fleet spawn: target repo acme/faux (--repo)");
     expect(r.err).toContain("fleet spawn: repo acme/faux → faux--pilot");
