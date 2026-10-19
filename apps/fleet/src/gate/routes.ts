@@ -52,7 +52,7 @@ async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   const out = status.output as
     | {
         state?: string; description?: string; statusPostFailed?: boolean; skipped?: string; legs?: unknown[];
-        baseSha?: string; configHash?: string;
+        baseSha?: string; planFingerprint?: string;
       }
     | undefined;
   // "terminated" is terminal too: mapping it to pending would poll forever.
@@ -72,11 +72,11 @@ async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   if (!out?.state) {
     return j({ state: "error", description: "gate workflow instance errored" });
   }
-  // legs (#1049), baseSha and configHash (#1230) are dropped from the JSON
-  // when the run carries none (the early-return paths never set them).
+  // legs (#1049), baseSha and planFingerprint (#1230) are dropped from the
+  // JSON when the run carries none (the early-return paths never set them).
   return j({
     state: out.state, description: out.description, statusPostFailed: out.statusPostFailed, legs: out.legs,
-    baseSha: out.baseSha, configHash: out.configHash,
+    baseSha: out.baseSha, planFingerprint: out.planFingerprint,
   });
 }
 
@@ -109,12 +109,12 @@ async function carryGreenFromLatestRun(
   if (latest === null) return j({ error: "no prior gate run for this PR to rerun failed legs from" }, 404);
   const statusRes = await gateRunStatusSafe(env, latest.runId);
   if (statusRes.status !== 200) return statusRes;
-  const statusBody = await statusRes.json() as { legs?: OutcomeLeg[]; baseSha?: string; configHash?: string };
-  if (statusBody.legs === undefined || statusBody.baseSha === undefined || statusBody.configHash === undefined) {
+  const statusBody = await statusRes.json() as { legs?: OutcomeLeg[]; baseSha?: string; planFingerprint?: string };
+  if (statusBody.legs === undefined || statusBody.baseSha === undefined || statusBody.planFingerprint === undefined) {
     return j({ error: "latest gate run has no leg results to carry" }, 409);
   }
   return {
-    headSha: latest.headSha, baseSha: statusBody.baseSha, configHash: statusBody.configHash,
+    headSha: latest.headSha, baseSha: statusBody.baseSha, planFingerprint: statusBody.planFingerprint,
     legs: greenLegsOf(statusBody.legs).map((l) => ({ leg: l.leg, state: "success" as const, description: l.description })),
   };
 }

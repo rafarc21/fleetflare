@@ -652,7 +652,7 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
 
     const instanceId = "gate-carry-match";
     const carryGreen = {
-      headSha: HEAD, baseSha: BASE, configHash: fixtureFingerprint(),
+      headSha: HEAD, baseSha: BASE, planFingerprint: fixtureFingerprint(),
       legs: [{ leg: "merge-tree", state: "success" as const }],
     };
 
@@ -662,10 +662,10 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       await e.GATE_WORKFLOW.create({ id: instanceId, params: { repo: REPO, pr: PR, carryGreen } });
       await instance.waitForStatus("complete");
 
-      const out = await instance.getOutput() as { state: string; baseSha?: string; configHash?: string };
+      const out = await instance.getOutput() as { state: string; baseSha?: string; planFingerprint?: string };
       expect(out.state).toBe("success");
       expect(out.baseSha).toBe(BASE);
-      expect(out.configHash).toBe(carryGreen.configHash);
+      expect(out.planFingerprint).toBe(carryGreen.planFingerprint);
 
       // Only "typecheck" was dispatched: "merge-tree" rode in from the carry.
       const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
@@ -687,7 +687,7 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
 
     const instanceId = "gate-carry-mismatch";
     const carryGreen = {
-      headSha: "c".repeat(40), baseSha: BASE, configHash: fixtureFingerprint(),
+      headSha: "c".repeat(40), baseSha: BASE, planFingerprint: fixtureFingerprint(),
       legs: [{ leg: "merge-tree", state: "success" as const }],
     };
 

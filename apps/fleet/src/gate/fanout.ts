@@ -216,7 +216,7 @@ export function planUnionLegs(base: PlanInput | null, head: PlanInput | null): P
 export interface CarryGreen {
   headSha: string;
   baseSha: string;
-  configHash: string;
+  planFingerprint: string;
   legs: LegResult[];
 }
 
@@ -245,9 +245,12 @@ export function greenLegsOf<T extends LegResult>(legs: T[]): T[] {
  *  must only ever put green legs in `carry.legs`, but this must not trust
  *  that blindly. */
 export function carriedGreenByLeg(
-  carry: CarryGreen | undefined, ctx: { headSha: string; baseSha: string; configHash: string },
+  carry: CarryGreen | undefined, ctx: { headSha: string; baseSha: string; planFingerprint: string },
 ): Map<string, LegResult> {
-  if (carry === undefined || carry.headSha !== ctx.headSha || carry.baseSha !== ctx.baseSha || carry.configHash !== ctx.configHash) {
+  if (
+    carry === undefined || carry.headSha !== ctx.headSha || carry.baseSha !== ctx.baseSha
+    || carry.planFingerprint !== ctx.planFingerprint
+  ) {
     return new Map();
   }
   return new Map(greenLegsOf(carry.legs).map((l) => [l.leg, l]));

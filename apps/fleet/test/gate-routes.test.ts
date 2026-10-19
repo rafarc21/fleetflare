@@ -275,18 +275,18 @@ describe("GET /studio/gate/status per-leg output (#1049)", () => {
 
   // #1230: a `--failed-only` rerun of this run builds its own carry from these
   // fields, so the status route must surface them, not just `legs`.
-  it("a complete run's output also carries baseSha and configHash through", async () => {
+  it("a complete run's output also carries baseSha and planFingerprint through", async () => {
     const env = fakeEnv();
     const output = {
       state: "success", statusPostFailed: false, legs: [{ leg: "merge-tree", state: "success" }],
-      baseSha: "b".repeat(40), configHash: "fp-7",
+      baseSha: "b".repeat(40), planFingerprint: "fp-7",
     };
     env.GATE_WORKFLOW.get = vi.fn(async () => ({
       status: vi.fn(async () => ({ status: "complete", output })),
     })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
     const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
     const res = await handleGateRoute(req, env);
-    expect(await res.json()).toMatchObject({ baseSha: "b".repeat(40), configHash: "fp-7" });
+    expect(await res.json()).toMatchObject({ baseSha: "b".repeat(40), planFingerprint: "fp-7" });
   });
 });
 
@@ -328,7 +328,7 @@ describe("POST /studio/gate/start with failedOnly (#1230)", () => {
     expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
   });
 
-  it("a prior run whose status carries no legs/baseSha/configHash -> 409, nothing started", async () => {
+  it("a prior run whose status carries no legs/baseSha/planFingerprint -> 409, nothing started", async () => {
     const env = fakeEnv();
     await d1RunIndex(env.DB).record(REPO, 202, { headSha: HEAD, runId: "run-202", progressedAt: Date.now() });
     env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
@@ -358,7 +358,7 @@ describe("POST /studio/gate/start with failedOnly (#1230)", () => {
         return {
           status: vi.fn(async () => ({
             status: "complete",
-            output: { state: "failure", description: "1/2 green", statusPostFailed: false, legs, baseSha: "b".repeat(40), configHash: "fp-9" },
+            output: { state: "failure", description: "1/2 green", statusPostFailed: false, legs, baseSha: "b".repeat(40), planFingerprint: "fp-9" },
           })),
         };
       }
@@ -374,7 +374,7 @@ describe("POST /studio/gate/start with failedOnly (#1230)", () => {
       id: expect.any(String),
       params: {
         repo: REPO, pr: 203,
-        carryGreen: { headSha: HEAD, baseSha: "b".repeat(40), configHash: "fp-9", legs: [{ leg: "merge-tree", state: "success" }] },
+        carryGreen: { headSha: HEAD, baseSha: "b".repeat(40), planFingerprint: "fp-9", legs: [{ leg: "merge-tree", state: "success" }] },
       },
     });
   });

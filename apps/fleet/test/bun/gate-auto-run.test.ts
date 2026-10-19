@@ -385,7 +385,7 @@ describe("startManualGateRun: carryGreen always starts fresh, never reattaches (
   const T1 = 1_700_000_000_000;
   const T2 = T1 + 60_000;
   const CARRY: CarryGreen = {
-    headSha: HEAD, baseSha: BASE, configHash: "fp-1", legs: [{ leg: "merge-tree", state: "success" }],
+    headSha: HEAD, baseSha: BASE, planFingerprint: "fp-1", legs: [{ leg: "merge-tree", state: "success" }],
   };
 
   it("a live run of the same head sha is not reattached to; a fresh -r run starts, carrying carryGreen", async () => {

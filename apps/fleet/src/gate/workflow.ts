@@ -64,9 +64,9 @@ export type GateRunOutcome =
       /** #1230: the plan this run resolved to. Only the two post-plan returns
        *  below set these; the early-return paths (fail/precheck/skip) never
        *  reach a plan, so they carry neither. */
-      baseSha?: string; configHash?: string;
+      baseSha?: string; planFingerprint?: string;
     }
-  | { rerun: string; statusPostFailed: boolean; legs: OutcomeLeg[]; baseSha?: string; configHash?: string }
+  | { rerun: string; statusPostFailed: boolean; legs: OutcomeLeg[]; baseSha?: string; planFingerprint?: string }
   | { skipped: string; statusPostFailed: boolean };
 
 export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
@@ -232,7 +232,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // full replan, never a stale carry).
     const fingerprint = planFingerprint(legs);
     const carriedByLeg = carriedGreenByLeg(event.payload.carryGreen, {
-      headSha: resolved.headSha, baseSha: resolved.baseSha, configHash: fingerprint,
+      headSha: resolved.headSha, baseSha: resolved.baseSha, planFingerprint: fingerprint,
     });
 
     // Promise.all over step-backed legs: each leg's own steps are independent,
@@ -306,7 +306,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
             // #1230: the legs that already went green carry forward, so the
             // rerun only dispatches the infra-failed ones.
             carryGreen: {
-              headSha: resolved.headSha, baseSha: resolved.baseSha, configHash: fingerprint,
+              headSha: resolved.headSha, baseSha: resolved.baseSha, planFingerprint: fingerprint,
               legs: greenLegsOf(results),
             },
           },
@@ -324,7 +324,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       });
       // A step result cached before the outcome became a string replays as `true` (#1150 review).
       if (rerunStarted(started)) {
-        return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results), baseSha: resolved.baseSha, configHash: fingerprint };
+        return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results), baseSha: resolved.baseSha, planFingerprint: fingerprint };
       }
     }
 
@@ -354,9 +354,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
     // Per-leg output (#1049) rides in the final result, in plan order. #1214
     // round 2: `guarded` (not `final`) rides, so a downgraded success reports
-    // failure here exactly as GitHub sees it. #1230: baseSha/configHash ride
+    // failure here exactly as GitHub sees it. #1230: baseSha/planFingerprint ride
     // too, so a later `--failed-only` rerun can validate its own carry against them.
-    return { ...guarded, statusPostFailed, legs: outcomeLegs(results), baseSha: resolved.baseSha, configHash: fingerprint };
+    return { ...guarded, statusPostFailed, legs: outcomeLegs(results), baseSha: resolved.baseSha, planFingerprint: fingerprint };
   }
 }
 

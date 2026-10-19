@@ -335,9 +335,9 @@ describe("planFingerprint (#1230)", () => {
 // the plan fingerprint all match this run's own resolve — any mismatch must
 // never count, so the caller replans and reruns every leg as if uncarried.
 describe("carriedGreenByLeg (#1230)", () => {
-  const CTX = { headSha: "h".repeat(40), baseSha: "b".repeat(40), configHash: "fp-1" };
+  const CTX = { headSha: "h".repeat(40), baseSha: "b".repeat(40), planFingerprint: "fp-1" };
   const CARRY: CarryGreen = {
-    headSha: CTX.headSha, baseSha: CTX.baseSha, configHash: CTX.configHash,
+    headSha: CTX.headSha, baseSha: CTX.baseSha, planFingerprint: CTX.planFingerprint,
     legs: [
       { leg: "merge-tree", state: "success" },
       { leg: "typecheck", state: "success" },
@@ -359,8 +359,8 @@ describe("carriedGreenByLeg (#1230)", () => {
     expect(carriedGreenByLeg(CARRY, { ...CTX, baseSha: "c".repeat(40) }).size).toBe(0);
   });
 
-  it("a mismatched configHash returns an empty map", () => {
-    expect(carriedGreenByLeg(CARRY, { ...CTX, configHash: "fp-2" }).size).toBe(0);
+  it("a mismatched planFingerprint returns an empty map", () => {
+    expect(carriedGreenByLeg(CARRY, { ...CTX, planFingerprint: "fp-2" }).size).toBe(0);
   });
 
   it("no carry (undefined) returns an empty map", () => {
