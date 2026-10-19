@@ -65,8 +65,14 @@ export type GateRunOutcome =
        *  below set these; the early-return paths (fail/precheck/skip) never
        *  reach a plan, so they carry neither. */
       baseSha?: string; planFingerprint?: string;
+      /** #1230 maestro review: the sha this run actually resolved and tested
+       *  (`resolved.headSha` from the live resolve-pr step), never an input
+       *  echo. The D1 run index's `headSha` is only the dispatch-time label and
+       *  can go stale when a run is slow to start and the index's entry is
+       *  reused for a later push to the same sha (see routes.ts). */
+      headSha?: string;
     }
-  | { rerun: string; statusPostFailed: boolean; legs: OutcomeLeg[]; baseSha?: string; planFingerprint?: string }
+  | { rerun: string; statusPostFailed: boolean; legs: OutcomeLeg[]; baseSha?: string; planFingerprint?: string; headSha?: string }
   | { skipped: string; statusPostFailed: boolean };
 
 export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
@@ -324,7 +330,10 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       });
       // A step result cached before the outcome became a string replays as `true` (#1150 review).
       if (rerunStarted(started)) {
-        return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results), baseSha: resolved.baseSha, planFingerprint: fingerprint };
+        return {
+          rerun: rerunId, statusPostFailed, legs: outcomeLegs(results),
+          baseSha: resolved.baseSha, planFingerprint: fingerprint, headSha: resolved.headSha,
+        };
       }
     }
 
@@ -356,7 +365,10 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // round 2: `guarded` (not `final`) rides, so a downgraded success reports
     // failure here exactly as GitHub sees it. #1230: baseSha/planFingerprint ride
     // too, so a later `--failed-only` rerun can validate its own carry against them.
-    return { ...guarded, statusPostFailed, legs: outcomeLegs(results), baseSha: resolved.baseSha, planFingerprint: fingerprint };
+    return {
+      ...guarded, statusPostFailed, legs: outcomeLegs(results),
+      baseSha: resolved.baseSha, planFingerprint: fingerprint, headSha: resolved.headSha,
+    };
   }
 }
 

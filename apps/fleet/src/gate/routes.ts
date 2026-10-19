@@ -52,7 +52,7 @@ async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   const out = status.output as
     | {
         state?: string; description?: string; statusPostFailed?: boolean; skipped?: string; legs?: unknown[];
-        baseSha?: string; planFingerprint?: string;
+        baseSha?: string; planFingerprint?: string; headSha?: string;
       }
     | undefined;
   // "terminated" is terminal too: mapping it to pending would poll forever.
@@ -72,11 +72,12 @@ async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   if (!out?.state) {
     return j({ state: "error", description: "gate workflow instance errored" });
   }
-  // legs (#1049), baseSha and planFingerprint (#1230) are dropped from the
-  // JSON when the run carries none (the early-return paths never set them).
+  // legs (#1049), baseSha, planFingerprint and headSha (#1230) are dropped
+  // from the JSON when the run carries none (the early-return paths never
+  // set them).
   return j({
     state: out.state, description: out.description, statusPostFailed: out.statusPostFailed, legs: out.legs,
-    baseSha: out.baseSha, planFingerprint: out.planFingerprint,
+    baseSha: out.baseSha, planFingerprint: out.planFingerprint, headSha: out.headSha,
   });
 }
 
@@ -101,7 +102,21 @@ async function gateRunStatusSafe(env: Env, runId: string): Promise<Response> {
  *  run — or the clean error Response to return in its place: 404 when there
  *  is no prior run (or its instance is gone behind a stale D1 pointer,
  *  reusing gateRunStatusSafe's own mapping), 409 when the prior run carries
- *  no leg results to carry from. */
+ *  no leg results to carry from.
+ *
+ *  Maestro review (#1230): `latest.headSha` (from the D1 run index) is only
+ *  the DISPATCH-TIME sha `recordRun` stored when the run was created — it is
+ *  NOT necessarily what the run actually resolved and tested. A run that is
+ *  slow to start can have its `resolve-pr` step do its live head read AFTER
+ *  the PR moved again; if that later push dedupes back onto the same run id
+ *  (gateRunId is deterministic on repo+sha), the run's own `headSha` in its
+ *  output can differ from the index's stale label even though the index was
+ *  never told the run tested something else. Trusting `latest.headSha` here
+ *  would let legs that validated the WRONG commit ride forward as "green"
+ *  for a later run of the right one. So the run's own `headSha` (from step 2
+ *  below, `resolved.headSha` in workflow.ts) must agree with the index's
+ *  before a carry is built at all; a mismatch is treated exactly like "no leg
+ *  results to carry from", never a special case. */
 async function carryGreenFromLatestRun(
   env: Env, repo: string, pr: number, index: GateRunIndex,
 ): Promise<CarryGreen | Response> {
@@ -109,12 +124,21 @@ async function carryGreenFromLatestRun(
   if (latest === null) return j({ error: "no prior gate run for this PR to rerun failed legs from" }, 404);
   const statusRes = await gateRunStatusSafe(env, latest.runId);
   if (statusRes.status !== 200) return statusRes;
-  const statusBody = await statusRes.json() as { legs?: OutcomeLeg[]; baseSha?: string; planFingerprint?: string };
-  if (statusBody.legs === undefined || statusBody.baseSha === undefined || statusBody.planFingerprint === undefined) {
+  const statusBody = await statusRes.json() as {
+    legs?: OutcomeLeg[]; baseSha?: string; planFingerprint?: string; headSha?: string;
+  };
+  if (
+    statusBody.legs === undefined || statusBody.baseSha === undefined || statusBody.planFingerprint === undefined
+    || statusBody.headSha === undefined || statusBody.headSha !== latest.headSha
+  ) {
     return j({ error: "latest gate run has no leg results to carry" }, 409);
   }
   return {
-    headSha: latest.headSha, baseSha: statusBody.baseSha, planFingerprint: statusBody.planFingerprint,
+    // The run's OWN resolved head sha is the ground truth; `latest.headSha`
+    // above was only the check. They are confirmed equal at this point, but
+    // the run's own value is the one that actually matches what its legs
+    // tested.
+    headSha: statusBody.headSha, baseSha: statusBody.baseSha, planFingerprint: statusBody.planFingerprint,
     // ms/summary ride along too (#1230 review): OutcomeLeg already carries
     // both, and the auto-infra-rerun carry (workflow.ts) passes full leg
     // results through, so this carry must not be the one path that drops them.
