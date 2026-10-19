@@ -814,6 +814,11 @@ describe("spawn / provision --repo (issue #1229)", () => {
     expect(parseCliArgs(["spawn", "pilot", "--repo"]).cmd).toBe("usage");
   });
 
+  it("a duplicate --repo on spawn is a named usage error, not a silent last-wins", () => {
+    expect(parseCliArgs(["spawn", "pilot", "--repo", "a/b", "--repo", "c/d"]).cmd).toBe("usage");
+    expect(parseCliArgs(["spawn", "pilot", "--repo=a/b", "--repo=c/d"]).cmd).toBe("usage");
+  });
+
   it("provision takes --repo <owner/name> and --repo=<owner/name>", () => {
     const want = {
       cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false,

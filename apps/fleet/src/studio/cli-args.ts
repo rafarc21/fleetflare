@@ -982,7 +982,8 @@ export function parseCliArgs(argv: string[]): CliCommand {
           i += 1;
           continue;
         }
-        if (token === "--repo" && repo === undefined) {
+        if (token === "--repo") {
+          if (repo !== undefined) return usage("--repo was given twice");
           const value = rest[++i];
           if (value === undefined) return usage("--repo needs a value");
           repo = value;
