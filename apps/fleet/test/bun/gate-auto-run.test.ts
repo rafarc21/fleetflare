@@ -11,6 +11,7 @@ import {
   autoRunPullRequest, gateRunId, GATE_STALL_MS, markRunProgress, pullRequestAutoRun, startGateRun, startManualGateRun, startEditedGateRun,
   type GateRunIndex, type GateRunInstance, type GateRunRecord, type GateRunStarter, type PullRequestAutoRun,
 } from "../../src/gate/auto-run";
+import type { CarryGreen } from "../../src/gate/fanout";
 
 const PR_REPO = "acme/example";
 const HEAD = "a".repeat(40);
@@ -373,6 +374,46 @@ describe("startManualGateRun: reattach to a live run, start fresh after a finish
     expect(again).toEqual({ runId: first.runId, reused: true });
     expect(creates).toHaveLength(2);
     expect(runs.size).toBe(1);
+  });
+});
+
+// #1230: `fleet gate run --failed-only` passes carryGreen in. That must
+// always take the fresh-start path, never reattach to a live run of the same
+// head sha: a failed-only rerun is an explicit request to re-test specific
+// legs, and reusing a stale live run would silently ignore it.
+describe("startManualGateRun: carryGreen always starts fresh, never reattaches (#1230)", () => {
+  const T1 = 1_700_000_000_000;
+  const T2 = T1 + 60_000;
+  const CARRY: CarryGreen = {
+    headSha: HEAD, baseSha: BASE, configHash: "fp-1", legs: [{ leg: "merge-tree", state: "success" }],
+  };
+
+  it("a live run of the same head sha is not reattached to; a fresh -r run starts, carrying carryGreen", async () => {
+    const { wf, runs, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    expect(runs.get(first.runId)!.status).toBe("running");
+    const second = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, carryGreen: CARRY }, index, () => T2);
+    const expectedId = `${first.runId}-r${T2.toString(36)}`;
+    // The still-live first run is superseded: a fresh run starts (never a
+    // reattach), and the old one is ended the same way any superseded run is.
+    expect(second).toEqual({ runId: expectedId, reused: false, supersededRunId: first.runId });
+    expect(creates.at(-1)).toEqual({ id: expectedId, params: { repo: PR_REPO, pr: 7, carryGreen: CARRY } });
+  });
+
+  it("no live run at all still starts fresh (the base id), carrying carryGreen", async () => {
+    const { wf, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const out = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, carryGreen: CARRY }, index, () => T1);
+    expect(out).toEqual({ runId: `${await gateRunId(PR_REPO, HEAD)}-r${T1.toString(36)}`, reused: false, supersededRunId: undefined });
+    expect(creates.at(-1)).toEqual({ id: out.runId, params: { repo: PR_REPO, pr: 7, carryGreen: CARRY } });
+  });
+
+  it("no carryGreen -> params carry no carryGreen key at all (unchanged shape)", async () => {
+    const { wf, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    expect(creates[0].params).toEqual({ repo: PR_REPO, pr: 7 });
   });
 });
 

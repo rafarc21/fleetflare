@@ -9,11 +9,12 @@
 // plus the head sha, and a second PR sharing the sha starts a `-p<pr>` fresh
 // run (#1172). Creating an instance under an id that already exists is the dedupe.
 import { isGateRunnerRepo } from "./config";
+import type { CarryGreen } from "./fanout";
 
 /** The params a gate run is created with: the GateWorkflow's own payload shape
  *  (workflow.ts GateWorkflowParams), restated here so this module never imports
  *  workflow.ts, which pulls cloudflare:workers into the bun-test project. */
-export interface GateRunParams { repo: string; pr: number }
+export interface GateRunParams { repo: string; pr: number; carryGreen?: CarryGreen }
 
 /** One Workflows instance handle: its status, and terminate() to end it. */
 export interface GateRunInstance {
@@ -198,7 +199,11 @@ async function recordRun(
  *  #1214 round 2: (a) `postPending` fires BEFORE the fresh -p<pr> create, so
  *  GitHub never sees the head without a pending gate/verdict; (b) a -p<pr> id
  *  already existing is reused only while it is LIVE; a finished one starts a
- *  fresh `-p<pr>-r<base36 now>` (injected `now`, like startManualGateRun). */
+ *  fresh `-p<pr>-r<base36 now>` (injected `now`, like startManualGateRun).
+ *
+ *  Not exposed as a carryGreen passthrough (unlike startManualGateRun): the
+ *  auto-run never carries green legs forward, only the infra auto-rerun
+ *  (workflow.ts) and the manual `--failed-only` rerun do. */
 export async function startGateRun(
   wf: GateRunStarter, input: { repo: string; pr: number; headSha: string; reopened?: boolean }, index: GateRunIndex,
   now: () => number = Date.now,
@@ -288,19 +293,25 @@ export async function startEditedGateRun(
  *  run starts under `<baseId>-r<base36 time>`, so a rerun after base drift or an
  *  infra flake needs no new push. A live run with no progress in the window is
  *  hung: it is ended first, and the fresh run is the only live one. The first
- *  start of a sha still uses the sha's own id, the one the auto-run dedupes on. */
+ *  start of a sha still uses the sha's own id, the one the auto-run dedupes on.
+ *
+ *  #1230: `input.carryGreen` set (a `--failed-only` rerun) always takes the
+ *  fresh-start path, never a reattach: that request is explicitly asking to
+ *  re-test specific legs, and reattaching to a stale live run would silently
+ *  ignore it. */
 export async function startManualGateRun(
-  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex,
+  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string; carryGreen?: CarryGreen }, index: GateRunIndex,
   now: () => number = Date.now,
 ): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
   const baseId = await gateRunId(input.repo, input.headSha);
   const latest = await index.latest(input.repo, input.pr);
-  const params = { repo: input.repo, pr: input.pr };
+  const params = { repo: input.repo, pr: input.pr, ...(input.carryGreen ? { carryGreen: input.carryGreen } : {}) };
   const startFresh = async () => {
     const runId = `${baseId}-r${now().toString(36)}`;
     await wf.create({ id: runId, params });
     return recordRun(wf, input, index, runId, now);
   };
+  if (input.carryGreen !== undefined) return startFresh();
   if (latest?.headSha === input.headSha && isLiveStatus(await statusOf(wf, latest.runId))) {
     if (!isStalled(latest, now())) return { runId: latest.runId, reused: true };
     await endRunOrThrow(wf, latest.runId);
