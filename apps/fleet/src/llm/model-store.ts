@@ -2,7 +2,7 @@
 // (spec 2026-10-13-model-pool-design, Task 3). Studio assignment and per-model
 // pool state are both just flags: `lead-model:<studioId>` -> model id,
 // `model-state:<modelId>` -> ModelState.
-import { getFlag, setFlag } from "../state";
+import { deleteFlag, getFlag, setFlag } from "../state";
 import { POOL, modelById, type ModelState } from "./models";
 
 const ASSIGN = (studioId: string) => `lead-model:${studioId}`;
@@ -63,4 +63,56 @@ export async function getModelStates(db: D1Database): Promise<Record<string, Mod
 export async function setModelState(db: D1Database, modelId: string, state: ModelState): Promise<void> {
   if (!modelById(modelId)) throw new Error(`unknown model ${modelId}`);
   await setFlag(db, STATE(modelId), state, Date.now());
+}
+
+// ---------------------------------------------------------------------------
+// no_finish_reason failure tracking (board issue #1228)
+// ---------------------------------------------------------------------------
+
+/** Issue #1228: how long a fingerprint's identical-input failure count stays
+ *  live. A poison request burns through its 3 tries in seconds; an hour keeps
+ *  the counter from leaking into the next genuinely-distinct turn while still
+ *  catching a client retry loop minutes later. */
+export const NO_FINISH_REASON_WINDOW_MS = 60 * 60_000;
+
+const NFR = (studioId: string, fingerprintHash: string) => `no-finish-reason:${studioId}:${fingerprintHash}`;
+
+/**
+ * Issue #1228: a `no_finish_reason` on a request with this fingerprint failed
+ * again — record it. The value is a `count|expiresAtMs` pair (one shared
+ * expiry) so a sliding window never lets one old failure plus a new one read
+ * as a streak. Count is kept separate from the increment used at the call site
+ * because the caller needs to bump AND learn whether the streak crossed the
+ * trip threshold, and `getFlag`-then-set is two non-atomic round trips. */
+export async function recordNoFinishReasonFailure(
+  db: D1Database, studioId: string, fingerprintHash: string, now: number = Date.now(),
+): Promise<number> {
+  const key = NFR(studioId, fingerprintHash);
+  const v = await getFlag(db, key);
+  const live = v !== null && Number(v.slice(v.lastIndexOf("|") + 1)) > now ? Number(v.slice(0, v.indexOf("|"))) : 0;
+  const next = live + 1;
+  await setFlag(db, key, `${next}|${now + NO_FINISH_REASON_WINDOW_MS}`, now);
+  return next;
+}
+
+/** Issue #1228: a successful completion clears the streak — the request is
+ *  proven non-poisonous, so an identical-input failure later is a fresh event,
+ *  not a continuation. */
+export async function clearNoFinishReasonFailures(
+  db: D1Database, studioId: string, fingerprintHash: string, now: number = Date.now(),
+): Promise<void> {
+  await deleteFlag(db, NFR(studioId, fingerprintHash));
+}
+
+/** Issue #1228: how many live (unexpired) identical-input failures this
+ *  fingerprint has racked up. The entry gate refuses at 3 — before spending
+ *  any more AI budget on a request proven to fail. */
+export async function getNoFinishReasonFailures(
+  db: D1Database, studioId: string, fingerprintHash: string, now: number = Date.now(),
+): Promise<number> {
+  const v = await getFlag(db, NFR(studioId, fingerprintHash));
+  if (v === null) return 0;
+  const bar = v.lastIndexOf("|");
+  if (bar === -1 || !(Number(v.slice(bar + 1)) > now)) return 0;
+  return Number(v.slice(0, v.indexOf("|")));
 }

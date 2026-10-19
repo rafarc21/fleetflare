@@ -731,13 +731,24 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
       const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
       await r.text();
       await ctx.drain();
-      expect(spy).toHaveBeenCalledTimes(1);
-      const line = spy.mock.calls[0].map(String).join(" ");
+      expect(spy).toHaveBeenCalledTimes(2);
+      const lines = spy.mock.calls.map((c) => c.map(String).join(" "));
       // Issue #304: the reason is now failureClass()'s own output — class/
       // status only. `no_finish_reason` carries no upstream text, so its
       // redacted form is the string itself, unchanged.
-      expect(line).toBe(`[glm-lead] call failed studio=${ME} stream=true in=0 out=0 reason=no_finish_reason`);
-      expect(line).not.toContain("TOP-SECRET-PROMPT-TEXT");
+      expect(lines[0]).toBe(`[glm-lead] call failed studio=${ME} stream=true in=0 out=0 reason=no_finish_reason`);
+      // Issue #1228: a second line carries the request fingerprint — hashes
+      // and sizes only, never the prompt text itself.
+      expect(lines[1]).toContain("[glm-lead] no_finish_reason");
+      expect(lines[1]).toContain("fingerprint=");
+      expect(lines[1]).toContain("bodyBytes=");
+      expect(lines[1]).toContain("tools=");
+      expect(lines[1]).toContain("lastToolResult=");
+      expect(lines[1]).toContain("lastChunks=");
+      expect(lines[1]).toContain("usageIn=");
+      expect(lines[1]).toContain("usageOut=");
+      expect(lines[1]).not.toContain("TOP-SECRET-PROMPT-TEXT");
+      expect(lines[0]).not.toContain("TOP-SECRET-PROMPT-TEXT");
     } finally {
       spy.mockRestore();
     }
