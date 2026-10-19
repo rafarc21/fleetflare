@@ -15,8 +15,11 @@
 // was not supposed to serve, so "zero Worker calls on refusal" is an assertion
 // about observed traffic, not about the absence of output.
 import { afterEach, describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { writeCredentials } from "./helpers/credentials";
 import { cleanupTempDirs, FLEET, tmpDir } from "./helpers/fleet-cli";
+
+const FF = join(import.meta.dir, "../../cli/ff.ts");
 
 afterEach(cleanupTempDirs);
 
@@ -30,6 +33,25 @@ async function runFleetIn(args: string[], home: string, cwd: string) {
     cmd: [process.execPath, FLEET, ...args],
     cwd,
     env: { PATH: process.env.PATH!, HOME: home },
+    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  const [out, err, code] = await Promise.all([
+    new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+  ]);
+  return { out, err, code };
+}
+
+/** Spawns `ff <args>` with the given HOME and a no-.git cwd — same refusal
+ *  hermeticity as runFleetIn, but for cli/ff.ts. Drops inherited ORCA_* the
+ *  way ff-no-tty.test.ts does, so the process never shells a real `orca`. */
+async function runFfIn(args: string[], home: string, cwd: string) {
+  const proc = Bun.spawn({
+    cmd: [process.execPath, FF, ...args],
+    cwd,
+    env: {
+      ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("ORCA_"))),
+      PATH: process.env.PATH!, HOME: home, TERM_PROGRAM: "not-orca",
+    },
     stdin: "ignore", stdout: "pipe", stderr: "pipe",
   });
   const [out, err, code] = await Promise.all([
@@ -74,6 +96,10 @@ function startStandIn() {
       if (url.pathname === "/studio/faux--pilot/provision") {
         await record();
         return Response.json(SPAWNED);
+      }
+      if (url.pathname === "/studio/" && req.method === "GET") {
+        seen.push({ method: req.method, path: url.pathname, body: null });
+        return Response.json([]);
       }
       if (url.pathname === "/studio/board/tasks") {
         seen.push({ method: req.method, path: url.pathname, body: null });
@@ -140,5 +166,50 @@ describe("fleet spawn refuses a no-git-remote cwd (issue #1229)", () => {
     const spawnLike = seen.filter((s) => s.method === "POST" && s.path === "/studio/faux--pilot/provision");
     expect(spawnLike.length).toBe(1);
     expect(spawnLike[0]!.body).toEqual({});
+  });
+
+  test("non-git cwd, `fleet spawn pilot --repo notaslug`: exit 1, names the bad --repo, ZERO Worker calls", async () => {
+    const home = tmpDir("spawn-no-remote-home-");
+    const cwd = tmpDir("spawn-no-remote-cwd-");
+    const { server, seen } = startStandIn();
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await runFleetIn(["spawn", "pilot", "--repo", "notaslug"], home, cwd);
+    server.stop(true);
+
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("bad --repo");
+    expect(seen.length).toBe(0);
+  });
+
+  test("non-git cwd, `fleet provision faux--pilot --repo acme/faux`: sends that repo (segment matches the id)", async () => {
+    const home = tmpDir("spawn-no-remote-home-");
+    const cwd = tmpDir("spawn-no-remote-cwd-");
+    const { server, seen } = startStandIn();
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await runFleetIn(["provision", "faux--pilot", "--repo", "acme/faux"], home, cwd);
+    server.stop(true);
+
+    expect(r.code).toBe(0);
+    const provisionPosts = seen.filter((s) => s.method === "POST" && s.path === "/studio/faux--pilot/provision");
+    expect(provisionPosts.length).toBe(1);
+    expect(provisionPosts[0]!.body).toEqual({ repo: "acme/faux" });
+    expect(r.err).toContain("fleet provision: target repo acme/faux (--repo)");
+  });
+
+  test("non-git cwd, bare `ff release-studio`: exit 1, names the fix, never spawns", async () => {
+    const home = tmpDir("spawn-no-remote-home-");
+    const cwd = tmpDir("spawn-no-remote-cwd-");
+    const { server, seen } = startStandIn();
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await runFfIn(["release-studio"], home, cwd);
+    server.stop(true);
+
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("no git remote here");
+    // ff lists studios before deciding; it must never reach the spawn route.
+    expect(seen.some((s) => s.path === "/studio/spawn")).toBe(false);
   });
 });

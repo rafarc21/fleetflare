@@ -1576,10 +1576,17 @@ async function cmdProvision(
   // resolves a bodyless provision to whatever repo the studio is already
   // bound to.
   const detected = await detectRepo();
-  // Issue #1229: the same gate `spawn` crosses, but ONLY when this cwd was
-  // going to supply the repo — an id not derived from the cwd is a legitimate
-  // bodyless provision (address-by-id), so the refusal must not fire there.
+  // Issue #1229: provision is ADDRESSED by id — the id's own repo segment IS
+  // the address — so a cwd that names no repo (and no --repo) stays a
+  // legitimate bodyless provision: the Worker resolves it to the studio's
+  // bound repo, never a guessed fallback. Only a malformed --repo is a
+  // refusal here, unlike spawn where the id is DERIVED from the cwd and a
+  // no-remote cwd means no target at all.
   const r = requireRepoForCreate("fleet provision", repoFlag, detected);
+  if (repoFlag !== undefined && !r.ok) {
+    console.error(r.message);
+    process.exit(1);
+  }
   // Board #21: the id's repo half is the FOLDED segment (repo.ts's
   // repoIdSegment), so a dotted repo only ever agrees with its own id through
   // that same fold — comparing the raw short name would make every
@@ -1587,11 +1594,11 @@ async function cmdProvision(
   const matchesId = r.ok
     ? (() => { const seg = repoIdSegment(r.slug.split("/")[1]); return seg !== null && seg === parseStudioId(id)?.repo; })()
     : false;
-  if (!r.ok && (repoFlag !== undefined || matchesId)) {
-    console.error(r.message);
-    process.exit(1);
+  if (matchesId && r.ok) {
+    console.error(repoFlag === undefined
+      ? `fleet provision: repo ${r.slug} (from git remote origin)`
+      : `fleet provision: target repo ${r.slug} (--repo)`);
   }
-  if (matchesId) reportRepo("fleet provision", { slug: r.slug, reason: null });
   // Issue #115: same query-string convention `?fresh-session=true` already
   // uses. cli-args.ts's own parsing already refuses both flags at once, so
   // at most one of freshSession/cancelFreshSession is ever true here.
@@ -1609,7 +1616,7 @@ async function cmdProvision(
   const res = await fetch(studioUrl(creds, id, provisionPath), {
     method: "POST",
     headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
-    body: JSON.stringify(matchesId ? { repo: r.slug } : {}),
+    body: JSON.stringify(matchesId && r.ok ? { repo: r.slug } : {}),
   });
   if (!res.ok) {
     console.error(repairFailureLine("provision", res.status, await res.text()));

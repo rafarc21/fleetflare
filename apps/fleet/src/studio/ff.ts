@@ -254,9 +254,8 @@ export function describeState(row: StudioStatus | null | undefined): string {
 export type FfDecision =
   /** Provisioned already — attach now, no waiting. */
   | { kind: "attach"; id: string }
-  /** No such studio. `id` is null ONLY when this folder names no repo: the
-   *  Worker then derives the id from the fleet's default repo (which this
-   *  side does not know) and returns it.
+  /** No such studio. `id` is null only in the no-repo case, which now REFUSES
+   *  (ffDecision returns kind:"error") — a spawn never carries a null id.
    *
    *  Issue #269: `instance` is present only on the `--new` path, where it is
    *  the number THIS side allocated and the number the spawn request must
@@ -285,10 +284,10 @@ export type FfDecision =
  * Without one, the id cannot be derived: the fleet default repo is
  * deployment config (env.AGENT_REPO) that no route publishes. Two honest
  * answers replace guessing at it — the registry already holds exactly one
- * studio for this role (use it), or it holds none (spawn with no repo and
- * let the Worker name the child from its own default). More than one is the
- * only case with no honest answer, and it refuses by name rather than
- * picking.
+ * studio for this role (use it), or it holds none (REFUSE, naming the
+ * --repo escape hatch — issue #1229; the old spawn-on-default fallback billed
+ * idling studios). More than one is the only case with no honest answer, and
+ * it refuses by name rather than picking.
  *
  * `repoSlug` is the SAME repo `repoSegment` was folded from (null alongside
  * it), and it is here for one reason: since board #21, `.` and `_` fold onto

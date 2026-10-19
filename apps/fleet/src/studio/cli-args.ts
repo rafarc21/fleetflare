@@ -988,7 +988,11 @@ export function parseCliArgs(argv: string[]): CliCommand {
           repo = value;
           continue;
         }
-        if (token.startsWith("--repo=")) { repo = token.slice("--repo=".length); continue; }
+        if (token.startsWith("--repo=")) {
+          if (repo !== undefined) return usage("--repo was given twice");
+          repo = token.slice("--repo=".length);
+          continue;
+        }
         return usage(`unexpected ${JSON.stringify(token)}`);
       }
       return {
