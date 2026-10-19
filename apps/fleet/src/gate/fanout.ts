@@ -203,6 +203,40 @@ export function planUnionLegs(base: PlanInput | null, head: PlanInput | null): P
   return [...baseLegs, ...headLegs];
 }
 
+// #1230: carrying a prior run's green legs into a rerun, so the rerun only
+// dispatches the legs that are not already green.
+export interface CarryGreen {
+  headSha: string;
+  baseSha: string;
+  configHash: string;
+  legs: LegResult[];
+}
+
+/** One run's planned legs, fingerprinted by their runnable content (leg name +
+ *  install/cmd/timeout/image — the same shape legContent already compares for
+ *  planUnionLegs, but WITH the leg name and over the WHOLE plan: this compares
+ *  two different runs' plans, not a base vs. head leg within one). Two runs
+ *  that plan identical legs get the same fingerprint; any difference (a
+ *  changed fleet.json, a different shard count) changes it. */
+export function planFingerprint(legs: PlannedLeg[]): string {
+  return JSON.stringify(legs.map((l) => [l.leg, l.installCmd, l.legCmd, l.timeoutMin, l.image]));
+}
+
+/** The prior run's green legs, valid ONLY while head sha, base sha and the
+ *  plan fingerprint all match this run's own resolve (#1230): a carry from a
+ *  different sha or a changed config must never count, so a mismatch returns
+ *  an empty map — the caller then runs every leg fresh, same as no carry at
+ *  all. Filters to `state === "success"` itself: a caller must only ever put
+ *  green legs in `carry.legs`, but this must not trust that blindly. */
+export function carriedGreenByLeg(
+  carry: CarryGreen | undefined, ctx: { headSha: string; baseSha: string; configHash: string },
+): Map<string, LegResult> {
+  if (carry === undefined || carry.headSha !== ctx.headSha || carry.baseSha !== ctx.baseSha || carry.configHash !== ctx.configHash) {
+    return new Map();
+  }
+  return new Map(carry.legs.filter((l) => l.state === "success").map((l) => [l.leg, l]));
+}
+
 const LEG_STATES = new Set<LegResult["state"]>(["success", "failure", "error"]);
 
 /** What a leg reports beside its state (#1049): wall time summed over its

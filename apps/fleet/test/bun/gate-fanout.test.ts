@@ -1,7 +1,10 @@
 // Pure fan-out planning for GateWorkflow (Task 14). No I/O, no bindings:
 // the Workflow feeds these results into step.do calls.
 import { describe, it, expect } from "bun:test";
-import { bunLegs, normalizeLegResult, outcomeLegs, planLegs, planUnionLegs, vitestLegs } from "../../src/gate/fanout";
+import {
+  bunLegs, carriedGreenByLeg, normalizeLegResult, outcomeLegs, planFingerprint, planLegs, planUnionLegs, vitestLegs,
+  type CarryGreen,
+} from "../../src/gate/fanout";
 import { MAX_LEGS_PER_PR } from "../../src/gate/config";
 import { resolveOutboundTarget } from "../../src/gate/outbound-handler";
 
@@ -282,5 +285,71 @@ describe("planUnionLegs: base plan + differing head legs (#1091 review)", () => 
 
   it("an omitted image and an explicit default image are the same leg: no @head copy", () => {
     expect(planUnionLegs(BASE, { ...BASE, image: "gate" })).toEqual(planLegs(BASE));
+  });
+});
+
+// #1230: a plan's fingerprint over its own runnable content (leg name +
+// install/cmd/timeout/image), used to tell whether a carried run's green legs
+// still apply to a NEW run's plan.
+describe("planFingerprint (#1230)", () => {
+  it("the same legs from the same plan fingerprint equal", () => {
+    expect(planFingerprint(planLegs(BASE))).toBe(planFingerprint(planLegs(BASE)));
+  });
+  it("a different legCmd changes the fingerprint", () => {
+    const a = planLegs(BASE);
+    const b = planLegs({ ...BASE, legs: [{ name: "typecheck", cmd: "true" }, LEGS[1]] });
+    expect(planFingerprint(a)).not.toBe(planFingerprint(b));
+  });
+  it("a different timeoutMin changes the fingerprint", () => {
+    const a = planLegs(BASE);
+    const b = planLegs({ ...BASE, legs: [{ name: "typecheck", cmd: LEGS[0].cmd, timeoutMin: 9 }, LEGS[1]] });
+    expect(planFingerprint(a)).not.toBe(planFingerprint(b));
+  });
+  it("a different image changes the fingerprint", () => {
+    const a = planLegs({ ...BASE, image: "gate" });
+    const b = planLegs({ ...BASE, image: "desktop" });
+    expect(planFingerprint(a)).not.toBe(planFingerprint(b));
+  });
+  it("a different leg name changes the fingerprint", () => {
+    const a = planLegs(BASE);
+    const b = planLegs({ ...BASE, legs: [{ name: "typecheck2", cmd: LEGS[0].cmd }, LEGS[1]] });
+    expect(planFingerprint(a)).not.toBe(planFingerprint(b));
+  });
+});
+
+// #1230: the prior run's green legs, valid ONLY while head sha, base sha and
+// the plan fingerprint all match this run's own resolve — any mismatch must
+// never count, so the caller replans and reruns every leg as if uncarried.
+describe("carriedGreenByLeg (#1230)", () => {
+  const CTX = { headSha: "h".repeat(40), baseSha: "b".repeat(40), configHash: "fp-1" };
+  const CARRY: CarryGreen = {
+    headSha: CTX.headSha, baseSha: CTX.baseSha, configHash: CTX.configHash,
+    legs: [
+      { leg: "merge-tree", state: "success" },
+      { leg: "typecheck", state: "success" },
+      { leg: "lint", state: "failure", description: "3 errors" },
+    ],
+  };
+
+  it("a matching ctx carries only the success legs, dropping any failure/error entry", () => {
+    const byLeg = carriedGreenByLeg(CARRY, CTX);
+    expect([...byLeg.keys()].sort()).toEqual(["merge-tree", "typecheck"]);
+    expect(byLeg.get("merge-tree")).toEqual({ leg: "merge-tree", state: "success" });
+  });
+
+  it("a mismatched headSha returns an empty map", () => {
+    expect(carriedGreenByLeg(CARRY, { ...CTX, headSha: "c".repeat(40) }).size).toBe(0);
+  });
+
+  it("a mismatched baseSha returns an empty map", () => {
+    expect(carriedGreenByLeg(CARRY, { ...CTX, baseSha: "c".repeat(40) }).size).toBe(0);
+  });
+
+  it("a mismatched configHash returns an empty map", () => {
+    expect(carriedGreenByLeg(CARRY, { ...CTX, configHash: "fp-2" }).size).toBe(0);
+  });
+
+  it("no carry (undefined) returns an empty map", () => {
+    expect(carriedGreenByLeg(undefined, CTX).size).toBe(0);
   });
 });
