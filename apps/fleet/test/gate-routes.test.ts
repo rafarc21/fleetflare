@@ -378,6 +378,27 @@ describe("POST /studio/gate/start with failedOnly (#1230)", () => {
       },
     });
   });
+
+  // #1230 review: the GET status handler wraps gateRunStatus in a
+  // try/catch mapping a not-found instance to a clean 404; the failedOnly
+  // branch called the same gateRunStatus with no such guard, so an
+  // expired/unknown instance behind a stale D1 pointer threw uncaught
+  // through the whole call stack instead of returning clean JSON.
+  it("a prior run whose instance the Workflow no longer knows -> clean JSON error, never an uncaught throw", async () => {
+    const env = fakeEnv();
+    await d1RunIndex(env.DB).record(REPO, 204, { headSha: HEAD, runId: "run-204", progressedAt: Date.now() });
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "run-204") throw new Error("instance.not_found");
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 204, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "no such gate run", runId: "run-204" });
+    expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
+  });
 });
 
 // #1148 review: a first run the watchdog ended reports its infra rerun's status, not "ended without a verdict".

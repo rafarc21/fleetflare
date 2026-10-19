@@ -9,7 +9,7 @@
 import type { Env } from "../env";
 import { getPullRequestHeadSha } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
-import { startManualGateRun, type GateRunParams } from "./auto-run";
+import { startManualGateRun, type GateRunIndex, type GateRunParams } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import { isGateRunnerRepo } from "./config";
 import { greenLegsOf, type CarryGreen, type OutcomeLeg } from "./fanout";
@@ -80,6 +80,45 @@ async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   });
 }
 
+/** gateRunStatus, with an unknown/expired instance mapped to the same clean
+ *  JSON error the GET /studio/gate/status handler returns (#1144) — a bare
+ *  throw must never reach a caller, whichever route reads a run's status. */
+async function gateRunStatusSafe(env: Env, runId: string): Promise<Response> {
+  try {
+    return await gateRunStatus(env, runId);
+  } catch (err) {
+    // An id the Workflow does not know is a JSON 404 (#1144). Any other throw
+    // is a JSON 500: a bare throw reached Cloudflare's HTML error page.
+    if (/not[ _.-]?found/i.test(err instanceof Error ? err.message : String(err))) {
+      return j({ error: "no such gate run", runId }, 404);
+    }
+    console.error("gate status failed", err);
+    return j({ error: "gate status unavailable" }, 500);
+  }
+}
+
+/** #1230: the carry for a `--failed-only` rerun, built from the PR's latest
+ *  run — or the clean error Response to return in its place: 404 when there
+ *  is no prior run (or its instance is gone behind a stale D1 pointer,
+ *  reusing gateRunStatusSafe's own mapping), 409 when the prior run carries
+ *  no leg results to carry from. */
+async function carryGreenFromLatestRun(
+  env: Env, repo: string, pr: number, index: GateRunIndex,
+): Promise<CarryGreen | Response> {
+  const latest = await index.latest(repo, pr);
+  if (latest === null) return j({ error: "no prior gate run for this PR to rerun failed legs from" }, 404);
+  const statusRes = await gateRunStatusSafe(env, latest.runId);
+  if (statusRes.status !== 200) return statusRes;
+  const statusBody = await statusRes.json() as { legs?: OutcomeLeg[]; baseSha?: string; configHash?: string };
+  if (statusBody.legs === undefined || statusBody.baseSha === undefined || statusBody.configHash === undefined) {
+    return j({ error: "latest gate run has no leg results to carry" }, 409);
+  }
+  return {
+    headSha: latest.headSha, baseSha: statusBody.baseSha, configHash: statusBody.configHash,
+    legs: greenLegsOf(statusBody.legs).map((l) => ({ leg: l.leg, state: "success" as const, description: l.description })),
+  };
+}
+
 export async function handleGateRoute(
   req: Request, env: Env, headShaOf: (repo: string, pr: number) => Promise<string> = liveHeadSha(env),
 ): Promise<Response> {
@@ -98,18 +137,8 @@ export async function handleGateRoute(
     // carriedGreenByLeg's own headSha check (a full replan), never a special
     // case here.
     if (body.failedOnly === true) {
-      const latest = await index.latest(body.repo, body.pr);
-      if (latest === null) return j({ error: "no prior gate run for this PR to rerun failed legs from" }, 404);
-      const statusBody = await (await gateRunStatus(env, latest.runId)).json() as {
-        legs?: OutcomeLeg[]; baseSha?: string; configHash?: string;
-      };
-      if (statusBody.legs === undefined || statusBody.baseSha === undefined || statusBody.configHash === undefined) {
-        return j({ error: "latest gate run has no leg results to carry" }, 409);
-      }
-      const carryGreen: CarryGreen = {
-        headSha: latest.headSha, baseSha: statusBody.baseSha, configHash: statusBody.configHash,
-        legs: greenLegsOf(statusBody.legs).map((l) => ({ leg: l.leg, state: "success" as const, description: l.description })),
-      };
+      const carryGreen = await carryGreenFromLatestRun(env, body.repo, body.pr, index);
+      if (carryGreen instanceof Response) return carryGreen;
       const run = await startManualGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha, carryGreen }, index);
       return j({ started: true, runId: run.runId, reused: run.reused });
     }
@@ -124,17 +153,7 @@ export async function handleGateRoute(
     }
     const runId = url.searchParams.get("runId");
     if (!runId) return j({ error: "runId required" }, 400);
-    try {
-      return await gateRunStatus(env, runId);
-    } catch (err) {
-      // An id the Workflow does not know is a JSON 404 (#1144). Any other throw
-      // is a JSON 500: a bare throw reached Cloudflare's HTML error page.
-      if (/not[ _.-]?found/i.test(err instanceof Error ? err.message : String(err))) {
-        return j({ error: "no such gate run", runId }, 404);
-      }
-      console.error("gate status failed", err);
-      return j({ error: "gate status unavailable" }, 500);
-    }
+    return await gateRunStatusSafe(env, runId);
   }
 
   return j({ error: "not found" }, 404);
