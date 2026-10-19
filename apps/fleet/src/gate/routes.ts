@@ -12,6 +12,7 @@ import { repoTokenMinter } from "../github/auth";
 import { startManualGateRun, type GateRunParams } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import { isGateRunnerRepo } from "./config";
+import type { CarryGreen } from "./fanout";
 import { rerunInstanceId, statusFollowingRerun } from "./infra-rerun";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
@@ -49,7 +50,10 @@ async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   // Task 14's verdict rides in the Workflow's own output once terminal;
   // anything not yet terminal maps to pending.
   const out = status.output as
-    | { state?: string; description?: string; statusPostFailed?: boolean; skipped?: string; legs?: unknown[] }
+    | {
+        state?: string; description?: string; statusPostFailed?: boolean; skipped?: string; legs?: unknown[];
+        baseSha?: string; configHash?: string;
+      }
     | undefined;
   // "terminated" is terminal too: mapping it to pending would poll forever.
   if (status.status === "errored" || status.status === "terminated") {
@@ -68,8 +72,12 @@ async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   if (!out?.state) {
     return j({ state: "error", description: "gate workflow instance errored" });
   }
-  // legs (#1049) is dropped from the JSON when the run carries none.
-  return j({ state: out.state, description: out.description, statusPostFailed: out.statusPostFailed, legs: out.legs });
+  // legs (#1049), baseSha and configHash (#1230) are dropped from the JSON
+  // when the run carries none (the early-return paths never set them).
+  return j({
+    state: out.state, description: out.description, statusPostFailed: out.statusPostFailed, legs: out.legs,
+    baseSha: out.baseSha, configHash: out.configHash,
+  });
 }
 
 export async function handleGateRoute(
@@ -78,12 +86,34 @@ export async function handleGateRoute(
   const url = new URL(req.url);
 
   if (url.pathname === "/studio/gate/start" && req.method === "POST") {
-    const body = (await req.json()) as { repo: string; pr: number };
+    const body = (await req.json()) as { repo: string; pr: number; failedOnly?: boolean };
     if (env.FLEET_GATE_RUNNER !== "on" || !isGateRunnerRepo(env.GATE_RUNNER_REPOS, body.repo)) {
       return j({ error: "gate runner not enabled for this repo" }, 404);
     }
     const headSha = await headShaOf(body.repo, body.pr);
-    const run = await startManualGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha }, d1RunIndex(env.DB));
+    const index = d1RunIndex(env.DB);
+    // #1230: `fleet gate run --failed-only` reruns only the legs the PR's
+    // latest run did not already go green on. The new run still targets the
+    // LIVE head sha above; a head that moved since `latest` is caught by
+    // carriedGreenByLeg's own headSha check (a full replan), never a special
+    // case here.
+    if (body.failedOnly === true) {
+      const latest = await index.latest(body.repo, body.pr);
+      if (latest === null) return j({ error: "no prior gate run for this PR to rerun failed legs from" }, 404);
+      const statusBody = await (await gateRunStatus(env, latest.runId)).json() as {
+        legs?: { leg: string; state: string; description?: string }[]; baseSha?: string; configHash?: string;
+      };
+      if (statusBody.legs === undefined || statusBody.baseSha === undefined || statusBody.configHash === undefined) {
+        return j({ error: "latest gate run has no leg results to carry" }, 409);
+      }
+      const carryGreen: CarryGreen = {
+        headSha: latest.headSha, baseSha: statusBody.baseSha, configHash: statusBody.configHash,
+        legs: statusBody.legs.filter((l) => l.state === "success").map((l) => ({ leg: l.leg, state: "success" as const, description: l.description })),
+      };
+      const run = await startManualGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha, carryGreen }, index);
+      return j({ started: true, runId: run.runId, reused: run.reused });
+    }
+    const run = await startManualGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha }, index);
     return j({ started: true, runId: run.runId, reused: run.reused });
   }
 

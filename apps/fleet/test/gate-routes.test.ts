@@ -5,6 +5,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import { handleGateRoute } from "../src/gate/routes";
 import { gateRunId } from "../src/gate/auto-run";
+import { d1RunIndex } from "../src/gate/auto-run-env";
 import type { Env } from "../src/env";
 
 const REPO = "acme/example";
@@ -271,6 +272,22 @@ describe("GET /studio/gate/status per-leg output (#1049)", () => {
     const res = await handleGateRoute(req, env);
     expect(await res.json()).toEqual(output);
   });
+
+  // #1230: a `--failed-only` rerun of this run builds its own carry from these
+  // fields, so the status route must surface them, not just `legs`.
+  it("a complete run's output also carries baseSha and configHash through", async () => {
+    const env = fakeEnv();
+    const output = {
+      state: "success", statusPostFailed: false, legs: [{ leg: "merge-tree", state: "success" }],
+      baseSha: "b".repeat(40), configHash: "fp-7",
+    };
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({ status: "complete", output })),
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(await res.json()).toMatchObject({ baseSha: "b".repeat(40), configHash: "fp-7" });
+  });
 });
 
 // #1144: an unknown run id is a JSON 404, and any other throw a JSON 500. A
@@ -294,6 +311,72 @@ describe("GET /studio/gate/status with a run id the Workflow does not know (#114
     expect(res.status).toBe(500);
     expect(res.headers.get("content-type")).toBe("application/json");
     expect(await res.json()).toEqual({ error: "gate status unavailable" });
+  });
+});
+
+// #1230: `fleet gate run --failed-only <pr>` reruns only the legs the PR's
+// latest run did not already go green on.
+describe("POST /studio/gate/start with failedOnly (#1230)", () => {
+  it("no prior gate run for the PR -> 404 naming the rerun it has nothing to carry from", async () => {
+    const env = fakeEnv();
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 201, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "no prior gate run for this PR to rerun failed legs from" });
+    expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
+  });
+
+  it("a prior run whose status carries no legs/baseSha/configHash -> 409, nothing started", async () => {
+    const env = fakeEnv();
+    await d1RunIndex(env.DB).record(REPO, 202, { headSha: HEAD, runId: "run-202", progressedAt: Date.now() });
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "run-202") {
+        return { status: vi.fn(async () => ({ status: "complete", output: { state: "success", statusPostFailed: false } })) };
+      }
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 202, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "latest gate run has no leg results to carry" });
+    expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
+  });
+
+  it("a complete prior run with green legs builds carryGreen from its own green legs for the new run", async () => {
+    const env = fakeEnv();
+    await d1RunIndex(env.DB).record(REPO, 203, { headSha: HEAD, runId: "run-203", progressedAt: Date.now() });
+    const legs = [
+      { leg: "merge-tree", state: "success" },
+      { leg: "lint", state: "failure", description: "3 errors" },
+    ];
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "run-203") {
+        return {
+          status: vi.fn(async () => ({
+            status: "complete",
+            output: { state: "failure", description: "1/2 green", statusPostFailed: false, legs, baseSha: "b".repeat(40), configHash: "fp-9" },
+          })),
+        };
+      }
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 203, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(200);
+    // Only "merge-tree" is a green leg; the red "lint" never rides along.
+    expect(env.GATE_WORKFLOW.create).toHaveBeenCalledWith({
+      id: expect.any(String),
+      params: {
+        repo: REPO, pr: 203,
+        carryGreen: { headSha: HEAD, baseSha: "b".repeat(40), configHash: "fp-9", legs: [{ leg: "merge-tree", state: "success" }] },
+      },
+    });
   });
 });
 
