@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { env, introspectWorkflowInstance } from "cloudflare:test";
 import type { Env } from "../src/env";
+import { planFingerprint, planUnionLegs, type PlanInput } from "../src/gate/fanout";
 import { CLOSING_KEYWORD_COMMIT_FAILURE, CLOSING_KEYWORD_FAILURE } from "../src/gate/merge-precheck";
 import { GATE_STATUS_CONTEXT } from "../src/gate/status-post";
 
@@ -32,6 +33,27 @@ const FLEET_JSON = JSON.stringify({
 const RUN_FLEET_JSON = JSON.stringify({
   gate: { install: "bun install", legs: [], pathRules: ["docs/**"] },
 });
+
+// #1230: a run-path block with ONE configured leg (merge-tree + typecheck =
+// two legs), so a carryGreen test can carry one green and still dispatch the
+// other through GATE_RUNNER.
+const RUN_FLEET_JSON_TWO_LEGS = JSON.stringify({
+  gate: { install: "bun install", legs: [{ name: "typecheck", cmd: "bun run typecheck" }], pathRules: ["docs/**"] },
+});
+
+// #1230: the plan fingerprint this fixture's run resolves to — mirrors
+// workflow.ts's own planFor(base, bunFiles.base) for RUN_FLEET_JSON_TWO_LEGS's
+// block (no bun lane, no vitest lane, no head config since fleetJson is
+// unchanged between merge-base and head in these fixtures).
+function fixtureFingerprint(): string {
+  const base: PlanInput = {
+    owner: "acme", repo: "example", pr: PR, runId: "fingerprint-only",
+    headSha: HEAD, baseSha: BASE,
+    install: "bun install", legs: [{ name: "typecheck", cmd: "bun run typecheck" }],
+    bunShards: [], bunLaneRoot: "", vitestShards: 8, baselineKeys: [],
+  };
+  return planFingerprint(planUnionLegs(base, null));
+}
 
 type Recorded = { method: string; url: string; body: unknown };
 
@@ -610,6 +632,76 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       const out = await instance.getOutput() as { state: string; description?: string };
       expect(out.state).toBe("failure");
       expect(out.description).toBe("gate: cannot list shared-head PRs");
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  // #1230: a carryGreen matching this run's own head sha, base sha and plan
+  // fingerprint skips dispatching the carried leg to GATE_RUNNER; only the
+  // leg not already green is actually run.
+  it("a carryGreen matching head/base/plan skips the carried leg's run-leg call; its result rides into the verdict (#1230)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON_TWO_LEGS;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+
+    const instanceId = "gate-carry-match";
+    const carryGreen = {
+      headSha: HEAD, baseSha: BASE, configHash: fixtureFingerprint(),
+      legs: [{ leg: "merge-tree", state: "success" as const }],
+    };
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, instanceId);
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: instanceId, params: { repo: REPO, pr: PR, carryGreen } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; baseSha?: string; configHash?: string };
+      expect(out.state).toBe("success");
+      expect(out.baseSha).toBe(BASE);
+      expect(out.configHash).toBe(carryGreen.configHash);
+
+      // Only "typecheck" was dispatched: "merge-tree" rode in from the carry.
+      const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
+      expect(legCalls.map((r) => (r.body as { leg?: string }).leg)).toEqual(["typecheck"]);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("a carryGreen with a mismatched headSha is ignored: every leg runs fresh (#1230)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON_TWO_LEGS;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+
+    const instanceId = "gate-carry-mismatch";
+    const carryGreen = {
+      headSha: "c".repeat(40), baseSha: BASE, configHash: fixtureFingerprint(),
+      legs: [{ leg: "merge-tree", state: "success" as const }],
+    };
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, instanceId);
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: instanceId, params: { repo: REPO, pr: PR, carryGreen } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string };
+      expect(out.state).toBe("success");
+
+      const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
+      expect(legCalls.map((r) => (r.body as { leg?: string }).leg).sort()).toEqual(["merge-tree", "typecheck"]);
     } finally {
       await instance.dispose();
     }
