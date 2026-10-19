@@ -222,19 +222,27 @@ export function planFingerprint(legs: PlannedLeg[]): string {
   return JSON.stringify(legs.map((l) => [l.leg, l.installCmd, l.legCmd, l.timeoutMin, l.image]));
 }
 
+/** A run's green legs: `state === "success"`, the only state a carry may ever
+ *  pass forward (#1230). The one filter every carry producer and consumer
+ *  shares, so none hand-rolls its own copy. */
+export function greenLegsOf<T extends LegResult>(legs: T[]): T[] {
+  return legs.filter((l) => l.state === "success");
+}
+
 /** The prior run's green legs, valid ONLY while head sha, base sha and the
  *  plan fingerprint all match this run's own resolve (#1230): a carry from a
  *  different sha or a changed config must never count, so a mismatch returns
  *  an empty map — the caller then runs every leg fresh, same as no carry at
- *  all. Filters to `state === "success"` itself: a caller must only ever put
- *  green legs in `carry.legs`, but this must not trust that blindly. */
+ *  all. Filters to `state === "success"` itself (via greenLegsOf): a caller
+ *  must only ever put green legs in `carry.legs`, but this must not trust
+ *  that blindly. */
 export function carriedGreenByLeg(
   carry: CarryGreen | undefined, ctx: { headSha: string; baseSha: string; configHash: string },
 ): Map<string, LegResult> {
   if (carry === undefined || carry.headSha !== ctx.headSha || carry.baseSha !== ctx.baseSha || carry.configHash !== ctx.configHash) {
     return new Map();
   }
-  return new Map(carry.legs.filter((l) => l.state === "success").map((l) => [l.leg, l]));
+  return new Map(greenLegsOf(carry.legs).map((l) => [l.leg, l]));
 }
 
 const LEG_STATES = new Set<LegResult["state"]>(["success", "failure", "error"]);

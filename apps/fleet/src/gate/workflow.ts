@@ -29,7 +29,7 @@ import {
 } from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
-  bundleKeyFor, carriedGreenByLeg, outcomeLegs, pendingStatusArgs, planBundleLeg, planFingerprint, planUnionLegs, verdictToStatusArgs,
+  bundleKeyFor, carriedGreenByLeg, greenLegsOf, outcomeLegs, pendingStatusArgs, planBundleLeg, planFingerprint, planUnionLegs, verdictToStatusArgs,
   type CarryGreen, type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
@@ -307,7 +307,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
             // rerun only dispatches the infra-failed ones.
             carryGreen: {
               headSha: resolved.headSha, baseSha: resolved.baseSha, configHash: fingerprint,
-              legs: results.filter((r) => r.state === "success"),
+              legs: greenLegsOf(results),
             },
           },
         }),

@@ -12,7 +12,7 @@ import { repoTokenMinter } from "../github/auth";
 import { startManualGateRun, type GateRunParams } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import { isGateRunnerRepo } from "./config";
-import type { CarryGreen } from "./fanout";
+import { greenLegsOf, type CarryGreen, type OutcomeLeg } from "./fanout";
 import { rerunInstanceId, statusFollowingRerun } from "./infra-rerun";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
@@ -101,14 +101,14 @@ export async function handleGateRoute(
       const latest = await index.latest(body.repo, body.pr);
       if (latest === null) return j({ error: "no prior gate run for this PR to rerun failed legs from" }, 404);
       const statusBody = await (await gateRunStatus(env, latest.runId)).json() as {
-        legs?: { leg: string; state: string; description?: string }[]; baseSha?: string; configHash?: string;
+        legs?: OutcomeLeg[]; baseSha?: string; configHash?: string;
       };
       if (statusBody.legs === undefined || statusBody.baseSha === undefined || statusBody.configHash === undefined) {
         return j({ error: "latest gate run has no leg results to carry" }, 409);
       }
       const carryGreen: CarryGreen = {
         headSha: latest.headSha, baseSha: statusBody.baseSha, configHash: statusBody.configHash,
-        legs: statusBody.legs.filter((l) => l.state === "success").map((l) => ({ leg: l.leg, state: "success" as const, description: l.description })),
+        legs: greenLegsOf(statusBody.legs).map((l) => ({ leg: l.leg, state: "success" as const, description: l.description })),
       };
       const run = await startManualGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha, carryGreen }, index);
       return j({ started: true, runId: run.runId, reused: run.reused });
