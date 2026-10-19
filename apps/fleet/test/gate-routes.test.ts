@@ -358,7 +358,10 @@ describe("POST /studio/gate/start with failedOnly (#1230)", () => {
         return {
           status: vi.fn(async () => ({
             status: "complete",
-            output: { state: "failure", description: "1/2 green", statusPostFailed: false, legs, baseSha: "b".repeat(40), planFingerprint: "fp-9" },
+            output: {
+              state: "failure", description: "1/2 green", statusPostFailed: false, legs,
+              baseSha: "b".repeat(40), planFingerprint: "fp-9", headSha: HEAD,
+            },
           })),
         };
       }
@@ -396,7 +399,10 @@ describe("POST /studio/gate/start with failedOnly (#1230)", () => {
         return {
           status: vi.fn(async () => ({
             status: "complete",
-            output: { state: "failure", description: "1/2 green", statusPostFailed: false, legs, baseSha: "b".repeat(40), planFingerprint: "fp-11" },
+            output: {
+              state: "failure", description: "1/2 green", statusPostFailed: false, legs,
+              baseSha: "b".repeat(40), planFingerprint: "fp-11", headSha: HEAD,
+            },
           })),
         };
       }
@@ -417,6 +423,44 @@ describe("POST /studio/gate/start with failedOnly (#1230)", () => {
         },
       },
     });
+  });
+
+  // #1230 maestro review: the D1 index's `headSha` is only the dispatch-time
+  // label `recordRun` stored when the run was created — a run that is slow to
+  // start can resolve (and actually test) a DIFFERENT live head than the one
+  // its run id was dispatched for (two pushes dedupe onto the same run id;
+  // the run's own late `resolve-pr` step reads whichever head is live then).
+  // When the run's own resolved headSha disagrees with the index's stale
+  // label, the carry must never be built from it: treat it exactly like
+  // "nothing to carry" (the same 409 as no legs/baseSha/planFingerprint).
+  it("stored head sha differs from the run's own resolved head sha: no carry, never a false green", async () => {
+    const env = fakeEnv();
+    await d1RunIndex(env.DB).record(REPO, 206, { headSha: HEAD, runId: "run-206", progressedAt: Date.now() });
+    const legs = [{ leg: "merge-tree", state: "success" }];
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "run-206") {
+        return {
+          status: vi.fn(async () => ({
+            status: "complete",
+            output: {
+              state: "success", statusPostFailed: false, legs,
+              baseSha: "b".repeat(40), planFingerprint: "fp-12",
+              // The run actually resolved and tested a DIFFERENT head than
+              // the D1 index's dispatch-time label (HEAD).
+              headSha: "d".repeat(40),
+            },
+          })),
+        };
+      }
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 206, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "latest gate run has no leg results to carry" });
+    expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
   });
 
   // #1230 review: the GET status handler wraps gateRunStatus in a

@@ -71,6 +71,27 @@ const greenRunner = {
   }),
 };
 
+// #1230 maestro review: every leg green EXCEPT the one named `redLeg`, which
+// answers "failure" — a carried-green leg alongside a freshly-dispatched red
+// sibling must never certify the run success.
+function runnerGreenExcept(redLeg: string) {
+  return {
+    idFromName: (name: string) => name as unknown as DurableObjectId,
+    get: (_id: unknown) => ({
+      fetch: async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(init.body as string) as { leg?: string };
+        recorded.push({ method: init.method ?? "POST", url: _url, body });
+        const leg = body.leg ?? "merge-tree";
+        return Response.json(
+          leg === redLeg
+            ? { leg, state: "failure", description: `${leg} exited 1` }
+            : { leg, state: "success" },
+        );
+      },
+    }),
+  };
+}
+
 let recorded: Recorded[] = [];
 let realFetch: typeof globalThis.fetch;
 // #1203: the two /compare/ GETs in one run — resolve-pr's compareFiles first,
@@ -702,6 +723,47 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
 
       const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
       expect(legCalls.map((r) => (r.body as { leg?: string }).leg).sort()).toEqual(["merge-tree", "typecheck"]);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  // #1230 maestro review: a carried green leg alongside a freshly-run red leg:
+  // the verdict is still red. A carry that correctly matches head/base/plan
+  // for "merge-tree" must not mask "typecheck" coming back red from its own
+  // fresh run-leg dispatch — the two legs are aggregated independently
+  // (aggregateVerdict is leg-keyed), so a carried success can never paper over
+  // a sibling that genuinely failed this run.
+  it("a carried green leg alongside a freshly-run red leg: the verdict is still red (#1230 maestro review)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON_TWO_LEGS;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = runnerGreenExcept("typecheck") as unknown as Env["GATE_RUNNER"];
+
+    const instanceId = "gate-carry-match-sibling-red";
+    const carryGreen = {
+      headSha: HEAD, baseSha: BASE, planFingerprint: fixtureFingerprint(),
+      legs: [{ leg: "merge-tree", state: "success" as const }],
+    };
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, instanceId);
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: instanceId, params: { repo: REPO, pr: PR, carryGreen } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string };
+      expect(out.state).not.toBe("success");
+      expect(["failure", "error"]).toContain(out.state);
+
+      // Only "typecheck" was dispatched fresh (a red leg retries once, so it
+      // shows up twice): "merge-tree" never ran — it rode in from the carry.
+      const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
+      expect(legCalls.map((r) => (r.body as { leg?: string }).leg)).toEqual(["typecheck", "typecheck"]);
     } finally {
       await instance.dispose();
     }
