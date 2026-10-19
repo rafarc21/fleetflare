@@ -315,6 +315,20 @@ describe("planFingerprint (#1230)", () => {
     const b = planLegs({ ...BASE, legs: [{ name: "typecheck2", cmd: LEGS[0].cmd }, LEGS[1]] });
     expect(planFingerprint(a)).not.toBe(planFingerprint(b));
   });
+  // #1230 review: planFingerprint must normalize image/timeoutMin the same
+  // way legContent (planUnionLegs) already does — an unset image and the
+  // default image name run on the identical actual image, so they must
+  // fingerprint the same, not silently discard a legitimate carry.
+  it("an undefined image and the explicit default image fingerprint the same", () => {
+    const a = planLegs({ ...BASE, legs: [LEGS[0]] }); // image undefined
+    const b = planLegs({ ...BASE, legs: [LEGS[0]], image: "gate" }); // DEFAULT_GATE_IMAGE
+    expect(planFingerprint(a)).toBe(planFingerprint(b));
+  });
+  it("an undefined timeoutMin and an explicit default timeoutMin fingerprint the same", () => {
+    const a = planLegs({ ...BASE, legs: [{ name: "typecheck", cmd: LEGS[0].cmd }] }); // timeoutMin undefined
+    const b = planLegs({ ...BASE, legs: [{ name: "typecheck", cmd: LEGS[0].cmd, timeoutMin: 25 }] }); // DEFAULT_LEG_TIMEOUT_MIN
+    expect(planFingerprint(a)).toBe(planFingerprint(b));
+  });
 });
 
 // #1230: the prior run's green legs, valid ONLY while head sha, base sha and
