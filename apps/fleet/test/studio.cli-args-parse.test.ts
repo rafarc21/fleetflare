@@ -788,3 +788,52 @@ describe("provision --account mapped (#1074)", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session", "--account", "mapped"])).toEqual(want);
   });
 });
+
+// Issue #1229: `--repo <owner/name>` on the two studio-CREATING verbs. The flag
+// is value-taking (both `--repo v` and `--repo=v`), optional, and the parsed
+// command carries a `repo` key ONLY when it was given — so every pre-existing
+// bare-spawn / bare-provision parse shape stays byte-identical.
+describe("spawn / provision --repo (issue #1229)", () => {
+  it("spawn takes --repo <owner/name> and --repo=<owner/name>", () => {
+    expect(parseCliArgs(["spawn", "pilot", "--repo", "acme/faux"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, repo: "acme/faux" });
+    expect(parseCliArgs(["spawn", "pilot", "--repo=acme/faux"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, repo: "acme/faux" });
+  });
+
+  it("spawn --repo combines with --new and --lead, in any order", () => {
+    expect(parseCliArgs(["spawn", "pilot", "--new", "--lead", "glm", "--repo", "acme/faux"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: true, leadType: "glm", repo: "acme/faux" });
+    expect(parseCliArgs(["spawn", "pilot", "--repo=acme/faux", "--lead", "kimi"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, leadType: "kimi", repo: "acme/faux" });
+  });
+
+  it("bare spawn still carries no repo key, and --repo with no value is a usage error", () => {
+    const bare = parseCliArgs(["spawn", "pilot"]);
+    expect(bare.cmd === "spawn" && "repo" in bare).toBe(false);
+    expect(parseCliArgs(["spawn", "pilot", "--repo"]).cmd).toBe("usage");
+  });
+
+  it("provision takes --repo <owner/name> and --repo=<owner/name>", () => {
+    const want = {
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false,
+      discardSession: false, repo: "acme/faux",
+    };
+    expect(parseCliArgs(["provision", "websites--scratch", "--repo", "acme/faux"])).toEqual(want);
+    expect(parseCliArgs(["provision", "websites--scratch", "--repo=acme/faux"])).toEqual(want);
+  });
+
+  it("provision --repo combines with --fresh-session and --account mapped, in any order", () => {
+    expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session", "--account", "mapped", "--repo", "acme/faux"]))
+      .toEqual({
+        cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false,
+        discardSession: false, forceMappedAccount: true, repo: "acme/faux",
+      });
+  });
+
+  it("bare provision still carries no repo key, and --repo with no value is a usage error", () => {
+    const bare = parseCliArgs(["provision", "websites--scratch"]);
+    expect(bare.cmd === "provision" && "repo" in bare).toBe(false);
+    expect(parseCliArgs(["provision", "websites--scratch", "--repo"]).cmd).toBe("usage");
+  });
+});
