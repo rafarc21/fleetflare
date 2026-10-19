@@ -273,7 +273,7 @@ export type CliCommand =
   // #715 Phase 1: `fleet gate [start <pr> | watch <pr>]` — the operator
   // surface for the gate-runner Workflow (POST /studio/gate/start, GET
   // /studio/gate/status). Same sub-action-word shape `models-*` uses above.
-  | { cmd: "gate-run"; pr: number }
+  | { cmd: "gate-run"; pr: number; failedOnly?: boolean }
   | { cmd: "gate-start"; pr: number }
   | { cmd: "gate-watch"; pr: number; runId: string }
   | { cmd: "usage"; message: string };
@@ -471,8 +471,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   // #715: two cmd literals share the `gate` word; verbLine's `gate-` prefix
   // collapse folds both back into one "fleet gate ..." help family.
   "gate-run": {
-    args: "run <pr>",
-    summary: "Start a gate-runner run for <pr> and wait for its verdict; exit 0 green, 1 red, 2 error or gate off. The repo is the folder's own origin.",
+    args: "run [--failed-only] <pr>",
+    summary: "Start a gate-runner run for <pr> and wait for its verdict; exit 0 green, 1 red, 2 error or gate off. --failed-only reruns only the latest run's red legs, carrying its green ones. The repo is the folder's own origin.",
   },
   "gate-start": {
     args: "start <pr>",
@@ -1318,10 +1318,15 @@ export function parseCliArgs(argv: string[]): CliCommand {
         return { cmd: "gate-watch", pr: Number(rest[1]), runId: rest[2] };
       }
       if (rest[0] === "run") {
-        if (rest.length !== 2 || !/^\d+$/.test(rest[1])) return usage("usage: fleet gate run <pr>");
-        return { cmd: "gate-run", pr: Number(rest[1]) };
+        // #1230: --failed-only may appear before or after the PR number.
+        const failedOnly = rest.includes("--failed-only");
+        const positional = rest.slice(1).filter((a) => a !== "--failed-only");
+        if (positional.length !== 1 || !/^\d+$/.test(positional[0])) {
+          return usage("usage: fleet gate run [--failed-only] <pr>");
+        }
+        return { cmd: "gate-run", pr: Number(positional[0]), ...(failedOnly ? { failedOnly: true } : {}) };
       }
-      return usage("usage: fleet gate [run <pr> | start <pr> | watch <pr> <runId>]");
+      return usage("usage: fleet gate [run [--failed-only] <pr> | start <pr> | watch <pr> <runId>]");
     }
     default:
       return { cmd: "usage", message: CLI_USAGE };

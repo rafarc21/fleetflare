@@ -206,6 +206,8 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
 export interface GateRunOptions {
   /** Poll interval. Tests shorten it; the CLI keeps the 5s default. */
   pollMs?: number;
+  /** #1230: rerun only the PR's latest run's red legs, carrying its green ones. */
+  failedOnly?: boolean;
 }
 
 /** `fleet gate run <pr>`: start the run, then poll its run id to a verdict.
@@ -217,7 +219,7 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
   try {
     const res = await fetch(new URL("/studio/gate/start", creds.workerUrl), {
       method: "POST", headers: { ...accessHeaders(creds), "content-type": "application/json" },
-      body: JSON.stringify({ repo, pr }),
+      body: JSON.stringify({ repo, pr, ...(opts.failedOnly ? { failedOnly: true } : {}) }),
     });
     const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; error?: string };
     if (!res.ok || body.error || typeof body.runId !== "string") {
@@ -255,9 +257,9 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
 }
 
 /** The CLI entry: the repo comes from the folder's own origin, as every repo-scoped verb does. */
-export async function cmdGateRun(creds: Credentials, pr: number): Promise<void> {
+export async function cmdGateRun(creds: Credentials, pr: number, opts: { failedOnly?: boolean } = {}): Promise<void> {
   const repo = await gatedRepo();
   if (!repo) return;
-  process.exitCode = await runGate(creds, repo, pr);
+  process.exitCode = await runGate(creds, repo, pr, opts);
 }
 
