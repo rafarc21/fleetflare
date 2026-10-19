@@ -1248,7 +1248,8 @@ export async function runTabs(flags: TabsFlags, deps: TabsDeps): Promise<TabsRun
   const plan = await planStudioWorkspaces(studios, deps.orcaDeps);
   for (const p of plan) {
     if (p.kind === "skipped") deps.log(`skipped  ${p.id} (${p.why})`);
-    else deps.log(`${p.kind === "open" ? "open     " : "has one  "}${p.id}`);
+    else if (p.kind === "has one") deps.log(`has one  ${p.id}`);
+    else deps.log(`open     ${p.id} (${p.detail})`);
   }
   if (plan.length === 0) deps.log("no studios in scope");
 
