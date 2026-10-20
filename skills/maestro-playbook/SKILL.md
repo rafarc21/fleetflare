@@ -79,10 +79,11 @@ applied to a fleet-wide image rollout.
 - **Deliverable (code/PR)** → cloud studio, the default:
   `fleet task new ... --studio <id> --sprint "<name>"` (or `--backlog`; #1245 requires one).
 - **Needs this machine** (local dev server, hardware) → local studio,
-  the exception, not the default. A local studio is a Claude Code session on
-  the operator's own machine, never a cloud container: it dies with the
-  laptop and carries no board task, so nothing that must outlive the machine
-  goes there. **Local fan-out can wedge the machine you
+  the exception, not the default. A local studio is the SAME studio concept —
+  one role, one repo, one board task, reporting by envelope — run as a Claude
+  Code session on the operator's own machine instead of a cloud container: it
+  still carries a board task, it just does not survive the laptop. **Local
+  fan-out can wedge the machine you
   are running on.** Four local studios each running a parallel
   tsc/eslint/vitest pass, stacked on top of whatever else is already running
   there, has pushed host load high enough with zero memory free that the
@@ -374,9 +375,9 @@ every pass its own new id, with zero prior verdicts on it.
 
 ## 8. Talking to the operator
 
-Every message carries a progress line, which studios are active or idle, and
-the merge-gate's state. The sprint report keeps one fixed shape — Running /
-Blocked / Next:
+Every message carries a progress line: `Sprint w: x/y (z%)` from
+`fleet sprint status`, and the merge-gate's state. The sprint report keeps
+one fixed shape — Running / Blocked / Next:
 - **Running** — `Sprint w: x/y (z%)`, the tasks in flight, and which studio
   holds each.
 - **Blocked** — what is stuck, and exactly what it needs to move.
