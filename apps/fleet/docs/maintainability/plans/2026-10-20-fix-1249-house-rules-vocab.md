@@ -19,7 +19,8 @@ Two text-only changes, no code.
 - `fleet/blueprint/studios/web-studio/studio.md` + both member blueprints:
   add the targeted-tests-only rule; drop "full test suite" from the gate list.
 - `skills/fleet-cockpit/SKILL.md`, `skills/maestro-playbook/SKILL.md`: rename
-  to "local studio"; fix the cockpit description's trailing "local agent".
+  to "local studio"; fix the cockpit description's trailing "local agent";
+  drop "full test suite" from the cockpit "Heavy gate budget" gate list.
 - Archival docs (`docs/maintainability/…drift-sweep…`,
   `docs/superpowers/plans/…fleet-cockpit-single-source…`) stay as-is: they
   quote the old term as history.
