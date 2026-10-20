@@ -9,6 +9,7 @@
 import type { Env } from "../env";
 import { getPullRequestHeadSha } from "../github/api";
 import { getDefaultBranch, getBranchProtection, setBranchProtection } from "../github/api";
+import { redactSecrets } from "../studio/redact";
 import { runGateProtect, type ProtectPort } from "./protect";
 import { repoTokenMinter } from "../github/auth";
 import { startManualGateRun, type GateRunIndex, type GateRunParams } from "./auto-run";
@@ -179,12 +180,14 @@ export async function handleGateRoute(
     } catch (err) {
       // A repo typo is a 404 the operator must see, not a generic 500 — same
       // 404->404 / else->502 split the board's upstreamFailure makes, with the
-      // underlying message (which never carries the token) preserved either way.
+      // underlying message preserved either way (and redacted the same way,
+      // defense-in-depth against a future error echoing a header).
       const message = err instanceof Error ? err.message : String(err);
       const status = /\((\d{3})\)/.exec(message)?.[1];
-      if (status === "404") return j({ error: message }, 404);
+      const redacted = redactSecrets(message);
+      if (status === "404") return j({ error: redacted }, 404);
       console.error("gate protect failed", err);
-      return j({ error: `gate protect failed: ${message}` }, 502);
+      return j({ error: `gate protect failed: ${redacted}` }, 502);
     }
   }
 

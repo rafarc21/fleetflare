@@ -285,7 +285,8 @@ export async function cmdGateRun(creds: Credentials, pr: number, opts: { failedO
 
 /** `fleet gate protect <owner/repo>` (#1247): one POST to /studio/gate/protect,
  *  which sets branch protection requiring gate/verdict on the default branch.
- *  Prints before/after. Exit 0 on success, 2 on a Worker refusal. */
+ *  Prints before/after. Exit 0 on success, 2 on a Worker refusal; an
+ *  unreachable Worker throws and exits 1 through main()'s own catch. */
 export async function cmdGateProtect(creds: Credentials, repo: string): Promise<void> {
   let res: Response;
   try {
