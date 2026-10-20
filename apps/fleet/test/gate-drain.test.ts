@@ -98,7 +98,7 @@ describe("drainPendingGateRuns: the every-minute release of the pending queue", 
   function fakeEnv(opts: {
     runner?: string;
     create?: () => Promise<{ id: string }>;
-    get?: () => Promise<unknown>;
+    get?: (id: string) => Promise<unknown>;
   } = {}): Env {
     return {
       FLEET_GATE_RUNNER: opts.runner ?? "on",
