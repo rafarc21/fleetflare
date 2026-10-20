@@ -1567,48 +1567,59 @@ async function cmdSpawn(
 // container. Same role prompt, house rules and lead-gate the container would
 // get; only WHERE differs.
 
+/** One git subprocess, decoded: `code` 0 means success, `stdout`/`stderr` are
+ *  the whole streams. The `run` port keeps resolveGitToplevel and
+ *  resolveDefaultBranch unit-testable over canned subprocess outputs (T3). */
+export interface GitRun {
+  (args: string[]): Promise<{ code: number; stdout: string; stderr: string }>;
+}
+
+/** The real `run`: one `git <args>` via Bun.spawn, never throwing — a spawn
+ *  that cannot even start reads as a non-zero exit (code 128), the same
+ *  "could not run git" outcome the callers already handle. */
+function defaultGitRun(): GitRun {
+  return async (args) => {
+    try {
+      const proc = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      return { code: await proc.exited, stdout, stderr };
+    } catch {
+      return { code: 128, stdout: "", stderr: "could not run git" };
+    }
+  };
+}
+
 /** `git rev-parse --show-toplevel` — the local clone's absolute path, used
  *  when `--local` was given without `--path`. Null (never a throw) when git
  *  cannot name one, and the caller refuses with a clear message. */
-export async function resolveGitToplevel(): Promise<string | null> {
-  try {
-    const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    if ((await proc.exited) !== 0) {
-      console.error(`fleet: could not resolve the local clone: ${stderr.trim().split("\n")[0] || "git could not find a toplevel"}`);
-      return null;
-    }
-    const toplevel = stdout.trim();
-    return toplevel === "" ? null : toplevel;
-  } catch {
-    console.error("fleet: could not run `git`");
+export async function resolveGitToplevel(run: GitRun = defaultGitRun()): Promise<string | null> {
+  const { code, stdout, stderr } = await run(["rev-parse", "--show-toplevel"]);
+  if (code !== 0) {
+    console.error(`fleet: could not resolve the local clone: ${stderr.trim().split("\n")[0] || "git could not find a toplevel"}`);
     return null;
   }
+  const toplevel = stdout.trim();
+  return toplevel === "" ? null : toplevel;
 }
 
 /** The local clone's default branch — `git symbolic-ref refs/remotes/origin/HEAD`,
  *  falling back to `git remote show origin`'s HEAD line, then `git branch -r`.
  *  Returns the PLAIN branch name (never `origin/`), or null when none of the
  *  three can resolve it. The caller refuses with a clear message. */
-export async function resolveDefaultBranch(): Promise<string | null> {
-  const run = async (args: string[]): Promise<string | null> => {
-    try {
-      const proc = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
-      const [stdout] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-      if ((await proc.exited) !== 0) return null;
-      return stdout.trim();
-    } catch {
-      return null;
-    }
+export async function resolveDefaultBranch(run: GitRun = defaultGitRun()): Promise<string | null> {
+  const tryRun = async (args: string[]): Promise<string | null> => {
+    const { code, stdout } = await run(args);
+    if (code !== 0) return null;
+    return stdout.trim();
   };
-  const symbolic = await run(["symbolic-ref", "refs/remotes/origin/HEAD"]);
+  const symbolic = await tryRun(["symbolic-ref", "refs/remotes/origin/HEAD"]);
   if (symbolic) return symbolic.replace(/^refs\/remotes\/origin\//, "");
   // `git remote show origin` prints a "HEAD branch: main" line; the first
   // fallback for clones predating `refs/remotes/origin/HEAD` (git 1.8.4).
-  const remoteShow = await run(["remote", "show", "origin"]);
+  const remoteShow = await tryRun(["remote", "show", "origin"]);
   const headLine = remoteShow?.split("\n").find((l) => l.trim().startsWith("HEAD branch:"));
   if (headLine) {
     const branch = headLine.trim().replace(/^HEAD branch:\s*/, "");
@@ -1616,7 +1627,7 @@ export async function resolveDefaultBranch(): Promise<string | null> {
   }
   // `git branch -r` — the last fallback: the first origin/* entry. Ambiguous
   // for a repo with several branches, but it is the only remaining signal.
-  const branchR = await run(["branch", "-r"]);
+  const branchR = await tryRun(["branch", "-r"]);
   const firstRemote = branchR?.split("\n").map((l) => l.trim()).find((l) => l.startsWith("origin/") && !l.includes("HEAD"));
   if (firstRemote) return firstRemote.replace(/^origin\//, "");
   return null;
@@ -1647,7 +1658,7 @@ export async function spawnLocalStudio(
   creds: Credentials, role: string, newInstance: boolean,
   leadType: "claude" | "glm" | "kimi" | "deepseek" | undefined,
   repoFlag: string | undefined, localPath: string,
-  opts: { cmd: string; attach: (id: string) => Promise<void>; task?: number | null },
+  opts: { cmd: string; attach: (id: string, materialized: boolean) => Promise<void>; task?: number | null },
 ): Promise<void> {
   const detected = await detectRepo();
   const r = requireRepoForCreate(opts.cmd, repoFlag, detected);
@@ -1711,8 +1722,13 @@ export async function spawnLocalStudio(
   console.log(formatTable([spawned]));
   // The lead's Orca worktree + attach terminal, materialized from the local
   // clone. Best-effort-fail-safe (like openStudioRow), so a wedged Orca never
-  // fails the spawn that already registered the row.
-  await ensureLocalStudioWorktree(spawned.id, defaultOrcaDeps(), {
+  // THROWS — but a local studio IS its Orca worktree: if the worktree was
+  // skipped (no orca binary) or failed, reporting the row as "up" is exactly
+  // the false up this feature exists to prevent. The row is already
+  // registered; say so and exit non-zero rather than proceeding to a success
+  // handoff over a lead that never materialized.
+  const orcaDeps = defaultOrcaDeps();
+  const outcome = await ensureLocalStudioWorktree(spawned.id, orcaDeps, {
     localPath: resolvedPath,
     defaultBranch,
     prompt,
@@ -1721,9 +1737,14 @@ export async function spawnLocalStudio(
     ...(body.members !== undefined ? { members: body.members } : {}),
     ...(typeof body.skills === "string" ? { skills: body.skills.split(",") } : {}),
   });
+  if (outcome.kind === "failed" || (outcome.kind === "skipped" && orcaDeps.hasBinary() === null)) {
+    console.error(`${opts.cmd}: ${spawned.id} has no local lead — the Orca worktree did not materialize (${outcome.why})`);
+    console.error(`  tear the registered row down with: fleet destroy ${spawned.id}`);
+    process.exit(1);
+  }
   // `ff --local` attaches (a local worktree boots claude directly, so there
   // is no provisioned-wait); `fleet spawn --local` just reports the row.
-  await opts.attach(spawned.id);
+  await opts.attach(spawned.id, outcome.kind !== "skipped");
 }
 
 async function cmdLocalSpawn(

@@ -541,6 +541,15 @@ async function ffLocal(
   creds: Credentials, parsed: Extract<ReturnType<typeof parseFfArgs>, { cmd: "ff" }>, detectedSlug: string,
 ): Promise<void> {
   const role = parsed.role;
+  // Board issue #250, carried onto the local path (S2): the maestro role is
+  // ALWAYS a session the operator starts by hand, never something `ff`
+  // spawns — even locally. ffDecision refuses it for the CLOUD form; the
+  // `--local` path short-circuits ffDecision, so this must refuse with the
+  // SAME message. Bare `ff --local` defaults to maestro, so it refuses too.
+  if (role === "maestro") {
+    fail("maestro runs locally, not as a cloud studio — start it from your own " +
+      "machine (see docs/setup.md's local-maestro note), never with ff");
+  }
   // A task is filed against a studio id before the spawn — which is only
   // knowable when the instance is fixed (instance 1). `--new` + a task would
   // file against instance 1 while the spawn builds instance 2, so it refuses
@@ -570,7 +579,7 @@ async function ffLocal(
   await spawnLocalStudio(creds, role, parsed.newInstance, undefined, undefined, "", {
     cmd: "ff",
     task,
-    attach: async (id: string) => localAttachOrHandOff(id, task),
+    attach: async (id: string, materialized: boolean) => localAttachOrHandOff(id, task, materialized),
   });
 }
 
@@ -581,7 +590,15 @@ async function ffLocal(
  * honoring ff's no-terminal honesty (a tty-less run says so and stops rather
  * than pretending to attach).
  */
-async function localAttachOrHandOff(id: string, task: number | null): Promise<void> {
+async function localAttachOrHandOff(id: string, task: number | null, materialized: boolean): Promise<void> {
+  // T1b: "the lead runs in the Orca terminal" is a claim about a worktree that
+  // actually materialized — never print it when ensureLocalStudioWorktree
+  // skipped (no orca binary). spawnLocalStudio already exits non-zero on that
+  // shape, but this function must not have printed a false "up" line first.
+  if (!materialized) {
+    if (task !== null) say(`  it is pointed at #${task}`);
+    return;
+  }
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
     const missing = process.stdin.isTTY !== true && process.stdout.isTTY !== true
       ? "stdin and stdout are"

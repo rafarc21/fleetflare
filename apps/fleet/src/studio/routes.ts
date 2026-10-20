@@ -521,13 +521,34 @@ export async function handleStudio(
         ? { leadType: (body as { leadType: "claude" | "glm" }).leadType }
         : {}),
     };
-    const { bringupEnv } = await resolveBringupEnv(
-      localProvisionDeps(env, fetchFile), cfg, env.AGENT_REPO, parent.repoSlug ?? env.AGENT_REPO,
-      status.leadType,
-    );
+    let bringupEnv: Awaited<ReturnType<typeof resolveBringupEnv>>["bringupEnv"];
+    try {
+      ({ bringupEnv } = await resolveBringupEnv(
+        localProvisionDeps(env, fetchFile), cfg, env.AGENT_REPO, parent.repoSlug ?? env.AGENT_REPO,
+        status.leadType,
+      ));
+    } catch (err) {
+      // T1a: runSpawn already wrote the running local row. resolveBringupEnv
+      // failing here means the CLI can never launch a lead — flip the row to
+      // stopped so nothing is left claiming a running local studio with no
+      // lead, and name the failure rather than leaving the orphan.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`studio ${status.id} local bring-up env failed`, err);
+      await recordStudio(env, { ...status, state: "stopped" });
+      return new Response(`local spawn failed resolving the bring-up env: ${message}`, { status: 500 });
+    }
     const studioEnv = "STUDIO_NAME" in bringupEnv && bringupEnv.STUDIO_NAME !== "" ? bringupEnv : null;
     const members = studioEnv
-      ? (JSON.parse(base64DecodeUtf8(studioEnv.STUDIO_MEMBERS_B64 || "e30=")) as Record<string, string>)
+      ? (() => {
+        // studioBringupEnv ships members as b64(JSON: {filename: b64(raw)}):
+        // the OUTER bundle is decoded here, but each inner member body is
+        // STILL base64. The CLI writes them verbatim to .claude/agents/, so
+        // every inner value must be decoded too — never sent as its base64.
+        const bundle = JSON.parse(base64DecodeUtf8(studioEnv.STUDIO_MEMBERS_B64 || "e30=")) as Record<string, string>;
+        const decoded: Record<string, string> = {};
+        for (const [filename, b64] of Object.entries(bundle)) decoded[filename] = base64DecodeUtf8(b64);
+        return decoded;
+      })()
       : undefined;
     return Response.json({
       ...status,
@@ -1168,6 +1189,17 @@ export async function handleStudio(
    * container cannot wedge the whole listing.
    */
   if (action === "check" && req.method === "POST") {
+    // Fleet task #1248 (T2): a local studio has no container, so there is no
+    // container readiness to check — refuse before the DO RPC, same guard as
+    // provision/restart/recycle/destroy.
+    const localRow = await getStudioRow(env, id.full);
+    if (localRow?.host === "local") {
+      return new Response(
+        `"${id.full}" is a local studio — it has no container, so check is container-only. ` +
+        "Tear it down with: fleet destroy " + id.full,
+        { status: 409 },
+      );
+    }
     let checked: Awaited<ReturnType<typeof stub.checkNow>>;
     try {
       checked = await stub.checkNow();
@@ -1324,6 +1356,17 @@ export async function handleStudio(
     });
   }
   if (action === "provision" && req.method === "POST") {
+    // Fleet task #1248 (T2): a local studio has no container — every
+    // container-only verb must refuse before RPCing the DO, the same guard the
+    // destroy branch carries. `fleet destroy` is the teardown for a local row.
+    const localRow = await getStudioRow(env, id.full);
+    if (localRow?.host === "local") {
+      return new Response(
+        `"${id.full}" is a local studio — it has no container, so provision is container-only. ` +
+        "Tear it down with: fleet destroy " + id.full,
+        { status: 409 },
+      );
+    }
     const body = (await req.json().catch(() => ({}))) as Partial<ProvisionConfig>;
     // Task 11: an explicit override for which blueprint ref to pull the
     // role file + org.json from — validated when the caller supplies one,
@@ -1475,6 +1518,16 @@ export async function handleStudio(
     }
   }
   if (action === "restart" && req.method === "POST") {
+    // Fleet task #1248 (T2): a local studio has no container — refuse before
+    // the DO RPC, same guard as provision/recycle/destroy.
+    const localRow = await getStudioRow(env, id.full);
+    if (localRow?.host === "local") {
+      return new Response(
+        `"${id.full}" is a local studio — it has no container, so restart is container-only. ` +
+        "Tear it down with: fleet destroy " + id.full,
+        { status: 409 },
+      );
+    }
     try {
       return Response.json(burnView(await stub.restartStudio()));
     } catch (err) {
@@ -1485,6 +1538,17 @@ export async function handleStudio(
     }
   }
   if (action === "recycle" && req.method === "POST") {
+    // Fleet task #1248 (T2): a local studio has no container — refuse before
+    // the DO RPC, same guard as provision/restart/destroy. recycle's whole
+    // point is destroying a container outright; a local row has none.
+    const localRow = await getStudioRow(env, id.full);
+    if (localRow?.host === "local") {
+      return new Response(
+        `"${id.full}" is a local studio — it has no container, so recycle is container-only. ` +
+        "Tear it down with: fleet destroy " + id.full,
+        { status: 409 },
+      );
+    }
     // Root-cause fix for the stranded-image bug: recycle destroys the
     // container outright, so it needs a full ProvisionConfig to re-provision
     // with — the same repo/role the provision branch above builds, parsed

@@ -6,6 +6,7 @@ import { recordStudio, listStudios } from "../src/studio/registry";
 import { fakeBlueprintFiles } from "./helpers/blueprint-fixture";
 import { decodeRolePrompt } from "./helpers/routes-studio-harness";
 import { base64EncodeUtf8 } from "../src/base64";
+import { __resetOrgCacheForTests, __resetFleetJsonCacheForTests } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 
@@ -61,6 +62,11 @@ function noContainerEnv(): Env {
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
+  // org.json/fleet.json are cached process-wide keyed by repo@ref — every
+  // test in this file shares REPO_SLUG@v1.0.0, so a later test's own
+  // fixture must not be served the stale cache an earlier one populated.
+  __resetOrgCacheForTests();
+  __resetFleetJsonCacheForTests();
 });
 
 afterEach(() => {
