@@ -74,7 +74,7 @@ describe("model store", () => {
   it("clearNoFinishReasonFailures drops the streak entirely", async () => {
     const now = 1_000_000;
     await recordNoFinishReasonFailure(env.DB, "s", "hash-a", now);
-    await clearNoFinishReasonFailures(env.DB, "s", "hash-a", now);
+    await clearNoFinishReasonFailures(env.DB, "s", "hash-a");
     expect(await getNoFinishReasonFailures(env.DB, "s", "hash-a", now)).toBe(0);
   });
 

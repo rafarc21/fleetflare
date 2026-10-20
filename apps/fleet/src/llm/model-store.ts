@@ -122,9 +122,15 @@ export async function recordNoFinishReasonFailure(
 
 /** Issue #1228: a successful completion clears the streak — the request is
  *  proven non-poisonous, so an identical-input failure later is a fresh event,
- *  not a continuation. */
+ *  not a continuation.
+ *
+ *  Finding 8 (fresh-context review, PR #1235): this used to also take a `now`
+ *  parameter, matching `recordNoFinishReasonFailure`/`getNoFinishReasonFailures`'s
+ *  own signatures — but it unconditionally deletes, never reading `now` at
+ *  all. Dropped: a reader comparing signatures should not be misled into
+ *  thinking this one is time-gated too. */
 export async function clearNoFinishReasonFailures(
-  db: D1Database, studioId: string, fingerprintHash: string, now: number = Date.now(),
+  db: D1Database, studioId: string, fingerprintHash: string,
 ): Promise<void> {
   await deleteFlag(db, NFR(studioId, fingerprintHash));
 }
