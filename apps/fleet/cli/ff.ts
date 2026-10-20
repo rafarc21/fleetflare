@@ -565,16 +565,34 @@ async function ffLocal(
 
   // The local spawn + worktree, shared with `fleet spawn --local`. `--local`
   // has no provisioned-wait: the worktree boots claude directly, so the only
-  // hand-off is the attach gate — attach if this process has a real TTY, else
-  // say so and return (the same no-terminal honesty ffAttachGate already
-  // carries for the cloud path).
+  // ending is the hand-off (a local studio has no container, so there is no
+  // WS attach — `ensureLocalStudioWorktree` already created the Orca terminal
+  // the lead runs in, and this codebase never steals focus).
   await spawnLocalStudio(creds, role, parsed.newInstance, undefined, undefined, "", {
     cmd: "ff",
     task,
-    attach: async (id: string) => {
-      await attachOrHandOff(creds, id, task);
-    },
+    attach: async (id: string) => localAttachOrHandOff(id, task),
   });
+}
+
+/**
+ * The `ff --local` ending. A local lead runs in the Orca terminal
+ * `ensureLocalStudioWorktree` created — there is no container, so `cmdAttach`'s
+ * WS path does not apply and nothing steals focus. It says where the lead is,
+ * honoring ff's no-terminal honesty (a tty-less run says so and stops rather
+ * than pretending to attach).
+ */
+async function localAttachOrHandOff(id: string, task: number | null): Promise<void> {
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+    const missing = process.stdin.isTTY !== true && process.stdout.isTTY !== true
+      ? "stdin and stdout are"
+      : `${process.stdin.isTTY !== true ? "stdin" : "stdout"} is`;
+    say(`${id} is up — not attaching: no terminal (${missing} not a tty)`);
+    if (task !== null) say(`  it is pointed at #${task}`);
+    say(`  the lead runs in the Orca terminal for worktree studio-${id}`);
+    return;
+  }
+  say(`${id} is up — the lead runs in the Orca terminal for worktree studio-${id}`);
 }
 
 /** `<repo>--<role>` for the local spawn — the same id the cloud form would
