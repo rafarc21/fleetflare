@@ -426,6 +426,15 @@ export async function handleFleetSpawn(
   // Only on this machine surface — the operator already has /provision. A
   // body without it (every pre-#59 binary) is the spawn it always was.
   const body = await spawnBody(req);
+  // Fleet task #1248 review BLOCKER B6: /fleet/spawn is the MACHINE cloud
+  // surface — same orphan-risk as /studio/spawn if a `local` field rode in
+  // here (host:"local" placeholder + a real container). Refuse before runSpawn.
+  if ((body as { local?: unknown } | null)?.local !== undefined && (body as { local?: unknown } | null)?.local !== null) {
+    return new Response(
+      "local spawns go through /studio/local/spawn (POST with {\"local\": true, \"localPath\": \"<absolute path>\"}) — this route is cloud-only",
+      { status: 400 },
+    );
+  }
   if ((body as { resume?: unknown } | null)?.resume === true) return runResume(deps, parent, body);
   return runSpawn(deps, parent, body);
 }
@@ -467,7 +476,18 @@ export async function handleStudio(
    */
   if (url.pathname === "/studio/spawn") {
     if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
-    const body = (await spawnBody(req)) as { repo?: unknown };
+    const body = (await spawnBody(req)) as { repo?: unknown; local?: unknown };
+    // Fleet task #1248 review BLOCKER B6: this is the CLOUD spawn route. A
+    // body that says `local` here would otherwise reach shared runSpawn and
+    // write a host:"local" placeholder then provision a REAL container —
+    // orphaning it (a destroy in that window is a D1 flip only). Local spawns
+    // have their own route.
+    if (body.local !== undefined && body.local !== null) {
+      return new Response(
+        "local spawns go through /studio/local/spawn (POST with {\"local\": true, \"localPath\": \"<absolute path>\"}) — this route is cloud-only",
+        { status: 400 },
+      );
+    }
     // Dynamic repo selection (P4a): `repo` is the full `owner/repo` the CLI
     // read out of the local `git remote origin`. resolveWorkRepo owns every
     // decision about it — shape, id-segment validity, the fleet-wide segment
