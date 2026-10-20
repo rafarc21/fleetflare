@@ -260,7 +260,10 @@
     el.appendChild(head);
 
     el.appendChild(row("last activity", c.lastRefresh || "-"));
-    el.appendChild(row("tailscale", c.tailscaleHost || "-"));
+    // Fleet task #1248 (R6): a local studio has no tailscale host — its
+    // "where" is the operator's Mac. Render "local" for it; a cloud card
+    // (host absent) keeps the existing tailscaleHost-or-"-" fallback.
+    el.appendChild(row("tailscale", c.host === "local" ? "local" : c.tailscaleHost || "-"));
     el.appendChild(row("turns", fmtNum(c.burn ? c.burn.turns : null)));
     el.appendChild(row("output tokens", fmtNum(c.burn ? c.burn.outputTokens : null)));
     el.appendChild(row("5h output", fmtNum(c.burn ? c.burn.window5hOutput : null)));

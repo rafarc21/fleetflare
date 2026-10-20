@@ -142,7 +142,13 @@ async function renderStudioGrid(env: Env): Promise<Response> {
       }
       return {
         id: s.id, state: s.state, lastRefresh: s.lastRefresh,
-        tailscaleHost: s.tailscaleHost, burn: s.burn, preview,
+        tailscaleHost: s.tailscaleHost,
+        // Fleet task #1248 (R6): a local studio has no tailscale host — its
+        // "where" is the operator's Mac. `host` rides the card so the grid
+        // renders "local" for it; absent on a cloud card, the exact bytes
+        // today (JSON.stringify drops undefined).
+        host: s.host,
+        burn: s.burn, preview,
       };
     }),
   );
