@@ -4,7 +4,7 @@
 // The GateRunnerDO answers /run-leg synchronously with the leg's LegResult.
 // That return value is the step result. A red test is data (state "failure"),
 // never a throw. Any non-2xx is infra: the step throws, Workflows retries it
-// once, and a second failure becomes this leg's "error".
+// twice (#1231), and a third failure becomes this leg's "error".
 import type { GateLegRequest } from "./leg-env";
 import { normalizeLegResult, type LegRunMeta, type PlannedLeg } from "./fanout";
 import { legTimeoutMin } from "./config";
@@ -32,11 +32,17 @@ const MAX_FIRST_DESCRIPTION_CHARS = 150;
  *  short enough to read as one line, generous enough for 2-3 short causes. */
 export const MAX_COMBINED_CAUSE_CHARS = 140;
 
-/** Every failed attempt's cause, joined, capped at MAX_COMBINED_CAUSE_CHARS —
- *  an ellipsis marks a cut, never a silent truncation. */
+/** Every cause gets a fair share of the budget — a long cause is shortened,
+ *  never erased outright by a later cause's length. The total never exceeds
+ *  MAX_COMBINED_CAUSE_CHARS: each cause's share already accounts for the "; "
+ *  separators between them. */
 export function combineCauses(causes: string[]): string {
-  const joined = causes.join("; ");
-  return joined.length <= MAX_COMBINED_CAUSE_CHARS ? joined : `${joined.slice(0, MAX_COMBINED_CAUSE_CHARS - 1)}…`;
+  if (causes.length === 0) return "";
+  const sep = "; ";
+  const budget = Math.max(0, MAX_COMBINED_CAUSE_CHARS - sep.length * (causes.length - 1));
+  const perCause = Math.max(1, Math.floor(budget / causes.length));
+  const trimmed = causes.map((c) => (c.length <= perCause ? c : `${c.slice(0, Math.max(0, perCause - 1))}…`));
+  return trimmed.join(sep);
 }
 
 /** The one step config a leg uses. Literal types, so the object is assignable

@@ -100,6 +100,24 @@ describe("runLegStep", () => {
     expect(result.description).toBe(combineCauses([cause, cause, cause]));
   });
 
+  it("every attempt's cause survives combineCauses, not just the first (#1231): a flat slice would erase attempts 2 and 3 entirely", async () => {
+    const step = fakeStep();
+    // Each attempt's error body is distinguished right after "lint: " so the
+    // marker stays inside the 200-char per-attempt cap, unlike a trailing marker.
+    let sent = 0;
+    const dispatch = async () => { sent++; return reply({ error: `${sent}${"x".repeat(193)}` }, 503); };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    const causeFor = (n: number) => `lint: ${n}${"x".repeat(193)} after 0 min`;
+    expect(result.state).toBe("error");
+    expect(result.description).toBe(combineCauses([causeFor(1), causeFor(2), causeFor(3)]));
+    // The old flat-slice code kept only the first ~140 chars of the joined
+    // causes, so attempts 2 and 3 were wholly absent from the description —
+    // not merely shortened. Each attempt's marker must now survive.
+    expect(result.description).toContain("lint: 1");
+    expect(result.description).toContain("lint: 2");
+    expect(result.description).toContain("lint: 3");
+  });
+
   it("only one step per leg, and no waitForEvent: the start step is the whole leg", async () => {
     const step = fakeStep();
     await runLegStep(step, async () => reply({ state: "success" }), PLANNED);
@@ -175,10 +193,23 @@ describe("combineCauses: every failed attempt's cause, joined, capped at 140 cha
     expect(combineCauses(["a: boom", "b: boom", "c: boom"])).toBe("a: boom; b: boom; c: boom");
   });
 
-  it("causes that together exceed 140 chars are cut to exactly 140 chars, ending with an ellipsis", () => {
+  it("causes that together exceed 140 chars are cut within the budget, each ending with an ellipsis (#1231: a fair share per cause, not a flat slice)", () => {
     const result = combineCauses(["x".repeat(60), "y".repeat(60), "z".repeat(60)]);
-    expect(result.length).toBe(MAX_COMBINED_CAUSE_CHARS);
-    expect(result.endsWith("…")).toBe(true);
+    expect(result.length).toBeLessThanOrEqual(MAX_COMBINED_CAUSE_CHARS);
+    // Each cause is shortened on its own, so each truncated cause's own ellipsis
+    // shows up, not just one at the very end of the joined string.
+    expect(result.split("; ").every((part) => part.endsWith("…"))).toBe(true);
+  });
+
+  it("3 long causes: a flat slice would erase causes 2 and 3 entirely; each cause gets a fair share instead (#1231)", () => {
+    const causes = [`AAAA${"x".repeat(100)}`, `BBBB${"y".repeat(100)}`, `CCCC${"z".repeat(100)}`];
+    const result = combineCauses(causes);
+    expect(result.length).toBeLessThanOrEqual(MAX_COMBINED_CAUSE_CHARS);
+    // Every cause's leading marker must survive as a nonempty fragment — none
+    // of the three is wholly erased by the others' length.
+    expect(result).toContain("AAAA");
+    expect(result).toContain("BBBB");
+    expect(result).toContain("CCCC");
   });
 });
 
