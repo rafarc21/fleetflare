@@ -1147,25 +1147,30 @@ export async function handleFleetAnthropicMessages(
   // the overflow walk so an out=0 no_finish_reason retries once then fails
   // over to the next model. The streaming caller cannot retry after the
   // Response has left, so it passes no `consume` and keeps the old behavior.
+  //
+  // Round 2 review, Finding 4: named and extracted out of the
+  // `runModelPoolOverflow` call below (was a ~17-line inline closure as its
+  // 6th argument) — purely cosmetic, no behavior change.
+  const consumeNonStreaming = async (value: Json, modelId: string): Promise<ConsumeOutcome> => {
+    if (!(value instanceof ReadableStream)) return { kind: "plain" as const };
+    try {
+      const frames = await collectAnthropicFrames(
+        value, `msg_${crypto.randomUUID().replace(/-/g, "")}`, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(modelId), req.signal,
+      );
+      // Issue #1228: every no_finish_reason — including the intermediate one
+      // that then retries/fails over — gets its fingerprint line here, so a
+      // poison request leaves a full trail even when a later model recovers.
+      if (frames.result.failure === "no_finish_reason") {
+        await logNoFinishReasonFingerprint(studio.id, fingerprint, frames.result.lastChunks, frames.result.inputTokens, frames.result.outputTokens);
+      }
+      return { kind: "collected" as const, frames };
+    } catch (e) {
+      return { kind: "pump_error" as const, message: e instanceof Error ? e.message : String(e) };
+    }
+  };
   const overflow = await runModelPoolOverflow(
     ai, order, body, gatewayId, leadAiRetryBaseMs(env), retryDeps,
-    stream ? undefined : async (value, modelId) => {
-      if (!(value instanceof ReadableStream)) return { kind: "plain" as const };
-      try {
-        const frames = await collectAnthropicFrames(
-          value, `msg_${crypto.randomUUID().replace(/-/g, "")}`, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(modelId), req.signal,
-        );
-        // Issue #1228: every no_finish_reason — including the intermediate one
-        // that then retries/fails over — gets its fingerprint line here, so a
-        // poison request leaves a full trail even when a later model recovers.
-        if (frames.result.failure === "no_finish_reason") {
-          await logNoFinishReasonFingerprint(studio.id, fingerprint, frames.result.lastChunks, frames.result.inputTokens, frames.result.outputTokens);
-        }
-        return { kind: "collected" as const, frames };
-      } catch (e) {
-        return { kind: "pump_error" as const, message: e instanceof Error ? e.message : String(e) };
-      }
-    },
+    stream ? undefined : consumeNonStreaming,
   );
   const { usedModel, attempts } = overflow;
   const headersAt = Date.now();
@@ -1232,7 +1237,13 @@ export async function handleFleetAnthropicMessages(
       // provider that ignored `stream: true` and returned a plain object
       // anyway is translated through the non-streaming path rather than
       // crashing on `.getReader()`.
+      //
+      // Round 2 review, Finding 2: unlike the other two success paths below
+      // (the real streaming success and the non-streaming collected
+      // success), this defensive branch never cleared the poison streak —
+      // same ctx.waitUntil + .catch(() => {}) pattern as those two.
       const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
+      ctx.waitUntil(clearNoFinishReasonFailures(env.DB, studio.id, fingerprint.fingerprintHash).catch(() => {}));
       logUsage(env, ctx, studio.id, { model: usedModel, stream: true, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts, timeToHeaders: headersAt - startedAt });
       return json(anthropic, 200);
     }

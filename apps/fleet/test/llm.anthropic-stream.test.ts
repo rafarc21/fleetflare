@@ -20,7 +20,7 @@ import {
 import { aggregateLeadUsage } from "../src/junior/usage";
 import { GLM_LEAD_MODEL } from "../src/llm/translate";
 import { POOL, type PoolModel } from "../src/llm/models";
-import { setAssignedModel, getNoFinishReasonFailures } from "../src/llm/model-store";
+import { setAssignedModel, getNoFinishReasonFailures, recordNoFinishReasonFailure } from "../src/llm/model-store";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -137,6 +137,33 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     ]);
     expect(text).toContain('"text":"hi"');
     expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, expect.objectContaining({ stream: true, stream_options: { include_usage: true } }));
+  });
+
+  // #1228 fresh-context review round 2, Finding 2: the defensive branch for
+  // a provider that ignored `stream: true` and returned a plain object
+  // anyway is a SUCCESS path, same as the real streaming success just
+  // above — it must clear the poison streak too, not just log usage.
+  it("the 'provider ignored stream:true' defensive fallback success path clears the poison streak", async () => {
+    const body = { ...good, stream: true, messages: [{ role: "user", content: "defensive fallback clears streak" }] };
+    const raw = JSON.stringify(body);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+    const fingerprintHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+    // Seed a live (but sub-3) streak for this exact fingerprint so clearing
+    // it is actually observable.
+    await recordNoFinishReasonFailure(env.DB, ME, fingerprintHash);
+
+    const run = vi.fn(async () => ({
+      choices: [{ message: { role: "assistant", content: "plain object despite stream:true" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 3, completion_tokens: 2 },
+    }));
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    await ctx.drain();
+    expect(await getNoFinishReasonFailures(env.DB, ME, fingerprintHash)).toBe(0);
   });
 
   // Maestro review round 1, MAJOR 3: the exact bug — a mid-stream upstream
