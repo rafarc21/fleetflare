@@ -198,6 +198,20 @@ describe("fleet spawn refuses a no-git-remote cwd (issue #1229)", () => {
     expect(r.err).toContain("fleet provision: target repo acme/faux (--repo)");
   });
 
+  test("non-git cwd, `fleet provision faux--pilot --repo acme/other`: segment mismatch refuses, ZERO Worker calls", async () => {
+    const home = tmpDir("spawn-no-remote-home-");
+    const cwd = tmpDir("spawn-no-remote-cwd-");
+    const { server, seen } = startStandIn();
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await runFleetIn(["provision", "faux--pilot", "--repo", "acme/other"], home, cwd);
+    server.stop(true);
+
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("does not match studio id repo segment");
+    expect(seen.length).toBe(0);
+  });
+
   test("non-git cwd, bare `ff release-studio`: exit 1, names the fix, never spawns", async () => {
     const home = tmpDir("spawn-no-remote-home-");
     const cwd = tmpDir("spawn-no-remote-cwd-");
