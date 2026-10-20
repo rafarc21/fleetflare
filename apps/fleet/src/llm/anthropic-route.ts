@@ -136,6 +136,24 @@ function extractPresentedToken(req: Request): string | null {
  *  stall from an upstream error from a client that hung up. */
 interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean; failure?: string; /** #1228: the last 2 raw upstream `data:` payloads (model OUTPUT, never prompt). */ lastChunks?: string[] }
 
+/** #1228 fresh-context review round 2, Finding 1/3: the ONE poison shape
+ *  every call site that touches the no_finish_reason streak must check the
+ *  SAME way — a `no_finish_reason` that produced ZERO output tokens. The
+ *  incident's own data says poison runs die after 0-1.6k out tokens, not
+ *  always 0, so a `no_finish_reason` that DID produce some output is a
+ *  normal, transient failure (the model answered, then the stream cut) —
+ *  never fingerprinted toward the 3-strike streak, and never counted by
+ *  `recordNoFinishReasonFailure`. This used to be a hand-written
+ *  `fr.failure === "no_finish_reason" && fr.outputTokens === 0` copied at
+ *  three separate call sites (`attemptOnce`, the non-streaming collected-
+ *  failure branch, and the streaming pump's own result handler) — the third
+ *  copy was missed when round 1 of this review added the `outputTokens`
+ *  gate to the other two, which is exactly the kind of drift one shared
+ *  predicate closes off for good. */
+function isPoisonNoFinish(r: { failure?: string; outputTokens: number }): boolean {
+  return r.failure === "no_finish_reason" && r.outputTokens === 0;
+}
+
 /** Issue #302: how long `pumpAnthropicStream` waits on one `reader.read()`
  *  before giving up on the upstream. A live GLM-lead run stalled ~8 minutes
  *  mid-stream; Claude Code only gives up after its own 600s client timeout,
@@ -950,7 +968,7 @@ async function attemptOnce(
   // SAME model once, then move to the next candidate. Anything else
   // (success, or a no_finish_reason that DID produce output — Finding 1) is
   // not that shape, so the walk stops here and reports it as-is.
-  if (fr.ok || !(fr.failure === "no_finish_reason" && fr.outputTokens === 0)) {
+  if (fr.ok || !isPoisonNoFinish(fr)) {
     return { accept: true, result: { kind: "ok", upstream: value, usedModel, attempts, collected: outcome.frames } };
   }
   return { accept: false, frame: fr };
@@ -1253,7 +1271,16 @@ export async function handleFleetAnthropicMessages(
           // Issue #1228: the streaming path can't retry (the Response already
           // left), but it still fingerprints and counts a no_finish_reason so
           // the entry gate refuses the SAME poison request on its next send.
-          if (result.failure === "no_finish_reason") {
+          //
+          // Round 2 review, Finding 1: this used to key on bare
+          // `result.failure === "no_finish_reason"`, with no `outputTokens
+          // === 0` gate — the one call site round 1's fix (see
+          // `isPoisonNoFinish`'s own doc comment) missed. A no_finish_reason
+          // WITH output is a normal, transient failure, not poison — it
+          // matches the non-streaming collected-failure branch below by not
+          // fingerprinting or counting it at all, same as that branch does
+          // for the identical shape.
+          if (isPoisonNoFinish(result)) {
             ctx.waitUntil(logNoFinishReasonFingerprint(studio.id, fingerprint, result.lastChunks, inputTokens, result.outputTokens));
             ctx.waitUntil(recordNoFinishReasonFailure(env.DB, studio.id, fingerprint.fingerprintHash).catch(() => {}));
           } else if (result.ok) {
@@ -1338,7 +1365,7 @@ export async function handleFleetAnthropicMessages(
     // — risking a false-positive permanent 400 on an unrelated flaky request,
     // and double-logging the fingerprint for the same frame (once inside the
     // overflow walk's own `consume` callback, once again here).
-    if (result.failure === "no_finish_reason" && result.outputTokens === 0) {
+    if (isPoisonNoFinish(result)) {
       await logNoFinishReasonFingerprint(studio.id, fingerprint, result.lastChunks, result.inputTokens, result.outputTokens);
       return (await recordAndRespondNoFinish(env.DB, studio.id, fingerprint.fingerprintHash)).response;
     }

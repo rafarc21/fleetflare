@@ -20,7 +20,7 @@ import {
 import { aggregateLeadUsage } from "../src/junior/usage";
 import { GLM_LEAD_MODEL } from "../src/llm/translate";
 import { POOL, type PoolModel } from "../src/llm/models";
-import { setAssignedModel } from "../src/llm/model-store";
+import { setAssignedModel, getNoFinishReasonFailures } from "../src/llm/model-store";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -682,6 +682,53 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
     await r.text();
     await ctx.drain();
     expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "no_finish_reason" });
+  });
+
+  // #1228 fresh-context review round 2, Finding 1: mirrors
+  // llm.anthropic-core.test.ts's "a no_finish_reason WITH output tokens is
+  // not poison-counted" test (round 1's fix for the non-streaming branches)
+  // — same scenario, but through the STREAMING path's own pump result
+  // handler, the third call site that hand-checked
+  // `result.failure === "no_finish_reason"` with no `outputTokens === 0`
+  // gate and was missed when round 1 added it to the other two. Sending the
+  // identical body 3+ times must never trip the 3-strike poison streak —
+  // the model answered with SOME output before the stream cut, a normal
+  // transient failure, not the out=0 poison shape.
+  it("a no_finish_reason WITH output tokens (streaming) is not poison-counted — a 4th identical send still reaches env.AI.run", async () => {
+    const noFinishWithOutputStream = () => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+          choices: [{ delta: { content: "partial but priced" } }],
+          usage: { prompt_tokens: 3, completion_tokens: 5 },
+        })}\n\n`));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => noFinishWithOutputStream());
+    const body = { ...good, stream: true, messages: [{ role: "user", content: "flaky but not poison, streaming" }] };
+
+    for (let i = 0; i < 3; i++) {
+      const r = await callRoute({ ai: { run }, body });
+      expect(r.status).toBe(200);
+      await r.text();
+      await ctx.drain();
+    }
+
+    // Never counted toward the 3-strike poison streak.
+    const raw = JSON.stringify(body);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+    const fingerprintHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+    expect(await getNoFinishReasonFailures(env.DB, ME, fingerprintHash)).toBe(0);
+
+    // The entry gate at the top of the handler only refuses once that
+    // counter hits 3 — never having moved off 0, a 4th identical send still
+    // reaches env.AI.run instead of being refused outright.
+    const callsBeforeFourth = run.mock.calls.length;
+    const fourth = await callRoute({ ai: { run }, body });
+    expect(fourth.status).toBe(200);
+    await fourth.text();
+    await ctx.drain();
+    expect(run.mock.calls.length).toBe(callsBeforeFourth + 1);
   });
 
   it("the client dropping the stream records client_abort and cancels the upstream", async () => {
