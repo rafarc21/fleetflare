@@ -1399,6 +1399,21 @@ export async function postCommitStatus(
   );
 }
 
+/** gate/verdict's (or any context's) current state for one commit, read right
+ *  after a post to confirm it actually landed (#1226) — the combined-status
+ *  endpoint lists every context's latest status. Undefined when the context
+ *  has no status yet for this sha. */
+export async function getCommitContextStatus(
+  token: string, repo: string, sha: string, context: string,
+): Promise<{ state: string; description?: string } | undefined> {
+  const raw = await ghJson<{ statuses?: { context?: string; state?: string; description?: string }[] }>(
+    token, `https://api.github.com/repos/${repo}/commits/${sha}/status`, { method: "GET" },
+    `read ${repo}@${sha} commit status`,
+  );
+  const match = raw.statuses?.find((s) => s.context === context);
+  return match?.state === undefined ? undefined : { state: match.state, description: match.description };
+}
+
 /** Head commit sha of one PR. getPullRequest does not return it. */
 export async function getPullRequestHeadSha(token: string, repo: string, number: number): Promise<string> {
   const raw = await ghJson<{ head?: { sha?: string } }>(
