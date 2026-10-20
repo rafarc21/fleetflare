@@ -6,7 +6,7 @@
 // the flag clears. A pending status still goes up for the queued PR, so GitHub
 // never sees the head without a gate (#1191).
 import type { PullRequestAutoRun } from "./auto-run";
-import { getFlag, setFlag, flagIsSet, deleteFlag } from "../state";
+import { getFlag, setFlag, flagIsSet } from "../state";
 
 export const GATE_DRAIN_FLAG = "gate_drain";
 export const GATE_DRAIN_QUEUE_KEY = "gate_drain_pending";
@@ -77,6 +77,16 @@ export function gateDrainQueue(db: D1Database): GateDrainQueue {
  *  Longer than the 15-min wait cap plus the deploy itself. */
 export const GATE_DRAIN_STALE_MS = 20 * 60_000;
 
+/** Deletes the drain flag only while it still carries the ts this caller read:
+ *  a fresh flag re-set between the read and this delete (a new deploy) must
+ *  survive, never be wiped by a stale read (#1232 review). */
+export async function clearStaleDrainFlag(db: D1Database, stamp: number): Promise<void> {
+  await db
+    .prepare(`DELETE FROM fleet_state WHERE key = ? AND ts = ?`)
+    .bind(GATE_DRAIN_FLAG, stamp)
+    .run();
+}
+
 /** Whether a Worker deploy is currently draining running gate runs. A flag set
  *  more than GATE_DRAIN_STALE_MS ago is stale (the deploy script's trap clears
  *  it on every path, so a surviving old flag is a crashed run): it reads as
@@ -89,7 +99,7 @@ export async function gateDraining(db: D1Database): Promise<boolean> {
     .first<{ ts: number }>();
   const stamp = row?.ts ?? 0;
   if (Date.now() - stamp > GATE_DRAIN_STALE_MS) {
-    await deleteFlag(db, GATE_DRAIN_FLAG);
+    await clearStaleDrainFlag(db, stamp);
     return false;
   }
   return true;

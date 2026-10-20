@@ -533,6 +533,12 @@ if [[ "$GATE_DRAIN" == 1 ]]; then
     echo "deploy.sh: refusing -- gate runs still running after the drain cap; the drain flag is cleared. Re-deploy when the fleet is quieter." >&2
     exit 1
   fi
+  # Re-stamp the flag's ts right before the deploy: the drain wait can run the
+  # full 15-min cap, leaving the flag near the 20-min TTL. A fresh stamp gives
+  # the deploy its own full TTL window, so gates never start mid-deploy.
+  NOW_MS=$(( $(date +%s) * 1000 ))
+  "$WRANGLER" d1 execute fleet --remote --command "INSERT INTO fleet_state (key,value,ts) VALUES ('gate_drain','1',$NOW_MS) ON CONFLICT(key) DO UPDATE SET value='1', ts=excluded.ts" -c wrangler.local.jsonc \
+    || { echo "deploy.sh: refusing -- could not re-stamp the gate drain flag; pass --skip-gate-drain to override." >&2; exit 1; }
 fi
 
 RC=0
