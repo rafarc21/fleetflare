@@ -113,6 +113,27 @@ function redactObservedSession(observed: Observed): Observed {
 }
 
 /**
+ * Fleet task #1248 (T2): the ONE guard every container-only verb carries for
+ * a `host:"local"` row — a local studio has no container, so it must refuse
+ * (409) before any DO RPC rather than dispatch into a namespace that holds
+ * nothing for it. `fleet destroy` is the teardown for a local row, and every
+ * refusal body names it. `null` when the row is not local (or absent) — the
+ * caller proceeds unchanged; the 409 body is byte-identical to what each
+ * branch hand-wrote before this was factored (the verb is the only varying
+ * word). The destroy branch does NOT use this: its local shape is a row flip
+ * to `stopped`, never a refusal.
+ */
+async function refuseLocalRow(env: Env, id: string, verb: string): Promise<Response | null> {
+  const localRow = await getStudioRow(env, id);
+  if (localRow?.host !== "local") return null;
+  return new Response(
+    `"${id}" is a local studio — it has no container, so ${verb} is container-only. ` +
+    "Tear it down with: fleet destroy " + id,
+    { status: 409 },
+  );
+}
+
+/**
  * Task 5 (P2 plane 3): assembles the grid page's per-studio card list and
  * renders it. Lives here, not grid.ts, for the same reason page.ts's own
  * render half never dispatches to a DO stub — routes.ts is this feature's
@@ -1198,14 +1219,8 @@ export async function handleStudio(
     // Fleet task #1248 (T2): a local studio has no container, so there is no
     // container readiness to check — refuse before the DO RPC, same guard as
     // provision/restart/recycle/destroy.
-    const localRow = await getStudioRow(env, id.full);
-    if (localRow?.host === "local") {
-      return new Response(
-        `"${id.full}" is a local studio — it has no container, so check is container-only. ` +
-        "Tear it down with: fleet destroy " + id.full,
-        { status: 409 },
-      );
-    }
+    const refused = await refuseLocalRow(env, id.full, "check");
+    if (refused) return refused;
     let checked: Awaited<ReturnType<typeof stub.checkNow>>;
     try {
       checked = await stub.checkNow();
@@ -1365,14 +1380,8 @@ export async function handleStudio(
     // Fleet task #1248 (T2): a local studio has no container — every
     // container-only verb must refuse before RPCing the DO, the same guard the
     // destroy branch carries. `fleet destroy` is the teardown for a local row.
-    const localRow = await getStudioRow(env, id.full);
-    if (localRow?.host === "local") {
-      return new Response(
-        `"${id.full}" is a local studio — it has no container, so provision is container-only. ` +
-        "Tear it down with: fleet destroy " + id.full,
-        { status: 409 },
-      );
-    }
+    const refused = await refuseLocalRow(env, id.full, "provision");
+    if (refused) return refused;
     const body = (await req.json().catch(() => ({}))) as Partial<ProvisionConfig>;
     // Task 11: an explicit override for which blueprint ref to pull the
     // role file + org.json from — validated when the caller supplies one,
@@ -1526,14 +1535,8 @@ export async function handleStudio(
   if (action === "restart" && req.method === "POST") {
     // Fleet task #1248 (T2): a local studio has no container — refuse before
     // the DO RPC, same guard as provision/recycle/destroy.
-    const localRow = await getStudioRow(env, id.full);
-    if (localRow?.host === "local") {
-      return new Response(
-        `"${id.full}" is a local studio — it has no container, so restart is container-only. ` +
-        "Tear it down with: fleet destroy " + id.full,
-        { status: 409 },
-      );
-    }
+    const refused = await refuseLocalRow(env, id.full, "restart");
+    if (refused) return refused;
     try {
       return Response.json(burnView(await stub.restartStudio()));
     } catch (err) {
@@ -1547,14 +1550,8 @@ export async function handleStudio(
     // Fleet task #1248 (T2): a local studio has no container — refuse before
     // the DO RPC, same guard as provision/restart/destroy. recycle's whole
     // point is destroying a container outright; a local row has none.
-    const localRow = await getStudioRow(env, id.full);
-    if (localRow?.host === "local") {
-      return new Response(
-        `"${id.full}" is a local studio — it has no container, so recycle is container-only. ` +
-        "Tear it down with: fleet destroy " + id.full,
-        { status: 409 },
-      );
-    }
+    const refused = await refuseLocalRow(env, id.full, "recycle");
+    if (refused) return refused;
     // Root-cause fix for the stranded-image bug: recycle destroys the
     // container outright, so it needs a full ProvisionConfig to re-provision
     // with — the same repo/role the provision branch above builds, parsed
