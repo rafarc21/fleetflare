@@ -654,6 +654,29 @@ describe("startEditedGateRunIdempotent: reattaches a live -e run, starts fresh o
     expect(runs.size).toBe(1);
   });
 
+  it("a live -e run NEWER than queuedAt is reused, never ended or re-created (#1241 b1)", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2);
+    const again = await startEditedGateRunIdempotent(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, queuedAt: T1 }, index, () => T2 + 1);
+    expect(again.runId).toBe(first.runId);
+    expect(again.reused).toBe(true);
+    expect(terminated).toEqual([]);
+    expect(runs.size).toBe(1);
+  });
+
+  it("a live -e run OLDER than queuedAt is not reused: it is ended and a fresh run starts (#1241 b1)", async () => {
+    const T3 = T2 + 60_000;
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    const again = await startEditedGateRunIdempotent(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, queuedAt: T2 }, index, () => T3);
+    expect(again.reused).toBe(false);
+    expect(again.runId).not.toBe(first.runId);
+    expect(terminated).toEqual([first.runId]);
+    expect(runs.size).toBe(2);
+  });
+
   it("a finished -e run is not reused: a fresh run starts", async () => {
     const { wf, runs } = fakeWorkflow();
     const { index } = fakeIndex();

@@ -146,7 +146,9 @@ describe("drainPendingGateRuns: the every-minute release of the pending queue", 
   it("a queued edited PR with a live -e run reattaches, never creates or terminates (#1241 a)", async () => {
     const repo = "acme/drain-edit";
     const headSha = "a".repeat(40);
-    const queued: PullRequestAutoRun = { repo, pr: 201, headSha, baseSha: "b".repeat(40), edited: true };
+    // The -e suffix encodes the run's start time (base36); reattach requires
+    // the run to be no older than the queue entry. queuedAt 1, suffix "1" -> 1 >= 1.
+    const queued: PullRequestAutoRun = { repo, pr: 201, headSha, baseSha: "b".repeat(40), edited: true, queuedAt: 1 };
     const eRunId = `${await gateRunId(repo, headSha)}-e1`;
     await d1RunIndex(env.DB).record(repo, 201, { headSha, runId: eRunId, progressedAt: Date.now() });
     await gateDrainQueue(env.DB).append(queued);
@@ -159,6 +161,26 @@ describe("drainPendingGateRuns: the every-minute release of the pending queue", 
     await drainPendingGateRuns(fakeEnv({ create, get }));
     expect(create).not.toHaveBeenCalled();
     expect(terminate).not.toHaveBeenCalled();
+    expect(await gateDrainQueue(env.DB).peek()).toEqual([]);
+  });
+
+  it("a queued edited PR whose live -e run predates the queue is NOT reattached (ended + fresh) (#1241 b1)", async () => {
+    const repo = "acme/drain-edit-old";
+    const headSha = "a".repeat(40);
+    const queuedAt = 2;
+    const queued: PullRequestAutoRun = { repo, pr: 202, headSha, baseSha: "b".repeat(40), edited: true, queuedAt };
+    const eRunId = `${await gateRunId(repo, headSha)}-e1`; // suffix 1 < queuedAt 2: a pre-edit -e run
+    await d1RunIndex(env.DB).record(repo, 202, { headSha, runId: eRunId, progressedAt: Date.now() });
+    await gateDrainQueue(env.DB).append(queued);
+    const create = vi.fn(async () => ({ id: "unused" }));
+    const terminated: string[] = [];
+    const get = vi.fn(async (id: string) => ({
+      status: async () => ({ status: terminated.includes(id) ? "terminated" : id === eRunId ? "running" : "terminated" }),
+      terminate: async () => { terminated.push(id); },
+    }));
+    await drainPendingGateRuns(fakeEnv({ create, get }));
+    expect(create).toHaveBeenCalledOnce();
+    expect(terminated).toEqual([eRunId]);
     expect(await gateDrainQueue(env.DB).peek()).toEqual([]);
   });
 });
