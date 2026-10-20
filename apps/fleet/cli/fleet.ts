@@ -81,7 +81,7 @@ import type { OpenPr } from "../src/board/open-prs";
 import { formatMemoryTable, MEMORY_LEGEND, type MemoryFileRow } from "./memory-format";
 import {
   openStudioRow, closeStudioRow, reconcileStudioWorkspaces, planStudioWorkspaces, defaultOrcaDeps,
-  studioWorkspaceTitle, readStudioRows, findAttachHandle, ensureLocalStudioWorktree,
+  studioWorkspaceTitle, readStudioRows, findAttachHandle, ensureLocalStudioWorktree, resolveStudioWorktreePath,
   type OrcaDeps, type TabsReport, type TabsPlanEntry,
 } from "./orca-workspace";
 import type { StudioStatus } from "../src/studio/types";
@@ -1652,13 +1652,42 @@ export async function gitAheadCount(run: GitRun, path: string): Promise<number> 
   return Number.isInteger(n) && n >= 0 ? n : 0;
 }
 
+/** The destroy decision's injectable seam: WHICH path the dirty/ahead git
+ *  reads target, and whether to remove. Every side effect is `deps`, so the
+ *  decision is unit-testable over canned git outputs and a fake worktree-path
+ *  resolver — no real Orca or git. */
+export interface LocalWorktreeRemoval { remove: boolean; note: string | null }
+
+/**
+ * Fleet task #1248 review BLOCKER B1 (fix round): what `cmdDestroy`'s
+ * teardown should do. Cloud (`status === null` or `status.host !== "local"`)
+ * always removes — the cloud teardown runs unconditionally. Local resolves
+ * the studio's ORCA worktree on-disk path via `deps.resolveWorktreePath(id)`
+ * and reads `gitIsDirty`/`gitAheadCount` against THAT path, then feeds
+ * `localTeardownDecision`. A null path keeps the worktree with a note, never
+ * a silent remove.
+ */
+export async function localWorktreeRemoval(
+  status: { host?: string; localPath?: string | null } | null,
+  flags: { force: boolean; discardUnsynced: boolean; park: boolean },
+  deps: { run: GitRun; resolveWorktreePath: (id: string) => Promise<string | null> },
+  id: string,
+): Promise<LocalWorktreeRemoval> {
+  if (status === null || status.host !== "local") return { remove: true, note: null };
+  const path = await deps.resolveWorktreePath(id);
+  if (path === null) return { remove: false, note: "worktree path could not be resolved — kept" };
+  const [dirty, ahead] = await Promise.all([gitIsDirty(deps.run, path), gitAheadCount(deps.run, path)]);
+  const decision = localTeardownDecision(flags, dirty, ahead > 0);
+  return decision.action === "remove"
+    ? { remove: true, note: decision.note }
+    : { remove: false, note: decision.note };
+}
+
 /** `git rev-parse --show-toplevel` — the local clone's absolute path, used
  *  when `--local` was given without `--path`. Null (never a throw) when git
- *  cannot name one, and the caller refuses with a clear message. When `cwd`
- *  is given, every git argv is prefixed with `-C <cwd>` so the clone being
- *  asked about is the one the caller named, never this process's own cwd. */
-export async function resolveGitToplevel(run: GitRun = defaultGitRun(), cwd?: string): Promise<string | null> {
-  const { code, stdout, stderr } = await run(cwd ? ["-C", cwd, "rev-parse", "--show-toplevel"] : ["rev-parse", "--show-toplevel"]);
+ *  cannot name one, and the caller refuses with a clear message. */
+export async function resolveGitToplevel(run: GitRun = defaultGitRun()): Promise<string | null> {
+  const { code, stdout, stderr } = await run(["rev-parse", "--show-toplevel"]);
   if (code !== 0) {
     console.error(`fleet: could not resolve the local clone: ${stderr.trim().split("\n")[0] || "git could not find a toplevel"}`);
     return null;
@@ -2110,24 +2139,16 @@ async function cmdDestroy(
   if (report.teardown) {
     // Fleet task #1248 review BLOCKER B1: a LOCAL studio's Orca worktree IS
     // its checkout — `worktree rm --force` here would delete uncommitted/
-    // unpushed work that lives nowhere else. Decide from the row's own
-    // git state instead; the CLOUD path (host !== "local") stays byte-identical.
-    if (report.status?.host === "local") {
-      const localPath = report.status.localPath;
-      if (localPath == null || localPath === "") {
-        console.error(`fleet: ${id}: worktree kept — no recorded localPath, so nothing is removed`);
-      } else {
-        const run = defaultGitRun();
-        const [dirty, ahead] = await Promise.all([gitIsDirty(run, localPath), gitAheadCount(run, localPath)]);
-        const decision = localTeardownDecision({ force, discardUnsynced, park }, dirty, ahead > 0);
-        if (decision.action === "remove") {
-          for (const line of await closeStudioRow(id, defaultOrcaDeps())) console.error(`fleet: ${line}`);
-        } else {
-          console.error(`fleet: ${id}: worktree ${decision.note}`);
-        }
-      }
-    } else {
+    // unpushed work that lives nowhere else. The decision reads the git state
+    // of the RESOLVED Orca worktree path (never the clone), so a clean clone
+    // beside a dirty worktree is never removed. The CLOUD path (remove:true)
+    // runs the SAME single closeStudioRow call it always did.
+    const removal = await localWorktreeRemoval(report.status, { force, discardUnsynced, park },
+      { run: defaultGitRun(), resolveWorktreePath: (sid) => resolveStudioWorktreePath(sid, defaultOrcaDeps()) }, id);
+    if (removal.remove) {
       for (const line of await closeStudioRow(id, defaultOrcaDeps())) console.error(`fleet: ${line}`);
+    } else if (removal.note !== null) {
+      console.error(`fleet: ${id}: ${removal.note}`);
     }
     // Board issue #332: after a confirmed stop, the NON-BLOCKING warning —
     // the studio's unmerged PRs outlive its lane, and the registry row

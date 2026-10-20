@@ -740,6 +740,30 @@ async function findLocalWorktreePath(id: string, name: string, deps: OrcaDeps): 
 }
 
 /**
+ * Fleet task #1248 review BLOCKER B1 (fix round): the studio's Orca worktree
+ * on-disk `path`, for `cli/fleet.ts`'s local-destroy decision. The dirty/ahead
+ * git reads must target THIS path — the Orca worktree, a different directory
+ * created FROM the clone — never `report.status.localPath` (the SOURCE clone):
+ * a clean source with a dirty worktree would still be deleted under
+ * `--force --discard-unsynced`.
+ *
+ * Null (never a throw) when Orca is absent, there is no row for this studio,
+ * or the lookup could not verify — the caller keeps the worktree. Same
+ * "never fails its caller" posture as every other entry point here: one
+ * try/catch, one deps.log line.
+ */
+export async function resolveStudioWorktreePath(id: string, deps: OrcaDeps): Promise<string | null> {
+  if (!orcaPresent(deps)) return null;
+  try {
+    const worktrees = await fullList(deps, "worktrees", LIST_TIMEOUT_MS);
+    return findStudioWorktree(id, worktrees, deps.registry)?.path ?? null;
+  } catch (err) {
+    deps.log(`${id}: worktree path lookup failed — ${errText(err)}`);
+    return null;
+  }
+}
+
+/**
  * Writes the lead's project-scoped files into the worktree. Fail-closed on
  * the gate: a hook copy or settings write that cannot land throws, and the
  * caller returns `{ kind: "failed" }` — never an ungated lead. The working
