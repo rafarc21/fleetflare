@@ -343,7 +343,11 @@ describe("local studio workspace — fleet task #1248", () => {
     expect(cmd).toContain('--append-system-prompt "$(cat /w/.fleet/working-set.md)"');
     expect(cmd).toContain('--allowedTools "Bash(git *) Edit Write"');
     expect(cmd).toContain("--effort max");
-    expect(cmd).toContain("--dangerously-skip-permissions");
+  });
+
+  test("localLaunchCommand never passes --dangerously-skip-permissions (a Mac lead keeps prompts on)", () => {
+    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    expect(cmd).not.toContain("--dangerously-skip-permissions");
   });
 
   test("localLaunchCommand omits --effort when the role carries none", () => {

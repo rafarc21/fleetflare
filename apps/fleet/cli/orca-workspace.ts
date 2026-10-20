@@ -601,14 +601,17 @@ export function localWorktreeCreateArgs(localPath: string, defaultBranch: string
 /** The claude launch line the attach terminal runs. The prompt is passed by
  *  FILE — `"$(cat <file>)"` is expanded by the terminal's shell into ONE argv
  *  element, so the line stays a few hundred bytes however large the brief is
- *  (studio-bringup.sh's own issue #6 technique). Pure so a test pins it. */
+ *  (studio-bringup.sh's own issue #6 technique). Pure so a test pins it.
+ *
+ *  Deliberately NO --dangerously-skip-permissions: this lead runs on the
+ *  operator's own Mac, not a Firecracker microVM, so permission prompts stay
+ *  on — the lead-gate PreToolUse hook (not --disallowedTools, which would
+ *  starve members too) is the structural guard against the lead implementing,
+ *  and the operator is present to approve the members' writes. */
 export function localLaunchCommand(id: string, promptFilePath: string, allowedTools: string, effort: string): string {
-  // Every studio grants Bash and skips permission prompts; the lead-gate
-  // PreToolUse hook (not --disallowedTools, which would starve members too)
-  // is the structural guard against the lead implementing.
+  void id;
   const args = [
     "claude",
-    "--dangerously-skip-permissions",
     "--append-system-prompt", `"$(cat ${promptFilePath})"`,
     "--allowedTools", `"${allowedTools}"`,
   ];
