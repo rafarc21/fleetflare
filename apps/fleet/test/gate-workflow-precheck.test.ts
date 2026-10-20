@@ -829,4 +829,51 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       await instance.dispose();
     }
   }, 60_000);
+
+  // #1226 review: the production bug was a step LOOKING successful when it
+  // wasn't, so the scenario that most needs proving against the REAL engine
+  // is the one where every attempt fails — not just the happy-retry path
+  // above. STATUS_POST_STEP_CONFIG's 5 retries mean 6 real attempts (1
+  // initial + 5 retries) all fail here, every one a mocked HTTP 503, and the
+  // run must end up "errored" with the real HTTP-status cause visible on the
+  // instance, never a "complete" instance whose outcome quietly says nothing
+  // was posted. disableRetryDelays() (on top of disableSleeps(), used above)
+  // bypasses step.do's own exponential backoff between attempts — without it
+  // 5 real exponential-from-10s delays would need minutes, not seconds.
+  it("a verdict POST that always fails exhausts the step engine's real retries and errors loudly, HTTP status visible (#1226)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+    // Call 1 is the run-start "pending" post (must land clean so the run
+    // proceeds to the verdict); every call from 2 onward is a verdict-post
+    // attempt, and every one of them is mocked as a transient HTTP 503 — the
+    // real step engine then exhausts all 5 of its own retries (6 attempts:
+    // calls 2-7) and gives up.
+    statusPostFailOn = new Set(Array.from({ length: 20 }, (_, i) => i + 2));
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-verdict-post-always-fails");
+    try {
+      await instance.modify(async (m) => {
+        await m.disableSleeps();
+        await m.disableRetryDelays();
+      });
+      await e.GATE_WORKFLOW.create({ id: "gate-verdict-post-always-fails", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("errored");
+
+      const err = await instance.getError();
+      expect(err.message).toContain("503");
+      expect(err.message).toContain("gate/verdict POST failed");
+      // 1 pending post (landed) + 6 verdict-post attempts (1 initial + 5
+      // retries, all failed): the real engine ran the full retry budget, not
+      // postGateStatus's own old 2x-immediate loop.
+      expect(statusPostCalls).toBe(7);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
 });
