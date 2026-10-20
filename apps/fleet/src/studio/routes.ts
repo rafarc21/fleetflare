@@ -928,7 +928,10 @@ export async function handleStudio(
    * no auth of its own, so this mount point is the only guard. 404s itself
    * unless FLEET_GATE_RUNNER is "on" and the repo is in GATE_RUNNER_REPOS.
    */
-  if (url.pathname === "/studio/gate/start" || url.pathname === "/studio/gate/status") {
+  if (
+    url.pathname === "/studio/gate/start" || url.pathname === "/studio/gate/status"
+    || url.pathname === "/studio/gate/protect"
+  ) {
     return handleGateRoute(req, env);
   }
 

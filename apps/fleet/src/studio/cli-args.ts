@@ -283,6 +283,7 @@ export type CliCommand =
   | { cmd: "gate-run"; pr: number; failedOnly?: boolean }
   | { cmd: "gate-start"; pr: number }
   | { cmd: "gate-watch"; pr: number; runId: string }
+  | { cmd: "gate-protect"; repo: string }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -488,6 +489,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   "gate-watch": {
     args: "watch <pr> <runId>",
     summary: "Poll a gate-runner run (the runId `fleet gate start` prints) for <pr> to a terminal state; exit 0 green, 1 red, 2 infra error, 3 status post failed.",
+  },
+  "gate-protect": {
+    args: "protect <owner/repo>",
+    summary: "Set branch protection on <owner/repo>'s default branch requiring status context gate/verdict (strict=false, enforce_admins=false). Idempotent; prints before/after.",
   },
 };
 
@@ -1386,6 +1391,12 @@ export function parseCliArgs(argv: string[]): CliCommand {
           return usage("usage: fleet gate run [--failed-only] <pr>");
         }
         return { cmd: "gate-run", pr: Number(positional[0]), ...(failedOnly ? { failedOnly: true } : {}) };
+      }
+      if (rest[0] === "protect") {
+        if (rest.length !== 2 || !/^[\w.-]+\/[\w.-]+$/.test(rest[1])) {
+          return usage("usage: fleet gate protect <owner/repo>");
+        }
+        return { cmd: "gate-protect", repo: rest[1] };
       }
       return usage("usage: fleet gate [run [--failed-only] <pr> | start <pr> | watch <pr> <runId>]");
     }

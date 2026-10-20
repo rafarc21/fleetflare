@@ -283,3 +283,27 @@ export async function cmdGateRun(creds: Credentials, pr: number, opts: { failedO
   process.exitCode = await runGate(creds, repo, pr, opts);
 }
 
+/** `fleet gate protect <owner/repo>` (#1247): one POST to /studio/gate/protect,
+ *  which sets branch protection requiring gate/verdict on the default branch.
+ *  Prints before/after. Exit 0 on success, 2 on a Worker refusal. */
+export async function cmdGateProtect(creds: Credentials, repo: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(new URL("/studio/gate/protect", creds.workerUrl), {
+      method: "POST", headers: { ...accessHeaders(creds), "content-type": "application/json" },
+      body: JSON.stringify({ repo }),
+    });
+  } catch (err) {
+    throw new Error(`fleet gate protect: could not reach ${creds.workerUrl}: ${errText(err)}`);
+  }
+  const body = await res.json() as { branch?: string; before?: string[]; after?: string[]; changed?: boolean; error?: string };
+  if (!res.ok || body.error) {
+    console.error(`gate protect failed: ${body.error ?? res.status}`);
+    process.exitCode = 2;
+    return;
+  }
+  console.log(`gate protect ${repo}: ${body.branch}`);
+  console.log(`  before: ${(body.before ?? []).join(", ") || "(none)"}`);
+  console.log(`  after:  ${(body.after ?? []).join(", ")}`);
+}
+

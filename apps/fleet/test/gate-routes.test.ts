@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import { handleGateRoute } from "../src/gate/routes";
+import type { ProtectPort } from "../src/gate/protect";
 import { gateRunId } from "../src/gate/auto-run";
 import { setFlag, deleteFlag } from "../src/state";
 import { d1RunIndex } from "../src/gate/auto-run-env";
@@ -525,5 +526,45 @@ describe("GET /studio/gate/status after the watchdog ended the run for its infra
     }) as never;
     const res = await handleGateRoute(new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=gate-first`), env, headSha);
     expect(await res.json()).toMatchObject({ state: "error" });
+  });
+});
+
+// #1247: `fleet gate protect <owner/repo>` — the route that turns on
+// gate/verdict branch protection. It runs FIRST, before the FLEET_GATE_RUNNER
+// checks, so the runner flag being off does not matter here.
+describe("POST /studio/gate/protect (#1247)", () => {
+  it("runs the pure protect over the injected port and returns the before/after", async () => {
+    const env = fakeEnv({ FLEET_GATE_RUNNER: "off" });
+    const calls: Array<{ method: string; repo: string; branch?: string; contexts?: string[] }> = [];
+    const protect: ProtectPort = {
+      getDefaultBranch: async (repo) => { calls.push({ method: "getDefaultBranch", repo }); return "main"; },
+      getProtection: async (repo, branch) => { calls.push({ method: "getProtection", repo, branch }); return { contexts: ["lint"] }; },
+      setProtection: async (repo, branch, contexts) => { calls.push({ method: "setProtection", repo, branch, contexts }); },
+    };
+    const req = new Request("https://worker/studio/gate/protect", {
+      method: "POST", body: JSON.stringify({ repo: "acme/websites" }),
+    });
+    const res = await handleGateRoute(req, env, headSha, protect);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      branch: "main", before: ["lint"], after: ["lint", "gate/verdict"], changed: true,
+    });
+    expect(calls).toEqual([
+      { method: "getDefaultBranch", repo: "acme/websites" },
+      { method: "getProtection", repo: "acme/websites", branch: "main" },
+      { method: "setProtection", repo: "acme/websites", branch: "main", contexts: ["lint", "gate/verdict"] },
+    ]);
+  });
+
+  it("a missing or slashless repo is a 400", async () => {
+    const env = fakeEnv();
+    for (const body of [{}, { repo: "not-a-repo" }]) {
+      const req = new Request("https://worker/studio/gate/protect", {
+        method: "POST", body: JSON.stringify(body),
+      });
+      const res = await handleGateRoute(req, env, headSha);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "repo required as owner/name" });
+    }
   });
 });

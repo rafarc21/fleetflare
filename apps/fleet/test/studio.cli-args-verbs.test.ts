@@ -780,4 +780,13 @@ describe("gate start / gate watch", () => {
   it("gate with an unrecognized sub-verb -> usage", () => {
     expect(parseCliArgs(["gate", "frobnicate", "715"]).cmd).toBe("usage");
   });
+  // #1247: `fleet gate protect <owner/repo>`.
+  it("gate protect <owner/repo> parses to the gate-protect command", () => {
+    expect(parseCliArgs(["gate", "protect", "acme/websites"])).toEqual({ cmd: "gate-protect", repo: "acme/websites" });
+  });
+  it("gate protect with a repo missing the owner/name slash -> usage naming the usage line", () => {
+    const parsed = parseCliArgs(["gate", "protect", "not-a-repo"]);
+    expect(parsed.cmd).toBe("usage");
+    if (parsed.cmd === "usage") expect(parsed.message).toContain("usage: fleet gate protect");
+  });
 });
