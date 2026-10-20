@@ -920,7 +920,11 @@ const FAILURE_REASON_CAP = 300;
 type ModelOverflowResult =
   | { kind: "ok"; upstream: Json; usedModel: string; attempts: number; collected?: CollectedFrames }
   | { kind: "exhausted"; usedModel: string; attempts: number; lastMessage: string }
-  | { kind: "no_finish_exhausted"; usedModel: string; attempts: number; lastNoFinish?: PumpResult }
+  // Finding 1 (fresh-context review of #1228, PR #1235, BLOCKING): `response`
+  // is the Response `recordPoison` already computed at the point the cap
+  // either tripped or was last checked — see `runModelPoolOverflow`'s own
+  // doc comment. The caller returns it as-is instead of recomputing it.
+  | { kind: "no_finish_exhausted"; usedModel: string; attempts: number; lastNoFinish?: PumpResult; response?: Response }
   | { kind: "pump_error"; usedModel: string; attempts: number; pumpError: string };
 
 /** Issue #1228: what the non-streaming caller folds its reply from — the
@@ -993,18 +997,49 @@ async function attemptOnce(
  *  call cost (see `handleFleetAnthropicMessages`'s own doc comment on
  *  `startedAt`/`attempts`). Pure aside from the `ai.run` call itself — no
  *  env/ctx/studio reach-in, so a caller supplies exactly what the walk
- *  needs and nothing more. */
+ *  needs and nothing more.
+ *
+ *  Finding 1 (fresh-context review of #1228, PR #1235, BLOCKING): this walk
+ *  can burn up to `order.length * 2` real `env.AI.run` calls per client
+ *  request (every candidate's initial try plus its same-model retry), but
+ *  the 3-strike poison cap used to only get checked ONCE per client
+ *  request, at the very end of the whole walk — a 3-model pool could burn
+ *  18 upstream completions across 3 client requests before the cap tripped,
+ *  worse than the incident's own 12. `recordPoison` (only supplied on the
+ *  non-streaming path, which is the only one that retries/fails over at
+ *  all) is called immediately after EVERY out=0 no_finish_reason occurrence
+ *  — both the initial attempt's and the same-model retry's — so every real
+ *  upstream failure counts toward the cap as it happens, and the walk stops
+ *  dead the instant the cap trips instead of continuing to retry or fail
+ *  over a request already proven poisonous. */
 async function runModelPoolOverflow(
   ai: NonNullable<Env["AI"]>, order: string[], body: Json,
   gatewayId: string | undefined, baseMs: number,
   retryDeps?: { sleep?: (ms: number) => Promise<void>; random?: () => number },
   consume?: (value: Json, modelId: string) => Promise<ConsumeOutcome>,
+  recordPoison?: () => Promise<{ n: number; response: Response }>,
 ): Promise<ModelOverflowResult> {
   let attempts = 0;
   let usedModel = order[0];
   let lastMessage = "";
   const seen = new Set<string>();
   let lastNoFinish: PumpResult | undefined;
+  // The most recent `recordPoison()` result — reused at the walk's natural
+  // exhaustion point (every candidate tried, none tripped the cap) instead
+  // of recomputing the same 529 response a second time.
+  let lastPoison: { n: number; response: Response } | undefined;
+  // Records `frame` as the latest no_finish_reason, then (when `recordPoison`
+  // is supplied) counts it toward the cap right away. Returns the walk's
+  // final result the instant the cap trips, so the caller can return it
+  // without trying this model's retry or failing over to the next candidate.
+  const checkPoisonCap = async (frame: PumpResult): Promise<ModelOverflowResult | undefined> => {
+    lastNoFinish = frame;
+    if (recordPoison === undefined) return undefined;
+    lastPoison = await recordPoison();
+    return lastPoison.n >= 3
+      ? { kind: "no_finish_exhausted", usedModel, attempts, lastNoFinish, response: lastPoison.response }
+      : undefined;
+  };
   for (const [index, modelId] of order.entries()) {
     const pm = modelById(modelId) ?? POOL[0];
     usedModel = pm.id;
@@ -1032,15 +1067,17 @@ async function runModelPoolOverflow(
       if (consume === undefined) return { kind: "ok", upstream: r.value, usedModel, attempts };
       const first = await attemptOnce(consume, r.value, pm.id, usedModel, attempts);
       if (first.accept) return first.result;
-      lastNoFinish = first.frame;
+      const firstCapped = await checkPoisonCap(first.frame);
+      if (firstCapped !== undefined) return firstCapped;
       const retried = await runAiWithRetry(run, { baseMs });
       attempts += retried.attempts;
       const second = await attemptOnce(consume, retried.value, pm.id, usedModel, attempts);
       if (second.accept) return second.result;
-      lastNoFinish = second.frame;
+      const secondCapped = await checkPoisonCap(second.frame);
+      if (secondCapped !== undefined) return secondCapped;
       // Same-model retry also failed the same way: move to the next candidate.
       if (hasNext) continue;
-      return { kind: "no_finish_exhausted", usedModel, attempts, lastNoFinish };
+      return { kind: "no_finish_exhausted", usedModel, attempts, lastNoFinish, response: lastPoison?.response };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       lastMessage = message;
@@ -1171,6 +1208,10 @@ export async function handleFleetAnthropicMessages(
   const overflow = await runModelPoolOverflow(
     ai, order, body, gatewayId, leadAiRetryBaseMs(env), retryDeps,
     stream ? undefined : consumeNonStreaming,
+    // Finding 1: only the non-streaming path retries/fails over at all, so
+    // only it needs every occurrence counted toward the cap as it happens —
+    // same gating as `consumeNonStreaming` just above.
+    stream ? undefined : () => recordAndRespondNoFinish(env.DB, studio.id, fingerprint.fingerprintHash),
   );
   const { usedModel, attempts } = overflow;
   const headersAt = Date.now();
@@ -1183,15 +1224,20 @@ export async function handleFleetAnthropicMessages(
     // fingerprint once more (hashes/sizes only) and count the failure.
     if (overflow.kind === "no_finish_exhausted") {
       const nf = overflow.lastNoFinish;
-      // The fingerprint line was already written inside the walk's consume
-      // callback (one per no_finish_reason, including this last one); here
-      // the turn is a confirmed failure, so count it toward the 3-try cap.
-      const { n, response } = await recordAndRespondNoFinish(env.DB, studio.id, fingerprint.fingerprintHash);
+      // Finding 1: the fingerprint line was already written inside the
+      // walk's consume callback (one per no_finish_reason occurrence); the
+      // 3-try cap itself was also already counted and checked inside the
+      // walk, at the point the cap tripped (or, if it never did, at the
+      // last occurrence) — `overflow.response` is that same Response,
+      // computed once, never recomputed here. The fallback below only
+      // covers the type-level `undefined` case; at runtime this branch is
+      // only reached when `recordPoison` was supplied (the non-streaming
+      // path), so `overflow.response` is always set.
       logUsage(env, ctx, studio.id, {
         model: usedModel, stream, inputTokens: nf?.inputTokens ?? 0, outputTokens: nf?.outputTokens ?? 0, ok: false,
-        failure: `no_finish_reason exhausted all models (count=${n})`, startedAt, attempts, timeToHeaders: headersAt - startedAt,
+        failure: "no_finish_reason exhausted all models", startedAt, attempts, timeToHeaders: headersAt - startedAt,
       });
-      return response;
+      return overflow.response ?? json(anthropicErrorBody("overloaded_error", "upstream stream ended without a finish reason; retry the turn"), 529);
     }
     // Issue #1228: a pump bug while collecting the non-streaming reply stays
     // the fixed-message 500 it always was — never folded into the failover.
@@ -1291,6 +1337,19 @@ export async function handleFleetAnthropicMessages(
           // matches the non-streaming collected-failure branch below by not
           // fingerprinting or counting it at all, same as that branch does
           // for the identical shape.
+          // Finding 2 (fresh-context review of #1228, PR #1235, accepted
+          // limitation): this counting runs inside `ctx.waitUntil`, in the
+          // BACKGROUND after the SSE response has already started
+          // streaming to the client. A client that resends the identical
+          // body very fast — before this background write lands — could
+          // race past the counter and see the cap trip on its 4th send
+          // instead of exactly its 3rd: an off-by-one slop, never an
+          // unbounded burn (streaming has no retry/failover at all, so each
+          // resend still costs exactly 1 upstream call either way). There is
+          // no way to know the failure before the response has already
+          // started streaming without buffering the whole reply first,
+          // which would defeat streaming's own purpose — so this is
+          // accepted as-is, not fixed here.
           if (isPoisonNoFinish(result)) {
             ctx.waitUntil(logNoFinishReasonFingerprint(studio.id, fingerprint, result.lastChunks, inputTokens, result.outputTokens));
             ctx.waitUntil(recordNoFinishReasonFailure(env.DB, studio.id, fingerprint.fingerprintHash).catch(() => {}));

@@ -497,11 +497,22 @@ describe("handleFleetAnthropicMessages — no_finish_reason retry/failover/non-r
     expect(rowsLogged[0].model).not.toBe(seen[0]);
   });
 
-  it("every pool model exhausts with out=0 no_finish_reason: first failure is retriable (529), third identical failure is non-retriable (400)", async () => {
-    // Issue #1228 (3): the SAME identical-input body sent 3 times in a row —
+  // Finding 1 (fresh-context review of #1228, PR #1235, BLOCKING): the
+  // 3-strike cap used to increment ONCE per client request, at the very end
+  // of the whole `runModelPoolOverflow` walk, while that walk itself burns
+  // up to `order.length * 2` real `env.AI.run` calls per request (every
+  // candidate's initial try plus its same-model retry). Every upstream out=0
+  // no_finish_reason occurrence now counts toward the cap as it happens, so
+  // with the default single-model pool here the SECOND client request
+  // already trips the cap on its very first attempt (2 occurrences from
+  // request 1, a 3rd occurrence 1 call into request 2) — never a third
+  // identical ROUND TRIP, and the total env.AI.run calls across the whole
+  // scenario stays at 3, not the pre-fix worst case.
+  it("every pool model exhausts with out=0 no_finish_reason: first failure is retriable (529), second identical failure is non-retriable (400) — total upstream calls stay bounded", async () => {
+    // Issue #1228 (3): the SAME identical-input body sent repeatedly —
     // computeRequestFingerprint hashes the raw pre-parse body string, so
-    // three calls with the same JS object serialize to byte-identical raw
-    // bodies, and all three land under the same fingerprint/studio key.
+    // repeated calls with the same JS object serialize to byte-identical raw
+    // bodies, and all of them land under the same fingerprint/studio key.
     const body = { ...good, messages: [{ role: "user", content: "same poison body every single time" }] };
     const run = vi.fn(async () => noFinishStream());
 
@@ -510,29 +521,66 @@ describe("handleFleetAnthropicMessages — no_finish_reason retry/failover/non-r
     expect(await first.json()).toMatchObject({
       type: "error", error: { type: "overloaded_error", message: "upstream stream ended without a finish reason; retry the turn" },
     });
+    // The single-model pool's initial try plus its one same-model retry —
+    // 2 real upstream completions for this first request.
+    expect(run.mock.calls.length).toBe(2);
 
     const second = await callRoute({ ai: { run }, body });
-    expect(second.status).toBe(529);
+    expect(second.status).toBe(400);
+    expect(await second.json()).toEqual({
+      type: "error",
+      error: { type: "invalid_request_error", message: "upstream repeatedly failed to complete this request; compact context and retry" },
+    });
+    // The cap trips on the SECOND request's very first attempt (the 3rd
+    // occurrence overall) — the walk stops dead right there, never spending
+    // a same-model retry on a request already proven poisonous.
+    expect(run.mock.calls.length).toBe(3);
 
+    // Issue #1228: the entry gate at the top of the handler refuses a 3rd
+    // identical request OUTRIGHT — the literal "client stops its 12x retry
+    // loop" proof — before spending any more AI budget on a request already
+    // proven to fail 3 times.
+    const callsBeforeThird = run.mock.calls.length;
     const third = await callRoute({ ai: { run }, body });
     expect(third.status).toBe(400);
     expect(await third.json()).toEqual({
       type: "error",
       error: { type: "invalid_request_error", message: "upstream repeatedly failed to complete this request; compact context and retry" },
     });
+    expect(run.mock.calls.length).toBe(callsBeforeThird);
 
-    // Issue #1228: the entry gate at the top of the handler refuses a 4th
-    // identical request OUTRIGHT — the literal "client stops its 12x retry
-    // loop" proof — before spending any more AI budget on a request already
-    // proven to fail 3 times.
-    const callsBeforeFourth = run.mock.calls.length;
     const fourth = await callRoute({ ai: { run }, body });
     expect(fourth.status).toBe(400);
-    expect(await fourth.json()).toEqual({
-      type: "error",
-      error: { type: "invalid_request_error", message: "upstream repeatedly failed to complete this request; compact context and retry" },
-    });
-    expect(run.mock.calls.length).toBe(callsBeforeFourth);
+    // Burn bound proof: 3 real upstream completions total for this entire
+    // scenario (4 client requests), never the pre-fix worst case of up to
+    // `order.length * 2` calls PER request before the cap was even checked.
+    expect(run.mock.calls.length).toBe(3);
+  });
+
+  // Finding 1's own TDD proof, using a 3-model pool (the shape the bug
+  // report itself used): every upstream occurrence counts toward the cap as
+  // it happens, so the cap can trip MID-WALK, inside a single client
+  // request, long before every candidate has even been tried.
+  it("a 3-model pool trips the 3-strike cap mid-walk on a SINGLE request, not after 3 client round trips (burn bound)", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const run = vi.fn(async () => noFinishStream());
+    const body = { ...good, messages: [{ role: "user", content: "same poison body, 3-model pool" }] };
+
+    const first = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body });
+    // Model 0's initial try + its same-model retry + model 1's initial try
+    // are 3 real occurrences, all within this ONE request — the cap trips
+    // right there, and the walk stops instead of continuing on to model 1's
+    // own retry or model 2 at all.
+    expect(first.status).toBe(400);
+    expect(run.mock.calls.length).toBe(3);
+
+    // A second identical request is refused OUTRIGHT at the entry gate —
+    // zero further env.AI.run calls. Total upstream completions for this
+    // whole scenario: 3 — not the pre-fix worst case of up to
+    // 3 models x 2 attempts x 3 round trips = 18.
+    const second = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body });
+    expect(second.status).toBe(400);
+    expect(run.mock.calls.length).toBe(3);
   });
 
   // Finding 1 (fresh-context review of #1228, PR #1235): the bottom

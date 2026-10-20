@@ -758,6 +758,44 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
     expect(run.mock.calls.length).toBe(callsBeforeFourth + 1);
   });
 
+  // Finding 3 (fresh-context review of #1228, PR #1235): mirrors
+  // llm.anthropic-core.test.ts's non-streaming "every pool model exhausts
+  // with out=0 no_finish_reason" test through the STREAMING path. Streaming
+  // has no retry/failover at all (the Response has already left by the
+  // time the pump result is known), so each identical send costs exactly 1
+  // upstream call; the entry gate still refuses the 4th outright once the
+  // 3rd send's background counting has landed.
+  it("3 streaming out=0 no_finish_reason failures (identical body) make the entry gate refuse a 4th identical request", async () => {
+    const noFinishStream = () => new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(partial()); controller.close(); },
+    });
+    const run = vi.fn(async () => noFinishStream());
+    const body = { ...good, stream: true, messages: [{ role: "user", content: "same poison body, streaming" }] };
+
+    for (let i = 0; i < 3; i++) {
+      const r = await callRoute({ ai: { run }, body });
+      expect(r.status).toBe(200);
+      await r.text();
+      await ctx.drain();
+    }
+
+    const raw = JSON.stringify(body);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+    const fingerprintHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+    expect(await getNoFinishReasonFailures(env.DB, ME, fingerprintHash)).toBe(3);
+
+    // The entry gate at the top of the handler refuses a 4th identical
+    // request OUTRIGHT — env.AI.run is never called for it.
+    const callsBeforeFourth = run.mock.calls.length;
+    const fourth = await callRoute({ ai: { run }, body });
+    expect(fourth.status).toBe(400);
+    expect(await fourth.json()).toEqual({
+      type: "error",
+      error: { type: "invalid_request_error", message: "upstream repeatedly failed to complete this request; compact context and retry" },
+    });
+    expect(run.mock.calls.length).toBe(callsBeforeFourth);
+  });
+
   it("the client dropping the stream records client_abort and cancels the upstream", async () => {
     let cancelled = false;
     const upstream = new ReadableStream<Uint8Array>({
