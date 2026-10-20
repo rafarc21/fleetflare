@@ -34,7 +34,7 @@ import { resolveProjectCard } from "../directus/card";
 import { redactSecrets } from "./redact";
 import { resolveOpsRepo } from "../ops-repo";
 import { juniorEnabled } from "../junior/gate";
-import { resolveBringupEnv, type ProvisionDeps, type RoleEnv, type StudioEnv } from "./provision";
+import { resolveBringupEnv, type ProvisionDeps } from "./provision";
 import { localRowStatus } from "./local-spawn";
 import type { Observed } from "./observed";
 import { logWakeOutcome } from "./wake";
