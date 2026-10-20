@@ -43,6 +43,20 @@ describe("deploy.sh: drain running gate runs before a Worker deploy (#1232)", ()
     expect(r.wrangler.some((l) => l.includes("'gate_drain','1'"))).toBe(true);
   });
 
+  test("a failed deploy clears the flag on the way out (every exit path clears)", () => {
+    writeConfig(gateConfig());
+    const r = deploy([], 0, { STUB_DEPLOY_EXIT: "1" });
+    expect(r.code).toBe(1);
+    // set, then deploy failed, then the EXIT trap cleared it
+    expect(r.wrangler.some((l) => l.includes("'gate_drain','1'"))).toBe(true);
+    expect(r.wrangler.some((l) => l.includes("'gate_drain','0'"))).toBe(true);
+    // the clear lands AFTER the (failed) deploy
+    const deployAt = r.wrangler.findIndex((l) => l === "wrangler deploy -c wrangler.local.jsonc");
+    const clearAt = r.wrangler.findIndex((l) => l.includes("'gate_drain','0'"));
+    expect(deployAt).toBeGreaterThanOrEqual(0);
+    expect(clearAt).toBeGreaterThan(deployAt);
+  });
+
   test("--skip-gate-drain: deploy proceeds with no d1 execute and no poll", () => {
     writeConfig(gateConfig());
     stub("gate-instances.json", [{ id: "gate-x", status: "running" }]);
