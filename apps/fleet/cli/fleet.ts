@@ -1883,15 +1883,16 @@ export async function listStudioTasks(creds: Credentials, studioId: string): Pro
   }
 }
 
-/** Issue #1245: the open sprint titles, for the sprint-required refusal. A
- *  failed read returns [] — the refusal still fires, just without naming
- *  sprints (a broken board must not silently pass a task that should have
- *  been refused). */
-async function openSprintTitles(creds: Credentials, repo: string | undefined): Promise<string[]> {
+/** Issue #1245: the open sprint titles, for the sprint-required refusal.
+ *  `null` means the `/sprints` read itself failed — the refusal still fires,
+ *  but must not claim "no sprints are open" when it could not tell (a broken
+ *  board must not silently pass a task that should have been refused, nor
+ *  lie about why). */
+async function openSprintTitles(creds: Credentials, repo: string | undefined): Promise<string[] | null> {
   const params = new URLSearchParams();
   if (repo !== undefined) params.set("repo", repo);
   const res = await fetch(boardUrl(creds, `/sprints?${params}`), { headers: accessHeaders(creds) });
-  if (!res.ok) return [];
+  if (!res.ok) return null;
   const summaries = (await res.json()) as SprintSummary[];
   return summaries.map((s) => s.title);
 }
@@ -1920,9 +1921,11 @@ async function cmdTaskNew(
   // milestone-less brief (ff, the in-container verb, a phone-filed issue).
   if (brief.milestone === undefined && brief.backlog !== true) {
     const titles = await openSprintTitles(creds, repo);
-    const hint = titles.length === 0
-      ? "no sprints are open — `fleet sprint open \"<title>\" ...` first, or file with --backlog"
-      : `open sprints: ${titles.map((t) => `"${t}"`).join(", ")}`;
+    const hint = titles === null
+      ? "could not read the open sprints (the board may be down)"
+      : titles.length === 0
+        ? "no sprints are open — `fleet sprint open \"<title>\" ...` first, or file with --backlog"
+        : `open sprints: ${titles.map((t) => `"${t}"`).join(", ")}`;
     console.error(`fleet task new: --sprint is required (or --backlog) — ${hint}`);
     process.exit(1);
   }

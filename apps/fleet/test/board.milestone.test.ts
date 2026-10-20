@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   BACKLOG_MILESTONE_TITLE,
+  parseMilestoneGoal,
   parseMilestoneOwner,
   renderMilestoneDescription,
 } from "../src/board/milestone";
@@ -45,5 +46,15 @@ describe("parseMilestoneOwner", () => {
   it("does not confuse a Goal line or a substring for the Owner line", () => {
     expect(parseMilestoneOwner("Not Owner: x\nOwner: real")).toBe("real");
     expect(parseMilestoneOwner("The Owner: real was here")).toBeNull();
+  });
+});
+
+describe("parseMilestoneGoal", () => {
+  it("reads the goal back out of a rendered description", () => {
+    expect(parseMilestoneGoal("Owner: x\nGoal: ship it")).toBe("ship it");
+  });
+
+  it("returns empty string when the Goal line is absent", () => {
+    expect(parseMilestoneGoal("Owner: x")).toBe("");
   });
 });

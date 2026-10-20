@@ -247,8 +247,10 @@ async function resolveMilestone(api: BoardApi, repo: string, title: string): Pro
  * A thrown error from listMilestones/createMilestone propagates — the caller's
  * try/catch (createTask's createIssue catch, routes' upstreamFailure) handles
  * it, same as every other upstream read/write on this file's surface.
+ *
+ * Exported so sprint.ts's closeSprint reuses it rather than keeping a second copy.
  */
-async function resolveOrCreateBacklogMilestone(api: BoardApi, repo: string): Promise<BoardResult<number>> {
+export async function resolveOrCreateBacklogMilestone(api: BoardApi, repo: string): Promise<BoardResult<number>> {
   const milestones = await api.listMilestones(repo);
   const found = milestones.find((m) => m.title.toLowerCase() === BACKLOG_MILESTONE_TITLE.toLowerCase());
   if (found) return { ok: true, value: found.number };

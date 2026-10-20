@@ -20,3 +20,10 @@ export function parseMilestoneOwner(description: string): string | null {
   const match = description.match(/^Owner: (.+)$/m);
   return match === null ? null : match[1].trim();
 }
+
+// The goal line a sprint's milestone description carries, or "" when absent —
+// the sibling of parseMilestoneOwner.
+export function parseMilestoneGoal(description: string): string {
+  const match = description.match(/^Goal: (.+)$/m);
+  return match === null ? "" : match[1].trim();
+}

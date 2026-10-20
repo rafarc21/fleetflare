@@ -13,8 +13,9 @@
 //     a sprint can only be closed by moving work somewhere it will not be lost,
 //     never by dropping it.
 
-import { BACKLOG_MILESTONE_TITLE, parseMilestoneOwner, renderMilestoneDescription } from "./milestone";
-import type { BoardApi, BoardResult } from "./board";
+import { parseMilestoneGoal, parseMilestoneOwner, renderMilestoneDescription } from "./milestone";
+import { resolveOrCreateBacklogMilestone, type BoardApi, type BoardResult } from "./board";
+import { openTasksWithLatestPr } from "./pr-landed";
 import type { BoardTask, BoardTaskState } from "./types";
 
 /** One open sprint as `fleet sprint status` reads it. `total` is the milestone's
@@ -25,13 +26,6 @@ export interface SprintSummary {
   goal: string;
   completed: number;
   total: number;
-}
-
-/** The goal line a sprint's milestone description carries, or "" when absent —
- *  the sibling of milestone.ts's parseMilestoneOwner. */
-function parseMilestoneGoal(description: string): string {
-  const match = description.match(/^Goal: (.+)$/m);
-  return match === null ? "" : match[1].trim();
 }
 
 /** Sprint title -> milestone number over the full milestone list (state=all),
@@ -45,33 +39,9 @@ async function resolveMilestoneByTitle(api: BoardApi, repo: string, title: strin
   return { ok: true, value: found.number };
 }
 
-/** The backlog milestone's number, created once on first use — the ONE
- *  implicit milestone the board owns. A thrown listMilestones/createMilestone
- *  error propagates; the route's try/catch handles it. */
-async function resolveOrCreateBacklogMilestone(api: BoardApi, repo: string): Promise<BoardResult<number>> {
-  const milestones = await api.listMilestones(repo);
-  const found = milestones.find((m) => m.title.toLowerCase() === BACKLOG_MILESTONE_TITLE.toLowerCase());
-  if (found) return { ok: true, value: found.number };
-  const created = await api.createMilestone(repo, {
-    title: BACKLOG_MILESTONE_TITLE,
-    description: "Backlog: tasks awaiting a sprint.",
-  });
-  return { ok: true, value: created.number };
-}
-
 /** The states that mean "work is still genuinely in flight" — a task in one of
  *  these must not be swept into the backlog or dropped by a sprint close. */
 const IN_FLIGHT_STATES: readonly BoardTaskState[] = ["working", "input_required", "awaiting_merge"];
-
-/** The open PR number a task links by mentioning `#N` (or `refs #N`) in its
- *  title or body, or null. `(?!\d)` keeps `#45` from matching `#450`. */
-function taskLinksOpenPr(task: BoardTask, openPrs: { number: number }[]): number | null {
-  const text = `${task.title}\n${task.body}`;
-  for (const pr of openPrs) {
-    if (new RegExp(`#${pr.number}(?!\\d)`).test(text)) return pr.number;
-  }
-  return null;
-}
 
 /**
  * `fleet sprint open` — creates the sprint milestone, refusing a blank title,
@@ -154,19 +124,32 @@ export async function closeSprint(
     };
   }
 
-  // GATE 2: a task that links an open PR still has unmerged work — refusing
-  // keeps the PR's merge (and its auto-close) from landing on a closed sprint.
-  const openPrs = await api.listOpenPullFiles(repo);
-  const linked: { task: BoardTask; pr: number }[] = [];
-  for (const t of tasks) {
-    const pr = taskLinksOpenPr(t, openPrs);
-    if (pr !== null) linked.push({ task: t, pr });
+  // GATE 2: a task whose newest result envelope names an OPEN PR still has
+  // unmerged work. "A task's PR" means the one channel the fleet itself
+  // writes — the §6 envelope's pr artifact — read through the shared scan
+  // (openTasksWithLatestPr), never a title/body regex. A task whose comments
+  // cannot be read refuses (fail closed): an unreadable PR is not "no PR".
+  const views = tasks.map((t) => ({ ...t, stale: false }));
+  const scan = await openTasksWithLatestPr(api, repo, views);
+  const openPrs: { task: BoardTask; pr: number }[] = [];
+  for (const r of scan) {
+    if (r.readFailed) {
+      return {
+        ok: false, status: 502,
+        message: `sprint "${title}" close cannot verify task #${r.taskNumber}'s PR — its comments could not be read`,
+      };
+    }
+    if (r.prNumber === null) continue;
+    const pr = await api.getPullRequest(repo, r.prNumber);
+    if (!pr.merged && pr.open) {
+      openPrs.push({ task: tasks.find((t) => t.number === r.taskNumber)!, pr: r.prNumber });
+    }
   }
-  if (linked.length > 0) {
+  if (openPrs.length > 0) {
     return {
       ok: false, status: 409,
       message: `sprint "${title}" has open PRs: ` +
-        linked.map((l) => `task #${l.task.number} links PR #${l.pr}`).join(", "),
+        openPrs.map((l) => `task #${l.task.number} links PR #${l.pr}`).join(", "),
     };
   }
 
@@ -184,6 +167,8 @@ export async function closeSprint(
     if (t.state === "completed") {
       await api.closeIssue(repo, t.number, "completed");
       closed.push(t.number);
+    } else if (t.state === "canceled") {
+      // finished work — never moved, never closed here
     } else {
       await api.setIssueMilestone(repo, t.number, backlog.value);
       movedToBacklog.push(t.number);

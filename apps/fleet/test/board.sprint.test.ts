@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { openSprint, sprintSummaries, closeSprint } from "../src/board/sprint";
-import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
+import { envelopeComment, fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import type { BoardApi } from "../src/board/board";
-import type { BoardTask } from "../src/board/types";
+import type { BoardTask, EnvelopeDoc } from "../src/board/types";
 import type { ListIssuesQuery } from "../src/board/api";
 
 // Sprint policy (open/status/close) over a fake BoardApi. Every assertion is
@@ -115,11 +115,22 @@ describe("closeSprint", () => {
     expect(api.setIssueMilestone).not.toHaveBeenCalled();
   });
 
-  it("refuses a sprint whose task links an open PR", async () => {
+  it("refuses a sprint whose task links an open PR (read from the newest result envelope)", async () => {
+    const sprintTask = task({ number: 10, state: "submitted", labels: ["submitted"] });
+    const resultDoc: EnvelopeDoc = {
+      envelope: { msg_id: "m", task_id: 10, sender: "websites--web-studio", intent: "result", schema_version: "1" },
+      payload: {
+        status: "ok", artifacts: [{ kind: "pr", pr: "45" }],
+        evidence: [], open_questions: [], context_digest: [], learnings: [],
+      },
+      notes: "",
+    };
     const api = fakeApi({
       listMilestones: vi.fn(async () => [{ number: 5, title: "Sprint A", description: "", state: "open" }]),
-      listIssues: vi.fn(async () => [task({ number: 10, title: "Fix #45", body: "", state: "submitted", labels: ["submitted"] })]),
-      listOpenPullFiles: vi.fn(async () => [{ number: 45, files: [] }]),
+      listIssues: vi.fn(async () => [sprintTask]),
+      getIssue: vi.fn(async () => sprintTask),
+      listComments: vi.fn(async () => [envelopeComment(resultDoc)]),
+      getPullRequest: vi.fn(async () => ({ number: 45, merged: false, open: true, title: "" })),
     });
     const res = await closeSprint(api, "o/r", "Sprint A");
     expect(res).toEqual({
@@ -127,6 +138,62 @@ describe("closeSprint", () => {
       message: 'sprint "Sprint A" has open PRs: task #10 links PR #45',
     });
     expect(api.closeMilestone).not.toHaveBeenCalled();
+    expect(api.setIssueMilestone).not.toHaveBeenCalled();
+    expect(api.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it("does not refuse a sprint whose task's PR is merged or closed", async () => {
+    const sprintTask = task({ number: 10, state: "submitted", labels: ["submitted"] });
+    const resultDoc: EnvelopeDoc = {
+      envelope: { msg_id: "m", task_id: 10, sender: "websites--web-studio", intent: "result", schema_version: "1" },
+      payload: {
+        status: "ok", artifacts: [{ kind: "pr", pr: "45" }],
+        evidence: [], open_questions: [], context_digest: [], learnings: [],
+      },
+      notes: "",
+    };
+    const api = fakeApi({
+      listMilestones: vi.fn(async () => [
+        { number: 5, title: "Sprint A", description: "", state: "open" },
+        { number: 99, title: "backlog", description: "", state: "open" },
+      ]),
+      listIssues: vi.fn(async () => [sprintTask]),
+      getIssue: vi.fn(async () => sprintTask),
+      listComments: vi.fn(async () => [envelopeComment(resultDoc)]),
+      getPullRequest: vi.fn(async () => ({ number: 45, merged: true, open: false, title: "" })),
+    });
+    const res = await closeSprint(api, "o/r", "Sprint A");
+    expect(res).toEqual({ ok: true, value: { movedToBacklog: [10], closed: [] } });
+    expect(api.setIssueMilestone).toHaveBeenCalledWith("o/r", 10, 99);
+    expect(api.closeMilestone).toHaveBeenCalledWith("o/r", 5);
+  });
+
+  it("does not move a canceled task to the backlog", async () => {
+    const api = fakeApi({
+      listMilestones: vi.fn(async () => [
+        { number: 5, title: "Sprint A", description: "", state: "open" },
+        { number: 99, title: "backlog", description: "", state: "open" },
+      ]),
+      listIssues: vi.fn(async () => [task({ number: 12, state: "canceled", labels: ["canceled"] })]),
+    });
+    const res = await closeSprint(api, "o/r", "Sprint A");
+    expect(res).toEqual({ ok: true, value: { movedToBacklog: [], closed: [] } });
+    expect(api.setIssueMilestone).not.toHaveBeenCalled();
+    expect(api.closeIssue).not.toHaveBeenCalled();
+    expect(api.closeMilestone).toHaveBeenCalledWith("o/r", 5);
+  });
+
+  it("still moves a failed task to the backlog (the carve-out is canceled-only)", async () => {
+    const api = fakeApi({
+      listMilestones: vi.fn(async () => [
+        { number: 5, title: "Sprint A", description: "", state: "open" },
+        { number: 99, title: "backlog", description: "", state: "open" },
+      ]),
+      listIssues: vi.fn(async () => [task({ number: 13, state: "failed", labels: ["failed"] })]),
+    });
+    const res = await closeSprint(api, "o/r", "Sprint A");
+    expect(res).toEqual({ ok: true, value: { movedToBacklog: [13], closed: [] } });
+    expect(api.setIssueMilestone).toHaveBeenCalledWith("o/r", 13, 99);
   });
 
   it("closes completed tasks, moves the rest to the backlog, and closes the sprint", async () => {
