@@ -1722,11 +1722,14 @@ export async function spawnLocalStudio(
   console.log(formatTable([spawned]));
   // The lead's Orca worktree + attach terminal, materialized from the local
   // clone. Best-effort-fail-safe (like openStudioRow), so a wedged Orca never
-  // THROWS — but a local studio IS its Orca worktree: if the worktree was
-  // skipped (no orca binary) or failed, reporting the row as "up" is exactly
-  // the false up this feature exists to prevent. The row is already
-  // registered; say so and exit non-zero rather than proceeding to a success
-  // handoff over a lead that never materialized.
+  // THROWS — but a local studio IS its Orca worktree (the Orca terminal is
+  // the lead, there is no container fallback), so ANY non-"created" outcome —
+  // skipped for no binary OR for a plain terminal with the binary on PATH
+  // (TERM_PROGRAM not Orca), or failed — means the lead never materialized.
+  // Reporting the row as "up" then is exactly the false up this feature
+  // exists to prevent. The row is already registered; say so and exit
+  // non-zero rather than proceeding to a success handoff over a lead that
+  // never materialized.
   const orcaDeps = defaultOrcaDeps();
   const outcome = await ensureLocalStudioWorktree(spawned.id, orcaDeps, {
     localPath: resolvedPath,
@@ -1737,7 +1740,7 @@ export async function spawnLocalStudio(
     ...(body.members !== undefined ? { members: body.members } : {}),
     ...(typeof body.skills === "string" ? { skills: body.skills.split(",") } : {}),
   });
-  if (outcome.kind === "failed" || (outcome.kind === "skipped" && orcaDeps.hasBinary() === null)) {
+  if (outcome.kind !== "created") {
     console.error(`${opts.cmd}: ${spawned.id} has no local lead — the Orca worktree did not materialize (${outcome.why})`);
     console.error(`  tear the registered row down with: fleet destroy ${spawned.id}`);
     process.exit(1);
