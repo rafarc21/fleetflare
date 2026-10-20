@@ -121,11 +121,13 @@ fi
 # --allow-unrescued.
 ALLOW_DIRTY_OPS=0
 ALLOW_UNRESCUED=0
+SKIP_GATE_DRAIN=0
 ARGS=()
 for a in "$@"; do
   case "$a" in
     --allow-dirty-ops) ALLOW_DIRTY_OPS=1 ;;
     --allow-unrescued) ALLOW_UNRESCUED=1 ;;
+    --skip-gate-drain) SKIP_GATE_DRAIN=1 ;;
     *) ARGS+=("$a") ;;
   esac
 done
@@ -482,7 +484,52 @@ if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
 fi
 
 cd "$FLEET_DIR"
-if ((${#ARGS[@]})); then
-  exec "$WRANGLER" "${ARGS[@]}" -c wrangler.local.jsonc
+
+# Issue #1232: drain running gate runs before the plain Worker deploy. A
+# Worker deploy ends live Workflows instances (code_update_strategy immediate),
+# so the gate_drain flag is set first (new starts queue — src/gate/
+# auto-run-env.ts), the running count is polled to zero, the deploy runs, then
+# the flag clears and the queued runs start. Only the plain deploy, and only a
+# config that actually declares the gate Workflow (no GATE_WORKFLOW binding ->
+# nothing to drain). d1 migrations, versions list, whoami etc. never drain.
+# --skip-gate-drain (consumed above, never passed to wrangler) skips it loudly;
+# it is a separate gate from --allow-unrescued and does not ride on it.
+GATE_DRAIN=0
+if is_plain_deploy ${ARGS[@]+"${ARGS[@]}"} && grep -q 'GATE_WORKFLOW' "$LOCAL_CONFIG"; then
+  GATE_DRAIN=1
 fi
-exec "$WRANGLER" deploy -c wrangler.local.jsonc
+if [[ "$GATE_DRAIN" == 1 && "$SKIP_GATE_DRAIN" == 1 ]]; then
+  echo "deploy.sh: WARNING -- --skip-gate-drain: NOT draining running gate runs; this deploy may kill in-flight gates." >&2
+  GATE_DRAIN=0
+fi
+
+if [[ "$GATE_DRAIN" == 1 ]]; then
+  NOW_MS=$(( $(date +%s) * 1000 ))
+  "$WRANGLER" d1 execute fleet --remote --command "INSERT INTO fleet_state (key,value,ts) VALUES ('gate_drain','1',$NOW_MS) ON CONFLICT(key) DO UPDATE SET value='1', ts=excluded.ts" -c wrangler.local.jsonc \
+    || { echo "deploy.sh: refusing -- could not set the gate drain flag; pass --skip-gate-drain to override, or clear the flag by hand." >&2; exit 1; }
+  if ! bun "$FLEET_DIR/scripts/gate-drain-wait.ts" wrangler.local.jsonc; then
+    echo "deploy.sh: refusing -- gate runs still running after the drain cap; the drain flag stays SET. Inspect with: wrangler workflows instances list gate, clear the flag by hand, then re-deploy." >&2
+    exit 1
+  fi
+fi
+
+RC=0
+if ((${#ARGS[@]})); then
+  set +e
+  "$WRANGLER" "${ARGS[@]}" -c wrangler.local.jsonc
+  RC=$?
+  set -e
+else
+  set +e
+  "$WRANGLER" deploy -c wrangler.local.jsonc
+  RC=$?
+  set -e
+fi
+
+if [[ "$GATE_DRAIN" == 1 ]]; then
+  NOW_MS=$(( $(date +%s) * 1000 ))
+  "$WRANGLER" d1 execute fleet --remote --command "INSERT INTO fleet_state (key,value,ts) VALUES ('gate_drain','0',$NOW_MS) ON CONFLICT(key) DO UPDATE SET value='0', ts=excluded.ts" -c wrangler.local.jsonc \
+    || echo "deploy.sh: WARNING -- could not clear the gate drain flag; clear it by hand." >&2
+fi
+
+exit $RC
