@@ -25,7 +25,7 @@ import {
 } from "./spawn";
 import { reachRepo, repoTokenMinter } from "../github/auth";
 import type { RepoReachFetch } from "../github/reach";
-import { fetchRepoFile } from "../github/api";
+import { fetchRepoFile, getDefaultBranch } from "../github/api";
 import { resolveWorkRepo, parseRepoSlug, type WorkRepoDeps } from "./repo";
 import { briefPromptResolver } from "../board/routes";
 import { resolveProjectCard } from "../directus/card";
@@ -36,7 +36,7 @@ import {
   threwInsideDurableObject, runtimeFlags, errorMessage, durableObjectUnreachable, launchOrStartRefusalResponse,
 } from "./rpc-failure";
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
-import { FLEET_JSON_DEFAULT_REF, FRESH_SESSION_REFUSED_PREFIX } from "./provision";
+import { FRESH_SESSION_REFUSED_PREFIX } from "./provision";
 import { resolveClaudeAccounts, accountLabel } from "./accounts";
 import {
   writeFleetAccountLimit, clearFleetAccountLimit, readOneAccountLimit, writeAccountHold,
@@ -224,13 +224,18 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
     listStudios: () => (rows ??= listStudios(env)),
     fetchPolicy: () => resolveSpawnPolicy(fetchFile, env.AGENT_REPO),
     // #1247: the gated-repo spawn guard. gatedRepos is the parsed
-    // GATE_RUNNER_REPOS list; gateBlock reads the repo's default-branch gate
-    // config through loadGateConfig + the real fleet.json reader. Absent
-    // inputs (GATE_RUNNER_REPOS empty) mean no repo is gated, so gateBlock is
-    // only built when there is at least one gated repo.
+    // GATE_RUNNER_REPOS list. gateBlock is assigned here but only invoked by
+    // runSpawn for a gated repo (see spawn.ts's guard), so no token is minted
+    // and no branch is read for a non-gated spawn.
     gatedRepos: parseGateRunnerRepos(env.GATE_RUNNER_REPOS),
-    gateBlock: (repoSlug: string) =>
-      loadGateConfig({ repo: repoSlug, fleetRepo: env.AGENT_REPO, configSha: FLEET_JSON_DEFAULT_REF }, fleetJsonReader(repoTokenMinter(env))),
+    gateBlock: async (repoSlug: string) => {
+      const mint = repoTokenMinter(env);
+      // The guard is about the DEFAULT-branch config, so read that branch's
+      // fleet.json — never assume "main" (the same reason getDefaultBranch
+      // exists, and the same convention github/api.ts documents for it).
+      const branch = await getDefaultBranch(await mint(repoSlug), repoSlug);
+      return loadGateConfig({ repo: repoSlug, fleetRepo: env.AGENT_REPO, configSha: branch }, fleetJsonReader(mint));
+    },
     // P5c: the project card is attached HERE rather than inside runSpawn,
     // so src/studio/spawn.ts keeps its "imports no Env, makes no network call
     // of its own" property (see SpawnDeps' own header) and both spawn routes

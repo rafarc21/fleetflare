@@ -177,8 +177,14 @@ export async function handleGateRoute(
       const result = await runGateProtect(protect, body.repo);
       return j(result);
     } catch (err) {
+      // A repo typo is a 404 the operator must see, not a generic 500 — same
+      // 404->404 / else->502 split the board's upstreamFailure makes, with the
+      // underlying message (which never carries the token) preserved either way.
+      const message = err instanceof Error ? err.message : String(err);
+      const status = /\((\d{3})\)/.exec(message)?.[1];
+      if (status === "404") return j({ error: message }, 404);
       console.error("gate protect failed", err);
-      return j({ error: "gate protect failed" }, 500);
+      return j({ error: `gate protect failed: ${message}` }, 502);
     }
   }
 

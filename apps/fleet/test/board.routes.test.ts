@@ -390,6 +390,46 @@ describe("handleBoard", () => {
       return renderEnvelopeComment(parsed.doc);
     }
 
+    // A result envelope whose artifacts carry no `pr` field at all — the
+    // research/retro shape the route must refuse (with --no-pr as the escape)
+    // instead of mistaking for a merge to check.
+    function noPrResultEnvelopeComment(): string {
+      const parsed = parseEnvelope({
+        sender: "websites--web-studio", intent: "result", status: "ok", notes: "done",
+        verification: { url: "https://x.test", steps: ["open it"], expected: "it works" },
+        artifacts: [{ kind: "code", path: "src/index.ts" }],
+      }, 42, "00000000-0000-0000-0000-000000000000");
+      if (!parsed.ok) throw new Error(parsed.message);
+      return renderEnvelopeComment(parsed.doc);
+    }
+
+    it("refuses completion when the latest result envelope has no PR, before any transition write", async () => {
+      authorized();
+      const api = fakeApi({
+        getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })),
+        listComments: vi.fn(async () => [{ id: 1, url: "https://github.com/o/r/issues/42#issuecomment-1",
+          author: "websites--web-studio", createdAt: "2026-10-20T00:00:00Z", body: noPrResultEnvelopeComment() }]),
+      });
+      const completedGatePort = {
+        getPullRequest: vi.fn(async () => ({ merged: true })),
+        getHeadSha: vi.fn(async () => "abc123def4567890"),
+        getCommitStatus: vi.fn(async () => ({ state: "success" })),
+      };
+      const res = await handleBoard(
+        req("/studio/board/tasks/42/state", {
+          method: "POST", body: JSON.stringify({ from: "working", to: "completed", repo: "acme-org/websites" }),
+        }),
+        gatedEnv, { api, reach, completedGatePort },
+      );
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain("no PR in the latest result envelope");
+      // The gate refusal happens before transitionTask: no state write.
+      expect(api.removeLabel).not.toHaveBeenCalled();
+      expect(api.addLabels).not.toHaveBeenCalled();
+      // And there is no PR to consult the gate port about.
+      expect(completedGatePort.getPullRequest).not.toHaveBeenCalled();
+    });
+
     it("refuses completion when the envelope PR is not merged, before any transition write", async () => {
       authorized();
       const api = fakeApi({

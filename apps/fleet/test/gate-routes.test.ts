@@ -567,4 +567,39 @@ describe("POST /studio/gate/protect (#1247)", () => {
       expect(await res.json()).toEqual({ error: "repo required as owner/name" });
     }
   });
+
+  // #1247 review: a protect failure must map the upstream status, not collapse
+  // every throw into a generic 500 — a repo typo is a 404 the operator can act
+  // on; a 403 (missing admin) is still "our call failed" (502), with the
+  // underlying message (which never carries the token) preserved in the body.
+  it("maps an upstream 404 to 404, naming the missing repo", async () => {
+    const env = fakeEnv();
+    const protect: ProtectPort = {
+      getDefaultBranch: async () => { throw new Error("read acme/x failed (404): Not Found"); },
+      getProtection: async () => ({ contexts: [] }),
+      setProtection: async () => {},
+    };
+    const req = new Request("https://worker/studio/gate/protect", {
+      method: "POST", body: JSON.stringify({ repo: "acme/x" }),
+    });
+    const res = await handleGateRoute(req, env, headSha, protect);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "read acme/x failed (404): Not Found" });
+  });
+
+  it("maps any other upstream failure (a 403) to 502, preserving the message", async () => {
+    const env = fakeEnv();
+    const protect: ProtectPort = {
+      getDefaultBranch: async () => { throw new Error("read acme/x failed (403): Forbidden"); },
+      getProtection: async () => ({ contexts: [] }),
+      setProtection: async () => {},
+    };
+    const req = new Request("https://worker/studio/gate/protect", {
+      method: "POST", body: JSON.stringify({ repo: "acme/x" }),
+    });
+    const res = await handleGateRoute(req, env, headSha, protect);
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Forbidden");
+  });
 });
