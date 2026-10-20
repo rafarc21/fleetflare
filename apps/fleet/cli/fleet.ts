@@ -2241,10 +2241,15 @@ export async function listStudioTasks(creds: Credentials, studioId: string): Pro
 async function openSprintTitles(creds: Credentials, repo: string | undefined): Promise<string[] | null> {
   const params = new URLSearchParams();
   if (repo !== undefined) params.set("repo", repo);
-  const res = await fetch(boardUrl(creds, `/sprints?${params}`), { headers: accessHeaders(creds) });
-  if (!res.ok) return null;
-  const summaries = (await res.json()) as SprintSummary[];
-  return summaries.map((s) => s.title);
+  try {
+    const res = await fetch(boardUrl(creds, `/sprints?${params}`), { headers: accessHeaders(creds) });
+    if (!res.ok) return null;
+    const summaries = (await res.json()) as SprintSummary[];
+    return summaries.map((s) => s.title);
+  } catch {
+    // A network error must print the refusal line, never a stack trace.
+    return null;
+  }
 }
 
 async function cmdTaskNew(

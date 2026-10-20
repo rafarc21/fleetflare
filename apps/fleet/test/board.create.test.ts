@@ -57,8 +57,11 @@ describe("createTask", () => {
   // opposite — the place tasks go when no sprint claims them yet.
   describe("backlog milestone (#1245)", () => {
     it("creates the backlog milestone on first use and files the task into it", async () => {
+      let calls = 0;
       const api = fakeApi({
-        listMilestones: vi.fn(async () => []),
+        listMilestones: vi.fn(async () => calls++ === 0 ? [] : [
+          { number: 9, title: "backlog", description: "", state: "open" },
+        ]),
         createMilestone: vi.fn(async () => ({ number: 9, title: "backlog" })),
       });
       const res = await createTask(api, "o/r", { ...brief, backlog: true });
@@ -86,6 +89,34 @@ describe("createTask", () => {
       const res = await createTask(api, "o/r", { ...brief, backlog: true });
       expect(res.ok).toBe(true);
       expect(api.createMilestone).not.toHaveBeenCalled();
+      expect(vi.mocked(api.createIssue).mock.calls[0][1].milestone).toBe(9);
+    });
+
+    it("a concurrent create raced ours: re-list finds two backlog milestones and reuses the OLDEST", async () => {
+      let calls = 0;
+      const api = fakeApi({
+        listMilestones: vi.fn(async () => calls++ === 0 ? [] : [
+          { number: 9, title: "backlog", description: "", state: "open" },
+          { number: 10, title: "backlog", description: "", state: "open" },
+        ]),
+        createMilestone: vi.fn(async () => ({ number: 10, title: "backlog" })),
+      });
+      const res = await createTask(api, "o/r", { ...brief, backlog: true });
+      expect(res.ok).toBe(true);
+      expect(api.createMilestone).toHaveBeenCalled();
+      expect(vi.mocked(api.createIssue).mock.calls[0][1].milestone).toBe(9);
+    });
+
+    it("an empty re-list after create trusts the create's own number — read-lag, not a fork", async () => {
+      let calls = 0;
+      const api = fakeApi({
+        listMilestones: vi.fn(async () => calls++ === 0 ? [] : []),
+        createMilestone: vi.fn(async () => ({ number: 9, title: "backlog" })),
+      });
+      const res = await createTask(api, "o/r", { ...brief, backlog: true });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(api.createMilestone).toHaveBeenCalled();
       expect(vi.mocked(api.createIssue).mock.calls[0][1].milestone).toBe(9);
     });
 

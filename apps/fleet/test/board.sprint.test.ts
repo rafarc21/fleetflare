@@ -92,6 +92,58 @@ describe("sprintSummaries", () => {
     const res = await sprintSummaries(api, "o/r", "Sprint C");
     expect(res).toEqual({ ok: false, status: 404, message: 'no open sprint titled "Sprint C"' });
   });
+
+  it("excludes a CLOSED task with no state label from the count — repo history, not sprint work", async () => {
+    const api = fakeApi({
+      listOpenMilestones: vi.fn(async () => [
+        { number: 1, title: "Sprint A", description: "Owner: alice\nGoal: ship A" },
+      ]),
+      listIssues: vi.fn(async () => [
+        task({ number: 10, state: "submitted", labels: ["submitted"], open: true }),
+        task({ number: 11, state: null, labels: [], open: false }),
+      ]),
+    });
+    const res = await sprintSummaries(api, "o/r", null);
+    expect(res).toEqual({
+      ok: true,
+      value: [{ title: "Sprint A", owner: "alice", goal: "ship A", completed: 0, total: 1 }],
+    });
+  });
+
+  it("still counts a CLOSED task that carries a board state label", async () => {
+    const api = fakeApi({
+      listOpenMilestones: vi.fn(async () => [
+        { number: 1, title: "Sprint A", description: "Owner: alice\nGoal: ship A" },
+      ]),
+      listIssues: vi.fn(async () => [
+        task({ number: 10, state: "completed", labels: ["completed"], open: false }),
+      ]),
+    });
+    const res = await sprintSummaries(api, "o/r", null);
+    expect(res).toEqual({
+      ok: true,
+      value: [{ title: "Sprint A", owner: "alice", goal: "ship A", completed: 1, total: 1 }],
+    });
+  });
+
+  it("still counts a CLOSED task carrying TWO state labels — drift, kept visible not dropped", async () => {
+    const api = fakeApi({
+      listOpenMilestones: vi.fn(async () => [
+        { number: 1, title: "Sprint A", description: "Owner: alice\nGoal: ship A" },
+      ]),
+      listIssues: vi.fn(async () => [
+        task({ number: 10, state: null, labels: ["working", "completed"], open: false }),
+      ]),
+    });
+    const res = await sprintSummaries(api, "o/r", null);
+    // The collapsed `state` is null for drift, so it never matches the
+    // `completed` filter — but its two labels still mean it counts toward
+    // `total`, exactly as listTasks keeps drift visible rather than hiding it.
+    expect(res).toEqual({
+      ok: true,
+      value: [{ title: "Sprint A", owner: "alice", goal: "ship A", completed: 0, total: 1 }],
+    });
+  });
 });
 
 describe("closeSprint", () => {
@@ -268,9 +320,30 @@ describe("closeSprint", () => {
     expect(api.closeMilestone).toHaveBeenCalledWith("o/r", 5);
   });
 
-  it("creates the backlog milestone when it is missing", async () => {
+  it("does not move a CLOSED failed task to the backlog — closed issues stay in the sprint milestone", async () => {
     const api = fakeApi({
-      listMilestones: vi.fn(async () => [{ number: 5, title: "Sprint A", description: "", state: "open" }]),
+      listMilestones: vi.fn(async () => [
+        { number: 5, title: "Sprint A", description: "", state: "open" },
+        { number: 99, title: "backlog", description: "", state: "open" },
+      ]),
+      listIssues: vi.fn(async () => [task({ number: 14, state: "failed", labels: ["failed"], open: false })]),
+    });
+    const res = await closeSprint(api, "o/r", "Sprint A");
+    expect(res).toEqual({ ok: true, value: { movedToBacklog: [], closed: [] } });
+    expect(api.setIssueMilestone).not.toHaveBeenCalled();
+    expect(api.closeIssue).not.toHaveBeenCalled();
+    expect(api.closeMilestone).toHaveBeenCalledWith("o/r", 5);
+  });
+
+  it("creates the backlog milestone when it is missing", async () => {
+    let calls = 0;
+    const api = fakeApi({
+      listMilestones: vi.fn(async () => calls++ < 2
+        ? [{ number: 5, title: "Sprint A", description: "", state: "open" }]
+        : [
+            { number: 5, title: "Sprint A", description: "", state: "open" },
+            { number: 99, title: "backlog", description: "", state: "open" },
+          ]),
       listIssues: vi.fn(async () => [task({ number: 11, state: "submitted", labels: ["submitted"] })]),
       createMilestone: vi.fn(async () => ({ number: 99, title: "backlog" })),
     });

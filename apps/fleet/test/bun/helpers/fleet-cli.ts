@@ -39,3 +39,20 @@ export async function runFleet(args: string[], home: string): Promise<{ out: str
   ]);
   return { out, err, code };
 }
+
+/** `runFleet` with a caller-chosen cwd — the form `cli.spawn-no-remote` and
+ *  `cli.task-new-sprint-required` both need (a hermetic no-.git cwd so
+ *  `detectRepo` yields `slug: null`), where the plain `runFleet` hardcodes
+ *  the spawn cwd to the process's own. */
+export async function runFleetIn(args: string[], home: string, cwd: string): Promise<{ out: string; err: string; code: number }> {
+  const proc = Bun.spawn({
+    cmd: [process.execPath, FLEET, ...args],
+    env: { PATH: process.env.PATH!, HOME: home },
+    cwd,
+    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  const [out, err, code] = await Promise.all([
+    new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+  ]);
+  return { out, err, code };
+}

@@ -242,7 +242,9 @@ async function resolveMilestone(api: BoardApi, repo: string, title: string): Pro
  * board owns: it is the place tasks go when no sprint claims them yet, so a
  * missing one is created, never refused. Case-insensitive, same as
  * resolveMilestone, because the title is a fixed constant but GitHub titles
- * are typed by hand.
+ * are typed by hand. Idempotent across concurrent first uses: after a create,
+ * it re-lists and reuses the OLDEST (lowest-number) backlog milestone, so two
+ * racing creates converge on the first one filed instead of forking the board.
  *
  * A thrown error from listMilestones/createMilestone propagates — the caller's
  * try/catch (createTask's createIssue catch, routes' upstreamFailure) handles
@@ -251,14 +253,29 @@ async function resolveMilestone(api: BoardApi, repo: string, title: string): Pro
  * Exported so sprint.ts's closeSprint reuses it rather than keeping a second copy.
  */
 export async function resolveOrCreateBacklogMilestone(api: BoardApi, repo: string): Promise<BoardResult<number>> {
-  const milestones = await api.listMilestones(repo);
-  const found = milestones.find((m) => m.title.toLowerCase() === BACKLOG_MILESTONE_TITLE.toLowerCase());
-  if (found) return { ok: true, value: found.number };
+  const oldest = (ms: { number: number; title: string }[]): { number: number; title: string } | undefined =>
+    ms
+      .filter((m) => m.title.toLowerCase() === BACKLOG_MILESTONE_TITLE.toLowerCase())
+      .sort((a, b) => a.number - b.number)[0];
+
+  const before = await api.listMilestones(repo);
+  const existing = oldest(before);
+  if (existing) return { ok: true, value: existing.number };
+
   const created = await api.createMilestone(repo, {
     title: BACKLOG_MILESTONE_TITLE,
     description: "Backlog: tasks awaiting a sprint.",
   });
-  return { ok: true, value: created.number };
+  // Re-list after create: a concurrent first use may have created one between
+  // our check and our create. Reuse the OLDEST (lowest number) — the first one
+  // filed — rather than trusting our just-created copy, so two racing creates
+  // cannot fork the board into two backlog milestones.
+  const after = await api.listMilestones(repo);
+  const reuse = oldest(after);
+  // An empty re-list is read-lag, not a fork: our own create's response is at
+  // least as fresh as a list that saw nothing, so trust it rather than 502'ing
+  // (a re-run on that 502 would list-empty again and create a SECOND duplicate).
+  return { ok: true, value: reuse?.number ?? created.number };
 }
 
 /**
