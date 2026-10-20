@@ -102,7 +102,9 @@ async function runFfLocal(args: string[]) {
 
 describe("fleet spawn --local — no orca binary (T1b)", () => {
   test("exits non-zero and names the failure instead of reporting the row as up", async () => {
-    const r = await runFleetLocal(["spawn", "pilot", "--local", "--path", "/abs/clone"]);
+    // --path names the REAL clone now (B4 reads the default branch and origin
+    // from it), so the dummy /abs/clone path of the pre-B4 test is gone.
+    const r = await runFleetLocal(["spawn", "pilot", "--local", "--path", repo]);
     expect(r.code).toBe(1);
     expect(r.err).toContain("fleet destroy faux--pilot");
   }, 40_000);
@@ -122,7 +124,7 @@ describe("fleet spawn --local — orca binary present, non-Orca terminal (T1.1)"
     chmodSync(fakeOrca, 0o755);
 
     const r = await runFleetLocal(
-      ["spawn", "pilot", "--local", "--path", "/abs/clone"],
+      ["spawn", "pilot", "--local", "--path", repo],
       { ORCA_CLI_COMMAND: fakeOrca },
     );
     expect(r.code).toBe(1);

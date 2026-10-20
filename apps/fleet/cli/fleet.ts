@@ -1592,11 +1592,73 @@ function defaultGitRun(): GitRun {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Fleet task #1248 review BLOCKER B1: local destroy must not wipe the
+// worktree's own work. A local studio's Orca worktree IS its checkout —
+// uncommitted/unpushed commits live only there — yet cmdDestroy's teardown
+// called `closeStudioRow` (-> `worktree rm --force`) for it the same as for a
+// cloud studio, whose worktree is only a sidebar row. The three helpers below
+// turn that into a decision: keep the worktree unless the operator has
+// explicitly forced a discard and nothing is left to lose.
+
+/** The pure teardown decision for a local studio's worktree.
+ *
+ *  park -> keep: a park is a pause, never a deletion, and `--park` used to
+ *    still `worktree rm` a local checkout. Remove only on a real destroy.
+ *  not (force && discardUnsynced) -> keep: without the operator explicitly
+ *    naming the price (the same two flags the cloud path already honours),
+ *    a destroy never deletes work it could still rescue.
+ *  dirty or ahead -> keep: dirty files or unpushed commits are the work; a
+ *    local destroy cannot recreate them from anywhere else. Only a clean,
+ *    fully-pushed checkout — nothing to lose — is removed.
+ *
+ *  Pure (no I/O) so it is unit-testable; `dirty`/`ahead` come from the git
+ *  reads `cmdDestroy` makes over `GitRun`. */
+export function localTeardownDecision(
+  flags: { force: boolean; discardUnsynced: boolean; park: boolean },
+  dirty: boolean, ahead: boolean,
+): { action: "keep" | "remove"; note: string } {
+  if (flags.park) return { action: "keep", note: "parked — the worktree is kept (fleet destroy --park never removes a local checkout)" };
+  if (!(flags.force && flags.discardUnsynced)) {
+    return {
+      action: "keep",
+      note: "kept — a local studio's worktree IS its checkout; remove it only with --force --discard-unsynced",
+    };
+  }
+  if (dirty) return { action: "keep", note: "kept — the worktree has uncommitted changes (--discard-unsynced was given, but dirty files are not unsynced commits)" };
+  if (ahead) return { action: "keep", note: "kept — the worktree has unpushed commits; nothing is removed until they are pushed" };
+  return { action: "remove", note: "clean and fully pushed — removing" };
+}
+
+/** `git -C <path> status --porcelain` non-empty -> dirty. Non-zero exit (git
+ *  cannot read the tree) is treated as dirty — refusing to delete is the safe
+ *  side, since the tree could not be proven clean. */
+export async function gitIsDirty(run: GitRun, path: string): Promise<boolean> {
+  const { code, stdout } = await run(["-C", path, "status", "--porcelain"]);
+  if (code !== 0) return true;
+  return stdout.trim() !== "";
+}
+
+/** `git -C <path> rev-list --count @{u}..` — how many commits are unpushed.
+ *  A non-zero exit (no upstream configured, no remote, shallow clone) reads
+ *  as NOT ahead (0): with no upstream to compare against, nothing can be said
+ *  to be "ahead of" it, and "nothing to lose relative to a missing upstream"
+ *  is the documented choice — the dirty check above is what still protects
+ *  any local work. */
+export async function gitAheadCount(run: GitRun, path: string): Promise<number> {
+  const { code, stdout } = await run(["-C", path, "rev-list", "--count", "@{u}.."]);
+  if (code !== 0) return 0;
+  const n = Number(stdout.trim());
+  return Number.isInteger(n) && n >= 0 ? n : 0;
+}
+
 /** `git rev-parse --show-toplevel` — the local clone's absolute path, used
  *  when `--local` was given without `--path`. Null (never a throw) when git
- *  cannot name one, and the caller refuses with a clear message. */
-export async function resolveGitToplevel(run: GitRun = defaultGitRun()): Promise<string | null> {
-  const { code, stdout, stderr } = await run(["rev-parse", "--show-toplevel"]);
+ *  cannot name one, and the caller refuses with a clear message. When `cwd`
+ *  is given, every git argv is prefixed with `-C <cwd>` so the clone being
+ *  asked about is the one the caller named, never this process's own cwd. */
+export async function resolveGitToplevel(run: GitRun = defaultGitRun(), cwd?: string): Promise<string | null> {
+  const { code, stdout, stderr } = await run(cwd ? ["-C", cwd, "rev-parse", "--show-toplevel"] : ["rev-parse", "--show-toplevel"]);
   if (code !== 0) {
     console.error(`fleet: could not resolve the local clone: ${stderr.trim().split("\n")[0] || "git could not find a toplevel"}`);
     return null;
@@ -1608,10 +1670,14 @@ export async function resolveGitToplevel(run: GitRun = defaultGitRun()): Promise
 /** The local clone's default branch — `git symbolic-ref refs/remotes/origin/HEAD`,
  *  falling back to `git remote show origin`'s HEAD line, then `git branch -r`.
  *  Returns the PLAIN branch name (never `origin/`), or null when none of the
- *  three can resolve it. The caller refuses with a clear message. */
-export async function resolveDefaultBranch(run: GitRun = defaultGitRun()): Promise<string | null> {
+ *  three can resolve it. The caller refuses with a clear message. When `cwd`
+ *  is given, every git argv is prefixed with `-C <cwd>` — the default branch
+ *  must come from the `--path` clone, not whatever repo this process happens
+ *  to be standing in. */
+export async function resolveDefaultBranch(run: GitRun = defaultGitRun(), cwd?: string): Promise<string | null> {
+  const withCwd = (args: string[]): string[] => (cwd ? ["-C", cwd, ...args] : args);
   const tryRun = async (args: string[]): Promise<string | null> => {
-    const { code, stdout } = await run(args);
+    const { code, stdout } = await run(withCwd(args));
     if (code !== 0) return null;
     return stdout.trim();
   };
@@ -1631,6 +1697,22 @@ export async function resolveDefaultBranch(run: GitRun = defaultGitRun()): Promi
   const firstRemote = branchR?.split("\n").map((l) => l.trim()).find((l) => l.startsWith("origin/") && !l.includes("HEAD"));
   if (firstRemote) return firstRemote.replace(/^origin\//, "");
   return null;
+}
+
+/**
+ * Fleet task #1248 review BLOCKER B4: the clone's origin slug — `git -C <cwd>
+ * remote get-url origin` through parseGitRemote (src/studio/repo.ts), the same
+ * parser `detectRepo` already uses. Null when git cannot read the remote or it
+ * is not a github.com repo. This is what lets spawnLocalStudio REFUSE a
+ * `--path /other/clone` whose origin names a different repo than the target
+ * slug: silently building a studio out of the wrong checkout is exactly the
+ * silent-wrong-target failure this whole feature exists to remove.
+ */
+export async function resolveCloneOriginSlug(run: GitRun = defaultGitRun(), cwd?: string): Promise<string | null> {
+  const args = cwd ? ["-C", cwd, "remote", "get-url", "origin"] : ["remote", "get-url", "origin"];
+  const { code, stdout } = await run(args);
+  if (code !== 0) return null;
+  return parseGitRemote(stdout.trim());
 }
 
 /** The decoded local-spawn response: the row plus the bring-up env the route
@@ -1680,10 +1762,24 @@ export async function spawnLocalStudio(
       process.exit(1);
     }
   }
-  const defaultBranch = await resolveDefaultBranch();
+  // Fleet task #1248 review BLOCKER B4: every git read below must target the
+  // RESOLVED clone (`-C <resolvedPath>`), never this process's own cwd — a
+  // `--path /other/clone` used to read the base branch of whatever repo the
+  // operator happened to be standing in (or fail outside one).
+  const gitRun = defaultGitRun();
+  const defaultBranch = await resolveDefaultBranch(gitRun, resolvedPath);
   if (defaultBranch === null) {
     console.error(`${opts.cmd}: could not resolve the default branch of ${r.slug} (git symbolic-ref refs/remotes/origin/HEAD) — ` +
       "fetch origin first, or re-run once the clone has a remote HEAD");
+    process.exit(1);
+  }
+  // B4 (second half): the clone's origin must name the SAME repo this spawn
+  // targets — a `--path /other/clone` whose origin is a different repo would
+  // build a studio for `<target>` out of somebody else's checkout, silently.
+  const cloneSlug = await resolveCloneOriginSlug(gitRun, resolvedPath);
+  if (cloneSlug !== null && cloneSlug.toLowerCase() !== r.slug.toLowerCase()) {
+    console.error(`${opts.cmd}: the clone at ${resolvedPath} has origin ${cloneSlug}, not ${r.slug} — ` +
+      "a local studio must be built from the repo it targets; pass --path to the right clone");
     process.exit(1);
   }
 
@@ -2012,7 +2108,27 @@ async function cmdDestroy(
   // could not read must never print a teardown line — an operator who reads
   // "Orca worktree and attach terminal removed" stops looking.
   if (report.teardown) {
-    for (const line of await closeStudioRow(id, defaultOrcaDeps())) console.error(`fleet: ${line}`);
+    // Fleet task #1248 review BLOCKER B1: a LOCAL studio's Orca worktree IS
+    // its checkout — `worktree rm --force` here would delete uncommitted/
+    // unpushed work that lives nowhere else. Decide from the row's own
+    // git state instead; the CLOUD path (host !== "local") stays byte-identical.
+    if (report.status?.host === "local") {
+      const localPath = report.status.localPath;
+      if (localPath == null || localPath === "") {
+        console.error(`fleet: ${id}: worktree kept — no recorded localPath, so nothing is removed`);
+      } else {
+        const run = defaultGitRun();
+        const [dirty, ahead] = await Promise.all([gitIsDirty(run, localPath), gitAheadCount(run, localPath)]);
+        const decision = localTeardownDecision({ force, discardUnsynced, park }, dirty, ahead > 0);
+        if (decision.action === "remove") {
+          for (const line of await closeStudioRow(id, defaultOrcaDeps())) console.error(`fleet: ${line}`);
+        } else {
+          console.error(`fleet: ${id}: worktree ${decision.note}`);
+        }
+      }
+    } else {
+      for (const line of await closeStudioRow(id, defaultOrcaDeps())) console.error(`fleet: ${line}`);
+    }
     // Board issue #332: after a confirmed stop, the NON-BLOCKING warning —
     // the studio's unmerged PRs outlive its lane, and the registry row
     // still exists, so the route still answers for it. For a plain destroy
