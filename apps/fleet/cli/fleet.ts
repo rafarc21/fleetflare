@@ -81,7 +81,7 @@ import type { OpenPr } from "../src/board/open-prs";
 import { formatMemoryTable, MEMORY_LEGEND, type MemoryFileRow } from "./memory-format";
 import {
   openStudioRow, closeStudioRow, reconcileStudioWorkspaces, planStudioWorkspaces, defaultOrcaDeps,
-  studioWorkspaceTitle, readStudioRows, findAttachHandle,
+  studioWorkspaceTitle, readStudioRows, findAttachHandle, ensureLocalStudioWorktree,
   type OrcaDeps, type TabsReport, type TabsPlanEntry,
 } from "./orca-workspace";
 import type { StudioStatus } from "../src/studio/types";
@@ -512,7 +512,10 @@ export function formatTable(
       // Issue #289/#285: the account the container was LAUNCHED on, the next
       // launch's in a note when they differ; "-" after a refused launch.
       formatAccount(s, leadModelOf(s, assignments)),
-      s.tailscaleHost ?? "-",
+      // Fleet task #1248: a local studio has no tailnet host — its HOST cell
+      // reads "local" (where it runs: the operator's Mac), never a "-" that
+      // would read as "unknown".
+      s.host === "local" ? "local" : s.tailscaleHost ?? "-",
       formatBurn(s.burn),
       s.lastRefresh ?? "-",
       capErrorCell(s.error),
@@ -1554,6 +1557,184 @@ async function cmdSpawn(
   // a GUI, and this can never fail the spawn that already succeeded.
   const spawnTasks = await listStudioTasks(creds, spawned.id);
   await openStudioRow(spawned.id, spawnTasks, defaultOrcaDeps());
+}
+
+// ---------------------------------------------------------------------------
+// fleet spawn --local / ff --local — fleet task #1248. A local studio runs on
+// the operator's Mac instead of a container: the registry row is written by
+// POST /studio/local/spawn (host:"local", localPath), and the lead is
+// materialized into an Orca worktree checked out from a LOCAL clone — never a
+// container. Same role prompt, house rules and lead-gate the container would
+// get; only WHERE differs.
+
+/** `git rev-parse --show-toplevel` — the local clone's absolute path, used
+ *  when `--local` was given without `--path`. Null (never a throw) when git
+ *  cannot name one, and the caller refuses with a clear message. */
+export async function resolveGitToplevel(): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    if ((await proc.exited) !== 0) {
+      console.error(`fleet: could not resolve the local clone: ${stderr.trim().split("\n")[0] || "git could not find a toplevel"}`);
+      return null;
+    }
+    const toplevel = stdout.trim();
+    return toplevel === "" ? null : toplevel;
+  } catch {
+    console.error("fleet: could not run `git`");
+    return null;
+  }
+}
+
+/** The local clone's default branch — `git symbolic-ref refs/remotes/origin/HEAD`,
+ *  falling back to `git remote show origin`'s HEAD line, then `git branch -r`.
+ *  Returns the PLAIN branch name (never `origin/`), or null when none of the
+ *  three can resolve it. The caller refuses with a clear message. */
+export async function resolveDefaultBranch(): Promise<string | null> {
+  const run = async (args: string[]): Promise<string | null> => {
+    try {
+      const proc = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+      const [stdout] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+      if ((await proc.exited) !== 0) return null;
+      return stdout.trim();
+    } catch {
+      return null;
+    }
+  };
+  const symbolic = await run(["symbolic-ref", "refs/remotes/origin/HEAD"]);
+  if (symbolic) return symbolic.replace(/^refs\/remotes\/origin\//, "");
+  // `git remote show origin` prints a "HEAD branch: main" line; the first
+  // fallback for clones predating `refs/remotes/origin/HEAD` (git 1.8.4).
+  const remoteShow = await run(["remote", "show", "origin"]);
+  const headLine = remoteShow?.split("\n").find((l) => l.trim().startsWith("HEAD branch:"));
+  if (headLine) {
+    const branch = headLine.trim().replace(/^HEAD branch:\s*/, "");
+    if (branch !== "") return branch;
+  }
+  // `git branch -r` — the last fallback: the first origin/* entry. Ambiguous
+  // for a repo with several branches, but it is the only remaining signal.
+  const branchR = await run(["branch", "-r"]);
+  const firstRemote = branchR?.split("\n").map((l) => l.trim()).find((l) => l.startsWith("origin/") && !l.includes("HEAD"));
+  if (firstRemote) return firstRemote.replace(/^origin\//, "");
+  return null;
+}
+
+/** The decoded local-spawn response: the row plus the bring-up env the route
+ *  attaches (prompt/allowedTools/effort/members/skills/leadType). */
+interface LocalSpawnResponse extends StudioStatus {
+  prompt?: string;
+  allowedTools?: string;
+  effort?: string;
+  members?: Record<string, string>;
+  skills?: string;
+  leadType?: "claude" | "glm";
+}
+
+/**
+ * The shared local spawn+worktree flow, used by `fleet spawn --local`
+ * (`cmdLocalSpawn`) and `ff --local`. Detects the repo (requireRepoForCreate
+ * still applies — a cwd naming no repo with no `--repo` refuses), resolves
+ * localPath (empty -> `git rev-parse --show-toplevel`) and the default branch,
+ * POSTs /studio/local/spawn, then materializes the worktree via
+ * ensureLocalStudioWorktree and prints the row. `opts.attach` decides the
+ * final hand-off: `fleet spawn` never attaches (just opens the row),
+ * `ff --local` attaches when this process has a real TTY.
+ */
+export async function spawnLocalStudio(
+  creds: Credentials, role: string, newInstance: boolean,
+  leadType: "claude" | "glm" | "kimi" | "deepseek" | undefined,
+  repoFlag: string | undefined, localPath: string,
+  opts: { cmd: string; attach: (id: string) => Promise<void>; task?: number | null },
+): Promise<void> {
+  const detected = await detectRepo();
+  const r = requireRepoForCreate(opts.cmd, repoFlag, detected);
+  if (!r.ok) {
+    console.error(r.message);
+    process.exit(1);
+  }
+  console.error(repoFlag === undefined
+    ? `${opts.cmd}: repo ${r.slug} (from git remote origin)`
+    : `${opts.cmd}: target repo ${r.slug} (--repo)`);
+
+  // --local without --path: the clone is the folder the operator is standing
+  // in, so resolve it here rather than guessing.
+  let resolvedPath = localPath;
+  if (resolvedPath === "") {
+    resolvedPath = (await resolveGitToplevel()) ?? "";
+    if (resolvedPath === "") {
+      console.error(`${opts.cmd}: --local needs a clone path — run inside the repo, or pass --path <abs>`);
+      process.exit(1);
+    }
+  }
+  const defaultBranch = await resolveDefaultBranch();
+  if (defaultBranch === null) {
+    console.error(`${opts.cmd}: could not resolve the default branch of ${r.slug} (git symbolic-ref refs/remotes/origin/HEAD) — ` +
+      "fetch origin first, or re-run once the clone has a remote HEAD");
+    process.exit(1);
+  }
+
+  const res = await fetch(new URL("/studio/local/spawn", creds.workerUrl), {
+    method: "POST",
+    headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
+    // Same body shape cmdSpawn sends, plus the local identity the route's
+    // readLocalRequest requires (`local: true`, `localPath`).
+    body: JSON.stringify({
+      role, repo: r.slug, local: true, localPath: resolvedPath,
+      ...(newInstance ? { instance: "next" } : {}),
+      ...(leadType === undefined ? {} : { leadType }),
+      // The task NUMBER, never the brief text — the Worker reads the issue
+      // itself and verifies it is assigned to the studio it is about to
+      // build (the same rule the cloud spawn's `task` field follows).
+      ...(opts.task == null ? {} : { task: opts.task }),
+    }),
+  });
+  if (!res.ok) {
+    console.error(`${opts.cmd}: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
+    process.exit(1);
+  }
+  const body = (await res.json()) as LocalSpawnResponse;
+  const spawned = parseStudioStatus(body);
+  if (spawned === null) {
+    console.error(`${opts.cmd}: answered 200 but the body was not a studio row`);
+    process.exit(1);
+  }
+  const prompt = body.prompt ?? "";
+  const allowedTools = body.allowedTools ?? "";
+  if (prompt === "" || allowedTools === "") {
+    console.error(`${opts.cmd}: the local-spawn route answered without prompt/allowedTools — cannot launch the lead`);
+    process.exit(1);
+  }
+  console.error(`${opts.cmd}: repo ${r.slug} → ${spawned.id} (local)`);
+  console.log(formatTable([spawned]));
+  // The lead's Orca worktree + attach terminal, materialized from the local
+  // clone. Best-effort-fail-safe (like openStudioRow), so a wedged Orca never
+  // fails the spawn that already registered the row.
+  await ensureLocalStudioWorktree(spawned.id, defaultOrcaDeps(), {
+    localPath: resolvedPath,
+    defaultBranch,
+    prompt,
+    allowedTools,
+    ...(body.effort !== undefined ? { effort: body.effort } : {}),
+    ...(body.members !== undefined ? { members: body.members } : {}),
+    ...(typeof body.skills === "string" ? { skills: body.skills.split(",") } : {}),
+  });
+  // `ff --local` attaches (a local worktree boots claude directly, so there
+  // is no provisioned-wait); `fleet spawn --local` just reports the row.
+  await opts.attach(spawned.id);
+}
+
+async function cmdLocalSpawn(
+  creds: Credentials, role: string, newInstance: boolean,
+  leadType: "claude" | "glm" | "kimi" | "deepseek" | undefined,
+  repoFlag: string | undefined, localPath: string,
+): Promise<void> {
+  await spawnLocalStudio(creds, role, newInstance, leadType, repoFlag, localPath, {
+    cmd: "fleet spawn",
+    attach: async () => {},
+  });
 }
 
 /**
@@ -3526,7 +3707,9 @@ async function main(): Promise<void> {
     case "paste":
       return cmdPaste(creds, parsed.id);
     case "spawn":
-      return cmdSpawn(creds, parsed.role, parsed.newInstance, parsed.leadType, parsed.repo);
+      return parsed.local
+        ? cmdLocalSpawn(creds, parsed.role, parsed.newInstance, parsed.leadType, parsed.repo, parsed.local.localPath)
+        : cmdSpawn(creds, parsed.role, parsed.newInstance, parsed.leadType, parsed.repo);
     case "provision":
       return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession, parsed.discardSession, parsed.forceMappedAccount === true, parsed.repo);
     case "recycle":

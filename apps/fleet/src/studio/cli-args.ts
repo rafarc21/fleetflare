@@ -86,7 +86,13 @@ export type CliCommand =
   // value, unresolved — cli-args.ts stays pure; cmdSpawn resolves it).
   // Present ONLY when the flag was given, so a bare `spawn <role>` keeps its
   // exact pre-#1229 parse shape.
-  | { cmd: "spawn"; role: string; newInstance: boolean; leadType?: "claude" | "glm" | "kimi" | "deepseek"; repo?: string }
+  //
+  // Fleet task #1248: `--local [--path <abs>]` — a studio on the operator's
+  // Mac instead of a container. `local` is present ONLY when `--local` was
+  // given (bare spawn stays byte-identical), and its `localPath` is the raw
+  // `--path` value or "" (no `--path`): cli-args.ts stays pure, so the empty
+  // case is resolved later (cmdLocalSpawn runs `git rev-parse --show-toplevel`).
+  | { cmd: "spawn"; role: string; newInstance: boolean; leadType?: "claude" | "glm" | "kimi" | "deepseek"; repo?: string; local?: { localPath: string } }
   // Issue #115: `cancelFreshSession` — `--no-fresh-session`, mutually
   // exclusive with `freshSession` above.
   // Issue #231: `discardSession` — `--discard-session`, the operator's
@@ -377,8 +383,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Upload the Mac clipboard image into the studio and print the in-container path. ctrl-v does this inline while attached.",
   },
   spawn: {
-    args: "<role> [--new] [--lead claude|glm|kimi|deepseek] [--repo owner/name]",
-    summary: "Create a studio for <role> in the repo you are standing in (the roles this fleet declares in fleet.json). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them. Issue #249: `--lead glm` boots this studio's lead on this fleet's own GLM-translation route instead of a Claude account — no Claude quota spent, sticky for the studio's whole life (set once, here, never re-asked on a later provision/restart/recycle). `--lead claude` is the explicit, redundant spelling of today's default. #717: `--lead kimi` / `--lead deepseek` are also glm-led, with that pool model (`fleet models`) pinned as the studio's main model instead of the round-robin default. maestro is spawnable from the Mac (the operator edge); ff refuses it (always local, issue #250), and `--new` never applies to it (singleton). Refuses when the cwd names no repo and no --repo is given — it never falls back to the fleet's default (pass --repo owner/name).",
+    args: "<role> [--new] [--lead claude|glm|kimi|deepseek] [--repo owner/name] [--local [--path <abs>]]",
+    summary: "Create a studio for <role> in the repo you are standing in (the roles this fleet declares in fleet.json). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them. Issue #249: `--lead glm` boots this studio's lead on this fleet's own GLM-translation route instead of a Claude account — no Claude quota spent, sticky for the studio's whole life (set once, here, never re-asked on a later provision/restart/recycle). `--lead claude` is the explicit, redundant spelling of today's default. #717: `--lead kimi` / `--lead deepseek` are also glm-led, with that pool model (`fleet models`) pinned as the studio's main model instead of the round-robin default. Fleet task #1248: `--local` boots the studio on THIS Mac instead of a container — it clones into an Orca worktree from a local checkout (`--path <abs>`, defaulting to the cwd's own git toplevel), runs the same role prompt/house rules/lead-gate the container would, and registers the row with `host:\"local\"` so `fleet ls` and task assign/done-record work identically. maestro is spawnable from the Mac (the operator edge); ff refuses it (always local, issue #250), and `--new` never applies to it (singleton). Refuses when the cwd names no repo and no --repo is given — it never falls back to the fleet's default (pass --repo owner/name).",
   },
   provision: {
     args: "<id> [--fresh-session [--discard-session]|--no-fresh-session] [--account mapped] [--repo owner/name]",
@@ -1082,9 +1088,15 @@ export function parseCliArgs(argv: string[]): CliCommand {
       // there are now two independent flags instead of one bare boolean.
       // Issue #1229: `--repo <v>`/`--repo=<v>` joins the same walk — three
       // independent flags, any order, none of them mutually exclusive.
+      // Fleet task #1248: `--local` (a bare boolean) and `--path <abs>`/
+      // `--path=<abs>` join the same walk. `--path` only names a local clone,
+      // so it requires `--local`; `--local` without `--path` leaves localPath
+      // empty and the CLI resolves it later (git toplevel).
       let newInstance = false;
       let leadType: "claude" | "glm" | "kimi" | "deepseek" | undefined;
       let repo: string | undefined;
+      let local = false;
+      let localPath: string | undefined;
       for (let i = 0; i < rest.length; i++) {
         const token = rest[i];
         if (token === "--new" && !newInstance) { newInstance = true; continue; }
@@ -1109,12 +1121,33 @@ export function parseCliArgs(argv: string[]): CliCommand {
           repo = token.slice("--repo=".length);
           continue;
         }
+        if (token === "--local") {
+          if (local) return usage("--local was given twice");
+          local = true;
+          continue;
+        }
+        if (token === "--path") {
+          if (localPath !== undefined) return usage("--path was given twice");
+          const value = rest[++i];
+          if (value === undefined) return usage("--path needs a value");
+          localPath = value;
+          continue;
+        }
+        if (token.startsWith("--path=")) {
+          if (localPath !== undefined) return usage("--path was given twice");
+          localPath = token.slice("--path=".length);
+          continue;
+        }
         return usage(`unexpected ${JSON.stringify(token)}`);
       }
+      // `--path` names a local clone and only a local clone — without
+      // `--local` it would be a silently ignored flag on a cloud spawn.
+      if (localPath !== undefined && !local) return usage("--path needs --local (a --path only names a local studio's clone)");
       return {
         cmd: "spawn", role: arg, newInstance,
         ...(leadType === undefined ? {} : { leadType }),
         ...(repo === undefined ? {} : { repo }),
+        ...(local ? { local: { localPath: localPath ?? "" } } : {}),
       };
     }
     // Issue #28: `--fresh-session`, same bespoke flag shape as recycle's own.

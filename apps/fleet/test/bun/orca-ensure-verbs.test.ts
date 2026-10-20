@@ -316,6 +316,14 @@ describe("ensureStudioWorkspace — the five hard requirements", () => {
 // stderr line, never a throw to the caller.
 
 describe("local studio workspace — fleet task #1248", () => {
+  // Real Orca reports `path` on the `worktree create` result (MEASURED — see
+  // orca-workspace.ts's OrcaEnvelope comment), and the local path's
+  // materialization step needs it to know where the lead's files land.
+  const LOCAL_CREATED = ok(JSON.stringify({
+    ok: true,
+    result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: "/fake/orca/studio-websites-pilot" } },
+  }));
+
   test("localWorktreeCreateArgs emits the exact worktree create argv", () => {
     expect(localWorktreeCreateArgs("/abs/clone", "main", "websites--pilot")).toEqual([
       "worktree", "create",
@@ -329,13 +337,13 @@ describe("local studio workspace — fleet task #1248", () => {
 
   test("localLaunchCommand quotes the prompt-by-file and carries allowedTools/effort", () => {
     const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *) Edit Write", "max");
-    expect(cmd).toContain("--append-system-prompt \"$(cat /w/.fleet/working-set.md)\"");
-    expect(cmd).toContain("--allowedTools \"Bash(git *) Edit Write\"");
+    // The prompt rides by FILE — the launch line stays a few hundred bytes
+    // whatever the brief's size, and the pane shell expands "$(cat ...)" into
+    // one argv element (studio-bringup.sh's own issue #6 technique).
+    expect(cmd).toContain('--append-system-prompt "$(cat /w/.fleet/working-set.md)"');
+    expect(cmd).toContain('--allowedTools "Bash(git *) Edit Write"');
     expect(cmd).toContain("--effort max");
     expect(cmd).toContain("--dangerously-skip-permissions");
-    // The shell fragment is single-quoted, so the "$(cat ...)" survives
-    // Orca's own re-parse of the --command string.
-    expect(cmd).toMatch(/'[^']*\$\(cat [^']*\)[^']*'/);
   });
 
   test("localLaunchCommand omits --effort when the role carries none", () => {
@@ -362,7 +370,7 @@ describe("local studio workspace — fleet task #1248", () => {
 
   test("creates the worktree, materializes the working set, and launches claude via terminal create", async () => {
     const f = fake({
-      "worktree create": CREATED,
+      "worktree create": LOCAL_CREATED,
       "terminal create": TERM_CREATED,
     });
     const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {

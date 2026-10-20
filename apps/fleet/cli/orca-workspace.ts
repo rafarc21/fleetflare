@@ -50,7 +50,10 @@
  */
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync,
+  symlinkSync, unlinkSync, writeFileSync,
+} from "node:fs";
 import { parseStudioId } from "../src/studio/ids";
 import { repoIdSegment } from "../src/studio/repo";
 import type { StudioStatus } from "../src/studio/types";
@@ -258,7 +261,11 @@ interface OrcaEnvelope {
     terminals?: OrcaTerminalEntry[];
     /** Orca's own "this page is not everything" flag. */
     truncated?: boolean;
-    worktree?: { id?: string; displayName?: string };
+    // `path` on the SINGLE worktree result is MEASURED on real Orca (the
+    // `worktree create` envelope carries it) — the local-studio path reads it
+    // to know where the lead's project-scoped files land, without a second
+    // `worktree list` round trip.
+    worktree?: { id?: string; displayName?: string; path?: string };
     terminal?: { handle?: string; title?: string };
   };
 }
@@ -566,6 +573,235 @@ export async function ensureStudioWorkspace(id: string, title: string, deps: Orc
  */
 export async function openStudioRow(id: string, tasks: BoardTask[], deps: OrcaDeps): Promise<WorkspaceOutcome> {
   return ensureStudioWorkspace(id, studioWorkspaceTitle(id, tasks), deps);
+}
+
+// ---------------------------------------------------------------------------
+// Fleet task #1248: the LOCAL studio worktree. A local studio (host:"local")
+// runs on the operator's Mac, not in a container — so the worktree is created
+// from a LOCAL clone (`path:<localPath>`), not from an Orca-managed repo id,
+// and the lead is materialized PROJECT-SCOPED (the worktree's own .claude/),
+// never into the global ~/.claude (board #20 cancelled the `fleet gates
+// install` verb, so nothing may write the Mac's global settings.json).
+
+/** The worktree create argv for a local studio — from a local clone, on the
+ *  origin default branch, as a `claude` agent worktree. Pure so a test pins
+ *  the exact tokens (`--repo path:`, `--base-branch origin/`, `--agent
+ *  claude`) without a fake Orca run. */
+export function localWorktreeCreateArgs(localPath: string, defaultBranch: string, id: string): string[] {
+  return [
+    "worktree", "create",
+    "--repo", `path:${localPath}`,
+    "--base-branch", `origin/${defaultBranch}`,
+    "--agent", "claude",
+    "--name", studioWorkspaceName(id),
+    "--no-parent", "--setup", "skip", "--json",
+  ];
+}
+
+/** The claude launch line the attach terminal runs. The prompt is passed by
+ *  FILE — `"$(cat <file>)"` is expanded by the terminal's shell into ONE argv
+ *  element, so the line stays a few hundred bytes however large the brief is
+ *  (studio-bringup.sh's own issue #6 technique). Pure so a test pins it. */
+export function localLaunchCommand(id: string, promptFilePath: string, allowedTools: string, effort: string): string {
+  // Every studio grants Bash and skips permission prompts; the lead-gate
+  // PreToolUse hook (not --disallowedTools, which would starve members too)
+  // is the structural guard against the lead implementing.
+  const args = [
+    "claude",
+    "--dangerously-skip-permissions",
+    "--append-system-prompt", `"$(cat ${promptFilePath})"`,
+    "--allowedTools", `"${allowedTools}"`,
+  ];
+  if (effort !== "") args.push("--effort", effort);
+  return args.join(" ");
+}
+
+/**
+ * The fail-closed PreToolUse hook command, matcher `.*` — the SAME guarded
+ * shape studio-bringup.sh writes for the cloud lead, but PROJECT-scoped: `$PWD`
+ * resolves to the worktree at claude's runtime, so a missing or non-executable
+ * hook refuses the call (`exit 2`, the only code claude treats as block)
+ * rather than waving a write through. Extracted so a test pins it verbatim.
+ */
+export function localLeadGateHookCommand(): string {
+  return 'S="$PWD/.claude/hooks/lead-gate.sh"; ' +
+    '[ -x "$S" ] || { echo "lead-gate hook absent or not executable -- refusing (decision 11)" >&2; exit 2; }; ' +
+    'exec "$S"';
+}
+
+/** Args for the `ensureLocalStudioWorktree` materialization step. */
+export interface LocalStudioArgs {
+  /** The Mac-side absolute path to the local clone the worktree is made from. */
+  localPath: string;
+  /** The plain default-branch name (resolved by the caller, e.g. `main`). */
+  defaultBranch: string;
+  /** The decoded role prompt (goes to `<worktree>/.fleet/working-set.md`). */
+  prompt: string;
+  /** The role's allowedTools string (comma/space grammar claude parses). */
+  allowedTools: string;
+  /** Role effort; "" means claude's own default, so no --effort is passed. */
+  effort?: string;
+  /** Decoded member map: `{ "<name>.md": "<raw md body>" }`. */
+  members?: Record<string, string>;
+  /** Skill names to symlink into the worktree's `.claude/skills`. */
+  skills?: string[];
+}
+
+/**
+ * Give a LOCAL studio its Orca worktree + attach terminal, and materialize
+ * the lead into it. Same five properties as `ensureStudioWorkspace` (never
+ * throws, no-op outside Orca, idempotent by the deterministic name, never
+ * steals focus, bounded), plus one this path adds: the lead gate is FAIL-
+ * CLOSED — if the hook copy or settings write cannot land, the whole thing
+ * returns `{ kind: "failed" }` rather than booting an ungated lead.
+ *
+ * The lead is materialized PROJECT-SCOPED, under the worktree's own
+ * `.claude/`, never the global `~/.claude/settings.json` (board #20 cancelled
+ * that verb) — and the fail-closed hook command resolves the script by
+ * `$PWD/.claude/hooks/lead-gate.sh` so the SAME settings.json bytes work no
+ * matter where the worktree actually lands on disk.
+ */
+export async function ensureLocalStudioWorktree(
+  id: string, deps: OrcaDeps, args: LocalStudioArgs,
+): Promise<WorkspaceOutcome> {
+  if (!orcaPresent(deps)) {
+    if (deps.hasBinary() === null && !deps.env.STUDIO_ID) {
+      deps.log(`orca not found on PATH — no Orca sidebar row for ${id}. Orca is optional; attach from any terminal with: fleet attach ${id}`);
+    }
+    return { kind: "skipped", why: "not running under Orca" };
+  }
+  try {
+    const name = studioWorkspaceName(id);
+    const made = await orcaJson(
+      deps,
+      localWorktreeCreateArgs(args.localPath, args.defaultBranch, id),
+      CREATE_TIMEOUT_MS,
+    );
+    const madeWorktree = made.result?.worktree;
+    const selector = madeWorktree?.id ? `id:${madeWorktree.id}` : `name:${name}`;
+    if (madeWorktree?.id) await deps.registry.set(id, madeWorktree.id);
+
+    // The worktree's on-disk path — where the lead's files land. Orca reports
+    // it on the create result; when it does not (or a list must be read),
+    // resolve it from the worktree list, then refuse fail-closed if unknown:
+    // an ungated lead is invisible, a missing worktree path is not.
+    const worktreePath = madeWorktree?.path ?? (await findLocalWorktreePath(id, name, deps));
+    if (!worktreePath) {
+      throw new Error(`Orca did not report a path for worktree "${name}" — refusing to materialize the lead`);
+    }
+
+    materializeLocalLead(worktreePath, args, deps);
+
+    const command = localLaunchCommand(id, join(worktreePath, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
+    const term = await orcaJson(
+      deps,
+      ["terminal", "create", "--worktree", selector, "--title", id, "--command", command, "--json"],
+      LIST_TIMEOUT_MS,
+    );
+    const handle = term.result?.terminal?.handle;
+    if (handle) {
+      await orcaJson(deps, ["terminal", "rename", "--terminal", handle, "--title", id, "--json"], LIST_TIMEOUT_MS);
+    }
+    return { kind: "created" };
+  } catch (err) {
+    const why = errText(err);
+    deps.log(`${id}: no Orca workspace opened — ${why}`);
+    return { kind: "failed", why };
+  }
+}
+
+/** The worktree's on-disk path, from the create result already read, or the
+ *  worktree list (matched by the deterministic name) when Orca's create
+ *  envelope omitted it. Null when it cannot be resolved — the caller refuses. */
+async function findLocalWorktreePath(id: string, name: string, deps: OrcaDeps): Promise<string | null> {
+  const listed = await orcaJson(deps, ["worktree", "list", "--json"], LIST_TIMEOUT_MS);
+  const worktrees = listed.result?.worktrees ?? [];
+  const found = findStudioWorktree(id, worktrees, deps.registry);
+  return found?.path ?? null;
+}
+
+/**
+ * Writes the lead's project-scoped files into the worktree. Fail-closed on
+ * the gate: a hook copy or settings write that cannot land throws, and the
+ * caller returns `{ kind: "failed" }` — never an ungated lead. The working
+ * set, members and skills are best-effort (a lead that boots without them is
+ * degraded; a lead that boots without the gate must not boot at all).
+ */
+function materializeLocalLead(worktreePath: string, args: LocalStudioArgs, deps: OrcaDeps): void {
+  // The working set — the same prompt file container bring-up persists, so a
+  // compaction can replay it, and the launch line reads it back by file.
+  const fleetDir = join(worktreePath, ".fleet");
+  mkdirSync(fleetDir, { recursive: true });
+  writeFileSync(join(fleetDir, "working-set.md"), args.prompt);
+
+  // Members -> native .claude/agents files, bytes verbatim. The map's keys
+  // are already the member filenames ("<name>.md") — the same bundle shape
+  // studio-blueprint.ts's studioBringupEnv carries to the container.
+  const claudeDir = join(worktreePath, ".claude");
+  if (args.members) {
+    const agentsDir = join(claudeDir, "agents");
+    mkdirSync(agentsDir, { recursive: true });
+    for (const [filename, raw] of Object.entries(args.members)) {
+      writeFileSync(join(agentsDir, filename), raw);
+    }
+  }
+
+  // Skills — symlink each name from THIS repo checkout's skills/<name> into
+  // the worktree's .claude/skills, the same `ln -sfn` idempotent shape the
+  // container uses (force + no-dereference). A missing source warns loudly
+  // and is skipped; it never fails the boot.
+  if (args.skills) {
+    const skillsDir = join(claudeDir, "skills");
+    mkdirSync(skillsDir, { recursive: true });
+    for (const skill of args.skills) {
+      if (skill === "") continue;
+      const source = join(import.meta.dir, "..", "..", "..", "skills", skill);
+      const link = join(skillsDir, skill);
+      if (!existsSync(source)) {
+        deps.log(`declared skill "${skill}" resolves to NOTHING at ${source} — studio boots without it`);
+        continue;
+      }
+      try {
+        rmSync(link, { force: true });
+        symlinkSync(source, link, "dir");
+      } catch (err) {
+        deps.log(`could not symlink skill "${skill}" — ${errText(err)}`);
+      }
+    }
+  }
+
+  // The lead gate — FAIL CLOSED. Copy the single-source hook script from THIS
+  // checkout's gates/ into the worktree's .claude/hooks/, chmod 0755, then
+  // write a PROJECT-scoped settings.json whose PreToolUse entry refuses
+  // (exit 2) when the script is missing or not executable. Never touches
+  // ~/.claude/settings.json. Throws on either failure: the caller's one catch
+  // turns it into { kind: "failed" }, so no ungated lead ever boots.
+  const hooksDir = join(claudeDir, "hooks");
+  mkdirSync(hooksDir, { recursive: true });
+  const hookDest = join(hooksDir, "lead-gate.sh");
+  const hookSource = join(import.meta.dir, "..", "..", "..", "gates", "lead-gate.sh");
+  if (!existsSync(hookSource)) {
+    throw new Error(`lead-gate source ${hookSource} missing — refusing to materialize an ungated lead (decision 11)`);
+  }
+  copyFileSync(hookSource, hookDest);
+  chmodSync(hookDest, 0o755);
+
+  const settingsPath = join(claudeDir, "settings.json");
+  let cfg: Record<string, unknown>;
+  try {
+    cfg = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+    if (typeof cfg !== "object" || cfg === null || Array.isArray(cfg)) cfg = {};
+  } catch {
+    cfg = {};
+  }
+  const hooks = (cfg.hooks ?? {}) as Record<string, unknown>;
+  const pre = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : [];
+  const entry = { matcher: ".*", hooks: [{ type: "command", command: localLeadGateHookCommand() }] };
+  const merged = { ...cfg, hooks: { ...hooks, PreToolUse: [...pre, entry] } };
+  // mkdir first — a settings write to a worktree whose .claude did not exist
+  // (the members/skills blocks above may have skipped) must still land.
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify(merged, null, 2));
 }
 
 type OrcaWorktree = NonNullable<NonNullable<OrcaEnvelope["result"]>["worktrees"]>[number];

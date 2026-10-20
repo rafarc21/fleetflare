@@ -33,13 +33,13 @@ describe("parseFfArgs", () => {
     // The literal "maestro", not the DEFAULT_FF_ROLE import — ties this test
     // to the real resolved role, not a comparison of the constant with itself.
     expect(parseFfArgs([])).toEqual({
-      cmd: "ff", role: "maestro", task: null, newInstance: false,
+      cmd: "ff", role: "maestro", task: null, newInstance: false, local: false,
     });
   });
 
   it("`ff <role>` takes the role", () => {
     expect(parseFfArgs(["web-studio"])).toEqual({
-      cmd: "ff", role: "web-studio", task: null, newInstance: false,
+      cmd: "ff", role: "web-studio", task: null, newInstance: false, local: false,
     });
   });
 
@@ -60,7 +60,7 @@ describe("parseFfArgs", () => {
     // Exact token match only, same containment rule `--new` has.
     expect(parseFfArgs(["pilot", "drop the --help flag"])).toEqual({
       cmd: "ff", role: "pilot", task: { kind: "new", text: "drop the --help flag" },
-      newInstance: false,
+      newInstance: false, local: false,
     });
     // `--` is not a help token either; bare and ALONE it is not a valid role
     // segment, so it keeps the existing usage error — never help, never a
@@ -77,25 +77,25 @@ describe("parseFfArgs", () => {
     expect(parseFfArgs(["web-studio", "  fix the header  "]))
       .toEqual({
         cmd: "ff", role: "web-studio", task: { kind: "new", text: "fix the header" },
-        newInstance: false,
+        newInstance: false, local: false,
       });
   });
 
   it("`ff <role> <n>` ADOPTS issue #n rather than filing a task called \"42\" (P5 §3)", () => {
     expect(parseFfArgs(["web-studio", "42"]))
       .toEqual({
-        cmd: "ff", role: "web-studio", task: { kind: "adopt", number: 42 }, newInstance: false,
+        cmd: "ff", role: "web-studio", task: { kind: "adopt", number: 42 }, newInstance: false, local: false,
       });
     // `#42` is how an issue number is written everywhere else.
     expect(parseFfArgs(["web-studio", "#42"]))
       .toEqual({
-        cmd: "ff", role: "web-studio", task: { kind: "adopt", number: 42 }, newInstance: false,
+        cmd: "ff", role: "web-studio", task: { kind: "adopt", number: 42 }, newInstance: false, local: false,
       });
     // Only a BARE number adopts — anything with words in it is a new task.
     expect(parseFfArgs(["web-studio", "42 things are broken"]))
       .toEqual({
         cmd: "ff", role: "web-studio", task: { kind: "new", text: "42 things are broken" },
-        newInstance: false,
+        newInstance: false, local: false,
       });
   });
 
@@ -104,26 +104,26 @@ describe("parseFfArgs", () => {
   // task" check nothing.
   it("`--new` is recognised in every position, and only as an exact token", () => {
     expect(parseFfArgs(["--new"])).toEqual({
-      cmd: "ff", role: DEFAULT_FF_ROLE, task: null, newInstance: true,
+      cmd: "ff", role: DEFAULT_FF_ROLE, task: null, newInstance: true, local: false,
     });
     expect(parseFfArgs(["pilot", "--new"])).toEqual({
-      cmd: "ff", role: "pilot", task: null, newInstance: true,
+      cmd: "ff", role: "pilot", task: null, newInstance: true, local: false,
     });
     expect(parseFfArgs(["--new", "pilot"])).toEqual({
-      cmd: "ff", role: "pilot", task: null, newInstance: true,
+      cmd: "ff", role: "pilot", task: null, newInstance: true, local: false,
     });
     expect(parseFfArgs(["pilot", "--new", "fix the header"])).toEqual({
-      cmd: "ff", role: "pilot", task: { kind: "new", text: "fix the header" }, newInstance: true,
+      cmd: "ff", role: "pilot", task: { kind: "new", text: "fix the header" }, newInstance: true, local: false,
     });
     expect(parseFfArgs(["pilot", "--new", "42"])).toEqual({
-      cmd: "ff", role: "pilot", task: { kind: "adopt", number: 42 }, newInstance: true,
+      cmd: "ff", role: "pilot", task: { kind: "adopt", number: 42 }, newInstance: true, local: false,
     });
   });
 
   it("a task that merely CONTAINS --new stays the task, flag off", () => {
     expect(parseFfArgs(["pilot", "drop the --new flag"])).toEqual({
       cmd: "ff", role: "pilot", task: { kind: "new", text: "drop the --new flag" },
-      newInstance: false,
+      newInstance: false, local: false,
     });
   });
 
@@ -156,8 +156,11 @@ describe("parseFfArgs", () => {
   });
 
   it("bare ff --local still resolves to the (refused) maestro role, so ffDecision short-circuits it", () => {
-    expect(parseFfArgs([]).local).toBe(false);
-    expect(parseFfArgs(["--local"]).role).toBe(DEFAULT_FF_ROLE);
+    const bare = parseFfArgs([]);
+    const local = parseFfArgs(["--local"]);
+    expect(bare.cmd === "ff" && bare.local).toBe(false);
+    expect(local.cmd === "ff" && local.role).toBe(DEFAULT_FF_ROLE);
+    expect(local.cmd === "ff" && local.local).toBe(true);
   });
 
   it("the help text names --local", () => {
