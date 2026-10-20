@@ -80,6 +80,7 @@ export function test(name: string, fn: () => void | Promise<void>, timeout: numb
 const DEPLOY_SH = resolve(import.meta.dir, "../../../scripts/deploy.sh");
 const DEPLOY_TARGET_TS = resolve(import.meta.dir, "../../../scripts/deploy-target.ts");
 const CONTAINERS_CHANGED_TS = resolve(import.meta.dir, "../../../scripts/deploy-containers-changed.ts");
+const GATE_DRAIN_WAIT_TS = resolve(import.meta.dir, "../../../scripts/gate-drain-wait.ts");
 const REAL_WRANGLER = resolve(import.meta.dir, "../../../node_modules/wrangler");
 
 // Filled by the hooks below. Each test file copies these into its own `let`s
@@ -141,6 +142,7 @@ export function useDeployRescueHarness(assign: (s: typeof state) => void) {
     copyFileSync(DEPLOY_SH, join(fleet, "scripts", "deploy.sh"));
     if (existsSync(DEPLOY_TARGET_TS)) copyFileSync(DEPLOY_TARGET_TS, join(fleet, "scripts", "deploy-target.ts"));
     if (existsSync(CONTAINERS_CHANGED_TS)) copyFileSync(CONTAINERS_CHANGED_TS, join(fleet, "scripts", "deploy-containers-changed.ts"));
+    if (existsSync(GATE_DRAIN_WAIT_TS)) copyFileSync(GATE_DRAIN_WAIT_TS, join(fleet, "scripts", "gate-drain-wait.ts"));
     mkdirSync(stubs);
     const bin = join(fleet, "node_modules", ".bin");
     mkdirSync(bin, { recursive: true });
@@ -159,6 +161,12 @@ export function useDeployRescueHarness(assign: (s: typeof state) => void) {
       '  cat "$f"; exit 0',
       "fi",
       `echo "wrangler $*" >> "${calls}"`,
+      'case "$1 $2 $3" in',
+      '  "workflows instances list")',
+      `    [ -f "${stubs}/gate-instances.json" ] && cat "${stubs}/gate-instances.json" || echo "[]"`,
+      "    exit 0 ;;",
+      "esac",
+      "exit 0",
       "",
     ].join("\n"));
     chmodSync(join(bin, "wrangler"), 0o755);
