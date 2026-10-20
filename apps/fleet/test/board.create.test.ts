@@ -52,6 +52,55 @@ describe("createTask", () => {
     expect(api.createIssue).not.toHaveBeenCalled();
   });
 
+  // `--backlog` files a task into the implicit backlog milestone, created once
+  // on first use. §5: a sprint is a deliberate open; the backlog is the
+  // opposite — the place tasks go when no sprint claims them yet.
+  describe("backlog milestone (#1245)", () => {
+    it("creates the backlog milestone on first use and files the task into it", async () => {
+      const api = fakeApi({
+        listMilestones: vi.fn(async () => []),
+        createMilestone: vi.fn(async () => ({ number: 9, title: "backlog" })),
+      });
+      const res = await createTask(api, "o/r", { ...brief, backlog: true });
+      expect(res.ok).toBe(true);
+      expect(api.createMilestone).toHaveBeenCalledWith("o/r", {
+        title: "backlog", description: "Backlog: tasks awaiting a sprint.",
+      });
+      expect(vi.mocked(api.createIssue).mock.calls[0][1].milestone).toBe(9);
+    });
+
+    it("reuses an existing backlog milestone without creating a new one", async () => {
+      const api = fakeApi({
+        listMilestones: vi.fn(async () => [{ number: 9, title: "backlog", description: "", state: "open" }]),
+      });
+      const res = await createTask(api, "o/r", { ...brief, backlog: true });
+      expect(res.ok).toBe(true);
+      expect(api.createMilestone).not.toHaveBeenCalled();
+      expect(vi.mocked(api.createIssue).mock.calls[0][1].milestone).toBe(9);
+    });
+
+    it("matches the existing backlog title regardless of case", async () => {
+      const api = fakeApi({
+        listMilestones: vi.fn(async () => [{ number: 9, title: "Backlog", description: "", state: "open" }]),
+      });
+      const res = await createTask(api, "o/r", { ...brief, backlog: true });
+      expect(res.ok).toBe(true);
+      expect(api.createMilestone).not.toHaveBeenCalled();
+      expect(vi.mocked(api.createIssue).mock.calls[0][1].milestone).toBe(9);
+    });
+
+    it("refuses a brief naming both a sprint and the backlog — one lane only", async () => {
+      const api = fakeApi();
+      const res = await createTask(api, "o/r", { ...brief, milestone: "Sprint 1", backlog: true });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.status).toBe(400);
+      expect(res.message).toBe("a task is on one sprint or the backlog, not both");
+      expect(api.createIssue).not.toHaveBeenCalled();
+      expect(api.createMilestone).not.toHaveBeenCalled();
+    });
+  });
+
   it("refuses an incomplete brief as a 400, before any GitHub call", async () => {
     const api = fakeApi();
     const res = await createTask(api, "o/r", { title: "t", objective: "o" });
