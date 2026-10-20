@@ -608,8 +608,7 @@ export function localWorktreeCreateArgs(localPath: string, defaultBranch: string
  *  on — the lead-gate PreToolUse hook (not --disallowedTools, which would
  *  starve members too) is the structural guard against the lead implementing,
  *  and the operator is present to approve the members' writes. */
-export function localLaunchCommand(id: string, promptFilePath: string, allowedTools: string, effort: string): string {
-  void id;
+export function localLaunchCommand(_id: string, promptFilePath: string, allowedTools: string, effort: string): string {
   const args = [
     "claude",
     "--append-system-prompt", `"$(cat ${promptFilePath})"`,
