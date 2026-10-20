@@ -9,7 +9,7 @@
 // bun:test lane, not vitest: cli/fleet.ts is Bun-only and never imported from
 // the vitest suite — same precedent as orca-workspace.test.ts's own header.
 import { describe, expect, test } from "bun:test";
-import { resolveDefaultBranch, resolveGitToplevel, resolveCloneOriginSlug, localTeardownDecision, gitIsDirty, gitAheadCount } from "../../cli/fleet";
+import { resolveDefaultBranch, resolveGitToplevel, resolveCloneOriginSlug, localTeardownDecision, gitIsDirty, gitAheadCount, localWorktreeRemoval } from "../../cli/fleet";
 
 /** A canned `run` port: `(args) => {code, stdout, stderr}`. */
 function runner(answers: Record<string, { code: number; stdout: string; stderr?: string }>) {
@@ -35,11 +35,6 @@ describe("resolveGitToplevel", () => {
   test("returns null on empty stdout", async () => {
     const run = runner({ "rev-parse --show-toplevel": { code: 0, stdout: "\n" } });
     expect(await resolveGitToplevel(run)).toBeNull();
-  });
-
-  test("with a cwd, -C <cwd> is prepended to the git argv", async () => {
-    const run = runner({ "-C /other/clone rev-parse --show-toplevel": { code: 0, stdout: "/other/clone\n" } });
-    expect(await resolveGitToplevel(run, "/other/clone")).toBe("/other/clone");
   });
 });
 
@@ -133,5 +128,52 @@ describe("local teardown decision (B1)", () => {
     // No upstream (non-zero exit) reads as 0 — nothing is "ahead of" a
     // missing upstream; the dirty check is what still protects the tree.
     expect(await gitAheadCount(runner({ "-C /p rev-list --count @{u}..": { code: 128, stdout: "" } }), "/p")).toBe(0);
+  });
+});
+
+// Fleet task #1248 review BLOCKER B1 (fix round): the decision cmdDestroy
+// makes — cloud teardown always runs; a local studio's worktree is removed
+// only when the RESOLVED Orca worktree path is clean, pushed, and the
+// operator explicitly priced it with --force --discard-unsynced. The git
+// reads target the resolved path (the Orca worktree), never the clone.
+describe("localWorktreeRemoval (B1 fix round)", () => {
+  const F = { force: false, discardUnsynced: false, park: false };
+  const FORCED = { force: true, discardUnsynced: true, park: false };
+  const resolve = (path: string | null) => async () => path;
+  const run = runner({});
+
+  test("cloud (null status) removes — teardown always runs", async () => {
+    expect(await localWorktreeRemoval(null, F, { run, resolveWorktreePath: resolve("/wt") }, "id"))
+      .toEqual({ remove: true, note: null });
+  });
+
+  test("cloud (host !== local) removes", async () => {
+    expect(await localWorktreeRemoval({ host: "cloud" as "local", localPath: null }, F, { run, resolveWorktreePath: resolve("/wt") }, "id"))
+      .toEqual({ remove: true, note: null });
+  });
+
+  test("local + resolved path dirty -> keep with the dirty note", async () => {
+    const dirty = runner({ "-C /wt status --porcelain": { code: 0, stdout: "M file.txt\n" }, "-C /wt rev-list --count @{u}..": { code: 0, stdout: "0\n" } });
+    const r = await localWorktreeRemoval({ host: "local", localPath: "/clone" }, FORCED, { run: dirty, resolveWorktreePath: resolve("/wt") }, "id");
+    expect(r.remove).toBe(false);
+    expect(r.note).toContain("uncommitted changes");
+  });
+
+  test("local + resolved path clean + force+discard -> remove", async () => {
+    const clean = runner({ "-C /wt status --porcelain": { code: 0, stdout: "" }, "-C /wt rev-list --count @{u}..": { code: 0, stdout: "0\n" } });
+    const r = await localWorktreeRemoval({ host: "local", localPath: "/clone" }, FORCED, { run: clean, resolveWorktreePath: resolve("/wt") }, "id");
+    expect(r).toEqual({ remove: true, note: "clean and fully pushed — removing" });
+  });
+
+  test("local + unresolvable worktree path -> keep with the could-not-resolve note", async () => {
+    const r = await localWorktreeRemoval({ host: "local", localPath: "/clone" }, FORCED, { run, resolveWorktreePath: resolve(null) }, "id");
+    expect(r).toEqual({ remove: false, note: "worktree path could not be resolved — kept" });
+  });
+
+  test("park -> keep", async () => {
+    const clean = runner({ "-C /wt status --porcelain": { code: 0, stdout: "" }, "-C /wt rev-list --count @{u}..": { code: 0, stdout: "0\n" } });
+    const r = await localWorktreeRemoval({ host: "local", localPath: "/clone" }, { force: true, discardUnsynced: true, park: true }, { run: clean, resolveWorktreePath: resolve("/wt") }, "id");
+    expect(r.remove).toBe(false);
+    expect(r.note).toContain("parked");
   });
 });

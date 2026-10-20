@@ -31,6 +31,7 @@ import {
   localLeadGateHookCommand,
   appendLocalExcludeLines,
   LOCAL_EXCLUDE_LINES,
+  resolveStudioWorktreePath,
   type OrcaDeps,
   type OrcaResult,
 } from "../../cli/orca-workspace";
@@ -556,5 +557,32 @@ describe("local lead files are excluded from git (B3)", () => {
     expect(() => appendLocalExcludeLines("/nonexistent", { log: (l) => lines.push(l) }, run)).not.toThrow();
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("could not exclude");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fleet task #1248 review BLOCKER B1 (fix round): resolveStudioWorktreePath —
+// the ORCA worktree's own on-disk path for a local studio's destroy decision.
+// The dirty/ahead git reads must target this path, never the clone it was
+// built from (a clean clone + dirty worktree + --force --discard-unsynced
+// would still delete uncommitted work).
+
+describe("resolveStudioWorktreePath (B1 fix round)", () => {
+  test("returns the worktree path whose basename matches the studio id", async () => {
+    const f = fake({
+      "worktree list": worktrees("staging", "studio-websites--pilot"),
+    });
+    expect(await resolveStudioWorktreePath("websites--pilot", f.deps)).toBe("/fake/orca/studio-websites-pilot");
+  });
+
+  test("null when no orca is present", async () => {
+    const f = fake({}, { env: { TERM_PROGRAM: "Apple_Terminal" } });
+    expect(await resolveStudioWorktreePath("websites--pilot", f.deps)).toBeNull();
+    expect(f.calls).toEqual([]);
+  });
+
+  test("null when the worktree list has no row for the studio", async () => {
+    const f = fake({ "worktree list": worktrees("staging") });
+    expect(await resolveStudioWorktreePath("websites--pilot", f.deps)).toBeNull();
   });
 });
