@@ -68,6 +68,13 @@ describe("deploy.sh: drain running gate runs before a Worker deploy (#1232)", ()
     expect(clearAt).toBeGreaterThan(deployAt);
   });
 
+  test("a failing clear keeps the deploy's exit code (rc not masked by the trap)", () => {
+    writeConfig(gateConfig());
+    const r = deploy([], 0, { STUB_DEPLOY_EXIT: "1", STUB_CLEAR_FAIL: "1" });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("could not clear the gate drain flag");
+  });
+
   test("--skip-gate-drain: deploy proceeds with no d1 execute and no poll", () => {
     writeConfig(gateConfig());
     stub("gate-instances.json", [{ id: "gate-x", status: "running" }]);

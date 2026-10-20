@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import { GATE_DRAIN_FLAG, GATE_DRAIN_QUEUE_KEY, gateDrainQueue, gateDraining, clearStaleDrainFlag } from "../src/gate/drain";
-import { drainPendingGateRuns } from "../src/gate/auto-run-env";
+import { drainPendingGateRuns, d1RunIndex } from "../src/gate/auto-run-env";
 import { gateRunId, type PullRequestAutoRun } from "../src/gate/auto-run";
 import { setFlag, deleteFlag, flagIsSet } from "../src/state";
 import type { Env } from "../src/env";
@@ -141,5 +141,24 @@ describe("drainPendingGateRuns: the every-minute release of the pending queue", 
     await drainPendingGateRuns(fakeEnv({ create, get }));
     expect(create).toHaveBeenCalled();
     expect(await gateDrainQueue(env.DB).peek()).toEqual([queued]);
+  });
+
+  it("a queued edited PR with a live -e run reattaches, never creates or terminates (#1241 a)", async () => {
+    const repo = "acme/drain-edit";
+    const headSha = "a".repeat(40);
+    const queued: PullRequestAutoRun = { repo, pr: 201, headSha, baseSha: "b".repeat(40), edited: true };
+    const eRunId = `${await gateRunId(repo, headSha)}-e1`;
+    await d1RunIndex(env.DB).record(repo, 201, { headSha, runId: eRunId, progressedAt: Date.now() });
+    await gateDrainQueue(env.DB).append(queued);
+    const create = vi.fn(async () => ({ id: "unused" }));
+    const terminate = vi.fn(async () => {});
+    const get = vi.fn(async (id: string) => ({
+      status: async () => ({ status: id === eRunId ? "running" : "terminated" }),
+      terminate,
+    }));
+    await drainPendingGateRuns(fakeEnv({ create, get }));
+    expect(create).not.toHaveBeenCalled();
+    expect(terminate).not.toHaveBeenCalled();
+    expect(await gateDrainQueue(env.DB).peek()).toEqual([]);
   });
 });

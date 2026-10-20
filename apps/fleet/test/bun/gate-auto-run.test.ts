@@ -664,6 +664,25 @@ describe("startEditedGateRunIdempotent: reattaches a live -e run, starts fresh o
     expect(again.runId).not.toBe(first.runId);
     expect(runs.size).toBe(2);
   });
+
+  it("a transient status read failure throws (entry stays queued), never ends a live run", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    let calls = 0;
+    const flaky: GateRunStarter = {
+      create: wf.create,
+      get: async (id) => {
+        calls++;
+        if (calls === 1 && id === first.runId) throw new Error("transient blip");
+        return wf.get(id);
+      },
+    };
+    await expect(startEditedGateRunIdempotent(flaky, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2))
+      .rejects.toThrow("transient blip");
+    expect(terminated).toEqual([]);
+    expect(runs.size).toBe(1);
+  });
 });
 
 describe("autoRunPullRequest: every gated PR starts a run; the Workflow decides (#1132)", () => {
