@@ -165,6 +165,7 @@ export function useDeployRescueHarness(assign: (s: typeof state) => void) {
       '  "workflows instances list")',
       `    [ -f "${stubs}/gate-instances.json" ] && cat "${stubs}/gate-instances.json" || echo "[]"`,
       "    exit 0 ;;",
+      '  "deploy "*) exit "${STUB_DEPLOY_EXIT:-0}" ;;',
       "esac",
       "exit 0",
       "",
