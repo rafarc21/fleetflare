@@ -436,6 +436,30 @@ async function logNoFinishReasonFingerprint(
   );
 }
 
+/** Code review (Standards axis, #1228 fresh-context review, Finding 6):
+ *  "record this out=0 no_finish_reason failure, check the 3-strike poison
+ *  threshold, and answer with the matching body" — the `noFinishExhausted`
+ *  branch (every pool candidate exhausted) and the final collected-failure
+ *  branch (no next model to fail over to at all) in
+ *  `handleFleetAnthropicMessages` used to each carry their own identical
+ *  copy of this. One shared helper means Finding 1's bug class (the
+ *  `outputTokens === 0` gate) only has one place left it could recur on.
+ *  Returns the streak count too — the `noFinishExhausted` call site's own
+ *  usage row still wants it in its failure message. */
+async function recordAndRespondNoFinish(
+  db: D1Database, studioId: string, fingerprintHash: string,
+): Promise<{ n: number; response: Response }> {
+  const n = await recordNoFinishReasonFailure(db, studioId, fingerprintHash);
+  // Issue #1228 (3): after 3 identical-input failures the request is proven
+  // poisonous — stop the client's 12x retry loop with a non-retriable 400.
+  // Before that threshold it is a normal retriable overload (529), the
+  // shape that moves the client's turn on.
+  const response = n >= 3
+    ? json(anthropicErrorBody("invalid_request_error", "upstream repeatedly failed to complete this request; compact context and retry"), 400)
+    : json(anthropicErrorBody("overloaded_error", "upstream stream ended without a finish reason; retry the turn"), 529);
+  return { n, response };
+}
+
 /** Builds the Anthropic SSE byte stream for one request: the prelude,
  *  then every chunk the upstream OpenAI-compatible stream yields, translated
  *  through translate.ts's pure state machine, then the closing frames. Kept
@@ -883,6 +907,44 @@ type ConsumeOutcome =
   | { kind: "plain" }
   | { kind: "pump_error"; message: string };
 
+/** Code review (Standards axis, #1228 fresh-context review, Finding 5): the
+ *  outcome of running `consume` against one `env.AI.run` value — either the
+ *  walk should stop and return `result` right away (a plain reply, a pump
+ *  bug, or anything that is not an out=0 no_finish_reason — see the
+ *  `fr.ok || !(...)` condition below, the ONE gate this also shares with
+ *  the bottom non-streaming failure branch in `handleFleetAnthropicMessages`,
+ *  Finding 1), or the walk should keep going (`frame` is the out=0
+ *  no_finish_reason PumpResult to remember as `lastNoFinish`). */
+type AttemptOutcome =
+  | { accept: true; result: ModelOverflowResult }
+  | { accept: false; frame: PumpResult };
+
+/** Code review (Standards axis, #1228 fresh-context review, Finding 5):
+ *  "consume one upstream value, decide whether an out=0 no_finish_reason
+ *  means retry/failover or something else means stop" — the initial attempt
+ *  and the same-model retry inside `runModelPoolOverflow`'s loop used to be
+ *  two hand-written, byte-identical copies of this. Pure aside from the
+ *  `consume` call itself. */
+async function attemptOnce(
+  consume: (value: Json, modelId: string) => Promise<ConsumeOutcome>,
+  value: Json, modelId: string, usedModel: string, attempts: number,
+): Promise<AttemptOutcome> {
+  const outcome = await consume(value, modelId);
+  if (outcome.kind === "plain") return { accept: true, result: { ok: true, upstream: value, usedModel, attempts } };
+  if (outcome.kind === "pump_error") return { accept: true, result: { ok: false, usedModel, attempts, pumpError: outcome.message } };
+  const fr = outcome.frames.result;
+  // Issue #1228: the stream ends without a finish_reason AFTER the caller
+  // has consumed it (env.AI.run itself succeeded). An out=0 no_finish_reason
+  // is a transient upstream failure another model may answer: retry the
+  // SAME model once, then move to the next candidate. Anything else
+  // (success, or a no_finish_reason that DID produce output — Finding 1) is
+  // not that shape, so the walk stops here and reports it as-is.
+  if (fr.ok || !(fr.failure === "no_finish_reason" && fr.outputTokens === 0)) {
+    return { accept: true, result: { ok: true, upstream: value, usedModel, attempts, collected: outcome.frames } };
+  }
+  return { accept: false, frame: fr };
+}
+
 /** Code review (Standards axis, #717): extracted verbatim out of
  *  `handleFleetAnthropicMessages`'s own body — the self-contained walk over
  *  `order` (pickModels' own candidate model list). Spec Component 4's own
@@ -939,28 +1001,14 @@ async function runModelPoolOverflow(
           : runAiWithRetry(run, { baseMs }));
       attempts += r.attempts;
       if (consume === undefined) return { ok: true, upstream: r.value, usedModel, attempts };
-      // Issue #1228: the stream ends without a finish_reason AFTER the
-      // caller has consumed it (env.AI.run itself succeeded). An out=0
-      // no_finish_reason is a transient upstream failure another model may
-      // answer: retry the SAME model once, then move to the next candidate.
-      const first = await consume(r.value, pm.id);
-      if (first.kind === "plain") return { ok: true, upstream: r.value, usedModel, attempts };
-      if (first.kind === "pump_error") return { ok: false, usedModel, attempts, pumpError: first.message };
-      const fr = first.frames.result;
-      if (fr.ok || !(fr.failure === "no_finish_reason" && fr.outputTokens === 0)) {
-        return { ok: true, upstream: r.value, usedModel, attempts, collected: first.frames };
-      }
-      lastNoFinish = fr;
+      const first = await attemptOnce(consume, r.value, pm.id, usedModel, attempts);
+      if (first.accept) return first.result;
+      lastNoFinish = first.frame;
       const retried = await runAiWithRetry(run, { baseMs });
       attempts += retried.attempts;
-      const second = await consume(retried.value, pm.id);
-      if (second.kind === "plain") return { ok: true, upstream: retried.value, usedModel, attempts };
-      if (second.kind === "pump_error") return { ok: false, usedModel, attempts, pumpError: second.message };
-      const sr = second.frames.result;
-      if (sr.ok || !(sr.failure === "no_finish_reason" && sr.outputTokens === 0)) {
-        return { ok: true, upstream: retried.value, usedModel, attempts, collected: second.frames };
-      }
-      lastNoFinish = sr;
+      const second = await attemptOnce(consume, retried.value, pm.id, usedModel, attempts);
+      if (second.accept) return second.result;
+      lastNoFinish = second.frame;
       // Same-model retry also failed the same way: move to the next candidate.
       if (hasNext) continue;
       return { ok: false, usedModel, attempts, noFinishExhausted: true, lastNoFinish };
@@ -1104,19 +1152,12 @@ export async function handleFleetAnthropicMessages(
       // The fingerprint line was already written inside the walk's consume
       // callback (one per no_finish_reason, including this last one); here
       // the turn is a confirmed failure, so count it toward the 3-try cap.
-      const n = await recordNoFinishReasonFailure(env.DB, studio.id, fingerprint.fingerprintHash);
+      const { n, response } = await recordAndRespondNoFinish(env.DB, studio.id, fingerprint.fingerprintHash);
       logUsage(env, ctx, studio.id, {
         model: usedModel, stream, inputTokens: nf?.inputTokens ?? 0, outputTokens: nf?.outputTokens ?? 0, ok: false,
         failure: `no_finish_reason exhausted all models (count=${n})`, startedAt, attempts, timeToHeaders: headersAt - startedAt,
       });
-      // Issue #1228 (3): after 3 identical-input failures the request is
-      // proven poisonous — stop the client's 12x retry loop with a
-      // non-retriable 400. Before that threshold it is a normal retriable
-      // overload (529), the shape that moves the client's turn on.
-      if (n >= 3) {
-        return json(anthropicErrorBody("invalid_request_error", "upstream repeatedly failed to complete this request; compact context and retry"), 400);
-      }
-      return json(anthropicErrorBody("overloaded_error", "upstream stream ended without a finish reason; retry the turn"), 529);
+      return response;
     }
     // Issue #1228: a pump bug while collecting the non-streaming reply stays
     // the fixed-message 500 it always was — never folded into the failover.
@@ -1274,13 +1315,21 @@ export async function handleFleetAnthropicMessages(
     // error. Only the out=0 shape is fingerprinted and counted; that one
     // reaches this line only when there was no next model to fail over to
     // (a single-model pool, or LEAD_MODEL_OVERFLOW=off).
-    if (result.failure === "no_finish_reason") {
+    //
+    // Finding 1 (fresh-context review of #1228, PR #1235): this used to key
+    // ONLY on `result.failure === "no_finish_reason"`, with no `outputTokens
+    // === 0` check — unlike `attemptOnce`'s own gate above (and
+    // `runModelPoolOverflow`'s retry walk it came from), which only treats
+    // an OUT=0 no_finish_reason as retriable/poison-countable. The incident's
+    // own data says poison runs die after 0-1.6k out tokens, not always 0, so
+    // this branch used to wrongly fingerprint/count a no_finish_reason WITH
+    // output toward the same 3-strike streak meant only for the out=0 shape
+    // — risking a false-positive permanent 400 on an unrelated flaky request,
+    // and double-logging the fingerprint for the same frame (once inside the
+    // overflow walk's own `consume` callback, once again here).
+    if (result.failure === "no_finish_reason" && result.outputTokens === 0) {
       await logNoFinishReasonFingerprint(studio.id, fingerprint, result.lastChunks, result.inputTokens, result.outputTokens);
-      const n = await recordNoFinishReasonFailure(env.DB, studio.id, fingerprint.fingerprintHash);
-      if (n >= 3) {
-        return json(anthropicErrorBody("invalid_request_error", "upstream repeatedly failed to complete this request; compact context and retry"), 400);
-      }
-      return json(anthropicErrorBody("overloaded_error", "upstream stream ended without a finish reason; retry the turn"), 529);
+      return (await recordAndRespondNoFinish(env.DB, studio.id, fingerprint.fingerprintHash)).response;
     }
     return json(anthropicErrorBody(type, overrideMessage ?? message), status);
   }

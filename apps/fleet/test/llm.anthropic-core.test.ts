@@ -22,6 +22,7 @@ import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { fakeCtx } from "./helpers/fake-ctx";
 import { lockedUsageLogDb } from "./helpers/d1-locked";
+import { getNoFinishReasonFailures } from "../src/llm/model-store";
 
 const ME = "acme-org--web-studio";
 // Maestro review round 1, MAJOR 2: every row here carries `leadType: "glm"`
@@ -532,5 +533,62 @@ describe("handleFleetAnthropicMessages — no_finish_reason retry/failover/non-r
       error: { type: "invalid_request_error", message: "upstream repeatedly failed to complete this request; compact context and retry" },
     });
     expect(run.mock.calls.length).toBe(callsBeforeFourth);
+  });
+
+  // Finding 1 (fresh-context review of #1228, PR #1235): the bottom
+  // non-streaming failure branch used to key ONLY on `result.failure ===
+  // "no_finish_reason"`, with no `outputTokens === 0` check — unlike the
+  // retry walk's own gate a few lines up in runModelPoolOverflow, which
+  // only treats an out=0 no_finish_reason as retriable/poison-countable.
+  // The incident's own data says poison runs die after 0-1.6k out tokens,
+  // not always 0, so a single-model pool whose no_finish_reason stream DID
+  // carry output tokens used to be wrongly fingerprinted/counted toward the
+  // SAME 3-strike poison streak meant only for the out=0 shape — risking a
+  // false-positive permanent 400 on an unrelated flaky request.
+  it("a no_finish_reason WITH output tokens is not poison-counted — falls through to the generic error path", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // A chunk that carries real `usage.completion_tokens` (so
+      // state.outputTokens > 0) but never a finish_reason — the "died with
+      // SOME output" shape, as opposed to noFinishStream()'s out=0 shape.
+      const noFinishWithOutputStream = () => new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+            choices: [{ delta: { content: "partial but priced" } }],
+            usage: { prompt_tokens: 3, completion_tokens: 5 },
+          })}\n\n`));
+          controller.close();
+        },
+      });
+      const run = vi.fn(async () => noFinishWithOutputStream());
+      const body = { ...good, messages: [{ role: "user", content: "flaky but not poison" }] };
+      const r = await callRoute({ ai: { run }, body });
+
+      // NOT the poison-streak shapes (529 overloaded_error / 400
+      // invalid_request_error) — it falls through to classifyAiError's own
+      // generic mapping for the translator's own error-frame message.
+      expect(r.status).not.toBe(529);
+      expect(r.status).not.toBe(400);
+      expect(r.status).toBe(500);
+      expect(await r.json()).toEqual({
+        type: "error",
+        error: { type: "api_error", message: "upstream stream ended without a finish reason" },
+      });
+
+      // Only ONE console.error fingerprint line for this single frame (the
+      // overflow walk's own consume callback) — the bottom branch must not
+      // log it a second time now that it falls through instead.
+      const lines = spy.mock.calls.map((c) => c.map(String).join(" "));
+      const fingerprintLines = lines.filter((l) => l.includes("[glm-lead] no_finish_reason") && l.includes("fingerprint="));
+      expect(fingerprintLines).toHaveLength(1);
+
+      // Never counted toward the 3-strike poison streak either.
+      const raw = JSON.stringify(body);
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+      const fingerprintHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+      expect(await getNoFinishReasonFailures(env.DB, ME, fingerprintHash)).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
