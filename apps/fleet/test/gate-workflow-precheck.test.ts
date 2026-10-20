@@ -123,6 +123,14 @@ let openPullsTruncated = false;
 // (call 3) by default (#1203). A guard test keeps the title clean so the run
 // reaches the verdict guard instead of failing the success recheck.
 let titleFlipsOnRecheck = true;
+// #1226: gate/verdict's current landed state, served back by the combined
+// -status GET postGateStatus reads to confirm a post. A test can make the
+// POST itself fail (reject) on specific 1-based call numbers
+// (statusPostFailOn), so Workflows' own step retry (STATUS_POST_STEP_CONFIG)
+// must re-run postGateStatus for real before the verdict ever lands.
+let lastPostedStatus: { state: string; description?: string } | undefined;
+let statusPostCalls = 0;
+let statusPostFailOn: Set<number> = new Set();
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -202,7 +210,20 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     return Promise.resolve(new Response("acmeclient\n", { status: 200 }));
   }
   if (method === "POST" && /\/statuses\/[0-9a-f]{40}$/.test(url)) {
+    statusPostCalls++;
+    if (statusPostFailOn.has(statusPostCalls)) {
+      return Promise.reject(new Error(`gate/verdict HTTP 503 (attempt ${statusPostCalls})`));
+    }
+    lastPostedStatus = init!.body === undefined ? undefined : (JSON.parse(init.body as string) as { state: string; description?: string });
     return Promise.resolve(json({}));
+  }
+  if (method === "GET" && /\/commits\/[0-9a-f]{40}\/status$/.test(url)) {
+    // #1226: postGateStatus's read-back confirmation — reflects whatever the
+    // last successful POST above landed, so every pre-existing test's clean
+    // single-attempt post still confirms and resolves.
+    return Promise.resolve(json({
+      statuses: lastPostedStatus === undefined ? [] : [{ context: GATE_STATUS_CONTEXT, ...lastPostedStatus }],
+    }));
   }
   return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
 }
@@ -222,6 +243,9 @@ beforeEach(() => {
   openPullsAlwaysThrows = false;
   openPullsTruncated = false;
   titleFlipsOnRecheck = true;
+  lastPostedStatus = undefined;
+  statusPostCalls = 0;
+  statusPostFailOn = new Set();
   realFetch = globalThis.fetch;
   globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
 });
@@ -764,6 +788,43 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       // shows up twice): "merge-tree" never ran — it rode in from the carry.
       const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
       expect(legCalls.map((r) => (r.body as { leg?: string }).leg)).toEqual(["typecheck", "typecheck"]);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  // #1226: a verdict POST that fails on its first attempts (mocked 503s) must
+  // still land through the REAL Workflows step engine's own retry
+  // (STATUS_POST_STEP_CONFIG, not postGateStatus's own old 2x-immediate loop).
+  // disableSleeps() bypasses the exponential backoff wait, the same pattern
+  // already used above for the shared-head-guard's retried listOpenPulls.
+  it("a verdict POST that fails twice then succeeds still lands, through the step engine's own retry (#1226)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+    // Call 1 is the run-start "pending" post (must land clean so the run
+    // proceeds); calls 2 and 3 are the verdict post's first two attempts,
+    // mocked as a transient HTTP 503; call 4 is the verdict post's third
+    // attempt, which succeeds.
+    statusPostFailOn = new Set([2, 3]);
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-verdict-post-retry");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-verdict-post-retry", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; statusPostFailed: boolean };
+      expect(out.state).toBe("success");
+      expect(out.statusPostFailed).toBe(false);
+      // 1 pending post + 3 verdict-post attempts (2 failed, 1 landed).
+      expect(statusPostCalls).toBe(4);
+      expect(lastPostedStatus?.state).toBe("success");
     } finally {
       await instance.dispose();
     }
