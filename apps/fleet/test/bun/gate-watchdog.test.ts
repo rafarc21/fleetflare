@@ -372,6 +372,24 @@ describe("hasRedResult: a leg's decisive stored result decides red, as the run's
     const files = { [`${P}/shard-lint-try2.json`]: "failure" };
     expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
   });
+
+  it("a try-3 that passed decides the leg over tries 1 and 2: not red (#1231: more than one infra retry)", async () => {
+    const files = {
+      [`${P}/shard-lint.json`]: "error",
+      [`${P}/shard-lint-try2.json`]: "failure",
+      [`${P}/shard-lint-try3.json`]: "success",
+    };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(false);
+  });
+
+  it("a try-3 that failed decides the leg over a passing try-2: red (#1231: the latest try always decides)", async () => {
+    const files = {
+      [`${P}/shard-lint.json`]: "error",
+      [`${P}/shard-lint-try2.json`]: "success",
+      [`${P}/shard-lint-try3.json`]: "failure",
+    };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
+  });
 });
 
 describe("sweepStalledRuns: only a finished run is retired; an unknown status is read again (#1150 review)", () => {
