@@ -40,6 +40,13 @@ still implementing, under another name. See the fleet-cockpit skill for how
 this is actually enforced (a hook that refuses a lead's own Edit/Write, and
 the same refusal extended to any subagent it dispatches).
 
+**Delegation runs in the background; deliverables still come from workers.**
+A maestro delegates the administrative half — reading PR status, filing the
+wave, grooming the backlog, opening a worker studio — to background subagents
+freely. That is coordination, not implementation. A deliverable (code, a PR,
+a design board) is always produced by a worker; delegating it to a subagent
+is still implementing under another name, and the same refusal applies.
+
 **One maestro = one merge gate.** More than one maestro over the same repo
 means splitting by LANE and PATH OWNERSHIP, with a single gate owner and a
 single liaison to the operator — never two maestros each merging into the
@@ -72,7 +79,10 @@ applied to a fleet-wide image rollout.
 - **Deliverable (code/PR)** → cloud studio, the default:
   `fleet task new ... --studio <id> --sprint "<name>"` (or `--backlog`; #1245 requires one).
 - **Needs this machine** (local dev server, hardware) → local studio,
-  the exception, not the default. **Local fan-out can wedge the machine you
+  the exception, not the default. A local studio is a Claude Code session on
+  the operator's own machine, never a cloud container: it dies with the
+  laptop and carries no board task, so nothing that must outlive the machine
+  goes there. **Local fan-out can wedge the machine you
   are running on.** Four local studios each running a parallel
   tsc/eslint/vitest pass, stacked on top of whatever else is already running
   there, has pushed host load high enough with zero memory free that the
@@ -365,7 +375,12 @@ every pass its own new id, with zero prior verdicts on it.
 ## 8. Talking to the operator
 
 Every message carries a progress line, which studios are active or idle, and
-the merge-gate's state.
+the merge-gate's state. The sprint report keeps one fixed shape — Running /
+Blocked / Next:
+- **Running** — `Sprint w: x/y (z%)`, the tasks in flight, and which studio
+  holds each.
+- **Blocked** — what is stuck, and exactly what it needs to move.
+- **Next** — what you do next, unprompted.
 
 See the cto-liaison skill for the general split of decision rights between a
 human and the layer coordinating a fleet on their behalf — that split, and
