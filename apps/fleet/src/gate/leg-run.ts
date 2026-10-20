@@ -28,11 +28,22 @@ const MAX_INFRA_CAUSE_CHARS = 200;
  *  passes on retry, so the flake's cause stays in the one-line status. */
 const MAX_FIRST_DESCRIPTION_CHARS = 150;
 
+/** The combined-causes budget for a leg whose every attempt failed (#1231):
+ *  short enough to read as one line, generous enough for 2-3 short causes. */
+export const MAX_COMBINED_CAUSE_CHARS = 140;
+
+/** Every failed attempt's cause, joined, capped at MAX_COMBINED_CAUSE_CHARS —
+ *  an ellipsis marks a cut, never a silent truncation. */
+export function combineCauses(causes: string[]): string {
+  const joined = causes.join("; ");
+  return joined.length <= MAX_COMBINED_CAUSE_CHARS ? joined : `${joined.slice(0, MAX_COMBINED_CAUSE_CHARS - 1)}…`;
+}
+
 /** The one step config a leg uses. Literal types, so the object is assignable
  *  to Workflows' WorkflowStepConfig without importing cloudflare:workers here
  *  (the check tsconfigs for test/ cannot resolve that module). */
 export interface LegStepConfig {
-  retries: { limit: number; delay: "15 seconds"; backoff: "constant" };
+  retries: { limit: number; delay: "15 seconds"; backoff: "constant" | "exponential" };
   timeout: "30 minutes";
 }
 
@@ -42,7 +53,7 @@ export interface LegStepRunner {
 }
 
 export const LEG_STEP_CONFIG: LegStepConfig = {
-  retries: { limit: 1, delay: "15 seconds", backoff: "constant" },
+  retries: { limit: 2, delay: "15 seconds", backoff: "exponential" },
   timeout: "30 minutes",
 };
 
@@ -118,6 +129,7 @@ export async function runLegStep(
   const deadlineMs = deps.stepDeadlineMs ?? legStepDeadlineMs(planned.timeoutMin);
   const attempt = (name: string, targetFor: (tryNo: number) => PlannedLeg): Promise<LegRunResult> => {
     let tryNo = 0;
+    const causes: string[] = [];
     return step.do(name, LEG_STEP_CONFIG, async () => {
       const target = targetFor(++tryNo);
       // Made inside the callback: a Workflows step retry re-runs it, so every
@@ -164,7 +176,8 @@ export async function runLegStep(
           ? `${planned.leg}: no progress past its deadline`
           : err instanceof Error ? err.message : String(err);
         const minutes = Math.round((Date.now() - started) / 60_000);
-        throw new Error(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min`);
+        causes.push(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min`);
+        throw new Error(combineCauses(causes));
       }
     });
   };

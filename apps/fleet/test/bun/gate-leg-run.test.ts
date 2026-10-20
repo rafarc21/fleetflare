@@ -3,7 +3,7 @@
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
 import { describe, it, expect, spyOn } from "bun:test";
-import { gateRunnerName, legResultReader, runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
+import { combineCauses, gateRunnerName, legResultReader, runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
 
@@ -79,23 +79,25 @@ describe("runLegStep", () => {
     });
   });
 
-  it("non-2xx: retried once; the 503 error body surfaces as '<leg>: <error>'", async () => {
+  it("non-2xx: retried twice (#1231); the 503 error body surfaces as '<leg>: <error>' for every attempt, combined", async () => {
     const step = fakeStep();
     let sent = 0;
     const dispatch = async () => { sent++; return reply({ error: "gate container did not start within 180 s" }, 503); };
     const result = await runLegStep(step, dispatch, PLANNED);
+    const cause = "lint: gate container did not start within 180 s after 0 min";
     expect(result.leg).toBe("lint");
     expect(result.state).toBe("error");
-    expect(result.description).toBe("lint: gate container did not start within 180 s after 0 min");
-    expect(sent).toBe(2);
+    expect(result.description).toBe(combineCauses([cause, cause, cause]));
+    expect(sent).toBe(3);
   });
 
-  it("the infra cause is cut at 200 chars, then the wall time is appended", async () => {
+  it("the infra cause is cut at 200 chars per attempt, then the wall time is appended, then all 3 attempts are combined (#1231)", async () => {
     const step = fakeStep();
     const dispatch = async () => reply({ error: "x".repeat(300) }, 503);
     const result = await runLegStep(step, dispatch, PLANNED);
+    const cause = `lint: ${"x".repeat(200 - "lint: ".length)} after 0 min`;
     expect(result.state).toBe("error");
-    expect(result.description).toBe(`lint: ${"x".repeat(200 - "lint: ".length)} after 0 min`);
+    expect(result.description).toBe(combineCauses([cause, cause, cause]));
   });
 
   it("only one step per leg, and no waitForEvent: the start step is the whole leg", async () => {
@@ -112,11 +114,11 @@ describe("runLegStep", () => {
     expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
   });
 
-  it("start step config: one retry after 15s constant, 30-minute attempt timeout", async () => {
+  it("start step config: two retries from a 15s exponential base delay, 30-minute attempt timeout (#1231)", async () => {
     const step = fakeStep();
     await runLegStep(step, async () => reply({ state: "success" }), PLANNED);
     expect(step.calls[0].config).toEqual({
-      retries: { limit: 1, delay: "15 seconds", backoff: "constant" },
+      retries: { limit: 2, delay: "15 seconds", backoff: "exponential" },
       timeout: "30 minutes",
     });
   });
@@ -135,6 +137,48 @@ describe("runLegStep", () => {
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result.state).toBe("error");
     expect(result.description).toContain("unknown state");
+  });
+});
+
+// #1231: retries.limit raised from 1 to 2, so a start-<leg> step now gets up
+// to 2 infra retries (3 total attempts) before giving up.
+describe("runLegStep: two infra retries, not one (#1231)", () => {
+  it("two infra failures then success: the third attempt's result is the leg's success", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      if (sent <= 2) return reply({ error: "gate container did not start within 180 s" }, 503);
+      return reply({ state: "success" });
+    };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toMatchObject({ leg: "lint", state: "success" });
+    expect(sent).toBe(3);
+  });
+
+  it("three infra failures: final error combines all attempt causes, capped at 140 chars", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; return reply({ error: `attempt ${sent} boom` }, 503); };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result.state).toBe("error");
+    expect(result.description!.length).toBeLessThanOrEqual(140);
+    expect(result.description).toContain("attempt 1 boom");
+    expect(result.description).toContain("attempt 2 boom");
+    expect(result.description).toContain("attempt 3 boom");
+    expect(sent).toBe(3);
+  });
+});
+
+describe("combineCauses: every failed attempt's cause, joined, capped at 140 chars (#1231)", () => {
+  it("causes that fit comfortably are joined verbatim with '; ', no truncation marker", () => {
+    expect(combineCauses(["a: boom", "b: boom", "c: boom"])).toBe("a: boom; b: boom; c: boom");
+  });
+
+  it("causes that together exceed 140 chars are cut to exactly 140 chars, ending with an ellipsis", () => {
+    const result = combineCauses(["x".repeat(60), "y".repeat(60), "z".repeat(60)]);
+    expect(result.length).toBe(140);
+    expect(result.endsWith("…")).toBe(true);
   });
 });
 
@@ -200,11 +244,12 @@ describe("runLegStep: flaky evidence and HTTP fallback (#1057)", () => {
     expect(result.description).toBe(`flaky: passed on retry; first: ${"y".repeat(150)}`);
   });
 
-  it("non-2xx with a non-JSON body: the cause is '<leg>: HTTP <status>'", async () => {
+  it("non-2xx with a non-JSON body: the cause is '<leg>: HTTP <status>', combined across all 3 attempts (#1231)", async () => {
     const step = fakeStep();
     const dispatch = async () => new Response("<html>bad gateway</html>", { status: 502 });
     const result = await runLegStep(step, dispatch, PLANNED);
-    expect(result).toMatchObject({ leg: "lint", state: "error", description: "lint: HTTP 502 after 0 min" });
+    const cause = "lint: HTTP 502 after 0 min";
+    expect(result).toMatchObject({ leg: "lint", state: "error", description: combineCauses([cause, cause, cause]) });
   });
 });
 
@@ -226,7 +271,7 @@ describe("gateRunnerName: one runner DO per leg attempt (#1068)", () => {
 });
 
 describe("runLegStep: every attempt dispatches under a fresh attempt id (#1068)", () => {
-  it("a start-step infra retry gets a new attempt id: the id is made inside the step callback", async () => {
+  it("a start-step infra retry gets a new attempt id on every attempt (#1231): the id is made inside the step callback", async () => {
     const step = fakeStep();
     const ids: string[] = [];
     const dispatch = async (_p: PlannedLeg, attemptId: string) => {
@@ -234,9 +279,9 @@ describe("runLegStep: every attempt dispatches under a fresh attempt id (#1068)"
       return reply({ error: "container not listening" }, 503);
     };
     await runLegStep(step, dispatch, PLANNED);
-    expect(ids).toHaveLength(2);
+    expect(ids).toHaveLength(3);
     expect(ids[0]).not.toBe("");
-    expect(ids[0]).not.toBe(ids[1]);
+    expect(new Set(ids).size).toBe(3);
   });
 
   it("a flaky red leg's retry-<leg> step gets its own attempt id", async () => {
@@ -269,30 +314,32 @@ describe("runLegStep: every attempt dispatches under a fresh attempt id (#1068)"
 // Thrown attempts still count: the wall time from the callback start is put
 // into the thrown message. Date.now is pinned so the minutes are exact.
 describe("runLegStep: a thrown attempt reports its wall time (#1068)", () => {
-  it("an infra attempt that spends 4 min then throws says 'after 4 min'", async () => {
+  it("an infra attempt that spends 4 min then throws says 'after 4 min', combined across all 3 attempts (#1231)", async () => {
     let now = 0;
     const clock = spyOn(Date, "now").mockImplementation(() => now);
     try {
       const step = fakeStep();
       const dispatch = async () => { now += 4 * 60_000; return reply({ error: "gate server unreachable: The container is not listening" }, 503); };
       const result = await runLegStep(step, dispatch, PLANNED);
+      const cause = "lint: gate server unreachable: The container is not listening after 4 min";
       expect(result).toEqual({
         leg: "lint", state: "error",
-        description: "lint: gate server unreachable: The container is not listening after 4 min",
+        description: combineCauses([cause, cause, cause]),
       });
     } finally {
       clock.mockRestore();
     }
   });
 
-  it("a dispatch that rejects (no reply at all) still reports its wall time", async () => {
+  it("a dispatch that rejects (no reply at all) still reports its wall time, combined across all 3 attempts (#1231)", async () => {
     let now = 0;
     const clock = spyOn(Date, "now").mockImplementation(() => now);
     try {
       const step = fakeStep();
       const dispatch = async () => { now += 2 * 60_000; throw new Error("socket reset"); };
       const result = await runLegStep(step, dispatch, PLANNED);
-      expect(result).toEqual({ leg: "lint", state: "error", description: "socket reset after 2 min" });
+      const cause = "socket reset after 2 min";
+      expect(result).toEqual({ leg: "lint", state: "error", description: combineCauses([cause, cause, cause]) });
     } finally {
       clock.mockRestore();
     }
@@ -324,24 +371,27 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
     expect(sent).toBe(2);
   });
 
-  it("no R2 result for the leg: the description is the transport error alone", async () => {
+  it("no R2 result for the leg: the description is the transport error, combined across all 3 attempts (#1231)", async () => {
     const step = fakeStep();
     const dispatch = async () => { throw new Error(LOST); };
     const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => undefined });
-    expect(result.description).toBe(`${LOST} after 0 min`);
+    const cause = `${LOST} after 0 min`;
+    expect(result.description).toBe(combineCauses([cause, cause, cause]));
   });
 
-  it("an R2 read that throws never masks the transport error", async () => {
+  it("an R2 read that throws never masks the transport error, combined across all 3 attempts (#1231)", async () => {
     const step = fakeStep();
     const dispatch = async () => { throw new Error(LOST); };
     const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => { throw new Error("r2 down"); } });
-    expect(result).toEqual({ leg: "lint", state: "error", description: `${LOST} after 0 min` });
+    const cause = `${LOST} after 0 min`;
+    expect(result).toEqual({ leg: "lint", state: "error", description: combineCauses([cause, cause, cause]) });
   });
 
-  it("no deps given: the transport error alone, as before", async () => {
+  it("no deps given: the transport error alone, combined across all 3 attempts (#1231)", async () => {
     const step = fakeStep();
     const dispatch = async () => { throw new Error(LOST); };
-    expect((await runLegStep(step, dispatch, PLANNED)).description).toBe(`${LOST} after 0 min`);
+    const cause = `${LOST} after 0 min`;
+    expect((await runLegStep(step, dispatch, PLANNED)).description).toBe(combineCauses([cause, cause, cause]));
   });
 
   it("transport lost, R2 holds success: the leg passes on the first try, no retry (#1122)", async () => {
@@ -385,13 +435,13 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
     });
   });
 
-  it("R2 absent under a transport loss: the transport error is the cause, and the retry runs", async () => {
+  it("R2 absent under a transport loss: the transport error is the cause, and the start step's own infra retries run (#1231: now 3 attempts)", async () => {
     const step = fakeStep();
     let sent = 0;
     const dispatch = async () => { sent++; throw new Error(LOST); };
     const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => undefined });
     expect(result).toMatchObject({ leg: "lint", state: "error" });
-    expect(sent).toBe(2);
+    expect(sent).toBe(3);
   });
 
   it("a retry that loses its transport reads the retry's own key", async () => {
@@ -425,12 +475,16 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
     expect(result.description).toBe("result read from R2 after transport loss: lint 3 errors");
   });
 
-  it("the start step's infra retry reads its own result key, not try 1's", async () => {
+  it("the start step's infra retries read their own result key, not try 1's (#1231: 2 infra retries, both on the try2 key)", async () => {
     const step = fakeStep();
     const readKeys: string[] = [];
     const dispatch = async () => { throw new Error(LOST); };
     await runLegStep(step, dispatch, PLANNED, { readResult: async (key) => { readKeys.push(key); return undefined; } });
-    expect(readKeys).toEqual([PLANNED.resultKey, "gate/o/r/runs/1/i/shard-lint-try2.json"]);
+    expect(readKeys).toEqual([
+      PLANNED.resultKey,
+      "gate/o/r/runs/1/i/shard-lint-try2.json",
+      "gate/o/r/runs/1/i/shard-lint-try2.json",
+    ]);
   });
 });
 
@@ -594,7 +648,7 @@ describe("runLegStep: install failure retries once (#1092)", () => {
     ]);
   });
 
-  it("an install retry that dies as infra still ends as error with the first cause noted", async () => {
+  it("an install retry that dies as infra still ends as error with the first cause noted, all 3 retry-step attempts combined (#1231)", async () => {
     const step = fakeStep();
     let sent = 0;
     const dispatch = async () => {
@@ -602,8 +656,9 @@ describe("runLegStep: install failure retries once (#1092)", () => {
       return sent === 1 ? reply({ state: "error", description: INSTALL }) : reply({ error: "gate container did not start within 180 s" }, 503);
     };
     const result = await runLegStep(step, dispatch, PLANNED);
+    const cause = "lint: gate container did not start within 180 s after 0 min";
     expect(result.state).toBe("error");
-    expect(result.description).toBe(`lint: gate container did not start within 180 s after 0 min; first: ${INSTALL}`);
+    expect(result.description).toBe(`${combineCauses([cause, cause, cause])}; first: ${INSTALL}`);
     expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
   });
 

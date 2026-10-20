@@ -41,7 +41,7 @@ describe("runLegStep: a hung DO call ends as infra and takes one rerun (#1135 it
     };
     const result = await runLegStep(fakeStep(), hangUntilAborted, PLANNED, { stepDeadlineMs: 20 });
 
-    expect(signals).toHaveLength(2); // start-lint and its infra retry
+    expect(signals).toHaveLength(3); // start-lint and its two infra retries (#1231)
     expect(signals.every((s) => s.aborted)).toBe(true);
     expect(result.state).toBe("error");
     expect(isInfraLegFailure({ leg: "lint", state: result.state, description: result.description })).toBe(true);
