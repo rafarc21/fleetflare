@@ -16,20 +16,26 @@ import { getStudioStub, getStudioStubForRow, realDoClassForRole } from "./profil
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { TERMINAL_PATH } from "./terminal";
 import { PASTE_MIME_EXT, PASTE_MAX_BYTES } from "./paste";
-import { listStudios, expireBurnWindow, claimStudioRow, claimStoppedRow, withAccountResolution } from "./registry";
+import {
+  listStudios, getStudioRow, recordStudio, expireBurnWindow, claimStudioRow, claimStoppedRow, withAccountResolution,
+} from "./registry";
 import { renderTerminalPage } from "./page";
 import { renderGridPage, scrubPreview, type GridCard } from "./grid";
 import {
   runSpawn, runResume, resolveSpawnParent, resolveSpawnPolicy, resolveMaxStudios, liveStudioCount, isSpawnTokenShaped,
-  SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type ResumeDeps, type SpawnParent,
+  readLocalRequest, SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type ResumeDeps, type SpawnParent,
 } from "./spawn";
-import { reachRepo, repoTokenMinter } from "../github/auth";
+import { reachRepo, repoTokenMinter, mintRepoToken } from "../github/auth";
 import type { RepoReachFetch } from "../github/reach";
 import { fetchRepoFile, getDefaultBranch } from "../github/api";
 import { resolveWorkRepo, parseRepoSlug, type WorkRepoDeps } from "./repo";
-import { briefPromptResolver } from "../board/routes";
+import { briefPromptResolver, assignedBriefResolver } from "../board/routes";
 import { resolveProjectCard } from "../directus/card";
 import { redactSecrets } from "./redact";
+import { resolveOpsRepo } from "../ops-repo";
+import { juniorEnabled } from "../junior/gate";
+import { resolveBringupEnv, type ProvisionDeps } from "./provision";
+import { localRowStatus } from "./local-spawn";
 import type { Observed } from "./observed";
 import { logWakeOutcome } from "./wake";
 import {
@@ -107,6 +113,27 @@ function redactObservedSession(observed: Observed): Observed {
 }
 
 /**
+ * Fleet task #1248 (T2): the ONE guard every container-only verb carries for
+ * a `host:"local"` row — a local studio has no container, so it must refuse
+ * (409) before any DO RPC rather than dispatch into a namespace that holds
+ * nothing for it. `fleet destroy` is the teardown for a local row, and every
+ * refusal body names it. `null` when the row is not local (or absent) — the
+ * caller proceeds unchanged; the 409 body is byte-identical to what each
+ * branch hand-wrote before this was factored (the verb is the only varying
+ * word). The destroy branch does NOT use this: its local shape is a row flip
+ * to `stopped`, never a refusal.
+ */
+async function refuseLocalRow(env: Env, id: string, verb: string): Promise<Response | null> {
+  const localRow = await getStudioRow(env, id);
+  if (localRow?.host !== "local") return null;
+  return new Response(
+    `"${id}" is a local studio — it has no container, so ${verb} is container-only. ` +
+    "Tear it down with: fleet destroy " + id,
+    { status: 409 },
+  );
+}
+
+/**
  * Task 5 (P2 plane 3): assembles the grid page's per-studio card list and
  * renders it. Lives here, not grid.ts, for the same reason page.ts's own
  * render half never dispatches to a DO stub — routes.ts is this feature's
@@ -136,7 +163,13 @@ async function renderStudioGrid(env: Env): Promise<Response> {
       }
       return {
         id: s.id, state: s.state, lastRefresh: s.lastRefresh,
-        tailscaleHost: s.tailscaleHost, burn: s.burn, preview,
+        tailscaleHost: s.tailscaleHost,
+        // Fleet task #1248 (R6): a local studio has no tailscale host — its
+        // "where" is the operator's Mac. `host` rides the card so the grid
+        // renders "local" for it; absent on a cloud card, the exact bytes
+        // today (JSON.stringify drops undefined).
+        host: s.host,
+        burn: s.burn, preview,
       };
     }),
   );
@@ -198,6 +231,50 @@ function githubRepoReach(env: Env): RepoReachFetch {
 
 function repoDeps(reach: RepoReachFetch): WorkRepoDeps {
   return { reachRepo: reach };
+}
+
+/**
+ * Fleet task #1248: base64-decode UTF-8 (the inverse of base64.ts's
+ * base64EncodeUtf8, which is what ROLE_PROMPT_B64/STUDIO_MEMBERS_B64 carry).
+ * A bare `atob` returns Latin-1 — every prompt now carries house rules whose
+ * em dashes are multi-byte — so the bytes are decoded as UTF-8, the same
+ * helper test/helpers/routes-studio-harness.ts's decodeRolePrompt already
+ * uses for exactly this reason.
+ */
+function base64DecodeUtf8(b64: string): string {
+  return new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+}
+
+/**
+ * Fleet task #1248: the local-spawn route's bring-up env. reuses
+ * provision.ts's resolveBringupEnv over a REAL, Env-backed ProvisionDeps
+ * built here (there is no Env->ProvisionDeps builder outside do.ts's own
+ * DO-scoped deps()): the only fields resolveBringupEnv reaches are
+ * fetchBlueprintFile, resolveAssignedBrief, juniorEnabled, opsRepo, and
+ * fetchOpsFile — exactly the set wired below, mirrored from do.ts's deps().
+ */
+function localProvisionDeps(env: Env, fetchFile: BlueprintFetch): ProvisionDeps {
+  const mint = repoTokenMinter(env);
+  const opsRepo = resolveOpsRepo(env);
+  return {
+    sbExec: async () => { throw new Error("local bring-up never execs a container"); },
+    recordStudio: (status) => recordStudio(env, status),
+    now: () => new Date().toISOString(),
+    fetchBlueprintFile: (repo, path, ref) => fetchFile(repo, path, ref),
+    memoryRepo: opsRepo,
+    opsRepo,
+    juniorEnabled: (slug) => juniorEnabled(env, slug),
+    resolveAssignedBrief: assignedBriefResolver(env),
+    ...(opsRepo === null
+      ? {}
+      : {
+        // Same contents:read-narrowed fetch do.ts's opsFileFetcher performs,
+        // inlined here because importing do.ts would drag the DO class into
+        // this module (see this file's own header).
+        fetchOpsFile: async (path, ref) =>
+          fetchRepoFile(await mintRepoToken(env, opsRepo, { permissions: { contents: "read" } }), opsRepo, path, ref),
+      }),
+  };
 }
 
 /**
@@ -349,6 +426,15 @@ export async function handleFleetSpawn(
   // Only on this machine surface — the operator already has /provision. A
   // body without it (every pre-#59 binary) is the spawn it always was.
   const body = await spawnBody(req);
+  // Fleet task #1248 review BLOCKER B6: /fleet/spawn is the MACHINE cloud
+  // surface — same orphan-risk as /studio/spawn if a `local` field rode in
+  // here (host:"local" placeholder + a real container). Refuse before runSpawn.
+  if ((body as { local?: unknown } | null)?.local !== undefined && (body as { local?: unknown } | null)?.local !== null) {
+    return new Response(
+      "local spawns go through /studio/local/spawn (POST with {\"local\": true, \"localPath\": \"<absolute path>\"}) — this route is cloud-only",
+      { status: 400 },
+    );
+  }
   if ((body as { resume?: unknown } | null)?.resume === true) return runResume(deps, parent, body);
   return runSpawn(deps, parent, body);
 }
@@ -390,7 +476,18 @@ export async function handleStudio(
    */
   if (url.pathname === "/studio/spawn") {
     if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
-    const body = (await spawnBody(req)) as { repo?: unknown };
+    const body = (await spawnBody(req)) as { repo?: unknown; local?: unknown };
+    // Fleet task #1248 review BLOCKER B6: this is the CLOUD spawn route. A
+    // body that says `local` here would otherwise reach shared runSpawn and
+    // write a host:"local" placeholder then provision a REAL container —
+    // orphaning it (a destroy in that window is a D1 flip only). Local spawns
+    // have their own route.
+    if (body.local !== undefined && body.local !== null) {
+      return new Response(
+        "local spawns go through /studio/local/spawn (POST with {\"local\": true, \"localPath\": \"<absolute path>\"}) — this route is cloud-only",
+        { status: 400 },
+      );
+    }
     // Dynamic repo selection (P4a): `repo` is the full `owner/repo` the CLI
     // read out of the local `git remote origin`. resolveWorkRepo owns every
     // decision about it — shape, id-segment validity, the fleet-wide segment
@@ -414,6 +511,101 @@ export async function handleStudio(
       id: OPERATOR_ID, role: OPERATOR_ID, repo: repo.segment, repoSlug: repo.slug,
     };
     return runSpawn(deps, parent, body);
+  }
+
+  /**
+   * Fleet task #1248: `fleet spawn --local` / `ff --local`. The operator's
+   * local spawn — same runSpawn core as /studio/spawn (same org chart,
+   * same fleet.json role check, same id allocation, same brief), but the
+   * provision half writes a D1 row (`host:"local"`, `localPath`) instead of
+   * dispatching to a container DO, and no maestro is woken (the sweep
+   * supervises containers only). `resolveWorkRepo` still verifies the repo
+   * exactly as the cloud route does — a local studio clones the same code
+   * from the same place, just on the operator's Mac.
+   *
+   * Handled before ROUTE_RE, beside /studio/spawn, for the same reason:
+   * this path has no studio id segment to match.
+   */
+  if (url.pathname === "/studio/local/spawn") {
+    if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+    const body = (await spawnBody(req)) as { repo?: unknown };
+    // This is the LOCAL spawn route — a body that does not say `local: true`
+    // is a caller error, not a cloud spawn. readLocalRequest's own `null`
+    // (malformed localPath) is left to runSpawn's identical check below.
+    if (readLocalRequest(body) === undefined) {
+      return new Response('local spawn requires {"local": true, "localPath": "<absolute path>"}', { status: 400 });
+    }
+    const deps = spawnDeps(env, fetchFile, resolveBrief);
+    const repo = await resolveWorkRepo(repoDeps(reach), {
+      requested: body.repo, defaultSlug: env.AGENT_REPO, rows: await deps.listStudios(),
+    });
+    if (!repo.ok) return new Response(repo.message, { status: repo.status });
+    const parent: SpawnParent = {
+      id: OPERATOR_ID, role: OPERATOR_ID, repo: repo.segment, repoSlug: repo.slug,
+    };
+    const res = await runSpawn(
+      {
+        ...deps,
+        // Local override: register the row straight into D1 — no DO, no
+        // container. notifyMaestro is a no-op: the sweep supervises
+        // containers only, and a local studio is never one.
+        provisionChild: (childId, cfg) => recordStudio(env, localRowStatus(childId, cfg)).then(() => localRowStatus(childId, cfg)),
+        notifyMaestro: async () => {},
+      },
+      parent,
+      body,
+    );
+    if (res.status !== 200) return res;
+
+    // runSpawn succeeded — resolve the bring-up env over the real
+    // ProvisionDeps and attach it to the response so the CLI can launch
+    // claude with the exact prompt/tools/effort the container would get.
+    const status = (await res.json()) as StudioStatus;
+    const cfg: ProvisionConfig = {
+      repo: parent.repo, role: parseStudioId(status.id)?.role ?? "",
+      spawnedBy: OPERATOR_ID, repoSlug: parent.repoSlug,
+      ...((body as { leadType?: "claude" | "glm" }).leadType !== undefined
+        ? { leadType: (body as { leadType: "claude" | "glm" }).leadType }
+        : {}),
+    };
+    let bringupEnv: Awaited<ReturnType<typeof resolveBringupEnv>>["bringupEnv"];
+    try {
+      ({ bringupEnv } = await resolveBringupEnv(
+        localProvisionDeps(env, fetchFile), cfg, env.AGENT_REPO, parent.repoSlug ?? env.AGENT_REPO,
+        status.leadType,
+      ));
+    } catch (err) {
+      // T1a: runSpawn already wrote the running local row. resolveBringupEnv
+      // failing here means the CLI can never launch a lead — flip the row to
+      // stopped so nothing is left claiming a running local studio with no
+      // lead, and name the failure rather than leaving the orphan.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`studio ${status.id} local bring-up env failed`, err);
+      await recordStudio(env, { ...status, state: "stopped" });
+      return new Response(`local spawn failed resolving the bring-up env: ${message}`, { status: 500 });
+    }
+    const studioEnv = "STUDIO_NAME" in bringupEnv && bringupEnv.STUDIO_NAME !== "" ? bringupEnv : null;
+    const members = studioEnv
+      ? (() => {
+        // studioBringupEnv ships members as b64(JSON: {filename: b64(raw)}):
+        // the OUTER bundle is decoded here, but each inner member body is
+        // STILL base64. The CLI writes them verbatim to .claude/agents/, so
+        // every inner value must be decoded too — never sent as its base64.
+        const bundle = JSON.parse(base64DecodeUtf8(studioEnv.STUDIO_MEMBERS_B64 || "e30=")) as Record<string, string>;
+        const decoded: Record<string, string> = {};
+        for (const [filename, b64] of Object.entries(bundle)) decoded[filename] = base64DecodeUtf8(b64);
+        return decoded;
+      })()
+      : undefined;
+    return Response.json({
+      ...status,
+      prompt: base64DecodeUtf8(bringupEnv.ROLE_PROMPT_B64),
+      allowedTools: bringupEnv.ROLE_ALLOWED_TOOLS,
+      effort: bringupEnv.ROLE_EFFORT,
+      ...(members !== undefined ? { members } : {}),
+      ...(studioEnv ? { skills: studioEnv.STUDIO_SKILLS } : {}),
+      leadType: status.leadType,
+    });
   }
 
   /**
@@ -1044,6 +1236,11 @@ export async function handleStudio(
    * container cannot wedge the whole listing.
    */
   if (action === "check" && req.method === "POST") {
+    // Fleet task #1248 (T2): a local studio has no container, so there is no
+    // container readiness to check — refuse before the DO RPC, same guard as
+    // provision/restart/recycle/destroy.
+    const refused = await refuseLocalRow(env, id.full, "check");
+    if (refused) return refused;
     let checked: Awaited<ReturnType<typeof stub.checkNow>>;
     try {
       checked = await stub.checkNow();
@@ -1200,6 +1397,11 @@ export async function handleStudio(
     });
   }
   if (action === "provision" && req.method === "POST") {
+    // Fleet task #1248 (T2): a local studio has no container — every
+    // container-only verb must refuse before RPCing the DO, the same guard the
+    // destroy branch carries. `fleet destroy` is the teardown for a local row.
+    const refused = await refuseLocalRow(env, id.full, "provision");
+    if (refused) return refused;
     const body = (await req.json().catch(() => ({}))) as Partial<ProvisionConfig>;
     // Task 11: an explicit override for which blueprint ref to pull the
     // role file + org.json from — validated when the caller supplies one,
@@ -1351,6 +1553,10 @@ export async function handleStudio(
     }
   }
   if (action === "restart" && req.method === "POST") {
+    // Fleet task #1248 (T2): a local studio has no container — refuse before
+    // the DO RPC, same guard as provision/recycle/destroy.
+    const refused = await refuseLocalRow(env, id.full, "restart");
+    if (refused) return refused;
     try {
       return Response.json(burnView(await stub.restartStudio()));
     } catch (err) {
@@ -1361,6 +1567,11 @@ export async function handleStudio(
     }
   }
   if (action === "recycle" && req.method === "POST") {
+    // Fleet task #1248 (T2): a local studio has no container — refuse before
+    // the DO RPC, same guard as provision/restart/destroy. recycle's whole
+    // point is destroying a container outright; a local row has none.
+    const refused = await refuseLocalRow(env, id.full, "recycle");
+    if (refused) return refused;
     // Root-cause fix for the stranded-image bug: recycle destroys the
     // container outright, so it needs a full ProvisionConfig to re-provision
     // with — the same repo/role the provision branch above builds, parsed
@@ -1454,6 +1665,22 @@ export async function handleStudio(
     // studio whose edges reach it (StudioStatus.parked). Sent only when set,
     // so a plain destroy's RPC is the byte-identical pre-#59 call.
     const park = url.searchParams.get("park") === "true";
+
+    // Fleet task #1248: a local studio has no container — destroying it is a
+    // registry row flip, never an RPC. The host stays "local" (it is still
+    // local, just stopped), and the cloud path below is untouched.
+    const localRow = await getStudioRow(env, id.full);
+    if (localRow?.host === "local") {
+      const stopped: StudioStatus = {
+        ...localRow,
+        state: "stopped",
+        parked: park,
+        stoppedAt: new Date().toISOString(),
+      };
+      await recordStudio(env, stopped);
+      return Response.json(burnView(stopped));
+    }
+
     try {
       const result = park
         ? await stub.destroyStudio(force, discardUnsynced, true)

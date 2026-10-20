@@ -16,11 +16,22 @@
 // orca-registry-teardown.test.ts, and the registry, locks, and ROW column live
 // in orca-registry-rows.test.ts.
 import { test, describe, expect } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import {
   studioWorkspaceName,
   orcaPresent,
   ensureStudioWorkspace,
   reconcileStudioWorkspaces,
+  ensureLocalStudioWorktree,
+  localWorktreeCreateArgs,
+  localLaunchCommand,
+  localLeadGateHookCommand,
+  appendLocalExcludeLines,
+  LOCAL_EXCLUDE_LINES,
+  resolveStudioWorktreePath,
   type OrcaDeps,
   type OrcaResult,
 } from "../../cli/orca-workspace";
@@ -301,4 +312,277 @@ describe("ensureStudioWorkspace — the five hard requirements", () => {
   });
 
 
+});
+
+// ---------------------------------------------------------------------------
+// Fleet task #1248: `ensureLocalStudioWorktree` — a LOCAL studio (host:"local")
+// materializes its lead into an Orca worktree checked out from a LOCAL clone
+// (`path:<localPath>`), with the SAME lead-gate + agents + skills the cloud
+// container gets, and launches claude via `orca terminal create`. Everything
+// is best-effort-fail-safe like `ensureStudioWorkspace`: one try/catch, one
+// stderr line, never a throw to the caller.
+
+describe("local studio workspace — fleet task #1248", () => {
+  // Real Orca reports `path` on the `worktree create` result (MEASURED — see
+  // orca-workspace.ts's OrcaEnvelope comment), and the local path's
+  // materialization step needs it to know where the lead's files land.
+  const LOCAL_CREATED = ok(JSON.stringify({
+    ok: true,
+    result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: "/fake/orca/studio-websites-pilot" } },
+  }));
+
+  test("localWorktreeCreateArgs emits the exact worktree create argv", () => {
+    expect(localWorktreeCreateArgs("/abs/clone", "main", "websites--pilot")).toEqual([
+      "worktree", "create",
+      "--repo", "path:/abs/clone",
+      "--base-branch", "origin/main",
+      "--agent", "claude",
+      "--name", "studio-websites--pilot",
+      "--no-parent", "--setup", "skip", "--json",
+    ]);
+  });
+
+  test("localLaunchCommand quotes the prompt-by-file and carries allowedTools/effort", () => {
+    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *) Edit Write", "max");
+    // The prompt rides by FILE — the launch line stays a few hundred bytes
+    // whatever the brief's size, and the pane shell expands "$(cat ...)" into
+    // one argv element (studio-bringup.sh's own issue #6 technique).
+    expect(cmd).toContain('--append-system-prompt "$(cat "/w/.fleet/working-set.md")"');
+    expect(cmd).toContain('--allowedTools "Bash(git *) Edit Write"');
+    expect(cmd).toContain("--effort max");
+  });
+
+  test("localLaunchCommand quotes the INNER prompt path so a path with a space survives", () => {
+    const cmd = localLaunchCommand("websites--pilot", "/w with space/.fleet/working-set.md", "Bash(git *)", "");
+    // The inner path must be quoted too: the pane shell reads the file path
+    // between the two quotes inside "$(cat ...)", or a space breaks the
+    // launch line.
+    expect(cmd).toContain('"$(cat "/w with space/.fleet/working-set.md")"');
+  });
+
+  test("localLaunchCommand never passes --dangerously-skip-permissions (a Mac lead keeps prompts on)", () => {
+    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    expect(cmd).not.toContain("--dangerously-skip-permissions");
+  });
+
+  test("localLaunchCommand arms the gate with a STUDIO_ID=<id> env-assignment prefix", () => {
+    // On the Mac STUDIO_ID is never set, so lead-gate.sh's own first line
+    // (`[ -n "${STUDIO_ID:-}" ] || exit 0`) would exit 0 before any gate
+    // logic. The prefix is the arming switch: claude — and every hook
+    // subprocess it spawns — inherits STUDIO_ID, and the gate goes active.
+    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    expect(cmd.startsWith("STUDIO_ID=websites--pilot claude")).toBe(true);
+    expect(cmd).not.toContain("--dangerously-skip-permissions");
+  });
+
+  test("localLaunchCommand omits --effort when the role carries none", () => {
+    expect(localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "")).not.toContain("--effort");
+  });
+
+  test("localLeadGateHookCommand is the fail-closed PreToolUse command, matcher .*", () => {
+    const cmd = localLeadGateHookCommand();
+    expect(cmd).toContain("lead-gate hook absent or not executable -- refusing (decision 11)");
+    expect(cmd).toContain("exit 2");
+    expect(cmd).toContain("exec");
+  });
+
+  test("localLeadGateHookCommand resolves the script by $CLAUDE_PROJECT_DIR, never $PWD (a lead that cd's still gates)", () => {
+    // $PWD is claude's CURRENT directory; a lead that `cd`'d into a subdir
+    // made it wrong and every tool call was refused (exit 2). The project
+    // root must be claude's own pointer, stable across cd.
+    const cmd = localLeadGateHookCommand();
+    expect(cmd).toContain("$CLAUDE_PROJECT_DIR/.claude/hooks/lead-gate.sh");
+    expect(cmd).not.toContain("$PWD");
+  });
+
+  test("a missing orca binary is a no-op with the same orca-not-found line", async () => {
+    const f = fake({}, { hasBinary: () => null, env: { TERM_PROGRAM: "Apple_Terminal" } });
+    const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+      localPath: "/abs/clone", defaultBranch: "main", prompt: "p", allowedTools: "Bash(git *)",
+    });
+    expect(outcome.kind).toBe("skipped");
+    expect(f.calls).toEqual([]);
+    expect(f.lines).toHaveLength(1);
+    expect(f.lines[0]).toContain("orca not found");
+  });
+
+  test("creates the worktree, materializes the working set, and launches claude via terminal create", async () => {
+    const f = fake({
+      "worktree create": LOCAL_CREATED,
+      "terminal create": TERM_CREATED,
+    });
+    const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+      localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+    });
+    expect(outcome.kind).toBe("created");
+
+    const create = f.calls.find((c) => c[0] === "worktree" && c[1] === "create");
+    expect(create).toBeDefined();
+    expect(create).toContain("--repo");
+    expect(create).toContain("path:/abs/clone");
+    expect(create).toContain("--base-branch");
+    expect(create).toContain("origin/main");
+    expect(create).toContain("--agent");
+    expect(create).toContain("claude");
+    expect(create).toContain("studio-websites--pilot");
+
+    const term = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
+    expect(term).toBeDefined();
+    expect(term).toContain("websites--pilot");
+    const cmd = term![term!.indexOf("--command") + 1];
+    expect(cmd).toContain("--append-system-prompt");
+    expect(cmd).toContain("$(cat");
+
+    // The prompt and settings landed on the worktree path (the fixture's
+    // worktree path), never in ~/.claude.
+    const path = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
+    expect(path).toBeDefined();
+  });
+
+  test("materializes the lead gate with IS_MAESTRO baked to False (a local studio is never maestro)", async () => {
+    // The copied hook must not keep the repo-tracked placeholder
+    // `IS_MAESTRO = __IS_MAESTRO_BOOL__`: if the gate ever ran, that bare
+    // name is a python NameError -> exit 1 -> PERMITS the call (only exit 2
+    // blocks). The bake into the copied bytes is the trust anchor — same
+    // reason studio-bringup.sh runs its own substitution on the copy, never
+    // leaves the value to be re-derived from a separate file at decision time.
+    const root = mkdtempSync(join(tmpdir(), "orca-local-"));
+    const worktreePath = join(root, "worktree");
+    try {
+      const f = fake({
+        "worktree create": ok(JSON.stringify({
+          ok: true,
+          result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: worktreePath } },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      const hookBytes = readFileSync(join(worktreePath, ".claude", "hooks", "lead-gate.sh"), "utf8");
+      expect(hookBytes).toContain("IS_MAESTRO = False");
+      expect(hookBytes).not.toContain("__IS_MAESTRO_BOOL__");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a worktree create failure is fail-closed: one stderr line, no throw", async () => {
+    const f = fake({ "worktree create": { ok: false, stdout: "", stderr: "boom", timedOut: false } });
+    const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+      localPath: "/abs/clone", defaultBranch: "main", prompt: "p", allowedTools: "Bash(git *)",
+    });
+    expect(outcome.kind).toBe("failed");
+    expect(f.lines.length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fleet task #1248 review BLOCKER B3: the lead's project-scoped files
+// (.fleet/working-set.md, .claude/settings.json, .claude/hooks/,
+// .claude/agents/, .claude/skills/) live INSIDE the worktree — committable.
+// A member `git add -A` would commit the fail-closed settings.json (blocking
+// every tool for anyone else using the repo) and private prompt/house-rules
+// text into a public repo. materializeLocalLead appends the exact lines to
+// the worktree's git exclude file (never the repo-tracked .gitignore).
+
+describe("local lead files are excluded from git (B3)", () => {
+  /** A real temp git worktree: `rev-parse --path-format=absolute --git-path
+   *  info/exclude` resolves the per-worktree exclude file, and a real
+   *  `git check-ignore` proves the lines take effect. */
+  function makeWorktree() {
+    const root = mkdtempSync(join(tmpdir(), "orca-exclude-repo-"));
+    const main = join(root, "main");
+    const wt = join(root, "wt");
+    mkdirSync(main);
+    execFileSync("git", ["init", "-q"], { cwd: main });
+    execFileSync("git", ["config", "user.email", "x@y"], { cwd: main });
+    execFileSync("git", ["config", "user.name", "x"], { cwd: main });
+    execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: main });
+    execFileSync("git", ["worktree", "add", "-q", wt, "-b", "wt"], { cwd: main });
+    return { root, main, wt };
+  }
+
+  function excludePath(wt: string): string {
+    return execFileSync("git", ["-C", wt, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], { encoding: "utf8" }).trim();
+  }
+
+  test("appends the five exact lines, idempotently, to the worktree's own exclude file", () => {
+    const { root, wt } = makeWorktree();
+    try {
+      const lines: string[] = [];
+      appendLocalExcludeLines(wt, { log: (l) => lines.push(l) });
+
+      const exclude = readFileSync(excludePath(wt), "utf8");
+      for (const line of LOCAL_EXCLUDE_LINES) expect(exclude).toContain(line);
+
+      // Idempotent: a second run must not stack duplicates.
+      appendLocalExcludeLines(wt, { log: (l) => lines.push(l) });
+      const again = readFileSync(excludePath(wt), "utf8");
+      for (const line of LOCAL_EXCLUDE_LINES) {
+        expect(again.split("\n").filter((l) => l === line)).toHaveLength(1);
+      }
+      expect(lines).toEqual([]); // never logs on success
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the excluded paths are actually ignored by git in the worktree", () => {
+    const { root, wt } = makeWorktree();
+    try {
+      appendLocalExcludeLines(wt, { log: () => {} });
+      // A file under each excluded path, then a real `git check-ignore`.
+      for (const dir of [".fleet", ".claude/hooks", ".claude/agents", ".claude/skills"]) {
+        mkdirSync(join(wt, dir), { recursive: true });
+        writeFileSync(join(wt, dir, "f"), "x");
+      }
+      mkdirSync(join(wt, ".claude"), { recursive: true });
+      writeFileSync(join(wt, ".claude", "settings.json"), "{}");
+      const ignored = execFileSync(
+        "git", ["-C", wt, "check-ignore", ".fleet/", ".claude/settings.json", ".claude/hooks/", ".claude/agents/", ".claude/skills/"],
+        { encoding: "utf8" },
+      ).trim().split("\n").filter(Boolean);
+      expect(ignored).toHaveLength(5);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a failed exclude write logs one line and never throws", () => {
+    const lines: string[] = [];
+    const run = (): { code: number | null; stdout: string; stderr: string } => ({ code: 128, stdout: "", stderr: "boom" });
+    expect(() => appendLocalExcludeLines("/nonexistent", { log: (l) => lines.push(l) }, run)).not.toThrow();
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("could not exclude");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fleet task #1248 review BLOCKER B1 (fix round): resolveStudioWorktreePath —
+// the ORCA worktree's own on-disk path for a local studio's destroy decision.
+// The dirty/ahead git reads must target this path, never the clone it was
+// built from (a clean clone + dirty worktree + --force --discard-unsynced
+// would still delete uncommitted work).
+
+describe("resolveStudioWorktreePath (B1 fix round)", () => {
+  test("returns the worktree path whose basename matches the studio id", async () => {
+    const f = fake({
+      "worktree list": worktrees("staging", "studio-websites--pilot"),
+    });
+    expect(await resolveStudioWorktreePath("websites--pilot", f.deps)).toBe("/fake/orca/studio-websites-pilot");
+  });
+
+  test("null when no orca is present", async () => {
+    const f = fake({}, { env: { TERM_PROGRAM: "Apple_Terminal" } });
+    expect(await resolveStudioWorktreePath("websites--pilot", f.deps)).toBeNull();
+    expect(f.calls).toEqual([]);
+  });
+
+  test("null when the worktree list has no row for the studio", async () => {
+    const f = fake({ "worktree list": worktrees("staging") });
+    expect(await resolveStudioWorktreePath("websites--pilot", f.deps)).toBeNull();
+  });
 });

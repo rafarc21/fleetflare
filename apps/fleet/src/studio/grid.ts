@@ -50,6 +50,14 @@ export interface GridCard {
   state: StudioState;
   lastRefresh: string | null;
   tailscaleHost: string | null;
+  /**
+   * Fleet task #1248 (R6): "local" when the studio runs on the operator's
+   * Mac, absent = cloud — byte-compat with every card serialised before this
+   * field existed (JSON.stringify drops undefined, so a cloud card is the
+   * exact same bytes it always was). The grid page's own script reads it to
+   * render "local" in the tailscale row instead of the "-" fallback.
+   */
+  host?: "local";
   burn: Burn | null;
   preview: string;
 }

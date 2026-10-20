@@ -54,6 +54,9 @@ export const FF_HELP = [
   '  ff <role> --new "<task>"  a SECOND (third, ...) studio for that role in this',
   "                  repo, on the lowest free instance number: <repo>--<role>--2,",
   "                  --3, and so on. Never attaches to an existing one.",
+  "  ff <role> --local         a studio on THIS Mac instead of a container: an",
+  "                  Orca worktree from this checkout, the same lead-gate and",
+  "                  role prompt the container would get, registered host:\"local\".",
   "  ff --help       this text",
   "",
   "All studios share ONE Claude account: --new lets more of them run at the same",
@@ -96,8 +99,12 @@ type FfArgs =
   /** Issue #269: `newInstance` is `--new` — spawn a FRESH instance of this
    *  role on the lowest free number rather than attaching to the one that is
    *  already there. False for every invocation written before #269, which is
-   *  what makes the flag purely additive. */
-  | { cmd: "ff"; role: string; task: FfTask | null; newInstance: boolean }
+   *  what makes the flag purely additive.
+   *
+   *  Fleet task #1248: `local` is `--local` — spawn the studio on THIS Mac
+   *  instead of a container, short-circuiting ffDecision's cloud logic. False
+   *  for every invocation written before #1248, the same additive shape. */
+  | { cmd: "ff"; role: string; task: FfTask | null; newInstance: boolean; local: boolean }
   | { cmd: "help" }
   | { cmd: "usage"; message: string };
 
@@ -108,6 +115,12 @@ type FfArgs =
  *  the word (`ff pilot "drop the --new flag"` — one quoted argv entry) is
  *  untouched. */
 const NEW_INSTANCE_FLAG = "--new";
+
+/** Fleet task #1248's `--local` — the same exact-token recognition `--new`
+ *  has, so `ff --local`, `ff pilot --local` and `ff pilot --local "fix X"`
+ *  all read the same, and a task that merely CONTAINS "--local" (one quoted
+ *  argv entry) is untouched. */
+const LOCAL_FLAG = "--local";
 
 /**
  * What `ff <role> "<task>"` fills in for the two brief sections the operator
@@ -175,6 +188,7 @@ export function ffTaskBrief(task: string, assignee: string): {
  */
 export function parseFfArgs(argv: string[]): FfArgs {
   const newInstance = argv.includes(NEW_INSTANCE_FLAG);
+  const local = argv.includes(LOCAL_FLAG);
   // Board issue #569: help is checked BEFORE the filter, so an exact
   // `--help`/`-h` token anywhere in argv wins — `ff web-studio --help` asks
   // for help instead of filing a task titled "--help". Checked on argv, not
@@ -183,16 +197,16 @@ export function parseFfArgs(argv: string[]): FfArgs {
   // (`ff pilot "drop the --help flag"`) is untouched, the same containment
   // rule NEW_INSTANCE_FLAG has.
   if (argv.includes("--help") || argv.includes("-h")) return { cmd: "help" };
-  const [first, ...rest] = argv.filter((a) => a !== NEW_INSTANCE_FLAG);
+  const [first, ...rest] = argv.filter((a) => a !== NEW_INSTANCE_FLAG && a !== LOCAL_FLAG);
   if (rest.length > 1) {
     return {
       cmd: "usage",
       message: `a task must be ONE argument — quote it: ff ${first} "${rest.join(" ")}"\n${FF_USAGE}`,
     };
   }
-  if (first === undefined) return { cmd: "ff", role: DEFAULT_FF_ROLE, task: null, newInstance };
+  if (first === undefined) return { cmd: "ff", role: DEFAULT_FF_ROLE, task: null, newInstance, local };
   if (!isIdSegment(first)) return { cmd: "usage", message: FF_USAGE };
-  if (rest.length === 0) return { cmd: "ff", role: first, task: null, newInstance };
+  if (rest.length === 0) return { cmd: "ff", role: first, task: null, newInstance, local };
   const task = rest[0].trim();
   if (task === "") return { cmd: "usage", message: `the task is empty\n${FF_USAGE}` };
   // P5 §3: an issue NUMBER adopts, it does not file. Checked before the
@@ -201,7 +215,7 @@ export function parseFfArgs(argv: string[]): FfArgs {
   if (number !== null) {
     const n = Number(number[1]);
     if (n <= 0) return { cmd: "usage", message: `#${n} is not an issue number\n${FF_USAGE}` };
-    return { cmd: "ff", role: first, task: { kind: "adopt", number: n }, newInstance };
+    return { cmd: "ff", role: first, task: { kind: "adopt", number: n }, newInstance, local };
   }
   if (task.length > TASK_TITLE_MAX) {
     return {
@@ -210,7 +224,7 @@ export function parseFfArgs(argv: string[]): FfArgs {
         `file it with \`fleet task new\` instead\n${FF_USAGE}`,
     };
   }
-  return { cmd: "ff", role: first, task: { kind: "new", text: task }, newInstance };
+  return { cmd: "ff", role: first, task: { kind: "new", text: task }, newInstance, local };
 }
 
 /**

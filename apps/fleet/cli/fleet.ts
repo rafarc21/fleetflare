@@ -81,7 +81,7 @@ import type { OpenPr } from "../src/board/open-prs";
 import { formatMemoryTable, MEMORY_LEGEND, type MemoryFileRow } from "./memory-format";
 import {
   openStudioRow, closeStudioRow, reconcileStudioWorkspaces, planStudioWorkspaces, defaultOrcaDeps,
-  studioWorkspaceTitle, readStudioRows, findAttachHandle,
+  studioWorkspaceTitle, readStudioRows, findAttachHandle, ensureLocalStudioWorktree, resolveStudioWorktreePath,
   type OrcaDeps, type TabsReport, type TabsPlanEntry,
 } from "./orca-workspace";
 import type { StudioStatus } from "../src/studio/types";
@@ -512,7 +512,10 @@ export function formatTable(
       // Issue #289/#285: the account the container was LAUNCHED on, the next
       // launch's in a note when they differ; "-" after a refused launch.
       formatAccount(s, leadModelOf(s, assignments)),
-      s.tailscaleHost ?? "-",
+      // Fleet task #1248: a local studio has no tailnet host — its HOST cell
+      // reads "local" (where it runs: the operator's Mac), never a "-" that
+      // would read as "unknown".
+      s.host === "local" ? "local" : s.tailscaleHost ?? "-",
       formatBurn(s.burn),
       s.lastRefresh ?? "-",
       capErrorCell(s.error),
@@ -1556,6 +1559,341 @@ async function cmdSpawn(
   await openStudioRow(spawned.id, spawnTasks, defaultOrcaDeps());
 }
 
+// ---------------------------------------------------------------------------
+// fleet spawn --local / ff --local — fleet task #1248. A local studio runs on
+// the operator's Mac instead of a container: the registry row is written by
+// POST /studio/local/spawn (host:"local", localPath), and the lead is
+// materialized into an Orca worktree checked out from a LOCAL clone — never a
+// container. Same role prompt, house rules and lead-gate the container would
+// get; only WHERE differs.
+
+/** One git subprocess, decoded: `code` 0 means success, `stdout`/`stderr` are
+ *  the whole streams. The `run` port keeps resolveGitToplevel and
+ *  resolveDefaultBranch unit-testable over canned subprocess outputs (T3). */
+export interface GitRun {
+  (args: string[]): Promise<{ code: number; stdout: string; stderr: string }>;
+}
+
+/** The real `run`: one `git <args>` via Bun.spawn, never throwing — a spawn
+ *  that cannot even start reads as a non-zero exit (code 128), the same
+ *  "could not run git" outcome the callers already handle. */
+function defaultGitRun(): GitRun {
+  return async (args) => {
+    try {
+      const proc = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      return { code: await proc.exited, stdout, stderr };
+    } catch {
+      return { code: 128, stdout: "", stderr: "could not run git" };
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Fleet task #1248 review BLOCKER B1: local destroy must not wipe the
+// worktree's own work. A local studio's Orca worktree IS its checkout —
+// uncommitted/unpushed commits live only there — yet cmdDestroy's teardown
+// called `closeStudioRow` (-> `worktree rm --force`) for it the same as for a
+// cloud studio, whose worktree is only a sidebar row. The three helpers below
+// turn that into a decision: keep the worktree unless the operator has
+// explicitly forced a discard and nothing is left to lose.
+
+/** The pure teardown decision for a local studio's worktree.
+ *
+ *  park -> keep: a park is a pause, never a deletion, and `--park` used to
+ *    still `worktree rm` a local checkout. Remove only on a real destroy.
+ *  not (force && discardUnsynced) -> keep: without the operator explicitly
+ *    naming the price (the same two flags the cloud path already honours),
+ *    a destroy never deletes work it could still rescue.
+ *  dirty or ahead -> keep: dirty files or unpushed commits are the work; a
+ *    local destroy cannot recreate them from anywhere else. Only a clean,
+ *    fully-pushed checkout — nothing to lose — is removed.
+ *
+ *  Pure (no I/O) so it is unit-testable; `dirty`/`ahead` come from the git
+ *  reads `cmdDestroy` makes over `GitRun`. */
+export function localTeardownDecision(
+  flags: { force: boolean; discardUnsynced: boolean; park: boolean },
+  dirty: boolean, ahead: boolean,
+): { action: "keep" | "remove"; note: string } {
+  if (flags.park) return { action: "keep", note: "parked — the worktree is kept (fleet destroy --park never removes a local checkout)" };
+  if (!(flags.force && flags.discardUnsynced)) {
+    return {
+      action: "keep",
+      note: "kept — a local studio's worktree IS its checkout; remove it only with --force --discard-unsynced",
+    };
+  }
+  if (dirty) return { action: "keep", note: "kept — the worktree has uncommitted changes (--discard-unsynced was given, but dirty files are not unsynced commits)" };
+  if (ahead) return { action: "keep", note: "kept — the worktree has unpushed commits; nothing is removed until they are pushed" };
+  return { action: "remove", note: "clean and fully pushed — removing" };
+}
+
+/** `git -C <path> status --porcelain` non-empty -> dirty. Non-zero exit (git
+ *  cannot read the tree) is treated as dirty — refusing to delete is the safe
+ *  side, since the tree could not be proven clean. */
+export async function gitIsDirty(run: GitRun, path: string): Promise<boolean> {
+  const { code, stdout } = await run(["-C", path, "status", "--porcelain"]);
+  if (code !== 0) return true;
+  return stdout.trim() !== "";
+}
+
+/** `git -C <path> rev-list --count @{u}..` — how many commits are unpushed.
+ *  A non-zero exit (no upstream configured, no remote, shallow clone) reads
+ *  as NOT ahead (0): with no upstream to compare against, nothing can be said
+ *  to be "ahead of" it, and "nothing to lose relative to a missing upstream"
+ *  is the documented choice — the dirty check above is what still protects
+ *  any local work. */
+export async function gitAheadCount(run: GitRun, path: string): Promise<number> {
+  const { code, stdout } = await run(["-C", path, "rev-list", "--count", "@{u}.."]);
+  if (code !== 0) return 0;
+  const n = Number(stdout.trim());
+  return Number.isInteger(n) && n >= 0 ? n : 0;
+}
+
+/** The destroy decision's injectable seam: WHICH path the dirty/ahead git
+ *  reads target, and whether to remove. Every side effect is `deps`, so the
+ *  decision is unit-testable over canned git outputs and a fake worktree-path
+ *  resolver — no real Orca or git. */
+export interface LocalWorktreeRemoval { remove: boolean; note: string | null }
+
+/**
+ * Fleet task #1248 review BLOCKER B1 (fix round): what `cmdDestroy`'s
+ * teardown should do. Cloud (`status === null` or `status.host !== "local"`)
+ * always removes — the cloud teardown runs unconditionally. Local resolves
+ * the studio's ORCA worktree on-disk path via `deps.resolveWorktreePath(id)`
+ * and reads `gitIsDirty`/`gitAheadCount` against THAT path, then feeds
+ * `localTeardownDecision`. A null path keeps the worktree with a note, never
+ * a silent remove.
+ */
+export async function localWorktreeRemoval(
+  status: { host?: string; localPath?: string | null } | null,
+  flags: { force: boolean; discardUnsynced: boolean; park: boolean },
+  deps: { run: GitRun; resolveWorktreePath: (id: string) => Promise<string | null> },
+  id: string,
+): Promise<LocalWorktreeRemoval> {
+  if (status === null || status.host !== "local") return { remove: true, note: null };
+  const path = await deps.resolveWorktreePath(id);
+  if (path === null) return { remove: false, note: "worktree path could not be resolved — kept" };
+  const [dirty, ahead] = await Promise.all([gitIsDirty(deps.run, path), gitAheadCount(deps.run, path)]);
+  const decision = localTeardownDecision(flags, dirty, ahead > 0);
+  return decision.action === "remove"
+    ? { remove: true, note: decision.note }
+    : { remove: false, note: decision.note };
+}
+
+/** `git rev-parse --show-toplevel` — the local clone's absolute path, used
+ *  when `--local` was given without `--path`. Null (never a throw) when git
+ *  cannot name one, and the caller refuses with a clear message. */
+export async function resolveGitToplevel(run: GitRun = defaultGitRun()): Promise<string | null> {
+  const { code, stdout, stderr } = await run(["rev-parse", "--show-toplevel"]);
+  if (code !== 0) {
+    console.error(`fleet: could not resolve the local clone: ${stderr.trim().split("\n")[0] || "git could not find a toplevel"}`);
+    return null;
+  }
+  const toplevel = stdout.trim();
+  return toplevel === "" ? null : toplevel;
+}
+
+/** The local clone's default branch — `git symbolic-ref refs/remotes/origin/HEAD`,
+ *  falling back to `git remote show origin`'s HEAD line, then `git branch -r`.
+ *  Returns the PLAIN branch name (never `origin/`), or null when none of the
+ *  three can resolve it. The caller refuses with a clear message. When `cwd`
+ *  is given, every git argv is prefixed with `-C <cwd>` — the default branch
+ *  must come from the `--path` clone, not whatever repo this process happens
+ *  to be standing in. */
+export async function resolveDefaultBranch(run: GitRun = defaultGitRun(), cwd?: string): Promise<string | null> {
+  const withCwd = (args: string[]): string[] => (cwd ? ["-C", cwd, ...args] : args);
+  const tryRun = async (args: string[]): Promise<string | null> => {
+    const { code, stdout } = await run(withCwd(args));
+    if (code !== 0) return null;
+    return stdout.trim();
+  };
+  const symbolic = await tryRun(["symbolic-ref", "refs/remotes/origin/HEAD"]);
+  if (symbolic) return symbolic.replace(/^refs\/remotes\/origin\//, "");
+  // `git remote show origin` prints a "HEAD branch: main" line; the first
+  // fallback for clones predating `refs/remotes/origin/HEAD` (git 1.8.4).
+  const remoteShow = await tryRun(["remote", "show", "origin"]);
+  const headLine = remoteShow?.split("\n").find((l) => l.trim().startsWith("HEAD branch:"));
+  if (headLine) {
+    const branch = headLine.trim().replace(/^HEAD branch:\s*/, "");
+    if (branch !== "") return branch;
+  }
+  // `git branch -r` — the last fallback: the first origin/* entry. Ambiguous
+  // for a repo with several branches, but it is the only remaining signal.
+  const branchR = await tryRun(["branch", "-r"]);
+  const firstRemote = branchR?.split("\n").map((l) => l.trim()).find((l) => l.startsWith("origin/") && !l.includes("HEAD"));
+  if (firstRemote) return firstRemote.replace(/^origin\//, "");
+  return null;
+}
+
+/**
+ * Fleet task #1248 review BLOCKER B4: the clone's origin slug — `git -C <cwd>
+ * remote get-url origin` through parseGitRemote (src/studio/repo.ts), the same
+ * parser `detectRepo` already uses. Null when git cannot read the remote or it
+ * is not a github.com repo. This is what lets spawnLocalStudio REFUSE a
+ * `--path /other/clone` whose origin names a different repo than the target
+ * slug: silently building a studio out of the wrong checkout is exactly the
+ * silent-wrong-target failure this whole feature exists to remove.
+ */
+export async function resolveCloneOriginSlug(run: GitRun = defaultGitRun(), cwd?: string): Promise<string | null> {
+  const args = cwd ? ["-C", cwd, "remote", "get-url", "origin"] : ["remote", "get-url", "origin"];
+  const { code, stdout } = await run(args);
+  if (code !== 0) return null;
+  return parseGitRemote(stdout.trim());
+}
+
+/** The decoded local-spawn response: the row plus the bring-up env the route
+ *  attaches (prompt/allowedTools/effort/members/skills/leadType). */
+interface LocalSpawnResponse extends StudioStatus {
+  prompt?: string;
+  allowedTools?: string;
+  effort?: string;
+  members?: Record<string, string>;
+  skills?: string;
+  leadType?: "claude" | "glm";
+}
+
+/**
+ * The shared local spawn+worktree flow, used by `fleet spawn --local`
+ * (`cmdLocalSpawn`) and `ff --local`. Detects the repo (requireRepoForCreate
+ * still applies — a cwd naming no repo with no `--repo` refuses), resolves
+ * localPath (empty -> `git rev-parse --show-toplevel`) and the default branch,
+ * POSTs /studio/local/spawn, then materializes the worktree via
+ * ensureLocalStudioWorktree and prints the row. `opts.attach` decides the
+ * final hand-off: `fleet spawn` never attaches (just opens the row),
+ * `ff --local` attaches when this process has a real TTY.
+ */
+export async function spawnLocalStudio(
+  creds: Credentials, role: string, newInstance: boolean,
+  leadType: "claude" | "glm" | "kimi" | "deepseek" | undefined,
+  repoFlag: string | undefined, localPath: string,
+  opts: { cmd: string; attach: (id: string, materialized: boolean) => Promise<void>; task?: number | null },
+): Promise<void> {
+  const detected = await detectRepo();
+  const r = requireRepoForCreate(opts.cmd, repoFlag, detected);
+  if (!r.ok) {
+    console.error(r.message);
+    process.exit(1);
+  }
+  console.error(repoFlag === undefined
+    ? `${opts.cmd}: repo ${r.slug} (from git remote origin)`
+    : `${opts.cmd}: target repo ${r.slug} (--repo)`);
+
+  // --local without --path: the clone is the folder the operator is standing
+  // in, so resolve it here rather than guessing.
+  let resolvedPath = localPath;
+  if (resolvedPath === "") {
+    resolvedPath = (await resolveGitToplevel()) ?? "";
+    if (resolvedPath === "") {
+      console.error(`${opts.cmd}: --local needs a clone path — run inside the repo, or pass --path <abs>`);
+      process.exit(1);
+    }
+  }
+  // Fleet task #1248 review BLOCKER B4: every git read below must target the
+  // RESOLVED clone (`-C <resolvedPath>`), never this process's own cwd — a
+  // `--path /other/clone` used to read the base branch of whatever repo the
+  // operator happened to be standing in (or fail outside one).
+  const gitRun = defaultGitRun();
+  const defaultBranch = await resolveDefaultBranch(gitRun, resolvedPath);
+  if (defaultBranch === null) {
+    console.error(`${opts.cmd}: could not resolve the default branch of ${r.slug} (git symbolic-ref refs/remotes/origin/HEAD) — ` +
+      "fetch origin first, or re-run once the clone has a remote HEAD");
+    process.exit(1);
+  }
+  // B4 (second half): the clone's origin must name the SAME repo this spawn
+  // targets — a `--path /other/clone` whose origin is a different repo would
+  // build a studio for `<target>` out of somebody else's checkout, silently.
+  const cloneSlug = await resolveCloneOriginSlug(gitRun, resolvedPath);
+  if (cloneSlug !== null && cloneSlug.toLowerCase() !== r.slug.toLowerCase()) {
+    console.error(`${opts.cmd}: the clone at ${resolvedPath} has origin ${cloneSlug}, not ${r.slug} — ` +
+      "a local studio must be built from the repo it targets; pass --path to the right clone");
+    process.exit(1);
+  }
+
+  const res = await fetch(new URL("/studio/local/spawn", creds.workerUrl), {
+    method: "POST",
+    headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
+    // Same body shape cmdSpawn sends, plus the local identity the route's
+    // readLocalRequest requires (`local: true`, `localPath`).
+    body: JSON.stringify({
+      role, repo: r.slug, local: true, localPath: resolvedPath,
+      ...(newInstance ? { instance: "next" } : {}),
+      ...(leadType === undefined ? {} : { leadType }),
+      // The task NUMBER, never the brief text — the Worker reads the issue
+      // itself and verifies it is assigned to the studio it is about to
+      // build (the same rule the cloud spawn's `task` field follows).
+      ...(opts.task == null ? {} : { task: opts.task }),
+    }),
+  });
+  if (!res.ok) {
+    console.error(`${opts.cmd}: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
+    process.exit(1);
+  }
+  const body = (await res.json()) as LocalSpawnResponse;
+  const spawned = parseStudioStatus(body);
+  if (spawned === null) {
+    console.error(`${opts.cmd}: answered 200 but the body was not a studio row`);
+    process.exit(1);
+  }
+  const prompt = body.prompt ?? "";
+  const allowedTools = body.allowedTools ?? "";
+  if (prompt === "" || allowedTools === "") {
+    console.error(`${opts.cmd}: the local-spawn route answered without prompt/allowedTools — cannot launch the lead`);
+    process.exit(1);
+  }
+  console.error(`${opts.cmd}: repo ${r.slug} → ${spawned.id} (local)`);
+  console.log(formatTable([spawned]));
+  // The lead's Orca worktree + attach terminal, materialized from the local
+  // clone. Best-effort-fail-safe (like openStudioRow), so a wedged Orca never
+  // THROWS — but a local studio IS its Orca worktree (the Orca terminal is
+  // the lead, there is no container fallback), so ANY non-"created" outcome —
+  // skipped for no binary OR for a plain terminal with the binary on PATH
+  // (TERM_PROGRAM not Orca), or failed — means the lead never materialized.
+  // Reporting the row as "up" then is exactly the false up this feature
+  // exists to prevent. The row is already registered; say so and exit
+  // non-zero rather than proceeding to a success handoff over a lead that
+  // never materialized.
+  const orcaDeps = defaultOrcaDeps();
+  const outcome = await ensureLocalStudioWorktree(spawned.id, orcaDeps, {
+    localPath: resolvedPath,
+    defaultBranch,
+    prompt,
+    allowedTools,
+    ...(body.effort !== undefined ? { effort: body.effort } : {}),
+    ...(body.members !== undefined ? { members: body.members } : {}),
+    ...(typeof body.skills === "string" ? { skills: body.skills.split(",") } : {}),
+  });
+  if (outcome.kind !== "created") {
+    // `why` rides the two outcomes ensureLocalStudioWorktree can actually
+    // produce here — skipped and failed; the "exists" kind in
+    // WorkspaceOutcome belongs to ensureStudioWorkspace's reuse path and
+    // never reaches a local spawn, so the bare-kind fallback below is
+    // defensive-only and never runs.
+    const why = outcome.kind === "skipped" || outcome.kind === "failed" ? outcome.why : outcome.kind;
+    console.error(`${opts.cmd}: ${spawned.id} has no local lead — the Orca worktree did not materialize (${why})`);
+    console.error(`  tear the registered row down with: fleet destroy ${spawned.id}`);
+    process.exit(1);
+  }
+  // `ff --local` attaches (a local worktree boots claude directly, so there
+  // is no provisioned-wait); `fleet spawn --local` just reports the row.
+  // After the fatal check above, outcome.kind is always "created" — the lead
+  // genuinely materialized — so the attach is handed a real worktree.
+  await opts.attach(spawned.id, true);
+}
+
+async function cmdLocalSpawn(
+  creds: Credentials, role: string, newInstance: boolean,
+  leadType: "claude" | "glm" | "kimi" | "deepseek" | undefined,
+  repoFlag: string | undefined, localPath: string,
+): Promise<void> {
+  await spawnLocalStudio(creds, role, newInstance, leadType, repoFlag, localPath, {
+    cmd: "fleet spawn",
+    attach: async () => {},
+  });
+}
+
 /**
  * Explicit provision — POST /studio/:id/provision (routes.ts's existing,
  * already-tested route; this command adds no new server-side behaviour, only
@@ -1799,7 +2137,19 @@ async function cmdDestroy(
   // could not read must never print a teardown line — an operator who reads
   // "Orca worktree and attach terminal removed" stops looking.
   if (report.teardown) {
-    for (const line of await closeStudioRow(id, defaultOrcaDeps())) console.error(`fleet: ${line}`);
+    // Fleet task #1248 review BLOCKER B1: a LOCAL studio's Orca worktree IS
+    // its checkout — `worktree rm --force` here would delete uncommitted/
+    // unpushed work that lives nowhere else. The decision reads the git state
+    // of the RESOLVED Orca worktree path (never the clone), so a clean clone
+    // beside a dirty worktree is never removed. The CLOUD path (remove:true)
+    // runs the SAME single closeStudioRow call it always did.
+    const removal = await localWorktreeRemoval(report.status, { force, discardUnsynced, park },
+      { run: defaultGitRun(), resolveWorktreePath: (sid) => resolveStudioWorktreePath(sid, defaultOrcaDeps()) }, id);
+    if (removal.remove) {
+      for (const line of await closeStudioRow(id, defaultOrcaDeps())) console.error(`fleet: ${line}`);
+    } else if (removal.note !== null) {
+      console.error(`fleet: ${id}: ${removal.note}`);
+    }
     // Board issue #332: after a confirmed stop, the NON-BLOCKING warning —
     // the studio's unmerged PRs outlive its lane, and the registry row
     // still exists, so the route still answers for it. For a plain destroy
@@ -3526,7 +3876,9 @@ async function main(): Promise<void> {
     case "paste":
       return cmdPaste(creds, parsed.id);
     case "spawn":
-      return cmdSpawn(creds, parsed.role, parsed.newInstance, parsed.leadType, parsed.repo);
+      return parsed.local
+        ? cmdLocalSpawn(creds, parsed.role, parsed.newInstance, parsed.leadType, parsed.repo, parsed.local.localPath)
+        : cmdSpawn(creds, parsed.role, parsed.newInstance, parsed.leadType, parsed.repo);
     case "provision":
       return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession, parsed.discardSession, parsed.forceMappedAccount === true, parsed.repo);
     case "recycle":

@@ -65,6 +65,20 @@ export interface StudioStatus {
    * pointing at this fleet's own `/fleet/llm/anthropic/v1/messages` route.
    */
   leadType?: "claude" | "glm";
+  /**
+   * Local studio (fleet task #1248): "local" when this studio runs on the
+   * operator's own Mac instead of a Cloudflare container. Absent = cloud,
+   * deliberately, so every row written before this field existed (and every
+   * cloud row written since) is byte-identical to today.
+   */
+  host?: "local";
+  /**
+   * Local studio (fleet task #1248): the Mac-side absolute path to the local
+   * clone this studio works out of. Null/absent = cloud, or a row written
+   * before the field existed. Nothing but `fleet ls`/the destroy-by-path
+   * branch reads it.
+   */
+  localPath?: string | null;
   tailscaleHost: string | null;
   lastRefresh: string | null;
   error: string | null;
@@ -788,6 +802,18 @@ export interface ProvisionConfig {
    * other override on this type follows.
    */
   leadType?: "claude" | "glm";
+  /**
+   * Local studio (fleet task #1248): "local" provisions a studio that runs on
+   * the operator's Mac — no container, no DO. Carried through to the
+   * registered `running` row (local-spawn.ts) and never to the cloud
+   * provision path. Absent = cloud, the ordinary case.
+   */
+  host?: "local";
+  /**
+   * Local studio (fleet task #1248): the Mac-side absolute path to the local
+   * clone, when `host` is "local". Only ever read by the local path.
+   */
+  localPath?: string;
   /**
    * Dynamic repo selection (P4a): the full `owner/repo` of the WORK repo to
    * clone. Absent means "whatever this studio is already bound to, else the

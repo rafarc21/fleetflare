@@ -825,6 +825,18 @@ describe("POST /fleet/spawn", () => {
     expect((await handleFleetSpawn(spawnReq({ role: "cto" }, token), testEnvWith(ns), fetchFile)).status).toBe(403);
   });
 
+  it("400 on a local field: the machine spawn surface is cloud-only (B6)", async () => {
+    const token = await registerStudio(PARENT_ID);
+    const ns = fakeStudioNamespace();
+    const { fetchFile } = fakeBlueprintFetch();
+    const res = await handleFleetSpawn(
+      spawnReq({ role: "release", local: true, localPath: "/tmp/websites" }, token), testEnvWith(ns), fetchFile,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("/studio/local/spawn");
+    expect(ns.provisioned).toEqual([]);
+  });
+
   it("200 happy path: provisions <parentRepo>--<role> with spawnedBy set to the parent id", async () => {
     const token = await registerStudio(PARENT_ID);
     const ns = fakeStudioNamespace();
@@ -1029,6 +1041,21 @@ describe("POST /studio/spawn (operator passthrough, Access side)", () => {
     const ns = fakeStudioNamespace();
     const { fetchFile } = fakeBlueprintFetch();
     expect((await handleStudio(operatorReq({ role: "cto" }), testEnvWith(ns), fetchFile)).status).toBe(409);
+  });
+
+  // Fleet task #1248 review BLOCKER B6: a `local` field on the CLOUD route
+  // would otherwise write a host:"local" placeholder and then provision a real
+  // container — orphaning it. Rejected before runSpawn.
+  it("400 on a local field: local spawns have their own route, and no container is provisioned", async () => {
+    authorized();
+    const ns = fakeStudioNamespace();
+    const { fetchFile } = fakeBlueprintFetch();
+    const res = await handleStudio(
+      operatorReq({ role: "cto", local: true, localPath: "/tmp/websites" }), testEnvWith(ns), fetchFile,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("/studio/local/spawn");
+    expect(ns.provisioned).toEqual([]);
   });
 
   it("400 on a malformed role", async () => {

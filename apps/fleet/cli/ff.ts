@@ -40,7 +40,7 @@
  */
 import {
   loadCredentials, accessHeaders, studioUrl, boardUrl, detectRepo, cmdAttach, type Credentials,
-  listStudioTasks,
+  listStudioTasks, spawnLocalStudio,
 } from "./fleet";
 import { openStudioRow, defaultOrcaDeps } from "./orca-workspace";
 import { poll, ticker } from "./poll";
@@ -524,6 +524,103 @@ async function spawnNewStudio(
 }
 
 // ---------------------------------------------------------------------------
+// ff --local — fleet task #1248. Short-circuits ffDecision's cloud logic: a
+// local studio has no container to wait for, so this is the same "file the
+// task first, spawn, then hand off" shape the cloud form uses, minus the
+// provisioned-wait (a local worktree boots claude directly).
+
+/**
+ * The `ff <role> --local` path. `parsed.task` is filed/adopted FIRST — the
+ * task is the durable artifact and carries the studio assignment — so it is
+ * filed against the fixed instance-1 id `<repo>--<role>` (the local spawn
+ * builds instance 1 unless `--new`, whose id is not known until the route
+ * answers). That is exactly why `--new` + a task refuses below: the task
+ * would be filed against instance 1 while the spawn builds instance 2.
+ */
+async function ffLocal(
+  creds: Credentials, parsed: Extract<ReturnType<typeof parseFfArgs>, { cmd: "ff" }>, detectedSlug: string,
+): Promise<void> {
+  const role = parsed.role;
+  // Board issue #250, carried onto the local path (S2): the maestro role is
+  // ALWAYS a session the operator starts by hand, never something `ff`
+  // spawns — even locally. ffDecision refuses it for the CLOUD form; the
+  // `--local` path short-circuits ffDecision, so this must refuse with the
+  // SAME message. Bare `ff --local` defaults to maestro, so it refuses too.
+  if (role === "maestro") {
+    fail("maestro runs locally, not as a cloud studio — start it from your own " +
+      "machine (see docs/setup.md's local-maestro note), never with ff");
+  }
+  // A task is filed against a studio id before the spawn — which is only
+  // knowable when the instance is fixed (instance 1). `--new` + a task would
+  // file against instance 1 while the spawn builds instance 2, so it refuses
+  // rather than silently mis-assign (the cloud form files the task AFTER the
+  // spawn for exactly this reason; the local path keeps the ordinary form).
+  if (parsed.newInstance && parsed.task !== null) {
+    fail("--new with a task is not supported for --local (the task is filed before the spawn, " +
+      "which needs a fixed instance) — drop --new, or file it first with: fleet task new");
+  }
+  const studioId = buildLocalStudioId(detectedSlug, role);
+  if (studioId === null) fail(refuseBadSegment(detectedSlug, detectedSlug.split("/")[1] ?? ""));
+
+  // File/adopt the task first — same durable-artifact-first ordering the
+  // cloud form follows, so a failed spawn still leaves the task on the board.
+  let task: number | null = null;
+  if (parsed.task !== null) {
+    task = parsed.task.kind === "new"
+      ? await fileTask(creds, detectedSlug, studioId, parsed.task.text)
+      : await adoptTask(creds, detectedSlug, studioId, parsed.task.number);
+  }
+
+  // The local spawn + worktree, shared with `fleet spawn --local`. `--local`
+  // has no provisioned-wait: the worktree boots claude directly, so the only
+  // ending is the hand-off (a local studio has no container, so there is no
+  // WS attach — `ensureLocalStudioWorktree` already created the Orca terminal
+  // the lead runs in, and this codebase never steals focus).
+  await spawnLocalStudio(creds, role, parsed.newInstance, undefined, undefined, "", {
+    cmd: "ff",
+    task,
+    attach: async (id: string, materialized: boolean) => localAttachOrHandOff(id, task, materialized),
+  });
+}
+
+/**
+ * The `ff --local` ending. A local lead runs in the Orca terminal
+ * `ensureLocalStudioWorktree` created — there is no container, so `cmdAttach`'s
+ * WS path does not apply and nothing steals focus. It says where the lead is,
+ * honoring ff's no-terminal honesty (a tty-less run says so and stops rather
+ * than pretending to attach).
+ */
+async function localAttachOrHandOff(id: string, task: number | null, materialized: boolean): Promise<void> {
+  // T1b: "the lead runs in the Orca terminal" is a claim about a worktree that
+  // actually materialized — never print it when ensureLocalStudioWorktree
+  // skipped (no orca binary). spawnLocalStudio already exits non-zero on that
+  // shape, but this function must not have printed a false "up" line first.
+  if (!materialized) {
+    if (task !== null) say(`  it is pointed at #${task}`);
+    return;
+  }
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+    const missing = process.stdin.isTTY !== true && process.stdout.isTTY !== true
+      ? "stdin and stdout are"
+      : `${process.stdin.isTTY !== true ? "stdin" : "stdout"} is`;
+    say(`${id} is up — not attaching: no terminal (${missing} not a tty)`);
+    if (task !== null) say(`  it is pointed at #${task}`);
+    say(`  the lead runs in the Orca terminal for worktree studio-${id}`);
+    return;
+  }
+  say(`${id} is up — the lead runs in the Orca terminal for worktree studio-${id}`);
+}
+
+/** `<repo>--<role>` for the local spawn — the same id the cloud form would
+ *  build for instance 1. Null when the slug's short name is not an id
+ *  segment even after the fold. */
+function buildLocalStudioId(detectedSlug: string, role: string): string | null {
+  const segment = repoIdSegment(detectedSlug.split("/")[1] ?? "");
+  if (segment === null) return null;
+  return `${segment}--${role}`;
+}
+
+// ---------------------------------------------------------------------------
 // entry point
 
 async function main(): Promise<void> {
@@ -559,6 +656,17 @@ async function main(): Promise<void> {
     say(`repo ${detected.slug} (from git remote origin)`);
   } else {
     say(`${detected.reason} — no git remote; resolving by the one existing ${parsed.role} studio, refusing if several`);
+  }
+
+  // Fleet task #1248: `ff --local` short-circuits ffDecision's cloud logic
+  // entirely — a local studio runs on this Mac, never a container. It still
+  // needs a repo (the local clone is the folder's own toplevel), so the
+  // no-repo refusal above applies exactly as it does for the cloud form.
+  if (parsed.local) {
+    if (detected.slug === null) {
+      fail(`--local needs a repo — cd into the repo you mean (this folder: ${detected.reason ?? "no git remote"})`);
+    }
+    return ffLocal(creds, parsed, detected.slug);
   }
 
   const decision = ffDecision(
