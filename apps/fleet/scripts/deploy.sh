@@ -525,10 +525,10 @@ trap 'clear_gate_drain_flag; exit 130' INT
 trap 'clear_gate_drain_flag; exit 143' TERM
 
 if [[ "$GATE_DRAIN" == 1 ]]; then
+  GATE_DRAIN_FLAG_SET=1
   NOW_MS=$(( $(date +%s) * 1000 ))
   "$WRANGLER" d1 execute fleet --remote --command "INSERT INTO fleet_state (key,value,ts) VALUES ('gate_drain','1',$NOW_MS) ON CONFLICT(key) DO UPDATE SET value='1', ts=excluded.ts" -c wrangler.local.jsonc \
     || { echo "deploy.sh: refusing -- could not set the gate drain flag; pass --skip-gate-drain to override, or clear the flag by hand." >&2; exit 1; }
-  GATE_DRAIN_FLAG_SET=1
   if ! bun "$FLEET_DIR/scripts/gate-drain-wait.ts" wrangler.local.jsonc; then
     echo "deploy.sh: refusing -- gate runs still running after the drain cap; the drain flag is cleared. Re-deploy when the fleet is quieter." >&2
     exit 1

@@ -6,24 +6,20 @@
 // the flag clears. A pending status still goes up for the queued PR, so GitHub
 // never sees the head without a gate (#1191).
 import type { PullRequestAutoRun } from "./auto-run";
-import { getFlag, setFlag, flagIsSet } from "../state";
+import { getFlag, flagIsSet } from "../state";
 
 export const GATE_DRAIN_FLAG = "gate_drain";
 export const GATE_DRAIN_QUEUE_KEY = "gate_drain_pending";
 
-/** The pending queue, stored as one JSON array over fleet_state. `append` is
- *  one D1 statement (json_insert), so two concurrent deliveries both land —
- *  never the read-then-write lost update src/state.ts's incrementCounter
- *  comment warns about. `claim` atomically removes the whole array in one
- *  DELETE ... RETURNING, so the cron's release cannot race a concurrent append
- *  (a concurrent append after the delete writes a fresh row, never lost). */
+/** The pending queue, stored as one JSON array over fleet_state. `append` and
+ *  `remove` are each one D1 statement (json_insert / json_remove by path), so a
+ *  concurrent append and a release remove never lose an entry — no read-then-
+ *  write whole-queue rewrite. */
 export interface GateDrainQueue {
   peek(): Promise<PullRequestAutoRun[]>;
   /** Atomically appends one pending run, in a single statement. */
   append(pr: PullRequestAutoRun): Promise<void>;
-  /** Atomically removes and returns the whole queue. */
-  claim(): Promise<PullRequestAutoRun[]>;
-  /** Removes one queued entry (matched by headSha) after its run started. */
+  /** Atomically removes one queued entry (matched by the full serialized entry). */
   remove(pr: PullRequestAutoRun): Promise<void>;
 }
 
@@ -50,24 +46,33 @@ export function gateDrainQueue(db: D1Database): GateDrainQueue {
         .bind(GATE_DRAIN_QUEUE_KEY, entry, Date.now(), entry)
         .run();
     },
-    async claim(): Promise<PullRequestAutoRun[]> {
-      const row = await db
-        .prepare(`DELETE FROM fleet_state WHERE key = ? RETURNING value`)
-        .bind(GATE_DRAIN_QUEUE_KEY)
-        .first<{ value: string }>();
-      if (row === null) return [];
-      try {
-        const parsed: unknown = JSON.parse(row.value);
-        return Array.isArray(parsed) ? (parsed as PullRequestAutoRun[]) : [];
-      } catch {
-        // A corrupt queue is dropped (and its row removed): nothing to start.
-        return [];
-      }
-    },
     async remove(pr: PullRequestAutoRun): Promise<void> {
-      const runs = await this.peek();
-      const kept = runs.filter((r) => !(r.repo === pr.repo && r.pr === pr.pr && r.headSha === pr.headSha));
-      await setFlag(db, GATE_DRAIN_QUEUE_KEY, JSON.stringify(kept), Date.now());
+      // json_remove by path, in one statement. Two miniflare-D1 quirks forced a
+      // deviation from the plain form: (1) the implicit `json_each(value)`
+      // correlation is NOT resolved here — the path subquery returns NULL — so
+      // the row is read through an explicit subselect; (2) json_remove(value,
+      // NULL) returns NULL (not the input) on SQLite, tripping the value NOT
+      // NULL constraint, so a WHERE EXISTS guard keeps the UPDATE a no-op for
+      // an already-removed (or never-queued) entry. Matched by the full
+      // serialized entry: `e.value = json(?)` compares JSON-equality, so a
+      // queuedAt stamp (now part of the entry, #1241 b1) can never match the
+      // wrong run — `json(?)` turns the bind into a JSON value the way
+      // json_each's `e.value` already is.
+      const entry = JSON.stringify(pr);
+      await db
+        .prepare(
+          `UPDATE fleet_state SET value = json_remove(
+             value,
+             (SELECT '$[' || CAST(e.key AS TEXT) || ']'
+              FROM json_each((SELECT value FROM fleet_state WHERE key = ?)) e
+              WHERE e.value = json(?) LIMIT 1)
+           ), ts = ? WHERE key = ? AND EXISTS (
+             SELECT 1 FROM json_each((SELECT value FROM fleet_state WHERE key = ?)) e
+             WHERE e.value = json(?)
+           )`,
+        )
+        .bind(GATE_DRAIN_QUEUE_KEY, entry, Date.now(), GATE_DRAIN_QUEUE_KEY, GATE_DRAIN_QUEUE_KEY, entry)
+        .run();
     },
   };
 }
@@ -81,6 +86,16 @@ export const GATE_DRAIN_STALE_MS = 20 * 60_000;
  *  a fresh flag re-set between the read and this delete (a new deploy) must
  *  survive, never be wiped by a stale read (#1232 review). */
 export async function clearStaleDrainFlag(db: D1Database, stamp: number): Promise<void> {
+  if (!Number.isFinite(stamp)) {
+    // A non-numeric ts (a corrupt row stores TEXT, never a number) can never
+    // match a numeric stamp. Delete it by its storage type, still conditional
+    // so a fresh numeric re-set between the read and this delete survives.
+    await db
+      .prepare(`DELETE FROM fleet_state WHERE key = ? AND typeof(ts) NOT IN ('integer', 'real')`)
+      .bind(GATE_DRAIN_FLAG)
+      .run();
+    return;
+  }
   await db
     .prepare(`DELETE FROM fleet_state WHERE key = ? AND ts = ?`)
     .bind(GATE_DRAIN_FLAG, stamp)
@@ -97,8 +112,9 @@ export async function gateDraining(db: D1Database): Promise<boolean> {
     .prepare(`SELECT ts FROM fleet_state WHERE key = ?`)
     .bind(GATE_DRAIN_FLAG)
     .first<{ ts: number }>();
-  const stamp = row?.ts ?? 0;
-  if (Date.now() - stamp > GATE_DRAIN_STALE_MS) {
+  const stamp = Number(row?.ts);
+  // A non-numeric ts (NaN) must read stale, never "draining forever".
+  if (!Number.isFinite(stamp) || Date.now() - stamp > GATE_DRAIN_STALE_MS) {
     await clearStaleDrainFlag(db, stamp);
     return false;
   }

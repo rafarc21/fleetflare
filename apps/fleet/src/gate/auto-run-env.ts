@@ -5,7 +5,7 @@
 // (not a gate block) turns a repo off: a gated repo with no valid gate config
 // fails red (#1132).
 import type { Env } from "../env";
-import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
+import { autoRunPullRequest, autoRunPullRequestIdempotent, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
 import { postGateStatus } from "./status-post";
 import { realStatusPort } from "./status-post-env";
 import type { StalledRun, WatchdogIndex } from "./watchdog";
@@ -99,9 +99,12 @@ export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<
     // goes up, so GitHub never sees the head without a gate (#1191). The cron
     // releases the queue once the flag clears.
     if (await gateDraining(env.DB)) {
-      await gateDrainQueue(env.DB).append(pr);
-      await pendingPost(env, "queued (gate draining for deploy)")(pr.repo, pr.headSha);
-      console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: queued (draining)`);
+      // #1241 b1: stamp when this run was queued, so the release reattaches an
+      // edited PR only to an -e run started by THIS edit, never a pre-edit one.
+      const queued = { ...pr, queuedAt: Date.now() };
+      await gateDrainQueue(env.DB).append(queued);
+      await pendingPost(env, "queued (gate draining for deploy)")(queued.repo, queued.headSha);
+      console.log(`gate auto-run ${queued.repo}#${queued.pr} ${queued.headSha.slice(0, 8)}: queued (draining)`);
       return;
     }
     const outcome = await autoRunPullRequest(pr, {
@@ -125,7 +128,7 @@ export async function drainPendingGateRuns(env: Env): Promise<void> {
   const queued = await queue.peek();
   for (const pr of queued) {
     try {
-      const outcome = await autoRunPullRequest(pr, {
+      const outcome = await autoRunPullRequestIdempotent(pr, {
         workflow: env.GATE_WORKFLOW,
         index: d1RunIndex(env.DB),
         postPending: pendingPost(env, pr.edited === true ? "running (edited title/body recheck)" : "running (fresh gate run)"),

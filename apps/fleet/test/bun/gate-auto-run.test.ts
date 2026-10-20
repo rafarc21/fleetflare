@@ -8,7 +8,7 @@ import { describe, it, expect } from "bun:test";
 import { MAX_LEG_TIMEOUT_MIN } from "../../src/gate/config";
 import { legStepDeadlineMs } from "../../src/gate/leg-run";
 import {
-  autoRunPullRequest, gateRunId, GATE_STALL_MS, markRunProgress, pullRequestAutoRun, startGateRun, startManualGateRun, startEditedGateRun,
+  autoRunPullRequest, gateRunId, GATE_STALL_MS, markRunProgress, pullRequestAutoRun, startGateRun, startManualGateRun, startEditedGateRun, startEditedGateRunIdempotent,
   type GateRunIndex, type GateRunInstance, type GateRunRecord, type GateRunStarter, type PullRequestAutoRun,
 } from "../../src/gate/auto-run";
 import type { CarryGreen } from "../../src/gate/fanout";
@@ -636,6 +636,75 @@ describe("startEditedGateRun: an edit re-runs under its own -e id (#1176)", () =
     await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
     expect(terminated).toEqual([baseId]);
     expect(runs.get(otherShaRunId)!.status).toBe("running");
+  });
+});
+
+describe("startEditedGateRunIdempotent: reattaches a live -e run, starts fresh otherwise (#1241 a)", () => {
+  const T1 = 1_700_000_000_000;
+  const T2 = T1 + 60_000;
+
+  it("a live same-head -e run is reused, never ended or re-created", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    const again = await startEditedGateRunIdempotent(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2);
+    expect(again.runId).toBe(first.runId);
+    expect(again.reused).toBe(true);
+    expect(terminated).toEqual([]);
+    expect(runs.size).toBe(1);
+  });
+
+  it("a live -e run NEWER than queuedAt is reused, never ended or re-created (#1241 b1)", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2);
+    const again = await startEditedGateRunIdempotent(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, queuedAt: T1 }, index, () => T2 + 1);
+    expect(again.runId).toBe(first.runId);
+    expect(again.reused).toBe(true);
+    expect(terminated).toEqual([]);
+    expect(runs.size).toBe(1);
+  });
+
+  it("a live -e run OLDER than queuedAt is not reused: it is ended and a fresh run starts (#1241 b1)", async () => {
+    const T3 = T2 + 60_000;
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    const again = await startEditedGateRunIdempotent(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, queuedAt: T2 }, index, () => T3);
+    expect(again.reused).toBe(false);
+    expect(again.runId).not.toBe(first.runId);
+    expect(terminated).toEqual([first.runId]);
+    expect(runs.size).toBe(2);
+  });
+
+  it("a finished -e run is not reused: a fresh run starts", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    runs.get(first.runId)!.status = "complete";
+    const again = await startEditedGateRunIdempotent(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2);
+    expect(again.reused).toBe(false);
+    expect(again.runId).not.toBe(first.runId);
+    expect(runs.size).toBe(2);
+  });
+
+  it("a transient status read failure throws (entry stays queued), never ends a live run", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    let calls = 0;
+    const flaky: GateRunStarter = {
+      create: wf.create,
+      get: async (id) => {
+        calls++;
+        if (calls === 1 && id === first.runId) throw new Error("transient blip");
+        return wf.get(id);
+      },
+    };
+    await expect(startEditedGateRunIdempotent(flaky, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T2))
+      .rejects.toThrow("transient blip");
+    expect(terminated).toEqual([]);
+    expect(runs.size).toBe(1);
   });
 });
 
