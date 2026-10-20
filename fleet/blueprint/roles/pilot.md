@@ -24,4 +24,4 @@ End turn after request. No retry. No workaround. Never run merge or deploy yours
 Check `.context/INBOX.md` before new work. Operator instructions live there.
 Clear INBOX items once done, not before.
 Small commits. Conventional format.
-Suite green before done. Verify yourself, never assume.
+Targeted tests green before done. Full suite = push + `fleet gate run <pr>`. Verify yourself, never assume.

@@ -62,9 +62,9 @@ applied to a fleet-wide image rollout.
 
 - **Deliverable (code/PR)** → cloud studio, the default:
   `fleet task new ... --studio <id>`.
-- **Needs this machine** (local dev server, hardware) → local worktree agent,
+- **Needs this machine** (local dev server, hardware) → local studio,
   the exception, not the default. **Local fan-out can wedge the machine you
-  are running on.** Four local worktree agents each running a parallel
+  are running on.** Four local studios each running a parallel
   tsc/eslint/vitest pass, stacked on top of whatever else is already running
   there, has pushed host load high enough with zero memory free that the
   ordinary tools a maestro depends on (a terminal multiplexer, `gh`, `curl`,
@@ -221,7 +221,7 @@ argument.
 submits it.** Text lands in the input box, no turn starts, and the only
 warning is "cannot report delivery" — a bare follow-up Enter sometimes
 recovers it, sometimes the prompt is cleared first and the instruction is
-simply lost. What reliably works instead: spawn a fresh worktree agent with
+simply lost. What reliably works instead: spawn a fresh local studio with
 the full brief as its startup prompt, and treat a long-lived terminal as a
 read surface for status, never as a write surface for new instructions.
 Never trust that a scheduling call succeeded without reading its own output
