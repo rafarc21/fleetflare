@@ -358,6 +358,20 @@ every pass its own new id, with zero prior verdicts on it.
 Every message carries a progress line, which studios are active or idle, and
 the merge-gate's state.
 
+**Report format — operator order 2026-10-13. Every message, every maestro:**
+
+```
+Goal: <outcome you are working toward>   (several -> 2-3 item list)
+**x/y (z%)** <finite scope: batch PRs merged, queue items done, rollout steps>
+- Running: <studio -> task>
+- Blocked: <item, on whom>        (omit when none)
+Next step: <ONE action>.   or   Your step: <ONE ask> / none.
+```
+
+Follow the i-have-adhd skill (https://github.com/ayghri/i-have-adhd). Max 5
+bullets. No prose paragraphs, no recap, no closer. Routine monitor events get
+one line or nothing.
+
 See the cto-liaison skill for the general split of decision rights between a
 human and the layer coordinating a fleet on their behalf — that split, and
 the rule against turning a relay into a filter, applies here unchanged. On
