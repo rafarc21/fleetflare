@@ -7,7 +7,7 @@
 import type { Env } from "../env";
 import { postCommitStatus } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
-import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
+import { autoRunPullRequest, autoRunPullRequestIdempotent, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
 import { postGateStatus } from "./status-post";
 import type { StalledRun, WatchdogIndex } from "./watchdog";
 import { gateDraining, gateDrainQueue } from "./drain";
@@ -127,7 +127,7 @@ export async function drainPendingGateRuns(env: Env): Promise<void> {
   const queued = await queue.peek();
   for (const pr of queued) {
     try {
-      const outcome = await autoRunPullRequest(pr, {
+      const outcome = await autoRunPullRequestIdempotent(pr, {
         workflow: env.GATE_WORKFLOW,
         index: d1RunIndex(env.DB),
         postPending: pendingPost(env, pr.edited === true ? "running (edited title/body recheck)" : "running (fresh gate run)"),

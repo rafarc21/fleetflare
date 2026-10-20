@@ -287,6 +287,27 @@ export async function startEditedGateRun(
   return { runId, reused: false };
 }
 
+/** #1241 (a): the release path's idempotent twin of startEditedGateRun. An
+ *  edited PR replayed from the pending queue (a remove() throw after a start,
+ *  or overlapping cron sweeps) must reattach to the -e run it already started,
+ *  never end-and-restart it. Reattaches only to a live same-head edit run the
+ *  index records; otherwise falls through to a fresh start. */
+export async function startEditedGateRunIdempotent(
+  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex,
+  now: () => number = Date.now,
+  postPending?: (repo: string, headSha: string) => Promise<void>,
+): Promise<{ runId: string; reused: boolean }> {
+  const latest = await index.latest(input.repo, input.pr);
+  if (
+    latest !== null && latest.headSha === input.headSha
+    && latest.runId.startsWith(`${await gateRunId(input.repo, input.headSha)}-e`)
+    && isLiveStatus(await statusOf(wf, latest.runId))
+  ) {
+    return { runId: latest.runId, reused: true };
+  }
+  return startEditedGateRun(wf, input, index, now, postPending);
+}
+
 /** #1085 (refs #715): the manual start (`fleet gate run`, /studio/gate/start).
  *  Reattaches ONLY to a live run of the sha (LIVE_STATUSES) that progressed
  *  within GATE_STALL_MS (#1135). A finished run of the sha is not reused: a fresh
@@ -359,6 +380,24 @@ export interface AutoRunDeps {
 export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDeps): Promise<AutoRunOutcome> {
   if (pr.edited === true) {
     await startEditedGateRun(
+      deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index,
+      Date.now, deps.postPending,
+    );
+    return "started";
+  }
+  const { reused } = await startGateRun(
+    deps.workflow,
+    { repo: pr.repo, pr: pr.pr, headSha: pr.headSha, ...(pr.reopened === true ? { reopened: true } : {}) },
+    deps.index, Date.now, deps.postPending,
+  );
+  return reused ? "reused" : "started";
+}
+
+/** #1241 (a): the release path's auto-run: idempotent for edited PRs (reattach
+ *  a live -e run), ordinary dedupe-by-sha for everything else. */
+export async function autoRunPullRequestIdempotent(pr: PullRequestAutoRun, deps: AutoRunDeps): Promise<AutoRunOutcome> {
+  if (pr.edited === true) {
+    await startEditedGateRunIdempotent(
       deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index,
       Date.now, deps.postPending,
     );
