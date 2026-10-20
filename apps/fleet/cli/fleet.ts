@@ -1741,13 +1741,21 @@ export async function spawnLocalStudio(
     ...(typeof body.skills === "string" ? { skills: body.skills.split(",") } : {}),
   });
   if (outcome.kind !== "created") {
-    console.error(`${opts.cmd}: ${spawned.id} has no local lead — the Orca worktree did not materialize (${outcome.why})`);
+    // `why` rides the two outcomes ensureLocalStudioWorktree can actually
+    // produce here — skipped and failed; the "exists" kind in
+    // WorkspaceOutcome belongs to ensureStudioWorkspace's reuse path and
+    // never reaches a local spawn, so the bare-kind fallback below is
+    // defensive-only and never runs.
+    const why = outcome.kind === "skipped" || outcome.kind === "failed" ? outcome.why : outcome.kind;
+    console.error(`${opts.cmd}: ${spawned.id} has no local lead — the Orca worktree did not materialize (${why})`);
     console.error(`  tear the registered row down with: fleet destroy ${spawned.id}`);
     process.exit(1);
   }
   // `ff --local` attaches (a local worktree boots claude directly, so there
   // is no provisioned-wait); `fleet spawn --local` just reports the row.
-  await opts.attach(spawned.id, outcome.kind !== "skipped");
+  // After the fatal check above, outcome.kind is always "created" — the lead
+  // genuinely materialized — so the attach is handed a real worktree.
+  await opts.attach(spawned.id, true);
 }
 
 async function cmdLocalSpawn(
