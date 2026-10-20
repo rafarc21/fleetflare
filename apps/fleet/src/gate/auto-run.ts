@@ -310,13 +310,12 @@ export async function startEditedGateRunIdempotent(
   const editRunSuffix = `${baseId}-e`;
   let isEditRun = latest !== null && latest.headSha === input.headSha
     && latest.runId.startsWith(editRunSuffix);
-  if (isEditRun && input.queuedAt !== undefined) {
-    const suffix = latest.runId.slice(editRunSuffix.length);
-    const runAt = parseInt(suffix, 36);
+  if (latest !== null && isEditRun && input.queuedAt !== undefined) {
+    const runAt = parseInt(latest.runId.slice(editRunSuffix.length), 36);
     // NaN (a hand-built / legacy id) is never trusted as newer: not reusable.
     isEditRun = !Number.isNaN(runAt) && runAt >= input.queuedAt;
   }
-  if (isEditRun) {
+  if (isEditRun && latest !== null) {
     let status: string | null;
     try {
       status = (await (await wf.get(latest.runId)).status()).status;
