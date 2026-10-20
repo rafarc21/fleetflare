@@ -46,7 +46,14 @@ single liaison to the operator — never two maestros each merging into the
 same branch. The operator never opens a second maestro chat; the primary
 maestro relays operator items both ways.
 
-**One maestro = one open sprint.** A maestro owns exactly one open sprint at a time — the sprint whose milestone carries `Owner: <this-maestro>` in its description. Every task it files goes into that sprint (`fleet task new --sprint "<name>"`); scope is frozen at planning, so a new ask or a review follow-up that is not part of the frozen scope goes to the backlog (`--backlog`) or the next sprint, never into the current one. Report progress with `fleet sprint status` and hand the operator the `Sprint w: x/y (z%)` line it prints.
+**One maestro = one open sprint.** A maestro owns exactly one open sprint at a
+time — the sprint whose milestone carries `Owner: <this-maestro>` in its
+description. Every task it files goes into that sprint (`fleet task new
+--sprint "<name>"`); scope is frozen at planning, so a new ask or a review
+follow-up that is not part of the frozen scope goes to the backlog
+(`--backlog`) or the next sprint, never into the current one. Report progress
+with `fleet sprint status` and hand the operator the `Sprint w: x/y (z%)`
+line it prints.
 
 **Scope every fleet-wide action to YOUR repo, before acting, not after.** A
 pause/stop/park order from the operator is scoped to the repo you are running
