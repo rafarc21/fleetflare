@@ -67,6 +67,7 @@ import {
   formatObservedLines, formatActivity, lsJsonRows,
 } from "./readiness-format";
 import { formatTaskTable, formatTaskShow, formatAssignWake } from "./task-format";
+import { formatSprintSummaries, formatSprintStatusLines, formatSprintStatus } from "./sprint-format";
 // Issue #934: the INFER column's pure half (the cell format + the blocked
 // threshold), kept Bun/node-free so either test pool can import it — see
 // that module's own header.
@@ -86,6 +87,7 @@ import {
 import type { StudioStatus } from "../src/studio/types";
 import type { BoardTask, BoardTaskState } from "../src/board/types";
 import type { TaskComment } from "../src/board/board";
+import type { SprintSummary } from "../src/board/sprint";
 import type { TaskBriefArgs } from "../src/studio/cli-args";
 
 // ---------------------------------------------------------------------------
@@ -1881,6 +1883,19 @@ export async function listStudioTasks(creds: Credentials, studioId: string): Pro
   }
 }
 
+/** Issue #1245: the open sprint titles, for the sprint-required refusal. A
+ *  failed read returns [] — the refusal still fires, just without naming
+ *  sprints (a broken board must not silently pass a task that should have
+ *  been refused). */
+async function openSprintTitles(creds: Credentials, repo: string | undefined): Promise<string[]> {
+  const params = new URLSearchParams();
+  if (repo !== undefined) params.set("repo", repo);
+  const res = await fetch(boardUrl(creds, `/sprints?${params}`), { headers: accessHeaders(creds) });
+  if (!res.ok) return [];
+  const summaries = (await res.json()) as SprintSummary[];
+  return summaries.map((s) => s.title);
+}
+
 async function cmdTaskNew(
   creds: Credentials, brief: TaskBriefArgs, provision = false, freshSession = false,
 ): Promise<void> {
@@ -1899,6 +1914,18 @@ async function cmdTaskNew(
     reportRepo("fleet task new", detected);
   }
   const repo = brief.repo ?? detected.slug ?? undefined;
+  // Issue #1245: a task files onto one sprint — or the backlog. Neither named
+  // is refused before anything is filed, naming the open sprints so the
+  // operator can pick one. The refusal is CLI-only: the Worker still accepts a
+  // milestone-less brief (ff, the in-container verb, a phone-filed issue).
+  if (brief.milestone === undefined && brief.backlog !== true) {
+    const titles = await openSprintTitles(creds, repo);
+    const hint = titles.length === 0
+      ? "no sprints are open — `fleet sprint open \"<title>\" ...` first, or file with --backlog"
+      : `open sprints: ${titles.map((t) => `"${t}"`).join(", ")}`;
+    console.error(`fleet task new: --sprint is required (or --backlog) — ${hint}`);
+    process.exit(1);
+  }
   // Issue #139: one key per invocation; postTaskNew replays it on every retry,
   // and the Worker returns the issue an earlier attempt already filed.
   const key = crypto.randomUUID();
@@ -2014,6 +2041,52 @@ async function cmdTaskShow(creds: Credentials, number: number): Promise<void> {
     creds, "fleet task show", `/tasks/${number}${repoQuery(detected.slug)}`,
   )) as { task: BoardTask; comments: TaskComment[] };
   console.log(formatTaskShow(view));
+}
+
+async function cmdSprintLs(creds: Credentials): Promise<void> {
+  const detected = await detectRepo();
+  reportRepo("fleet sprint ls", detected);
+  const summaries = (await boardRequest(creds, "fleet sprint ls", `/sprints${repoQuery(detected.slug)}`)) as SprintSummary[];
+  console.log(formatSprintSummaries(summaries));
+}
+
+async function cmdSprintOpen(creds: Credentials, title: string, owner: string, goal: string): Promise<void> {
+  const detected = await detectRepo();
+  reportRepo("fleet sprint open", detected);
+  const res = (await boardRequest(creds, "fleet sprint open", "/sprints", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, owner, goal, ...(detected.slug ? { repo: detected.slug } : {}) }),
+  })) as { number: number; title: string };
+  console.log(`opened sprint "${res.title}" (milestone #${res.number})`);
+}
+
+async function cmdSprintStatus(creds: Credentials, title: string | null): Promise<void> {
+  const detected = await detectRepo();
+  reportRepo("fleet sprint status", detected);
+  if (title === null) {
+    const summaries = (await boardRequest(creds, "fleet sprint status", `/sprints${repoQuery(detected.slug)}`)) as SprintSummary[];
+    console.log(formatSprintStatusLines(summaries));
+    return;
+  }
+  const sprintParams = new URLSearchParams({ title });
+  if (detected.slug) sprintParams.set("repo", detected.slug);
+  const summaries = (await boardRequest(creds, "fleet sprint status", `/sprints?${sprintParams}`)) as SprintSummary[];
+  const taskParams = new URLSearchParams({ milestone: title });
+  if (detected.slug) taskParams.set("repo", detected.slug);
+  const tasks = (await boardRequest(creds, "fleet sprint status", `/tasks?${taskParams}`)) as BoardTask[];
+  console.log(formatSprintStatus(summaries[0], tasks));
+}
+
+async function cmdSprintClose(creds: Credentials, title: string): Promise<void> {
+  const detected = await detectRepo();
+  reportRepo("fleet sprint close", detected);
+  const res = (await boardRequest(creds, "fleet sprint close", "/sprints/close", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, ...(detected.slug ? { repo: detected.slug } : {}) }),
+  })) as { movedToBacklog: number[]; closed: number[] };
+  console.log(`sprint "${title}" closed — ${res.closed.length} completed closed, ${res.movedToBacklog.length} moved to backlog`);
 }
 
 /**
@@ -3475,6 +3548,14 @@ async function main(): Promise<void> {
       return cmdTaskReap(creds, parsed.apply, parsed.terminal === true);
     case "task-junior-sweep":
       return cmdTaskJuniorSweep(creds, parsed.apply);
+    case "sprint-ls":
+      return cmdSprintLs(creds);
+    case "sprint-open":
+      return cmdSprintOpen(creds, parsed.title, parsed.owner, parsed.goal);
+    case "sprint-status":
+      return cmdSprintStatus(creds, parsed.title);
+    case "sprint-close":
+      return cmdSprintClose(creds, parsed.title);
     case "rescue-gc":
       return cmdRescueGc(creds, parsed.apply, parsed.olderThanDays);
     case "rescue-all":
