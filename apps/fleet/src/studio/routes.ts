@@ -931,10 +931,13 @@ export async function handleStudio(
   }
 
   /**
-   * #715 gate runner (Phase 1): /studio/gate/start and /studio/gate/status.
-   * Same Access-gated lane as /studio/models above — handleGateRoute carries
-   * no auth of its own, so this mount point is the only guard. 404s itself
-   * unless FLEET_GATE_RUNNER is "on" and the repo is in GATE_RUNNER_REPOS.
+   * #715 gate runner (Phase 1): /studio/gate/start, /studio/gate/status, and
+   * (#1247) /studio/gate/protect. Same Access-gated lane as /studio/models
+   * above — handleGateRoute carries no auth of its own, so this mount point is
+   * the only guard. start/status 404 themselves unless FLEET_GATE_RUNNER is
+   * "on" and the repo is in GATE_RUNNER_REPOS; protect runs BEFORE that flag
+   * check on purpose (turning protection on must work even while the runner
+   * flag is off).
    */
   if (
     url.pathname === "/studio/gate/start" || url.pathname === "/studio/gate/status"

@@ -7,6 +7,7 @@ import {
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
   setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict,
+  getBranchProtection,
 } from "../src/github/api";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
 
@@ -1055,6 +1056,24 @@ describe("branch protection create/update split (#1247)", () => {
     expect(calls[0].method).toBe("PATCH");
     expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/main/protection/required_status_checks");
     expect(calls[0].body).toEqual({ strict: false });
+  });
+});
+
+describe("getBranchProtection", () => {
+  it("404 means no rule (null), not an empty list", async () => {
+    respond = () => new Response("{\"message\":\"Branch not protected\"}", { status: 404, headers: { "content-type": "application/json" } });
+    expect(await getBranchProtection("tok", "o/r", "main")).toBeNull();
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/main/protection");
+  });
+
+  it("a rule with no required_status_checks reads as an empty context list", async () => {
+    respond = () => Response.json({ enforce_admins: true });
+    expect(await getBranchProtection("tok", "o/r", "main")).toEqual({ contexts: [] });
+  });
+
+  it("reads the required status contexts off the rule", async () => {
+    respond = () => Response.json({ required_status_checks: { contexts: ["lint", "gate/verdict"] } });
+    expect(await getBranchProtection("tok", "o/r", "main")).toEqual({ contexts: ["lint", "gate/verdict"] });
   });
 });
 
