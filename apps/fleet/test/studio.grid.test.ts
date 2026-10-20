@@ -192,6 +192,38 @@ describe("GET /studio/ — content negotiation (Task 5, P2 plane 3)", () => {
     expect(body).toContain("studio-pilot.tailnet-1234.ts.net");
   });
 
+  // Fleet task #1248 (R6): a `host:"local"` row's card must carry `host` so
+  // the grid's "tailscale" row renders "local" — where it runs — instead of a
+  // "-" that would read as "unknown". This goes end-to-end through
+  // handleStudio (routes.ts's card build, the half that must not drop the
+  // field), so it fails on the current code which builds the card without
+  // `host` and, transitively, on the current page/grid.html which never reads
+  // `c.host`.
+  it("a host:\"local\" card carries host and the grid's tailscale row renders 'local', not '-'", async () => {
+    authorized();
+    const testEnv = envWithFakeStudio();
+    await recordStudio(env, status({ host: "local", localPath: "/tmp/websites" }));
+
+    const res = await handleStudio(authorizedReq("/studio/", { headers: { Accept: "text/html" } }), testEnv);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+
+    const line = body.split("\n").find((l) => l.trim().startsWith("var STUDIO_DATA = "));
+    expect(line).toBeDefined();
+    const cards = JSON.parse(
+      line!.trim().replace(/^var STUDIO_DATA = /, "").replace(/;$/, ""),
+    ) as GridCard[];
+    expect(cards).toHaveLength(1);
+    expect(cards[0].host).toBe("local");
+
+    // The card serialisation carrying host proves routes.ts did its half; the
+    // template's own reader renders it client-side. Assert the render contract
+    // on the template source the grid serves (page/grid.html): the tailscale
+    // row must choose "local" for a host:"local" card, never the "-" fallback.
+    expect(gridHtmlArtifact).toContain('c.host === "local"');
+    expect(gridHtmlArtifact).toContain('row("tailscale", c.host === "local" ? "local" : c.tailscaleHost || "-")');
+  });
+
   it("the served page carries the terminal-link mechanism and this studio's id to build it from", async () => {
     // The link itself ("/studio/<id>/terminal") is built client-side from
     // the embedded card data (grid.template.html's `card()`), so a raw
