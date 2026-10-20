@@ -5,6 +5,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import { handleGateRoute } from "../src/gate/routes";
 import { gateRunId } from "../src/gate/auto-run";
+import { setFlag, deleteFlag } from "../src/state";
 import type { Env } from "../src/env";
 
 const REPO = "acme/example";
@@ -150,6 +151,26 @@ describe("handleGateRoute", () => {
     }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
     const res = await handleGateRoute(new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=gate-run-1`), env);
     expect(await res.json()).toEqual({ state: "error", description: "gate workflow instance ended without a verdict" });
+  });
+});
+
+// #1232: while a Worker deploy drains running gate runs, the manual start queues
+// as pending instead of creating a run the deploy would kill.
+describe("POST /studio/gate/start while a deploy drains (#1232)", () => {
+  it("with gate_drain set, returns pending and never creates a run", async () => {
+    await setFlag(testEnv.DB, "gate_drain", "1", 0);
+    try {
+      const env = fakeEnv();
+      const req = new Request("https://worker/studio/gate/start", {
+        method: "POST", body: JSON.stringify({ repo: REPO, pr: 1 }),
+      });
+      const res = await handleGateRoute(req, env, headSha);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ started: false, pending: true });
+      expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
+    } finally {
+      await deleteFlag(testEnv.DB, "gate_drain");
+    }
   });
 });
 
