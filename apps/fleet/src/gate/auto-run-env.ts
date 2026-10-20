@@ -5,10 +5,8 @@
 // (not a gate block) turns a repo off: a gated repo with no valid gate config
 // fails red (#1132).
 import type { Env } from "../env";
-import { getCommitContextStatus, postCommitStatus } from "../github/api";
-import { repoTokenMinter } from "../github/auth";
 import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
-import { GATE_STATUS_CONTEXT, postGateStatus } from "./status-post";
+import { postGateStatus, realStatusPort } from "./status-post";
 import type { StalledRun, WatchdogIndex } from "./watchdog";
 
 /** The per-PR gate run pointer on the D1 gate_pr_head table (migrations 0007, 0008).
@@ -84,11 +82,7 @@ export function d1WatchdogIndex(db: D1Database): WatchdogIndex {
  *  before: a pending post must never block the run that follows it. */
 function pendingPost(env: Env, description: string) {
   return async (repo: string, headSha: string): Promise<void> => {
-    const port = {
-      mintToken: repoTokenMinter(env), postCommitStatus,
-      getCommitStatus: (token: string, r: string, sha: string) => getCommitContextStatus(token, r, sha, GATE_STATUS_CONTEXT),
-    };
-    await postGateStatus(port, repo, headSha, { state: "pending", description }).catch((err: unknown) => {
+    await postGateStatus(realStatusPort(env), repo, headSha, { state: "pending", description }).catch((err: unknown) => {
       console.error(`gate auto-run ${repo} ${headSha.slice(0, 8)}: pending status post failed`, err);
     });
   };

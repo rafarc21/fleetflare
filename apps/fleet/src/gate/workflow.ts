@@ -15,7 +15,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getCommitContextStatus, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree, postCommitStatus,
+  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree,
 } from "../github/api";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
@@ -39,7 +39,7 @@ import { d1RunIndex } from "./auto-run-env";
 import {
   announceInfraRerun, infraRerunDecision, launchInfraRerun, recordInfraRerun, rerunInstanceId, rerunStarted, rerunStatusArgs,
 } from "./infra-rerun";
-import { GATE_STATUS_CONTEXT, postGateStatus, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
+import { postGateStatus, realStatusPort, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
 export interface GateWorkflowParams {
@@ -58,6 +58,13 @@ export interface GateWorkflowParams {
 // Vitest shard count comes from the fleet.json gate block (default 8, capped by
 // planLegs at MAX_LEGS_PER_PR). vitestCmd's {i}/{n} renders as i/n per shard.
 
+// #1226: every `statusPostFailed` below is now hardcoded `false` at every
+// return site that reaches it — a real post failure throws out of run()
+// before any `return` executes (postGateStatus's new throw contract), so this
+// field can never actually be observed `true` on a completed instance
+// anymore. It stays only for the JSON shape's backward compatibility
+// (routes.ts forwards it; cli/gate.ts's gateWatchExitCode still branches on
+// it) — removing it is a separate, bigger decision outside this fix's scope.
 export type GateRunOutcome =
   | {
       state: "success" | "failure" | "error"; description?: string; statusPostFailed: boolean; legs: OutcomeLeg[];
@@ -78,11 +85,7 @@ export type GateRunOutcome =
 export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
   /** The real GitHub calls behind every gate/verdict post in this run. */
   private statusPort(): StatusPort {
-    const mintToken = repoTokenMinter(this.env);
-    return {
-      mintToken, postCommitStatus,
-      getCommitStatus: (token, repo, sha) => getCommitContextStatus(token, repo, sha, GATE_STATUS_CONTEXT),
-    };
+    return realStatusPort(this.env);
   }
 
   async run(event: WorkflowEvent<GateWorkflowParams>, step: WorkflowStep): Promise<GateRunOutcome> {

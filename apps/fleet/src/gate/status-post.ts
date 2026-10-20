@@ -10,6 +10,9 @@
 // old 2x-immediate-then-swallow loop that made Workflows' own retry unreachable.
 // The post is idempotent (posting the same state/description again is
 // harmless), so repeating the whole attempt on retry is always safe.
+import type { Env } from "../env";
+import { getCommitContextStatus, postCommitStatus } from "../github/api";
+import { repoTokenMinter } from "../github/auth";
 
 export const GATE_STATUS_CONTEXT = "gate/verdict";
 
@@ -27,6 +30,19 @@ export interface StatusPort {
    *  for this context yet, OR when the read itself fails — callers never treat
    *  that as proof of absence, only as "not confirmed." */
   getCommitStatus(token: string, repo: string, sha: string): Promise<{ state: string; description?: string } | undefined>;
+}
+
+/** The real GitHub calls behind every gate/verdict post: one place, shared by
+ *  the Workflow (workflow.ts), the pre-run pending post (auto-run-env.ts) and
+ *  the watchdog sweep (watchdog-env.ts) — all three built this same
+ *  mintToken/postCommitStatus/getCommitStatus triple by hand before (#1226
+ *  review), which let them drift apart silently. */
+export function realStatusPort(env: Env): StatusPort {
+  const mintToken = repoTokenMinter(env);
+  return {
+    mintToken, postCommitStatus,
+    getCommitStatus: (token, repo, sha) => getCommitContextStatus(token, repo, sha, GATE_STATUS_CONTEXT),
+  };
 }
 
 /** The status-post step's own retry (#1226): explicit, not Workflows' implicit
