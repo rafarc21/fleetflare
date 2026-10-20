@@ -29,6 +29,7 @@ import {
   listPullsForCommit, getIssueCloser, type IssueCloser, pullClaimsIssue,
   listMatchingBranches, commitDate, compareFiles, deleteBranch,
   repoIsPrivate, fetchRepoFile, listOpenPullFiles,
+  getPullRequestHeadSha, getCommitContextStatus,
 } from "../github/api";
 import {
   createIssue, getIssue, listIssues, addLabels, removeLabel, countIssues,
@@ -52,7 +53,10 @@ import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify"
 import { openTasksWithLatestPr } from "./pr-landed";
 import { closeTaskOnPromote } from "./close-action";
 import { studioOpenPrs, type OpenPr } from "./open-prs";
+import { completedGate, type CompletedGatePort } from "./completed-gate";
 import { runTaskReap, type ReapDeps, type LandedCheck } from "../studio/task-reap";
+import { isGateRunnerRepo } from "../gate/config";
+import { GATE_STATUS_CONTEXT } from "../gate/status-post";
 import { runRescueGc, type RescueBranch } from "../studio/rescue-gc";
 import { listStudios } from "../studio/registry";
 import {
@@ -62,7 +66,7 @@ import {
 import { parseStudioId } from "../studio/ids";
 import { repoIdSegment } from "../studio/repo";
 import type { StudioStatus } from "../studio/types";
-import { JUNIOR_LABEL, TERMINAL_TASK_STATES, taskAssignees, type BoardTask } from "./types";
+import { JUNIOR_LABEL, TERMINAL_TASK_STATES, taskAssignees, latestResultPr, type BoardTask } from "./types";
 import { guardBoardApi, leakGuard, LeakGateError, type LeakGuardDeps } from "./leak";
 import { OPS_DENYLIST_PATH } from "../leak-gate";
 import { resolveOpsRepo } from "../ops-repo";
@@ -330,6 +334,23 @@ function realRescueGcPort(env: Env): RescueGcPort {
       return false;
     },
     deleteBranch: async (repo, branch) => deleteBranch(await mint(repo), repo, branch),
+  };
+}
+
+/** #1247: the real GitHub calls behind a completed gate. One credential per
+ *  repo owner, minted lazily, same as the reap/rescue ports. */
+function realCompletedGatePort(env: Env): CompletedGatePort {
+  const mint = repoTokenMinter(env);
+  return {
+    getPullRequest: async (repo, number) => {
+      const pr = await getPullRequest(await mint(repo), repo, number);
+      return { merged: pr.merged };
+    },
+    getHeadSha: async (repo, number) => getPullRequestHeadSha(await mint(repo), repo, number),
+    getCommitStatus: async (repo, sha) => {
+      const s = await getCommitContextStatus(await mint(repo), repo, sha, GATE_STATUS_CONTEXT);
+      return s?.state === undefined ? undefined : { state: s.state };
+    },
   };
 }
 
@@ -876,6 +897,7 @@ type BoardPorts = {
   reapPort?: ReapPort;
   assignWake?: AssignWakeDeps;
   rescueGcPort?: RescueGcPort;
+  completedGatePort?: CompletedGatePort;
 };
 
 export async function handleBoard(
@@ -886,7 +908,8 @@ export async function handleBoard(
   { api = githubBoardApi(env), reach = githubRepoReach(env),
     verifyFetch = realVerifyFetch(env), reapPort = realReapPort(env),
     assignWake = realWakeDeps(env),
-    rescueGcPort = realRescueGcPort(env) }: BoardPorts = {},
+    rescueGcPort = realRescueGcPort(env),
+    completedGatePort = realCompletedGatePort(env) }: BoardPorts = {},
 ): Promise<Response> {
   const authFailure = await verifyAccess(req, env);
   if (authFailure) return authFailure;
@@ -998,7 +1021,30 @@ export async function handleBoard(
     }
     if (action === undefined) return respond(await showTask(api, repo.value, number));
     if (action === "state") {
-      return respond(await revokeTaskGrantsIfTerminal(env, repo.value, await transitionTask(api, repo.value, number, body)));
+      // #1247: completing a gated repo's task needs a green merge, unless the
+      // caller declares --no-pr (research/retro: no code to gate).
+      const gateEnforced = env.FLEET_GATE_RUNNER === "on" && isGateRunnerRepo(env.GATE_RUNNER_REPOS, repo.value);
+      if (body.to === "completed" && gateEnforced && body.noPr !== true) {
+        const shown = await showTask(api, repo.value, number);
+        if (!shown.ok) return respond(shown);
+        const pr = latestResultPr(shown.value.comments);
+        if (pr === null) {
+          return respond({
+            ok: false, status: 409,
+            message: "no PR in the latest result envelope — pass --no-pr for a research/retro task, or report a PR first",
+          });
+        }
+        const gate = await completedGate(completedGatePort, repo.value, pr);
+        if (!gate.ok) return respond(gate);
+      }
+      const transitioned = await transitionTask(api, repo.value, number, body);
+      if (transitioned.ok && body.to === "completed" && gateEnforced && body.noPr === true) {
+        // Best-effort: the completion already happened; the log is advisory.
+        await api.createComment(repo.value, number, "completed without a gate check (--no-pr)").catch((err) => {
+          console.error(`board: --no-pr completion comment failed for #${number} in ${repo.value}`, err);
+        });
+      }
+      return respond(await revokeTaskGrantsIfTerminal(env, repo.value, transitioned));
     }
     // P5 §3's two assignment verbs. Both are on the OPERATOR surface and on
     // no other: the studio surface below has no route for either, so "an

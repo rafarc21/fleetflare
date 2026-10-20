@@ -360,6 +360,77 @@ export async function getDefaultBranch(token: string, repo: string): Promise<str
   return body.default_branch;
 }
 
+/** The required-status contexts currently on a branch's protection rule, or
+ *  null when the branch has no protection rule at all (404). A rule with no
+ *  required status checks reads as an empty list. */
+export async function getBranchProtection(
+  token: string, repo: string, branch: string,
+): Promise<{ contexts: string[] } | null> {
+  const { res, text } = await ghRequest(
+    token,
+    `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection`,
+    { method: "GET" },
+    `read ${repo} branch protection`,
+    [404],
+  );
+  if (res.status === 404) return null;
+  const body = JSON.parse(text || "{}") as { required_status_checks?: { contexts?: unknown } | null };
+  const raw = body.required_status_checks?.contexts;
+  if (!Array.isArray(raw)) return { contexts: [] };
+  return { contexts: raw.filter((c): c is string => typeof c === "string") };
+}
+
+/** PUT a fresh branch-protection rule (the CREATE path). GitHub's PUT replaces
+ *  the whole rule and requires all four keys — omitting
+ *  `required_pull_request_reviews` 422s — so this must run ONLY when no rule
+ *  exists yet; the update path below touches nothing else. */
+export async function setBranchProtectionRule(
+  token: string, repo: string, branch: string, contexts: string[],
+): Promise<void> {
+  await ghRequest(
+    token,
+    `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        required_status_checks: { strict: false, contexts },
+        enforce_admins: false,
+        required_pull_request_reviews: null,
+        restrictions: null,
+      }),
+    },
+    `set ${repo} branch protection`,
+  );
+}
+
+/** Append required-status contexts to an EXISTING rule (the UPDATE path). A
+ *  full PUT here would wipe the rule's reviews/restrictions/admin setting, so
+ *  this POSTs only the contexts sub-resource. Adding a context already present
+ *  is a harmless no-op. */
+export async function addBranchProtectionContexts(
+  token: string, repo: string, branch: string, contexts: string[],
+): Promise<void> {
+  await ghRequest(
+    token,
+    `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection/required_status_checks/contexts`,
+    { method: "POST", body: JSON.stringify({ contexts }) },
+    `add ${repo} branch protection contexts`,
+  );
+}
+
+/** Set strict on an EXISTING rule's required status checks (PATCH), without
+ *  rewriting any other part of the rule. */
+export async function setBranchProtectionStrict(
+  token: string, repo: string, branch: string, strict: boolean,
+): Promise<void> {
+  await ghRequest(
+    token,
+    `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`,
+    { method: "PATCH", body: JSON.stringify({ strict }) },
+    `set ${repo} branch protection strict`,
+  );
+}
+
 /** Issue #1: GitHub's own `private` flag. Throws on non-2xx; the leak gate
  *  reads a throw as public, so only a confirmed private repo skips its scan. */
 export async function repoIsPrivate(token: string, repo: string): Promise<boolean> {

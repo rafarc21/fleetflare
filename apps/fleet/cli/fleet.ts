@@ -34,7 +34,7 @@ import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior, cmdJuniorStats } from "./junior";
 import { cmdAccounts, cmdAccountsSync, cmdAccountsHold, cmdAccountsClear } from "./accounts";
 import { cmdModelsLs, cmdModelsAssign, cmdModelsSet } from "./models";
-import { cmdGateRun, cmdGateStart, cmdGateWatch } from "./gate";
+import { cmdGateRun, cmdGateStart, cmdGateWatch, cmdGateProtect } from "./gate";
 import { formatAccountResolution } from "./accounts-format";
 import { sweepAllPages, type SweepPage } from "./junior-sweep";
 import { reapTerminalAll, type TerminalPage } from "./reap-terminal";
@@ -2106,12 +2106,12 @@ async function taskStateFetchCurrent(
 }
 
 async function taskStateFetchTransition(
-  creds: Credentials, number: number, from: string, to: string, repoSlug: string | null,
+  creds: Credentials, number: number, from: string, to: string, repoSlug: string | null, noPr = false,
 ): Promise<TaskStateFetchResult> {
   const res = await fetch(boardUrl(creds, `/tasks/${number}/state`), {
     method: "POST",
     headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
-    body: JSON.stringify({ from, to, ...(repoSlug ? { repo: repoSlug } : {}) }),
+    body: JSON.stringify({ from, to, ...(repoSlug ? { repo: repoSlug } : {}), ...(noPr ? { noPr: true } : {}) }),
   });
   if (!res.ok) return { ok: false, status: res.status, message: (await res.text()).slice(0, 500) };
   const task = (await res.json()) as BoardTask;
@@ -2130,14 +2130,14 @@ async function taskStateFetchTransition(
  * exits 1, the same posture `boardRequest` already establishes for every
  * other board verb in this file.
  */
-async function cmdTaskState(creds: Credentials, number: number, to: BoardTaskState, fromNone = false): Promise<void> {
+async function cmdTaskState(creds: Credentials, number: number, to: BoardTaskState, fromNone = false, noPr = false): Promise<void> {
   const detected = await detectRepo();
   reportRepo("fleet task state", detected);
 
   const result = await runTaskStateTransition(
     {
       getCurrentState: (c, n) => taskStateFetchCurrent(c, n, detected.slug),
-      transition: (c, n, from, toState) => taskStateFetchTransition(c, n, from, toState, detected.slug),
+      transition: (c, n, from, toState) => taskStateFetchTransition(c, n, from, toState, detected.slug, noPr),
     },
     creds, number, to, { fromNone },
   );
@@ -3470,7 +3470,7 @@ async function main(): Promise<void> {
     case "task-assign":
       return cmdTaskAssign(creds, parsed.number, parsed.target, parsed.why, parsed.readRepos);
     case "task-state":
-      return cmdTaskState(creds, parsed.number, parsed.to, parsed.fromNone === true);
+      return cmdTaskState(creds, parsed.number, parsed.to, parsed.fromNone === true, parsed.noPr === true);
     case "task-reap":
       return cmdTaskReap(creds, parsed.apply, parsed.terminal === true);
     case "task-junior-sweep":
@@ -3516,6 +3516,8 @@ async function main(): Promise<void> {
       return cmdGateStart(creds, parsed.pr);
     case "gate-watch":
       return cmdGateWatch(creds, parsed.pr, parsed.runId);
+    case "gate-protect":
+      return cmdGateProtect(creds, parsed.repo);
   }
 }
 

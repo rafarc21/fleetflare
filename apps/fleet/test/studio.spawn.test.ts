@@ -1714,6 +1714,35 @@ describe("spawnDeps().provisionChild — issue #107 role routing is real, not ju
   });
 });
 
+// #1247 review: the spawn guard's gatedRepos must honor FLEET_GATE_RUNNER the
+// same way the board's completed-gate check does — runner off = no repo is
+// gated, whatever GATE_RUNNER_REPOS still names. A repo whose runner is off
+// would otherwise still refuse to spawn.
+describe("spawnDeps().gatedRepos honors FLEET_GATE_RUNNER (#1247 review)", () => {
+  const small = fakeStudioNamespace();
+  const big = fakeStudioNamespace();
+  const { fetchFile } = fakeBlueprintFetch();
+  const resolveBrief = async () => ({ ok: true as const, value: "" });
+
+  it("runner on + GATE_RUNNER_REPOS set -> the parsed list", () => {
+    const testEnv = {
+      ...env, STUDIO: small, STUDIO_BIG: big, AGENT_REPO: REPO_SLUG,
+      FLEET_GATE_RUNNER: "on", GATE_RUNNER_REPOS: "acme/websites",
+    } as unknown as Env;
+    const deps = spawnDeps(testEnv, fetchFile, resolveBrief);
+    expect(deps.gatedRepos).toEqual(["acme/websites"]);
+  });
+
+  it("runner off -> [], even when GATE_RUNNER_REPOS still names a repo", () => {
+    const testEnv = {
+      ...env, STUDIO: small, STUDIO_BIG: big, AGENT_REPO: REPO_SLUG,
+      FLEET_GATE_RUNNER: "off", GATE_RUNNER_REPOS: "acme/websites",
+    } as unknown as Env;
+    const deps = spawnDeps(testEnv, fetchFile, resolveBrief);
+    expect(deps.gatedRepos).toEqual([]);
+  });
+});
+
 /** Same distinguishable-fake-namespace shape test/studio.profile.test.ts
  *  uses for its own pure-function tests — `get` tags which namespace
  *  served the stub, so a test can tell them apart without a real DO. */

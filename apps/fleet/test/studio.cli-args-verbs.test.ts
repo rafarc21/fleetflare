@@ -138,6 +138,19 @@ describe("fleet task state --from-none — issue #82", () => {
   });
 });
 
+describe("fleet task state --no-pr — #1247", () => {
+  it("--no-pr alone sets noPr", () => {
+    expect(parseCliArgs(["task", "state", "42", "completed", "--no-pr"]))
+      .toEqual({ cmd: "task-state", number: 42, to: "completed", noPr: true });
+  });
+  it("combines with --from-none, either order", () => {
+    expect(parseCliArgs(["task", "state", "42", "completed", "--from-none", "--no-pr"]))
+      .toEqual({ cmd: "task-state", number: 42, to: "completed", fromNone: true, noPr: true });
+    expect(parseCliArgs(["task", "state", "42", "completed", "--no-pr", "--from-none"]))
+      .toEqual({ cmd: "task-state", number: 42, to: "completed", fromNone: true, noPr: true });
+  });
+});
+
 describe("fleet task reap --terminal — issue #55", () => {
   it("--terminal is a dry run; with --apply it applies; flag order free", () => {
     expect(parseCliArgs(["task", "reap", "--terminal"])).toEqual({ cmd: "task-reap", apply: false, terminal: true });
@@ -766,5 +779,14 @@ describe("gate start / gate watch", () => {
   });
   it("gate with an unrecognized sub-verb -> usage", () => {
     expect(parseCliArgs(["gate", "frobnicate", "715"]).cmd).toBe("usage");
+  });
+  // #1247: `fleet gate protect <owner/repo>`.
+  it("gate protect <owner/repo> parses to the gate-protect command", () => {
+    expect(parseCliArgs(["gate", "protect", "acme/websites"])).toEqual({ cmd: "gate-protect", repo: "acme/websites" });
+  });
+  it("gate protect with a repo missing the owner/name slash -> usage naming the usage line", () => {
+    const parsed = parseCliArgs(["gate", "protect", "not-a-repo"]);
+    expect(parsed.cmd).toBe("usage");
+    if (parsed.cmd === "usage") expect(parsed.message).toContain("usage: fleet gate protect");
   });
 });

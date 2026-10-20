@@ -203,7 +203,7 @@ export type CliCommand =
   // typing what it BELIEVES the state to be is exactly the stale value the
   // route's own compare-and-swap exists to catch.
   // Issue #82: `fromNone` = `--from-none`, repair a task with no state label.
-  | { cmd: "task-state"; number: number; to: BoardTaskState; fromNone?: true }
+  | { cmd: "task-state"; number: number; to: BoardTaskState; fromNone?: true; noPr?: true }
   // Board issue #1077, item 2: `message <n> <text…>` — a board comment on the
   // task plus a wake of its one studio lead (the Worker's own route, the same
   // one the in-container verb calls). `text` is the rest of argv, joined.
@@ -283,6 +283,7 @@ export type CliCommand =
   | { cmd: "gate-run"; pr: number; failedOnly?: boolean }
   | { cmd: "gate-start"; pr: number }
   | { cmd: "gate-watch"; pr: number; runId: string }
+  | { cmd: "gate-protect"; repo: string }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -420,7 +421,7 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Move task <n> to another studio: old studio label off, new one on, state back to submitted, lineage commented (from, to, when, why). Earlier comments stay — they are what the previous studio did. A bare role means that role's FIRST instance in the repo you are standing in; issue #269 also accepts `pilot--2` (that role's instance 2, same repo) and a full studio id (`websites--pilot`, `websites--pilot--2`), which needs no repo context at all. --read-repos (issue #291) grants the new studio read-only access to those sibling repos, exactly as on task new; an assign WITHOUT it drops any earlier grant on the task.",
   },
   "task-state": {
-    args: `state <n> <to: ${TASK_STATES.join("|")}> [--from-none]`,
+    args: `state <n> <to: ${TASK_STATES.join("|")}> [--from-none] [--no-pr]`,
     summary: "Move task <n> to a new board state via the Worker's own compare-and-swap: reads the CURRENT state first and sends it as \"from\", so a stale caller gets the route's own 409 verbatim instead of overwriting someone else's write. Operator-invoked only — nothing auto-closes a task. --from-none repairs a task left with NO state label (an interrupted transition): the Worker refuses unless there really are zero, and logs the repair on the issue (issue #82).",
   },
   "rescue-gc": {
@@ -488,6 +489,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   "gate-watch": {
     args: "watch <pr> <runId>",
     summary: "Poll a gate-runner run (the runId `fleet gate start` prints) for <pr> to a terminal state; exit 0 green, 1 red, 2 infra error, 3 status post failed.",
+  },
+  "gate-protect": {
+    args: "protect <owner/repo>",
+    summary: "Set branch protection on <owner/repo>'s default branch requiring status context gate/verdict (strict=false, enforce_admins=false). Idempotent; prints before/after.",
   },
 };
 
@@ -708,8 +713,10 @@ function parseTask(argv: string[]): CliCommand {
     // typo'd state name is a usage error with the vocabulary listed, not a
     // wasted round trip that the route would 400 on anyway.
     const [rawNumber, to, ...extra] = rest;
-    const fromNone = extra.length === 1 && extra[0] === "--from-none";
-    if (extra.length > 0 && !fromNone) return usage(`unexpected ${JSON.stringify(extra[0])}`);
+    const fromNone = extra.includes("--from-none");
+    const noPr = extra.includes("--no-pr");
+    const unexpected = extra.filter((e) => e !== "--from-none" && e !== "--no-pr");
+    if (unexpected.length > 0) return usage(`unexpected ${JSON.stringify(unexpected[0])}`);
     const number = parseIssueNumber(rawNumber);
     if (number === null) {
       const got = rawNumber === undefined ? "" : ` (got ${JSON.stringify(rawNumber)})`;
@@ -720,7 +727,11 @@ function parseTask(argv: string[]): CliCommand {
         `fleet task state needs a valid target state: fleet task state <n> <to> — one of ${TASK_STATES.join("|")}`,
       );
     }
-    return { cmd: "task-state", number, to, ...(fromNone ? { fromNone: true as const } : {}) };
+    return {
+      cmd: "task-state", number, to,
+      ...(fromNone ? { fromNone: true as const } : {}),
+      ...(noPr ? { noPr: true as const } : {}),
+    };
   }
   if (sub === "message") {
     // Board issue #1077, item 2: the same grammar as the in-container verb
@@ -1380,6 +1391,12 @@ export function parseCliArgs(argv: string[]): CliCommand {
           return usage("usage: fleet gate run [--failed-only] <pr>");
         }
         return { cmd: "gate-run", pr: Number(positional[0]), ...(failedOnly ? { failedOnly: true } : {}) };
+      }
+      if (rest[0] === "protect") {
+        if (rest.length !== 2 || !/^[\w.-]+\/[\w.-]+$/.test(rest[1])) {
+          return usage("usage: fleet gate protect <owner/repo>");
+        }
+        return { cmd: "gate-protect", repo: rest[1] };
       }
       return usage("usage: fleet gate [run [--failed-only] <pr> | start <pr> | watch <pr> <runId>]");
     }

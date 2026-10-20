@@ -8,6 +8,11 @@
 // binding's OWN native instance-status API, not a second GitHub read.
 import type { Env } from "../env";
 import { getPullRequestHeadSha } from "../github/api";
+import {
+  getDefaultBranch, getBranchProtection, setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict,
+} from "../github/api";
+import { redactSecrets } from "../studio/redact";
+import { runGateProtect, type ProtectPort } from "./protect";
 import { repoTokenMinter } from "../github/auth";
 import { startManualGateRun, type GateRunIndex, type GateRunParams } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
@@ -34,6 +39,19 @@ const j = (v: unknown, status = 200) =>
 /** The PR's live head sha: the manual start keys its run on it (#1072). */
 export const liveHeadSha = (env: Env) => async (repo: string, pr: number): Promise<string> =>
   getPullRequestHeadSha(await repoTokenMinter(env)(repo), repo, pr);
+
+/** #1247: the real GitHub calls behind `gate protect`. One credential per repo
+ *  owner, minted lazily, same as liveHeadSha. */
+export function realProtectPort(env: Env): ProtectPort {
+  const mint = repoTokenMinter(env);
+  return {
+    getDefaultBranch: async (repo) => getDefaultBranch(await mint(repo), repo),
+    getProtection: async (repo, branch) => getBranchProtection(await mint(repo), repo, branch),
+    createProtection: async (repo, branch, contexts) => setBranchProtectionRule(await mint(repo), repo, branch, contexts),
+    addRequiredContexts: async (repo, branch, contexts) => addBranchProtectionContexts(await mint(repo), repo, branch, contexts),
+    setStrict: async (repo, branch, strict) => setBranchProtectionStrict(await mint(repo), repo, branch, strict),
+  };
+}
 
 /** The status one run id reports. A throw (an unknown id included) is the
  *  caller's to map to a JSON error. */
@@ -151,8 +169,31 @@ async function carryGreenFromLatestRun(
 
 export async function handleGateRoute(
   req: Request, env: Env, headShaOf: (repo: string, pr: number) => Promise<string> = liveHeadSha(env),
+  protect: ProtectPort = realProtectPort(env),
 ): Promise<Response> {
   const url = new URL(req.url);
+
+  if (url.pathname === "/studio/gate/protect" && req.method === "POST") {
+    const body = (await req.json()) as { repo?: unknown };
+    if (typeof body.repo !== "string" || !body.repo.includes("/")) {
+      return j({ error: "repo required as owner/name" }, 400);
+    }
+    try {
+      const result = await runGateProtect(protect, body.repo);
+      return j(result);
+    } catch (err) {
+      // A repo typo is a 404 the operator must see, not a generic 500 — same
+      // 404->404 / else->502 split the board's upstreamFailure makes, with the
+      // underlying message preserved either way (and redacted the same way,
+      // defense-in-depth against a future error echoing a header).
+      const message = err instanceof Error ? err.message : String(err);
+      const status = /\((\d{3})\)/.exec(message)?.[1];
+      const redacted = redactSecrets(message);
+      if (status === "404") return j({ error: redacted }, 404);
+      console.error("gate protect failed", err);
+      return j({ error: `gate protect failed: ${redacted}` }, 502);
+    }
+  }
 
   if (url.pathname === "/studio/gate/start" && req.method === "POST") {
     const body = (await req.json()) as { repo: string; pr: number; failedOnly?: boolean };

@@ -23,6 +23,7 @@ import type { ProvisionConfig, StudioStatus } from "./types";
 // binding of its own, so importing it does not break this file's "imports
 // no Env" property (see this file's own header).
 import { modelByKey } from "../llm/models";
+import type { GateConfig } from "../gate/config";
 
 /**
  * R-P3-7: the machine surface's credential. Spawn calls originate inside
@@ -145,6 +146,13 @@ export interface SpawnDeps {
    *  resolveSpawnPolicy below for the real wiring. Throwing is a meaningful
    *  outcome (503, never a silent allow). */
   fetchPolicy: () => Promise<SpawnPolicy>;
+  /** #1247: the "owner/repo" slugs gated in (env.GATE_RUNNER_REPOS, parsed).
+   *  Absent = no spawn gate enforcement (every caller that predates this
+   *  feature). */
+  gatedRepos?: string[];
+  /** #1247: the gated repo's default-branch gate config, or null when none is
+   *  valid (the #1132 silent-skip this refuses instead). Absent = no check. */
+  gateBlock?: (repoSlug: string) => Promise<GateConfig | null>;
   /** The EXISTING provision path (R-P3-2: "no new provisioning machinery"):
    *  routes.ts wires this to `getStudioStubForRow(env, {id: childId,
    *  doClass: realDoClassForRole(env, cfg.role)}).provision(cfg)` — a spawn
@@ -556,6 +564,18 @@ export async function runResume(deps: ResumeDeps, parent: SpawnParent, body: unk
 /** Issue #296: how many numbers a `"next"` spawn tries after losing races. */
 const MAX_CLAIM_ATTEMPTS = 20;
 
+/** #1247 (refs #1132): the one-line refusal for a gated repo with no valid
+ *  gate block. Names the fix — add a `gate` block to the repo's root
+ *  fleet.json (or a `gates[repo]` entry in the fleet repo) — so the operator
+ *  sees how to fix it, never a bare 400. */
+export function spawnGateConfigRefusal(repoSlug: string): Response {
+  return new Response(
+    `${repoSlug} is gated (GATE_RUNNER_REPOS) but its default-branch gate config has no valid gate block — ` +
+    "add a `gate` block to its fleet.json (or a `gates` entry in the fleet repo) before spawning a studio there",
+    { status: 400 },
+  );
+}
+
 export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unknown): Promise<Response> {
   const requested = (body as { role?: unknown } | null)?.role;
   if (typeof requested !== "string" || requested.length === 0) {
@@ -635,6 +655,18 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
 
   if (!maySpawn(policy.org, parent.role, requested)) {
     return new Response("spawn not permitted by org chart", { status: 403 });
+  }
+
+  // #1247 (refs #1132): a gated repo must have a valid default-branch gate
+  // block before a studio spawns into it — the old silent skip let a studio
+  // run where no PR could ever go green. Only enforced when the deploy wired
+  // gatedRepos AND gateBlock; absent = every pre-#1247 caller unchanged.
+  const repoSlug = parent.repoSlug;
+  if (deps.gatedRepos !== undefined && repoSlug !== undefined
+      && deps.gatedRepos.includes(repoSlug.toLowerCase())
+      && deps.gateBlock !== undefined) {
+    const block = await deps.gateBlock(repoSlug);
+    if (block === null) return spawnGateConfigRefusal(repoSlug);
   }
 
   // Review round 1, Important 2: org.json can edge a role that fleet.json
