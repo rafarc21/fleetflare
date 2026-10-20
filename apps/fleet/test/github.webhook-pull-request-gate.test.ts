@@ -11,6 +11,10 @@ import { handleGithubWebhook } from "../src/github/webhook";
 import { fakeCtx } from "./helpers/fake-ctx";
 import { sign } from "./helpers/webhook-sign";
 import { envWithStudio } from "./helpers/webhook-harness";
+import { setFlag, deleteFlag } from "../src/state";
+import { autoRunFromEnv } from "../src/gate/auto-run-env";
+import { gateDrainQueue } from "../src/gate/drain";
+import type { PullRequestAutoRun } from "../src/gate/auto-run";
 
 const SECRET = "hook-secret";
 const REPO = "acme/example";
@@ -84,5 +88,35 @@ describe("pull_request delivery -> gate auto-run", () => {
   it("other actions queue no auto-run", async () => {
     const closed = await deliver(prBody("closed"), ON);
     expect(closed.queued - (await deliver(prBody("closed"), OFF)).queued).toBe(0);
+  });
+});
+
+// #1232: while a deploy drains, the auto-run queues as pending instead of
+// starting a run the deploy would kill. The enqueue happens inside
+// ctx.waitUntil (drain: false), so this calls autoRunFromEnv directly and
+// asserts the queue holds the entry.
+describe("pull_request delivery while a deploy drains (#1232)", () => {
+  it("with gate_drain set, queues the run pending and never creates", async () => {
+    const create = vi.fn(async () => ({ id: "unused" }));
+    const pr: PullRequestAutoRun = { repo: REPO, pr: 7, headSha: HEAD, baseSha: "f".repeat(40) };
+    const e = {
+      ...envWithStudio(SECRET, {
+        wakes: [] as [string, string][],
+        rpcCalls: [] as { name: string; method: string }[],
+        ctl: { wakeOutcome: { ok: true } as { ok: boolean; error?: string }, getCalls: 0, onWake: null, lastCtx: null },
+      }),
+      FLEET_GATE_RUNNER: "on",
+      GATE_RUNNER_REPOS: REPO,
+      GATE_WORKFLOW: { create, get: vi.fn(async () => { throw new Error("instance not found"); }) },
+    } as unknown as typeof env;
+    await setFlag(env.DB, "gate_drain", "1", Date.now());
+    try {
+      await autoRunFromEnv(e, pr);
+      expect(create).not.toHaveBeenCalled();
+      expect(await gateDrainQueue(env.DB).peek()).toEqual([pr]);
+    } finally {
+      await deleteFlag(env.DB, "gate_drain");
+      await deleteFlag(env.DB, "gate_drain_pending");
+    }
   });
 });

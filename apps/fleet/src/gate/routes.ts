@@ -12,6 +12,7 @@ import { repoTokenMinter } from "../github/auth";
 import { startManualGateRun, type GateRunIndex, type GateRunParams } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import { isGateRunnerRepo } from "./config";
+import { gateDraining } from "./drain";
 import { greenLegsOf, type CarryGreen, type OutcomeLeg } from "./fanout";
 import { rerunInstanceId, statusFollowingRerun } from "./infra-rerun";
 
@@ -157,6 +158,12 @@ export async function handleGateRoute(
     const body = (await req.json()) as { repo: string; pr: number; failedOnly?: boolean };
     if (env.FLEET_GATE_RUNNER !== "on" || !isGateRunnerRepo(env.GATE_RUNNER_REPOS, body.repo)) {
       return j({ error: "gate runner not enabled for this repo" }, 404);
+    }
+    // #1232: a Worker deploy is draining — the manual start queues as pending
+    // instead of creating a run the deploy would kill. The id-less manual form
+    // carries no headSha to queue, so it is told to wait rather than queued.
+    if (await gateDraining(env.DB)) {
+      return j({ started: false, pending: true });
     }
     const headSha = await headShaOf(body.repo, body.pr);
     const index = d1RunIndex(env.DB);
