@@ -471,7 +471,22 @@ async function logNoFinishReasonFingerprint(
 async function recordAndRespondNoFinish(
   db: D1Database, studioId: string, fingerprintHash: string,
 ): Promise<{ n: number; response: Response }> {
-  const n = await recordNoFinishReasonFailure(db, studioId, fingerprintHash);
+  let n: number;
+  try {
+    n = await recordNoFinishReasonFailure(db, studioId, fingerprintHash);
+  } catch (e) {
+    // Finding 4 (fresh-context review of #1228, PR #1235, BLOCKING): a D1
+    // failure here (network blip, binding down, or the model-store's own
+    // "no row" guard firing) used to propagate all the way up through this
+    // function's caller as an unhandled rejection — a 500 WORSE than the
+    // 529 a transient no_finish_reason would otherwise get. Falling back to
+    // the safe retriable response is never worse than that 529, never a
+    // crash, and never silently escalates to the non-retriable 400 either
+    // — an `n` read off a failed D1 call can't be trusted enough to compare
+    // against the 3-strike threshold.
+    console.error("[glm-lead] recordNoFinishReasonFailure failed", e instanceof Error ? e.message : String(e));
+    return { n: 0, response: json(anthropicErrorBody("overloaded_error", "upstream stream ended without a finish reason; retry the turn"), 529) };
+  }
   // Issue #1228 (3): after 3 identical-input failures the request is proven
   // poisonous — stop the client's 12x retry loop with a non-retriable 400.
   // Before that threshold it is a normal retriable overload (529), the

@@ -583,6 +583,32 @@ describe("handleFleetAnthropicMessages — no_finish_reason retry/failover/non-r
     expect(run.mock.calls.length).toBe(3);
   });
 
+  // Finding 4 (fresh-context review of #1228, PR #1235, BLOCKING): a D1
+  // failure while recording the no_finish_reason streak (network blip,
+  // binding down) used to propagate all the way up through
+  // `recordAndRespondNoFinish` as an unhandled rejection — a 500 WORSE than
+  // the 529 a transient no_finish_reason would otherwise get. This DB stub
+  // throws on the exact statement `recordNoFinishReasonFailure` runs
+  // (unique `'1|' || ?` literal) and forwards everything else to the real
+  // D1, so only the poison-counting write is affected.
+  it("a D1 failure while recording the poison streak falls back to a safe 529, never crashes the request", async () => {
+    const throwingDb = {
+      prepare: (sql: string) => {
+        if (sql.includes("'1|' || ?")) throw new Error("D1_ERROR: network blip");
+        return env.DB.prepare(sql);
+      },
+    } as unknown as Env["DB"];
+    const run = vi.fn(async () => noFinishStream());
+    const body = { ...good, messages: [{ role: "user", content: "d1 down while counting poison" }] };
+
+    const r = await callRoute({ ai: { run }, envOverrides: { DB: throwingDb }, body });
+    expect(r.status).toBe(529);
+    expect(await r.json()).toEqual({
+      type: "error",
+      error: { type: "overloaded_error", message: "upstream stream ended without a finish reason; retry the turn" },
+    });
+  });
+
   // Finding 1 (fresh-context review of #1228, PR #1235): the bottom
   // non-streaming failure branch used to key ONLY on `result.failure ===
   // "no_finish_reason"`, with no `outputTokens === 0` check — unlike the

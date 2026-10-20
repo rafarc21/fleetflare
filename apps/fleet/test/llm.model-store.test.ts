@@ -78,6 +78,19 @@ describe("model store", () => {
     expect(await getNoFinishReasonFailures(env.DB, "s", "hash-a", now)).toBe(0);
   });
 
+  // Finding 4 (fresh-context review of #1228, PR #1235, BLOCKING): the old
+  // `row!.value` non-null assertion let a `null`/`undefined` `.first()`
+  // result (or anything else that isn't a row with the right shape) throw a
+  // cryptic "Cannot read properties of undefined" TypeError instead of a
+  // message that actually says what went wrong.
+  it("throws a clear, specific error when D1's RETURNING row comes back empty", async () => {
+    const emptyRowDb = {
+      prepare: () => ({ bind: () => ({ first: async () => null }) }),
+    } as unknown as D1Database;
+    await expect(recordNoFinishReasonFailure(emptyRowDb, "s", "hash-a", 1_000_000))
+      .rejects.toThrow("recordNoFinishReasonFailure: D1 returned no row");
+  });
+
   // Finding 2 (fresh-context review of #1228, PR #1235): recordNoFinishReasonFailure
   // used to be getFlag-then-setFlag -- two non-atomic round trips, the exact
   // shape state.ts's own incrementCounter doc comment (PR #9 review, BLOCKER

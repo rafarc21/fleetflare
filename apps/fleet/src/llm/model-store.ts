@@ -116,7 +116,14 @@ export async function recordNoFinishReasonFailure(
     )
     .bind(key, expiresAt, now, now, expiresAt, expiresAt)
     .first<{ value: string }>();
-  const value = row!.value;
+  // Finding 4 (fresh-context review of #1228, PR #1235, BLOCKING): a bare
+  // `row!.value` non-null assertion let a `null`/`undefined` `.first()`
+  // result (D1 misbehaving, not a thrown error) crash with a cryptic
+  // "Cannot read properties of undefined" TypeError. A specific, named
+  // error here is what `recordAndRespondNoFinish`'s own try/catch (the
+  // real fix for the crash-vs-529 risk this describes) actually catches.
+  if (row == null) throw new Error("recordNoFinishReasonFailure: D1 returned no row");
+  const value = row.value;
   return Number(value.slice(0, value.indexOf("|")));
 }
 
