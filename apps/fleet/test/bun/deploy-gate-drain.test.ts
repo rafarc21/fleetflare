@@ -31,6 +31,17 @@ describe("deploy.sh: drain running gate runs before a Worker deploy (#1232)", ()
     expect(r.wrangler.slice(setAt, deployAt).some((l) => l.startsWith("wrangler workflows instances list gate"))).toBe(true);
   });
 
+  test("re-stamps the drain flag before the deploy (fresh TTL covers the deploy)", () => {
+    writeConfig(gateConfig());
+    const r = deploy([], 0);
+    expect(r.code, r.err).toBe(0);
+    const sets = r.wrangler.map((l, i) => ({ l, i })).filter((x) => x.l.includes("'gate_drain','1'"));
+    expect(sets.length).toBe(2); // initial set + re-stamp before deploy
+    const deployAt = r.wrangler.findIndex((l) => l === "wrangler deploy -c wrangler.local.jsonc");
+    expect(sets[1].i).toBeGreaterThan(sets[0].i);
+    expect(sets[1].i).toBeLessThan(deployAt);
+  });
+
   test("a running gate instance never drains: refuses after the cap, flag is CLEARED, no deploy", () => {
     writeConfig(gateConfig());
     stub("gate-instances.json", [{ id: "gate-x", status: "running" }]);

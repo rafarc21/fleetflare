@@ -4,7 +4,7 @@
 // kill. The every-minute cron releases the queue once the flag is cleared.
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
-import { GATE_DRAIN_FLAG, GATE_DRAIN_QUEUE_KEY, gateDrainQueue, gateDraining } from "../src/gate/drain";
+import { GATE_DRAIN_FLAG, GATE_DRAIN_QUEUE_KEY, gateDrainQueue, gateDraining, clearStaleDrainFlag } from "../src/gate/drain";
 import { drainPendingGateRuns } from "../src/gate/auto-run-env";
 import { gateRunId, type PullRequestAutoRun } from "../src/gate/auto-run";
 import { setFlag, deleteFlag, flagIsSet } from "../src/state";
@@ -75,6 +75,16 @@ describe("gateDraining: the drain flag", () => {
   it("a stale flag (older than 20 min) reads as not-draining and is cleared", async () => {
     await setFlag(env.DB, GATE_DRAIN_FLAG, "1", Date.now() - 21 * 60_000);
     expect(await gateDraining(env.DB)).toBe(false);
+    expect(await flagIsSet(env.DB, GATE_DRAIN_FLAG)).toBe(false);
+  });
+
+  it("clearStaleDrainFlag deletes only when the ts still matches; a fresh re-set survives", async () => {
+    const stale = Date.now() - 21 * 60_000;
+    await setFlag(env.DB, GATE_DRAIN_FLAG, "1", Date.now());
+    await clearStaleDrainFlag(env.DB, stale); // aimed at a stale stamp, must no-op
+    expect(await flagIsSet(env.DB, GATE_DRAIN_FLAG)).toBe(true);
+    await setFlag(env.DB, GATE_DRAIN_FLAG, "1", stale);
+    await clearStaleDrainFlag(env.DB, stale); // matching stamp deletes
     expect(await flagIsSet(env.DB, GATE_DRAIN_FLAG)).toBe(false);
   });
 });
