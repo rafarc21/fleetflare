@@ -92,6 +92,39 @@ describe("sprintSummaries", () => {
     const res = await sprintSummaries(api, "o/r", "Sprint C");
     expect(res).toEqual({ ok: false, status: 404, message: 'no open sprint titled "Sprint C"' });
   });
+
+  it("excludes a CLOSED task with no state label from the count — repo history, not sprint work", async () => {
+    const api = fakeApi({
+      listOpenMilestones: vi.fn(async () => [
+        { number: 1, title: "Sprint A", description: "Owner: alice\nGoal: ship A" },
+      ]),
+      listIssues: vi.fn(async () => [
+        task({ number: 10, state: "submitted", labels: ["submitted"], open: true }),
+        task({ number: 11, state: null, labels: [], open: false }),
+      ]),
+    });
+    const res = await sprintSummaries(api, "o/r", null);
+    expect(res).toEqual({
+      ok: true,
+      value: [{ title: "Sprint A", owner: "alice", goal: "ship A", completed: 0, total: 1 }],
+    });
+  });
+
+  it("still counts a CLOSED task that carries a board state label", async () => {
+    const api = fakeApi({
+      listOpenMilestones: vi.fn(async () => [
+        { number: 1, title: "Sprint A", description: "Owner: alice\nGoal: ship A" },
+      ]),
+      listIssues: vi.fn(async () => [
+        task({ number: 10, state: "completed", labels: ["completed"], open: false }),
+      ]),
+    });
+    const res = await sprintSummaries(api, "o/r", null);
+    expect(res).toEqual({
+      ok: true,
+      value: [{ title: "Sprint A", owner: "alice", goal: "ship A", completed: 1, total: 1 }],
+    });
+  });
 });
 
 describe("closeSprint", () => {
@@ -265,6 +298,21 @@ describe("closeSprint", () => {
     expect(res).toEqual({ ok: true, value: { movedToBacklog: [11], closed: [10] } });
     expect(api.closeIssue).toHaveBeenCalledWith("o/r", 10, "completed");
     expect(api.setIssueMilestone).toHaveBeenCalledWith("o/r", 11, 99);
+    expect(api.closeMilestone).toHaveBeenCalledWith("o/r", 5);
+  });
+
+  it("does not move a CLOSED failed task to the backlog — closed issues stay in the sprint milestone", async () => {
+    const api = fakeApi({
+      listMilestones: vi.fn(async () => [
+        { number: 5, title: "Sprint A", description: "", state: "open" },
+        { number: 99, title: "backlog", description: "", state: "open" },
+      ]),
+      listIssues: vi.fn(async () => [task({ number: 14, state: "failed", labels: ["failed"], open: false })]),
+    });
+    const res = await closeSprint(api, "o/r", "Sprint A");
+    expect(res).toEqual({ ok: true, value: { movedToBacklog: [], closed: [] } });
+    expect(api.setIssueMilestone).not.toHaveBeenCalled();
+    expect(api.closeIssue).not.toHaveBeenCalled();
     expect(api.closeMilestone).toHaveBeenCalledWith("o/r", 5);
   });
 

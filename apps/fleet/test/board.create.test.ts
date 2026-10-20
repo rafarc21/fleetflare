@@ -89,6 +89,21 @@ describe("createTask", () => {
       expect(vi.mocked(api.createIssue).mock.calls[0][1].milestone).toBe(9);
     });
 
+    it("a concurrent create raced ours: re-list finds two backlog milestones and reuses the OLDEST", async () => {
+      let calls = 0;
+      const api = fakeApi({
+        listMilestones: vi.fn(async () => calls++ === 0 ? [] : [
+          { number: 9, title: "backlog", description: "", state: "open" },
+          { number: 10, title: "backlog", description: "", state: "open" },
+        ]),
+        createMilestone: vi.fn(async () => ({ number: 10, title: "backlog" })),
+      });
+      const res = await createTask(api, "o/r", { ...brief, backlog: true });
+      expect(res.ok).toBe(true);
+      expect(api.createMilestone).toHaveBeenCalled();
+      expect(vi.mocked(api.createIssue).mock.calls[0][1].milestone).toBe(9);
+    });
+
     it("refuses a brief naming both a sprint and the backlog — one lane only", async () => {
       const api = fakeApi();
       const res = await createTask(api, "o/r", { ...brief, milestone: "Sprint 1", backlog: true });
