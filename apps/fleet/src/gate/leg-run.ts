@@ -4,7 +4,7 @@
 // The GateRunnerDO answers /run-leg synchronously with the leg's LegResult.
 // That return value is the step result. A red test is data (state "failure"),
 // never a throw. Any non-2xx is infra: the step throws, Workflows retries it
-// once, and a second failure becomes this leg's "error".
+// twice (#1231), and a third failure becomes this leg's "error".
 import type { GateLegRequest } from "./leg-env";
 import { normalizeLegResult, type LegRunMeta, type PlannedLeg } from "./fanout";
 import { legTimeoutMin } from "./config";
@@ -28,11 +28,28 @@ const MAX_INFRA_CAUSE_CHARS = 200;
  *  passes on retry, so the flake's cause stays in the one-line status. */
 const MAX_FIRST_DESCRIPTION_CHARS = 150;
 
+/** The combined-causes budget for a leg whose every attempt failed (#1231):
+ *  short enough to read as one line, generous enough for 2-3 short causes. */
+export const MAX_COMBINED_CAUSE_CHARS = 140;
+
+/** Every cause gets a fair share of the budget — a long cause is shortened,
+ *  never erased outright by a later cause's length. The total never exceeds
+ *  MAX_COMBINED_CAUSE_CHARS: each cause's share already accounts for the "; "
+ *  separators between them. */
+export function combineCauses(causes: string[]): string {
+  if (causes.length === 0) return "";
+  const sep = "; ";
+  const budget = Math.max(0, MAX_COMBINED_CAUSE_CHARS - sep.length * (causes.length - 1));
+  const perCause = Math.max(1, Math.floor(budget / causes.length));
+  const trimmed = causes.map((c) => (c.length <= perCause ? c : `${c.slice(0, Math.max(0, perCause - 1))}…`));
+  return trimmed.join(sep);
+}
+
 /** The one step config a leg uses. Literal types, so the object is assignable
  *  to Workflows' WorkflowStepConfig without importing cloudflare:workers here
  *  (the check tsconfigs for test/ cannot resolve that module). */
 export interface LegStepConfig {
-  retries: { limit: number; delay: "15 seconds"; backoff: "constant" };
+  retries: { limit: number; delay: "15 seconds"; backoff: "constant" | "exponential" };
   timeout: "30 minutes";
 }
 
@@ -42,7 +59,7 @@ export interface LegStepRunner {
 }
 
 export const LEG_STEP_CONFIG: LegStepConfig = {
-  retries: { limit: 1, delay: "15 seconds", backoff: "constant" },
+  retries: { limit: 2, delay: "15 seconds", backoff: "exponential" },
   timeout: "30 minutes",
 };
 
@@ -118,6 +135,10 @@ export async function runLegStep(
   const deadlineMs = deps.stepDeadlineMs ?? legStepDeadlineMs(planned.timeoutMin);
   const attempt = (name: string, targetFor: (tryNo: number) => PlannedLeg): Promise<LegRunResult> => {
     let tryNo = 0;
+    // Persists across this step's own Workflows retries (same closure, like
+    // tryNo above) — one cause per failed attempt, so the final throw (if
+    // retries run out) carries all of them, never just the last.
+    const causes: string[] = [];
     return step.do(name, LEG_STEP_CONFIG, async () => {
       const target = targetFor(++tryNo);
       // Made inside the callback: a Workflows step retry re-runs it, so every
@@ -164,14 +185,15 @@ export async function runLegStep(
           ? `${planned.leg}: no progress past its deadline`
           : err instanceof Error ? err.message : String(err);
         const minutes = Math.round((Date.now() - started) / 60_000);
-        throw new Error(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min`);
+        causes.push(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min`);
+        throw new Error(combineCauses(causes));
       }
     });
   };
 
   const first = await attempt(`start-${planned.leg}`, (tryNo) => tryNo === 1
     ? planned
-    : { ...planned, resultKey: infraRetryResultKey(planned.resultKey) },
+    : { ...planned, resultKey: infraRetryResultKey(planned.resultKey, tryNo) },
   ).catch((err: unknown): LegRunResult => {
     // Retries spent (infra). The thrown message already carries the cause.
     const message = err instanceof Error ? err.message : String(err);
@@ -267,11 +289,13 @@ export function retryResultKey(resultKey: string): string {
   return resultKey.replace(/\.json$/, ".retry.json");
 }
 
-/** The start step's infra-retry key: its own, so a try 1 that wrote its result
- *  before its transport died is never read back as try 2's. Dashes, not dots:
- *  the container may only PUT `shard-<leg>[-…].json` (outbound-handler.ts). */
-export function infraRetryResultKey(resultKey: string): string {
-  return resultKey.replace(/\.json$/, "-try2.json");
+/** The start step's infra-retry key for one try number: its own, so an
+ *  earlier try that wrote its result before its transport died is never read
+ *  back as a later try's (#1231: tries 2 and 3 must not share try 2's key).
+ *  Dashes, not dots: the container may only PUT `shard-<leg>[-…].json`
+ *  (outbound-handler.ts). */
+export function infraRetryResultKey(resultKey: string, tryNo: number): string {
+  return resultKey.replace(/\.json$/, `-try${tryNo}.json`);
 }
 
 /** The sum of the attempts that were timed; undefined when none was. */

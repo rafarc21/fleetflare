@@ -24,24 +24,38 @@ export const GATE_WATCHDOG_LOOKBACK_MS = 2 * 60 * 60_000;
  *  verdict posts before the row leaves the sweep. */
 export const GATE_WATCHDOG_FINAL_AGE_MS = GATE_WATCHDOG_LOOKBACK_MS - 5 * 60_000;
 
+/** Any `-try<N>.json` suffix collapses to its leg's base, not just `-try2.json`
+ *  (#1231: more than one infra retry is now possible). */
+const TRY_SUFFIX = /-try(\d+)\.json$/;
+
 /** Whether any leg's decisive stored result is red. `read` gets one stored result
  *  by key, undefined when absent. A red first try is final unless its retry
- *  passed (#1156 N1c); a red retry is always red; an infra first try's try-2
- *  result decides over it (#1150 review). */
+ *  passed (#1156 N1c); a red retry is always red; the latest infra-retry try
+ *  decides over every earlier one, including the original first attempt
+ *  (#1150 review, generalized for #1231's multiple tries). */
 export async function hasRedResult(
   keys: string[], read: (key: string) => Promise<{ state?: string } | undefined>,
 ): Promise<boolean> {
-  const bases = new Set(keys.map((k) => k.replace(/(\.retry\.json|-try2\.json|\.json)$/, "")));
+  const bases = new Set(keys.map((k) => k.replace(/(\.retry\.json|-try\d+\.json|\.json)$/, "")));
   for (const base of bases) {
     const retryKey = `${base}.retry.json`;
     const retry = keys.includes(retryKey) ? await read(retryKey) : undefined;
-    const try2Key = `${base}-try2.json`;
-    const try2 = keys.includes(try2Key) ? await read(try2Key) : undefined;
+    // Every infra-retry try for this base, highest try number last — the
+    // latest decides over every earlier try, same as try-2 decided over the
+    // original first attempt before #1231 made more than one retry possible.
+    const tryKeys = keys
+      .filter((k) => k.startsWith(`${base}-try`) && TRY_SUFFIX.test(k))
+      .sort((a, b) => Number(TRY_SUFFIX.exec(a)![1]) - Number(TRY_SUFFIX.exec(b)![1]));
+    let latestTry: { state?: string } | undefined;
+    for (const k of tryKeys) {
+      const r = await read(k);
+      if (r !== undefined) latestTry = r;
+    }
     const jsonKey = `${base}.json`;
     const json = keys.includes(jsonKey) ? await read(jsonKey) : undefined;
-    // try-2 decides over the original first attempt for an infra leg; the retry
-    // decides over a red first try only when it passed (#1156 N1c).
-    const first = try2 ?? json;
+    // The latest try decides over the original first attempt for an infra leg;
+    // the retry decides over a red first try only when it passed (#1156 N1c).
+    const first = latestTry ?? json;
     if (retry?.state === "failure") return true;
     if (first?.state === "failure" && retry?.state !== "success") return true;
   }
