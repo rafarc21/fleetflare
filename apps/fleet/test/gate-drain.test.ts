@@ -7,7 +7,7 @@ import { env } from "cloudflare:test";
 import { GATE_DRAIN_FLAG, GATE_DRAIN_QUEUE_KEY, gateDrainQueue, gateDraining } from "../src/gate/drain";
 import { drainPendingGateRuns } from "../src/gate/auto-run-env";
 import { gateRunId, type PullRequestAutoRun } from "../src/gate/auto-run";
-import { setFlag, deleteFlag } from "../src/state";
+import { setFlag, deleteFlag, flagIsSet } from "../src/state";
 import type { Env } from "../src/env";
 
 const pr: PullRequestAutoRun = {
@@ -48,6 +48,15 @@ describe("gateDrainQueue: the pending auto-runs over fleet_state", () => {
     expect(await queue.peek()).toEqual([]);
   });
 
+  it("remove drops only the matched entry, keeping the rest", async () => {
+    const queue = gateDrainQueue(env.DB);
+    const other: PullRequestAutoRun = { repo: "acme/drain-queue", pr: 99, headSha: "b".repeat(40), baseSha: "c".repeat(40) };
+    await queue.append(pr);
+    await queue.append(other);
+    await queue.remove(pr);
+    expect(await queue.peek()).toEqual([other]);
+  });
+
   it("a corrupt (non-JSON) value reads as [] — fail-closed, never throws", async () => {
     await setFlag(env.DB, GATE_DRAIN_QUEUE_KEY, "not json", 0);
     expect(await gateDrainQueue(env.DB).peek()).toEqual([]);
@@ -57,10 +66,16 @@ describe("gateDrainQueue: the pending auto-runs over fleet_state", () => {
 describe("gateDraining: the drain flag", () => {
   it("is true after setFlag \"1\", false when absent or \"0\"", async () => {
     expect(await gateDraining(env.DB)).toBe(false);
-    await setFlag(env.DB, GATE_DRAIN_FLAG, "1", 0);
+    await setFlag(env.DB, GATE_DRAIN_FLAG, "1", Date.now());
     expect(await gateDraining(env.DB)).toBe(true);
-    await setFlag(env.DB, GATE_DRAIN_FLAG, "0", 0);
+    await setFlag(env.DB, GATE_DRAIN_FLAG, "0", Date.now());
     expect(await gateDraining(env.DB)).toBe(false);
+  });
+
+  it("a stale flag (older than 20 min) reads as not-draining and is cleared", async () => {
+    await setFlag(env.DB, GATE_DRAIN_FLAG, "1", Date.now() - 21 * 60_000);
+    expect(await gateDraining(env.DB)).toBe(false);
+    expect(await flagIsSet(env.DB, GATE_DRAIN_FLAG)).toBe(false);
   });
 });
 
@@ -96,7 +111,7 @@ describe("drainPendingGateRuns: the every-minute release of the pending queue", 
   it("with the flag set, creates nothing and leaves the queue untouched", async () => {
     const queued: PullRequestAutoRun = { repo: "acme/drain-blocked", pr: 102, headSha: "e".repeat(40), baseSha: "f".repeat(40) };
     const create = vi.fn(async () => ({ id: "unused" }));
-    await setFlag(env.DB, GATE_DRAIN_FLAG, "1", 0);
+    await setFlag(env.DB, GATE_DRAIN_FLAG, "1", Date.now());
     await gateDrainQueue(env.DB).append(queued);
     await drainPendingGateRuns(fakeEnv({ create }));
     expect(create).not.toHaveBeenCalled();

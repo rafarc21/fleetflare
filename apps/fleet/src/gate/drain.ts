@@ -6,7 +6,7 @@
 // the flag clears. A pending status still goes up for the queued PR, so GitHub
 // never sees the head without a gate (#1191).
 import type { PullRequestAutoRun } from "./auto-run";
-import { getFlag, flagIsSet } from "../state";
+import { getFlag, setFlag, flagIsSet, deleteFlag } from "../state";
 
 export const GATE_DRAIN_FLAG = "gate_drain";
 export const GATE_DRAIN_QUEUE_KEY = "gate_drain_pending";
@@ -23,6 +23,8 @@ export interface GateDrainQueue {
   append(pr: PullRequestAutoRun): Promise<void>;
   /** Atomically removes and returns the whole queue. */
   claim(): Promise<PullRequestAutoRun[]>;
+  /** Removes one queued entry (matched by headSha) after its run started. */
+  remove(pr: PullRequestAutoRun): Promise<void>;
 }
 
 export function gateDrainQueue(db: D1Database): GateDrainQueue {
@@ -62,10 +64,33 @@ export function gateDrainQueue(db: D1Database): GateDrainQueue {
         return [];
       }
     },
+    async remove(pr: PullRequestAutoRun): Promise<void> {
+      const runs = await this.peek();
+      const kept = runs.filter((r) => !(r.repo === pr.repo && r.pr === pr.pr && r.headSha === pr.headSha));
+      await setFlag(db, GATE_DRAIN_QUEUE_KEY, JSON.stringify(kept), Date.now());
+    },
   };
 }
 
-/** Whether a Worker deploy is currently draining running gate runs. */
+/** A drain flag older than this is a crashed/abandoned run's: it reads as
+ *  not-draining and is cleared, so one stuck flag never blocks every gate.
+ *  Longer than the 15-min wait cap plus the deploy itself. */
+export const GATE_DRAIN_STALE_MS = 20 * 60_000;
+
+/** Whether a Worker deploy is currently draining running gate runs. A flag set
+ *  more than GATE_DRAIN_STALE_MS ago is stale (the deploy script's trap clears
+ *  it on every path, so a surviving old flag is a crashed run): it reads as
+ *  not-draining and is cleared, never blocking a gate. */
 export async function gateDraining(db: D1Database): Promise<boolean> {
-  return flagIsSet(db, GATE_DRAIN_FLAG);
+  if (!(await flagIsSet(db, GATE_DRAIN_FLAG))) return false;
+  const row = await db
+    .prepare(`SELECT ts FROM fleet_state WHERE key = ?`)
+    .bind(GATE_DRAIN_FLAG)
+    .first<{ ts: number }>();
+  const stamp = row?.ts ?? 0;
+  if (Date.now() - stamp > GATE_DRAIN_STALE_MS) {
+    await deleteFlag(db, GATE_DRAIN_FLAG);
+    return false;
+  }
+  return true;
 }

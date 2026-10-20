@@ -159,7 +159,7 @@ describe("handleGateRoute", () => {
 // as pending instead of creating a run the deploy would kill.
 describe("POST /studio/gate/start while a deploy drains (#1232)", () => {
   it("with gate_drain set, returns pending and never creates a run", async () => {
-    await setFlag(testEnv.DB, "gate_drain", "1", 0);
+    await setFlag(testEnv.DB, "gate_drain", "1", Date.now());
     try {
       const env = fakeEnv();
       const req = new Request("https://worker/studio/gate/start", {

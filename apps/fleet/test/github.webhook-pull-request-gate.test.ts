@@ -109,7 +109,7 @@ describe("pull_request delivery while a deploy drains (#1232)", () => {
       GATE_RUNNER_REPOS: REPO,
       GATE_WORKFLOW: { create, get: vi.fn(async () => { throw new Error("instance not found"); }) },
     } as unknown as typeof env;
-    await setFlag(env.DB, "gate_drain", "1", 0);
+    await setFlag(env.DB, "gate_drain", "1", Date.now());
     try {
       await autoRunFromEnv(e, pr);
       expect(create).not.toHaveBeenCalled();

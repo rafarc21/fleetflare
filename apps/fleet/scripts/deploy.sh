@@ -495,6 +495,7 @@ cd "$FLEET_DIR"
 # --skip-gate-drain (consumed above, never passed to wrangler) skips it loudly;
 # it is a separate gate from --allow-unrescued and does not ride on it.
 GATE_DRAIN=0
+GATE_DRAIN_FLAG_SET=0
 # Match the binding on a comment-stripped copy with a bash regex, never a
 # grep -q pipe: under `set -o pipefail` a pipe's grep -q early-exits on a match
 # and SIGPIPEs its producer, which would silently skip the drain on a large config.
@@ -507,12 +508,29 @@ if [[ "$GATE_DRAIN" == 1 && "$SKIP_GATE_DRAIN" == 1 ]]; then
   GATE_DRAIN=0
 fi
 
+# Issue #1232 (maestro review): the flag must never stay set after this script
+# exits, whatever the exit path (cap hit, failed deploy, Ctrl-C). The trap
+# clears it on EXIT/INT/TERM; each signal handler also re-raises so the shell
+# still dies with the right code. The trap body only clears when this run set
+# the flag (a skip or a non-draining command never touches it).
+clear_gate_drain_flag() {
+  if [[ "$GATE_DRAIN_FLAG_SET" == 1 ]]; then
+    NOW_MS=$(( $(date +%s) * 1000 ))
+    "$WRANGLER" d1 execute fleet --remote --command "INSERT INTO fleet_state (key,value,ts) VALUES ('gate_drain','0',$NOW_MS) ON CONFLICT(key) DO UPDATE SET value='0', ts=excluded.ts" -c wrangler.local.jsonc >/dev/null 2>&1 \
+      || echo "deploy.sh: WARNING -- could not clear the gate drain flag; clear it by hand." >&2
+  fi
+}
+trap 'clear_gate_drain_flag' EXIT
+trap 'clear_gate_drain_flag; exit 130' INT
+trap 'clear_gate_drain_flag; exit 143' TERM
+
 if [[ "$GATE_DRAIN" == 1 ]]; then
   NOW_MS=$(( $(date +%s) * 1000 ))
   "$WRANGLER" d1 execute fleet --remote --command "INSERT INTO fleet_state (key,value,ts) VALUES ('gate_drain','1',$NOW_MS) ON CONFLICT(key) DO UPDATE SET value='1', ts=excluded.ts" -c wrangler.local.jsonc \
     || { echo "deploy.sh: refusing -- could not set the gate drain flag; pass --skip-gate-drain to override, or clear the flag by hand." >&2; exit 1; }
+  GATE_DRAIN_FLAG_SET=1
   if ! bun "$FLEET_DIR/scripts/gate-drain-wait.ts" wrangler.local.jsonc; then
-    echo "deploy.sh: refusing -- gate runs still running after the drain cap; the drain flag stays SET. Inspect with: wrangler workflows instances list gate, clear the flag by hand, then re-deploy." >&2
+    echo "deploy.sh: refusing -- gate runs still running after the drain cap; the drain flag is cleared. Re-deploy when the fleet is quieter." >&2
     exit 1
   fi
 fi
@@ -530,14 +548,6 @@ else
   set -e
 fi
 
-if [[ "$GATE_DRAIN" == 1 ]]; then
-  if [[ "$RC" == 0 ]]; then
-    NOW_MS=$(( $(date +%s) * 1000 ))
-    "$WRANGLER" d1 execute fleet --remote --command "INSERT INTO fleet_state (key,value,ts) VALUES ('gate_drain','0',$NOW_MS) ON CONFLICT(key) DO UPDATE SET value='0', ts=excluded.ts" -c wrangler.local.jsonc \
-      || echo "deploy.sh: WARNING -- could not clear the gate drain flag; clear it by hand." >&2
-  else
-    echo "deploy.sh: deploy failed (exit $RC) — the gate drain flag stays SET; inspect and clear it by hand before the next deploy." >&2
-  fi
-fi
-
+# The EXIT trap clears the flag on every path (success, deploy failure, Ctrl-C).
+# Nothing below needs to clear it itself; the trap runs at `exit $RC`.
 exit $RC

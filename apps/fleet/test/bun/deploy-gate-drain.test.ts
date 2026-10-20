@@ -31,14 +31,15 @@ describe("deploy.sh: drain running gate runs before a Worker deploy (#1232)", ()
     expect(r.wrangler.slice(setAt, deployAt).some((l) => l.startsWith("wrangler workflows instances list gate"))).toBe(true);
   });
 
-  test("a running gate instance never drains: refuses after the cap, flag stays set, no deploy, no clear", () => {
+  test("a running gate instance never drains: refuses after the cap, flag is CLEARED, no deploy", () => {
     writeConfig(gateConfig());
     stub("gate-instances.json", [{ id: "gate-x", status: "running" }]);
     const r = deploy([], 0, { GATE_DRAIN_CAP_MS: "150", GATE_DRAIN_POLL_MS: "10" });
     expect(r.code).toBe(1);
     expect(r.err).toContain("gate runs still running after the drain cap");
     expect(r.wrangler.some((l) => l === "wrangler deploy -c wrangler.local.jsonc")).toBe(false);
-    expect(r.wrangler.some((l) => l.includes("'gate_drain','0'"))).toBe(false);
+    // the trap cleared the flag on the way out
+    expect(r.wrangler.some((l) => l.includes("'gate_drain','0'"))).toBe(true);
     expect(r.wrangler.some((l) => l.includes("'gate_drain','1'"))).toBe(true);
   });
 
