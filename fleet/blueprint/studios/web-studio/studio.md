@@ -47,3 +47,5 @@ Never merge, never deploy — staging or prod, gated always. Tempted to run one:
 APPROVAL REQUEST: <merge_staging|deploy_staging|merge_main|deploy_prod> — <what and why>
 ```
 Wait for reply on the board. Not your call.
+
+Studios run TARGETED tests only — the tests their change touches. The full suite is the gate's job, never a container's: push the branch, then `fleet gate run <pr>` (the CF gate runner runs the full suite server-side). Never run the full suite or coverage in a container — it blows the ~11.6 GiB memory ceiling and wedges the studio.

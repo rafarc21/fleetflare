@@ -1,6 +1,6 @@
 ---
 name: fleet-cockpit
-description: Use when work should run in the cloud fleet rather than locally — spawning or attaching a studio, filing board tasks, checking what the fleet is doing, adopting an existing issue, or deciding between the fleet and local Orca worktree agents. Covers `ff`, `fleet`, studio ids, and the traps that make a healthy fleet look broken. Read this before reaching for a local agent on anything that should outlive the laptop.
+description: Use when work should run in the cloud fleet rather than locally — spawning or attaching a studio, filing board tasks, checking what the fleet is doing, adopting an existing issue, or deciding between the fleet and a local studio. Covers `ff`, `fleet`, studio ids, and the traps that make a healthy fleet look broken. Read this before reaching for a local agent on anything that should outlive the laptop.
 ---
 
 # Fleet cockpit
@@ -12,11 +12,11 @@ when the laptop closes, and they carry guardrails a local session does not.
 
 ## Decide first: fleet or local
 
-> **`dev` is DEAD (2026-09-07).** Read "local" below as a local **Orca**
-> worktree agent (`orca worktree create`) or this session. Routing rule lives in
+> **`dev` is DEAD (2026-09-07).** Read "local" below as a local
+> studio or this session. Routing rule lives in
 > `~/.claude/CLAUDE.md` `## Agent Dispatch`.
 
-| use the fleet | use local Orca agent / this session |
+| use the fleet | use local studio / this session |
 |---|---|
 | real deliverables | quick exploration, throwaway |
 | work that must outlive the laptop | needs your local filesystem or running services |
