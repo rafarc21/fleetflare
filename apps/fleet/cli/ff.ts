@@ -531,12 +531,11 @@ async function spawnNewStudio(
 
 /**
  * The `ff <role> --local` path. `parsed.task` is filed/adopted FIRST — the
- * task is the durable artifact and carries the studio assignment — but a
- * local spawn's id is not known until the route answers, so the task is
- * filed against a studio id derived the same way the cloud form derives it:
- * `<repo>--<role>` (instance 1), since `--local` never means `--new` (maestro
- * is the local-singleton role and `--new` is refused for it; every other role
- * local-spawns instance 1 or refuses if it exists).
+ * task is the durable artifact and carries the studio assignment — so it is
+ * filed against the fixed instance-1 id `<repo>--<role>` (the local spawn
+ * builds instance 1 unless `--new`, whose id is not known until the route
+ * answers). That is exactly why `--new` + a task refuses below: the task
+ * would be filed against instance 1 while the spawn builds instance 2.
  */
 async function ffLocal(
   creds: Credentials, parsed: Extract<ReturnType<typeof parseFfArgs>, { cmd: "ff" }>, detectedSlug: string,
