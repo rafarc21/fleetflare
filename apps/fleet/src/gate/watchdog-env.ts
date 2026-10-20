@@ -7,7 +7,8 @@ import { getPullRequest } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
 import { isGateRunnerRepo } from "./config";
 import { d1WatchdogIndex } from "./auto-run-env";
-import { postGateStatus, realStatusPort } from "./status-post";
+import { postGateStatus } from "./status-post";
+import { realStatusPort } from "./status-post-env";
 import { hasRedResult, sweepStalledRuns, type WatchdogRun } from "./watchdog";
 
 /** Whether any leg of the run stored a red result. The leg result keys are

@@ -39,7 +39,8 @@ import { d1RunIndex } from "./auto-run-env";
 import {
   announceInfraRerun, infraRerunDecision, launchInfraRerun, recordInfraRerun, rerunInstanceId, rerunStarted, rerunStatusArgs,
 } from "./infra-rerun";
-import { postGateStatus, realStatusPort, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
+import { postGateStatus, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
+import { realStatusPort } from "./status-post-env";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
 export interface GateWorkflowParams {

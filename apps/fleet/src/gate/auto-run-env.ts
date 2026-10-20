@@ -6,7 +6,8 @@
 // fails red (#1132).
 import type { Env } from "../env";
 import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
-import { postGateStatus, realStatusPort } from "./status-post";
+import { postGateStatus } from "./status-post";
+import { realStatusPort } from "./status-post-env";
 import type { StalledRun, WatchdogIndex } from "./watchdog";
 
 /** The per-PR gate run pointer on the D1 gate_pr_head table (migrations 0007, 0008).
