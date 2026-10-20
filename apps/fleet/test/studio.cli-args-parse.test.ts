@@ -786,15 +786,15 @@ describe("parseCliArgs: sprint", () => {
   });
 
   it("sprint open parses title, --maestro and --goal", () => {
-    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "rafael", "--goal", "ship X"]))
-      .toEqual({ cmd: "sprint-open", title: "Sprint 3", owner: "rafael", goal: "ship X" });
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "operator", "--goal", "ship X"]))
+      .toEqual({ cmd: "sprint-open", title: "Sprint 3", owner: "operator", goal: "ship X" });
   });
 
   it("sprint open accepts --maestro= and --goal= value forms, in either order", () => {
-    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro=rafael", "--goal=ship X"]))
-      .toEqual({ cmd: "sprint-open", title: "Sprint 3", owner: "rafael", goal: "ship X" });
-    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--goal=ship X", "--maestro=rafael"]))
-      .toEqual({ cmd: "sprint-open", title: "Sprint 3", owner: "rafael", goal: "ship X" });
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro=operator", "--goal=ship X"]))
+      .toEqual({ cmd: "sprint-open", title: "Sprint 3", owner: "operator", goal: "ship X" });
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--goal=ship X", "--maestro=operator"]))
+      .toEqual({ cmd: "sprint-open", title: "Sprint 3", owner: "operator", goal: "ship X" });
   });
 
   it("sprint open refuses a missing --maestro", () => {
@@ -802,18 +802,18 @@ describe("parseCliArgs: sprint", () => {
   });
 
   it("sprint open refuses a missing --goal", () => {
-    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "rafael"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "operator"]).cmd).toBe("usage");
   });
 
   it("sprint open refuses a missing, empty, or flag-shaped title", () => {
-    expect(parseCliArgs(["sprint", "open", "--maestro", "rafael", "--goal", "ship X"]).cmd).toBe("usage");
-    expect(parseCliArgs(["sprint", "open", "", "--maestro", "rafael", "--goal", "ship X"]).cmd).toBe("usage");
-    expect(parseCliArgs(["sprint", "open", "--title", "--maestro", "rafael", "--goal", "ship X"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "open", "--maestro", "operator", "--goal", "ship X"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "open", "", "--maestro", "operator", "--goal", "ship X"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "open", "--title", "--maestro", "operator", "--goal", "ship X"]).cmd).toBe("usage");
   });
 
   it("sprint open refuses a duplicate --maestro or --goal", () => {
     expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "a", "--maestro", "b", "--goal", "ship X"]).cmd).toBe("usage");
-    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "rafael", "--goal", "a", "--goal", "b"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "operator", "--goal", "a", "--goal", "b"]).cmd).toBe("usage");
   });
 
   it("sprint status: bare → title null; with a title → title set; a flag-shaped title is refused", () => {

@@ -13,7 +13,7 @@ import type { SprintSummary } from "../src/board/sprint";
 // The module prefixes every title with `Sprint `, so a fixture title is the
 // bare milestone name ("1", "2"), not the already-prefixed "Sprint 1".
 const summary = (overrides: Partial<SprintSummary> = {}): SprintSummary => ({
-  title: "1", owner: "rafael", goal: "ship X", completed: 3, total: 10, ...overrides,
+  title: "1", owner: "operator", goal: "ship X", completed: 3, total: 10, ...overrides,
 });
 
 describe("formatSprintStatusLine", () => {
@@ -44,7 +44,7 @@ describe("formatSprintSummaries", () => {
   it("carries the status line, owner and goal", () => {
     const out = formatSprintSummaries([summary()]);
     expect(out).toContain("Sprint 1: 3/10 (30%)");
-    expect(out).toContain("owner: rafael");
+    expect(out).toContain("owner: operator");
     expect(out).toContain("goal: ship X");
   });
 
