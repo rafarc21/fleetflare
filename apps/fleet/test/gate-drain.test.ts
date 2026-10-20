@@ -17,6 +17,12 @@ const pr: PullRequestAutoRun = {
   baseSha: "b".repeat(40),
 };
 
+/** Inserts a raw ts string, so a test can force a non-numeric stamp that a
+ *  number-typed setFlag call could never write. */
+async function db_set_raw(db: D1Database, key: string, value: string, ts: string) {
+  await db.prepare(`INSERT INTO fleet_state (key, value, ts) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts`).bind(key, value, ts).run();
+}
+
 beforeEach(async () => {
   await deleteFlag(env.DB, GATE_DRAIN_FLAG);
   await deleteFlag(env.DB, GATE_DRAIN_QUEUE_KEY);
@@ -41,16 +47,9 @@ describe("gateDrainQueue: the pending auto-runs over fleet_state", () => {
     expect(await queue.peek()).toEqual([pr, second]);
   });
 
-  it("claim removes and returns the queue", async () => {
+  it("remove drops only the matched entry, keeping the rest (atomic)", async () => {
     const queue = gateDrainQueue(env.DB);
-    await queue.append(pr);
-    expect(await queue.claim()).toEqual([pr]);
-    expect(await queue.peek()).toEqual([]);
-  });
-
-  it("remove drops only the matched entry, keeping the rest", async () => {
-    const queue = gateDrainQueue(env.DB);
-    const other: PullRequestAutoRun = { repo: "acme/drain-queue", pr: 99, headSha: "b".repeat(40), baseSha: "c".repeat(40) };
+    const other: PullRequestAutoRun = { repo: "acme/drain-queue", pr: 42, headSha: "f".repeat(40), baseSha: "e".repeat(40) };
     await queue.append(pr);
     await queue.append(other);
     await queue.remove(pr);
@@ -74,6 +73,12 @@ describe("gateDraining: the drain flag", () => {
 
   it("a stale flag (older than 20 min) reads as not-draining and is cleared", async () => {
     await setFlag(env.DB, GATE_DRAIN_FLAG, "1", Date.now() - 21 * 60_000);
+    expect(await gateDraining(env.DB)).toBe(false);
+    expect(await flagIsSet(env.DB, GATE_DRAIN_FLAG)).toBe(false);
+  });
+
+  it("a non-numeric ts reads as stale, never draining forever", async () => {
+    await db_set_raw(env.DB, GATE_DRAIN_FLAG, "1", "not-a-number");
     expect(await gateDraining(env.DB)).toBe(false);
     expect(await flagIsSet(env.DB, GATE_DRAIN_FLAG)).toBe(false);
   });
