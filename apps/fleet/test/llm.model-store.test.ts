@@ -77,4 +77,24 @@ describe("model store", () => {
     await clearNoFinishReasonFailures(env.DB, "s", "hash-a", now);
     expect(await getNoFinishReasonFailures(env.DB, "s", "hash-a", now)).toBe(0);
   });
+
+  // Finding 2 (fresh-context review of #1228, PR #1235): recordNoFinishReasonFailure
+  // used to be getFlag-then-setFlag -- two non-atomic round trips, the exact
+  // shape state.ts's own incrementCounter doc comment (PR #9 review, BLOCKER
+  // F1) says let 20 concurrent calls against a cap of 3 all succeed. The
+  // retry/failover walk can call this more than once per request across
+  // models, plus genuinely concurrent client retries, for the SAME
+  // studio+fingerprint -- same atomicity proof as state.test.ts's own
+  // incrementCounter race test: N genuinely concurrent calls against the
+  // same key must produce N distinct sequential totals (1..N), never two
+  // callers seeing (and writing) the same post-increment value.
+  it("N concurrent calls against the same studio+fingerprint see N distinct sequential totals (1..N)", async () => {
+    const n = 20;
+    const results = await Promise.all(
+      Array.from({ length: n }, () => recordNoFinishReasonFailure(env.DB, "s", "hash-race", 1_000_000)),
+    );
+    expect(new Set(results).size).toBe(n);
+    expect(Math.max(...results)).toBe(n);
+    expect(await getNoFinishReasonFailures(env.DB, "s", "hash-race", 1_000_000)).toBe(n);
+  });
 });

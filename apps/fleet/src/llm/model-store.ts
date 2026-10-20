@@ -81,18 +81,43 @@ const NFR = (studioId: string, fingerprintHash: string) => `no-finish-reason:${s
  * Issue #1228: a `no_finish_reason` on a request with this fingerprint failed
  * again — record it. The value is a `count|expiresAtMs` pair (one shared
  * expiry) so a sliding window never lets one old failure plus a new one read
- * as a streak. Count is kept separate from the increment used at the call site
- * because the caller needs to bump AND learn whether the streak crossed the
- * trip threshold, and `getFlag`-then-set is two non-atomic round trips. */
+ * as a streak.
+ *
+ * Finding 2 (fresh-context review, PR #1235): this used to be `getFlag` then
+ * `setFlag` — two non-atomic round trips, the exact race `state.ts`'s own
+ * `incrementCounter` doc comment (PR #9 review, BLOCKER F1) exists to fix:
+ * "20 concurrent calls against a cap of 3 all succeed". The retry/failover
+ * walk can call this more than once per request across models, plus
+ * genuinely concurrent client retries, for the SAME studio+fingerprint — a
+ * plausible way to bypass or trip the 3-strike gate early. `incrementCounter`
+ * itself has no window-expiry reset, so the window math is folded into ONE
+ * atomic statement here instead, same `INSERT ... ON CONFLICT DO UPDATE ...
+ * RETURNING` shape: a live (unexpired) stored expiry increments the count and
+ * extends the expiry; an absent or expired one resets to a fresh streak of 1
+ * — decided and written inside the SAME statement SQLite resolves the
+ * `ON CONFLICT` with, never a separate read first.
+ */
 export async function recordNoFinishReasonFailure(
   db: D1Database, studioId: string, fingerprintHash: string, now: number = Date.now(),
 ): Promise<number> {
   const key = NFR(studioId, fingerprintHash);
-  const v = await getFlag(db, key);
-  const live = v !== null && Number(v.slice(v.lastIndexOf("|") + 1)) > now ? Number(v.slice(0, v.indexOf("|"))) : 0;
-  const next = live + 1;
-  await setFlag(db, key, `${next}|${now + NO_FINISH_REASON_WINDOW_MS}`, now);
-  return next;
+  const expiresAt = now + NO_FINISH_REASON_WINDOW_MS;
+  const row = await db
+    .prepare(
+      `INSERT INTO fleet_state (key, value, ts) VALUES (?, '1|' || ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = CASE
+           WHEN CAST(substr(value, instr(value, '|') + 1) AS INTEGER) > ?
+             THEN CAST(CAST(substr(value, 1, instr(value, '|') - 1) AS INTEGER) + 1 AS TEXT) || '|' || ?
+           ELSE '1|' || ?
+         END,
+         ts = excluded.ts
+       RETURNING value`,
+    )
+    .bind(key, expiresAt, now, now, expiresAt, expiresAt)
+    .first<{ value: string }>();
+  const value = row!.value;
+  return Number(value.slice(0, value.indexOf("|")));
 }
 
 /** Issue #1228: a successful completion clears the streak — the request is
