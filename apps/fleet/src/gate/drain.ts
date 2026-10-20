@@ -11,9 +11,15 @@ import { getFlag, setFlag, flagIsSet } from "../state";
 export const GATE_DRAIN_FLAG = "gate_drain";
 export const GATE_DRAIN_QUEUE_KEY = "gate_drain_pending";
 
-/** The pending queue, stored as one JSON array over fleet_state. */
+/** The pending queue, stored as one JSON array over fleet_state. `append` is
+ *  one D1 statement (json_insert), so two concurrent deliveries both land —
+ *  never the read-then-write lost update src/state.ts's incrementCounter
+ *  comment warns about. `write` replaces the whole array and is only for the
+ *  single every-minute drain writer. */
 export interface GateDrainQueue {
   peek(): Promise<PullRequestAutoRun[]>;
+  /** Atomically appends one pending run, in a single statement. */
+  append(pr: PullRequestAutoRun): Promise<void>;
   write(runs: PullRequestAutoRun[]): Promise<void>;
 }
 
@@ -29,6 +35,16 @@ export function gateDrainQueue(db: D1Database): GateDrainQueue {
         // Fail-closed: a corrupt queue drops nothing and starts nothing.
         return [];
       }
+    },
+    async append(pr: PullRequestAutoRun): Promise<void> {
+      const entry = JSON.stringify(pr);
+      await db
+        .prepare(
+          `INSERT INTO fleet_state (key, value, ts) VALUES (?, json_array(json(?)), ?)
+           ON CONFLICT(key) DO UPDATE SET value = json_insert(value, '$[#]', json(?)), ts = excluded.ts`,
+        )
+        .bind(GATE_DRAIN_QUEUE_KEY, entry, Date.now(), entry)
+        .run();
     },
     async write(runs: PullRequestAutoRun[]): Promise<void> {
       await setFlag(db, GATE_DRAIN_QUEUE_KEY, JSON.stringify(runs), Date.now());

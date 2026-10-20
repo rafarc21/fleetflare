@@ -72,6 +72,13 @@ export function gateStartLine(body: { runId: string; reused?: boolean }, pr: num
     : `gate-start: started fresh run ${body.runId} for PR #${pr}`;
 }
 
+/** The one line a drain-queued start prints (#1232): the manual start route
+ *  answers `{started:false, pending:true}` without a run id, so there is
+ *  nothing to poll — the operator retries after the deploy. */
+export function gateQueuedLine(pr: number): string {
+  return `gate-start: queued (gate draining for deploy) for PR #${pr} — retry after the deploy`;
+}
+
 export async function cmdGateStart(creds: Credentials, pr: number): Promise<void> {
   const repo = await gatedRepo();
   if (!repo) return;
@@ -84,10 +91,14 @@ export async function cmdGateStart(creds: Credentials, pr: number): Promise<void
   } catch (err) {
     throw new Error(`fleet gate-start: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
-  const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; error?: string };
+  const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; pending?: boolean; error?: string };
   if (!res.ok || body.error) {
     console.error(`gate-start failed: ${body.error ?? res.status}`);
     process.exitCode = 2;
+    return;
+  }
+  if (body.pending === true) {
+    console.error(gateQueuedLine(pr));
     return;
   }
   console.log(gateStartLine({ runId: body.runId ?? "", reused: body.reused }, pr));
@@ -219,9 +230,17 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
       method: "POST", headers: { ...accessHeaders(creds), "content-type": "application/json" },
       body: JSON.stringify({ repo, pr }),
     });
-    const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; error?: string };
-    if (!res.ok || body.error || typeof body.runId !== "string") {
+    const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; pending?: boolean; error?: string };
+    if (!res.ok || body.error) {
       console.error(`gate-start failed: ${body.error ?? res.status}`);
+      return 2;
+    }
+    if (body.pending === true) {
+      console.error(gateQueuedLine(pr));
+      return 2;
+    }
+    if (typeof body.runId !== "string") {
+      console.error(`gate-start failed: ${res.status}`);
       return 2;
     }
     runId = body.runId;

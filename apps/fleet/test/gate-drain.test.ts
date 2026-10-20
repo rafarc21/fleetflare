@@ -33,6 +33,14 @@ describe("gateDrainQueue: the pending auto-runs over fleet_state", () => {
     expect(await queue.peek()).toEqual([pr]);
   });
 
+  it("append is atomic: two appends both land in one array", async () => {
+    const queue = gateDrainQueue(env.DB);
+    const second: PullRequestAutoRun = { repo: "acme/drain-queue", pr: 43, headSha: "f".repeat(40), baseSha: "e".repeat(40) };
+    await queue.append(pr);
+    await queue.append(second);
+    expect(await queue.peek()).toEqual([pr, second]);
+  });
+
   it("write([]) clears the queue", async () => {
     const queue = gateDrainQueue(env.DB);
     await queue.write([pr]);

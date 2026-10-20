@@ -495,7 +495,7 @@ cd "$FLEET_DIR"
 # --skip-gate-drain (consumed above, never passed to wrangler) skips it loudly;
 # it is a separate gate from --allow-unrescued and does not ride on it.
 GATE_DRAIN=0
-if is_plain_deploy ${ARGS[@]+"${ARGS[@]}"} && grep -q 'GATE_WORKFLOW' "$LOCAL_CONFIG"; then
+if is_plain_deploy ${ARGS[@]+"${ARGS[@]}"} && grep -v '^[[:space:]]*//' "$LOCAL_CONFIG" | grep -q '"binding"[[:space:]]*:[[:space:]]*"GATE_WORKFLOW"'; then
   GATE_DRAIN=1
 fi
 if [[ "$GATE_DRAIN" == 1 && "$SKIP_GATE_DRAIN" == 1 ]]; then
@@ -527,9 +527,13 @@ else
 fi
 
 if [[ "$GATE_DRAIN" == 1 ]]; then
-  NOW_MS=$(( $(date +%s) * 1000 ))
-  "$WRANGLER" d1 execute fleet --remote --command "INSERT INTO fleet_state (key,value,ts) VALUES ('gate_drain','0',$NOW_MS) ON CONFLICT(key) DO UPDATE SET value='0', ts=excluded.ts" -c wrangler.local.jsonc \
-    || echo "deploy.sh: WARNING -- could not clear the gate drain flag; clear it by hand." >&2
+  if [[ "$RC" == 0 ]]; then
+    NOW_MS=$(( $(date +%s) * 1000 ))
+    "$WRANGLER" d1 execute fleet --remote --command "INSERT INTO fleet_state (key,value,ts) VALUES ('gate_drain','0',$NOW_MS) ON CONFLICT(key) DO UPDATE SET value='0', ts=excluded.ts" -c wrangler.local.jsonc \
+      || echo "deploy.sh: WARNING -- could not clear the gate drain flag; clear it by hand." >&2
+  else
+    echo "deploy.sh: deploy failed (exit $RC) — the gate drain flag stays SET; inspect and clear it by hand before the next deploy." >&2
+  fi
 fi
 
 exit $RC

@@ -101,9 +101,7 @@ export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<
     // goes up, so GitHub never sees the head without a gate (#1191). The cron
     // releases the queue once the flag clears.
     if (await gateDraining(env.DB)) {
-      const queue = gateDrainQueue(env.DB);
-      const runs = await queue.peek();
-      await queue.write([...runs, pr]);
+      await gateDrainQueue(env.DB).append(pr);
       await pendingPost(env, "queued (gate draining for deploy)")(pr.repo, pr.headSha);
       console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: queued (draining)`);
       return;

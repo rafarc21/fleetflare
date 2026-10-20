@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, spyOn } from "bun:test";
-import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, runGate, formatMs, legLines, gateStartLine, type GateStatusResponse } from "../../cli/gate";
+import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, runGate, formatMs, legLines, gateStartLine, gateQueuedLine, type GateStatusResponse } from "../../cli/gate";
 
 // #1085 (refs #715): the start line says whether the run was reattached or fresh.
 describe("gateStartLine: reattached to a live run vs a fresh run (#1085)", () => {
@@ -8,6 +8,12 @@ describe("gateStartLine: reattached to a live run vs a fresh run (#1085)", () =>
   });
   it("not reused (a fresh run) -> started fresh run", () => {
     expect(gateStartLine({ runId: "run-2", reused: false }, 7)).toBe("gate-start: started fresh run run-2 for PR #7");
+  });
+});
+
+describe("gateQueuedLine", () => {
+  it("names the retry", () => {
+    expect(gateQueuedLine(7)).toBe("gate-start: queued (gate draining for deploy) for PR #7 — retry after the deploy");
   });
 });
 
@@ -126,6 +132,12 @@ describe("runGate exit codes", () => {
 
   it("start answers 200 with no run id -> 2, never a green exit", async () => {
     const stub = stubWorker({ start: () => Response.json({ started: true }), statuses: [{ state: "success" }] });
+    expect(await runGate(stub.creds, "acme/example", 7, { pollMs: 1 })).toBe(2);
+    expect(stub.seen.statusCalls).toBe(0);
+  });
+
+  it("start answers pending (gate draining): 2, prints the queued line, never polls", async () => {
+    const stub = stubWorker({ start: () => Response.json({ started: false, pending: true }), statuses: [{ state: "success" }] });
     expect(await runGate(stub.creds, "acme/example", 7, { pollMs: 1 })).toBe(2);
     expect(stub.seen.statusCalls).toBe(0);
   });
