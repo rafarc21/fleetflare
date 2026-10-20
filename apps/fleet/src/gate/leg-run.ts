@@ -184,7 +184,7 @@ export async function runLegStep(
 
   const first = await attempt(`start-${planned.leg}`, (tryNo) => tryNo === 1
     ? planned
-    : { ...planned, resultKey: infraRetryResultKey(planned.resultKey) },
+    : { ...planned, resultKey: infraRetryResultKey(planned.resultKey, tryNo) },
   ).catch((err: unknown): LegRunResult => {
     // Retries spent (infra). The thrown message already carries the cause.
     const message = err instanceof Error ? err.message : String(err);
@@ -280,11 +280,13 @@ export function retryResultKey(resultKey: string): string {
   return resultKey.replace(/\.json$/, ".retry.json");
 }
 
-/** The start step's infra-retry key: its own, so a try 1 that wrote its result
- *  before its transport died is never read back as try 2's. Dashes, not dots:
- *  the container may only PUT `shard-<leg>[-…].json` (outbound-handler.ts). */
-export function infraRetryResultKey(resultKey: string): string {
-  return resultKey.replace(/\.json$/, "-try2.json");
+/** The start step's infra-retry key for one try number: its own, so an
+ *  earlier try that wrote its result before its transport died is never read
+ *  back as a later try's (#1231: tries 2 and 3 must not share try 2's key).
+ *  Dashes, not dots: the container may only PUT `shard-<leg>[-…].json`
+ *  (outbound-handler.ts). */
+export function infraRetryResultKey(resultKey: string, tryNo: number): string {
+  return resultKey.replace(/\.json$/, `-try${tryNo}.json`);
 }
 
 /** The sum of the attempts that were timed; undefined when none was. */

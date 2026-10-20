@@ -475,7 +475,7 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
     expect(result.description).toBe("result read from R2 after transport loss: lint 3 errors");
   });
 
-  it("the start step's infra retries read their own result key, not try 1's (#1231: 2 infra retries, both on the try2 key)", async () => {
+  it("the start step's infra retries read their own result key, not try 1's or each other's (#1231: tries 2 and 3 each get their own key)", async () => {
     const step = fakeStep();
     const readKeys: string[] = [];
     const dispatch = async () => { throw new Error(LOST); };
@@ -483,8 +483,32 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
     expect(readKeys).toEqual([
       PLANNED.resultKey,
       "gate/o/r/runs/1/i/shard-lint-try2.json",
-      "gate/o/r/runs/1/i/shard-lint-try2.json",
+      "gate/o/r/runs/1/i/shard-lint-try3.json",
     ]);
+  });
+
+  it("try 3 reads back its own stored result, never try 2's late-arriving one, under a shared-key collision (#1231)", async () => {
+    const step = fakeStep();
+    const dispatch = async () => { throw new Error(LOST); };
+    // Models the race the plan calls out: try 2's read finds nothing yet (its
+    // container's late write hasn't landed), but by the time something reads
+    // the try2 key again, it has — a stale value a collision would hand to
+    // try 3. try 3's OWN key always holds its own, distinct result.
+    let try2Reads = 0;
+    const result = await runLegStep(step, dispatch, PLANNED, {
+      readResult: async (key) => {
+        if (key === "gate/o/r/runs/1/i/shard-lint-try2.json") {
+          try2Reads++;
+          return try2Reads === 1 ? undefined : { state: "error", description: "try 2's stale result" };
+        }
+        if (key === "gate/o/r/runs/1/i/shard-lint-try3.json") {
+          return { state: "error", description: "try 3's own result" };
+        }
+        return undefined;
+      },
+    });
+    expect(result.state).toBe("error");
+    expect(result.description).toBe("result read from R2 after transport loss: try 3's own result");
   });
 });
 
