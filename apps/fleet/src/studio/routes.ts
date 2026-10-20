@@ -36,7 +36,7 @@ import {
   threwInsideDurableObject, runtimeFlags, errorMessage, durableObjectUnreachable, launchOrStartRefusalResponse,
 } from "./rpc-failure";
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
-import { FRESH_SESSION_REFUSED_PREFIX } from "./provision";
+import { FLEET_JSON_DEFAULT_REF, FRESH_SESSION_REFUSED_PREFIX } from "./provision";
 import { resolveClaudeAccounts, accountLabel } from "./accounts";
 import {
   writeFleetAccountLimit, clearFleetAccountLimit, readOneAccountLimit, writeAccountHold,
@@ -48,6 +48,9 @@ import { writeFleetAccountUsage, readOneAccountUsage } from "./account-usage-sto
 import { countWorkerExceptions } from "../exceptions";
 import { handleModelsRoute } from "../llm/models-route";
 import { handleGateRoute } from "../gate/routes";
+import { parseGateRunnerRepos } from "../gate/config";
+import { loadGateConfig } from "../gate/load-config";
+import { fleetJsonReader } from "../gate/fleet-json";
 import { setAssignedModel } from "../llm/model-store";
 
 const ROUTE_RE = /^\/studio\/([^/]+)\/(status|provisioned|provision|restart|recycle|destroy|wake|check|rescue|inspect|ws\/terminal|paste|terminal|clear-session-guard)$/;
@@ -220,6 +223,14 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
   return {
     listStudios: () => (rows ??= listStudios(env)),
     fetchPolicy: () => resolveSpawnPolicy(fetchFile, env.AGENT_REPO),
+    // #1247: the gated-repo spawn guard. gatedRepos is the parsed
+    // GATE_RUNNER_REPOS list; gateBlock reads the repo's default-branch gate
+    // config through loadGateConfig + the real fleet.json reader. Absent
+    // inputs (GATE_RUNNER_REPOS empty) mean no repo is gated, so gateBlock is
+    // only built when there is at least one gated repo.
+    gatedRepos: parseGateRunnerRepos(env.GATE_RUNNER_REPOS),
+    gateBlock: (repoSlug: string) =>
+      loadGateConfig({ repo: repoSlug, fleetRepo: env.AGENT_REPO, configSha: FLEET_JSON_DEFAULT_REF }, fleetJsonReader(repoTokenMinter(env))),
     // P5c: the project card is attached HERE rather than inside runSpawn,
     // so src/studio/spawn.ts keeps its "imports no Env, makes no network call
     // of its own" property (see SpawnDeps' own header) and both spawn routes
