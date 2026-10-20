@@ -170,3 +170,166 @@ describe("fixture decoder", () => {
     expect(decodeRolePrompt(b64)).toBe("You are release. Merge carefully.");
   });
 });
+
+function authorizedReq(path: string, method = "POST") {
+  return new Request(`https://x${path}`, {
+    method,
+    headers: { "Cf-Access-Jwt-Assertion": "test-jwt" },
+  });
+}
+
+// A STUDIO namespace whose EVERY verb throws — the local row's guard must
+// return before any container RPC, so "no DO call" is proven by the 409.
+function containerThrowingEnv(): Env {
+  const throwIt = () => {
+    throw new Error("a local row must never reach the container DO");
+  };
+  return {
+    ...env,
+    AGENT_REPO: REPO_SLUG,
+    STUDIO: {
+      idFromName: (n: string) => n as unknown as DurableObjectId,
+      get: () => ({
+        provision: throwIt, restartStudio: throwIt, recycle: throwIt, checkNow: throwIt,
+        wakeStudio: throwIt, destroyStudio: throwIt,
+      }),
+    },
+  } as unknown as Env;
+}
+
+describe("POST /studio/local/spawn — shared id allocation with cloud rows (S3)", () => {
+  it("a cloud instance-1 row makes a local `instance: \"next\"` spawn take instance 2", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    // CLOUD row: state running, host ABSENT — the lowest-free-n scan must
+    // count it, so the local spawn lands on --2, never --1.
+    await recordStudio(env, {
+      id: "websites--pilot", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: REPO_SLUG,
+    });
+
+    const res = await handleStudio(
+      localSpawnReq({ role: "pilot", local: true, localPath: "/tmp/websites", instance: "next" }),
+      noContainerEnv(), fakeFetchFile(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as StudioStatus).id).toBe("websites--pilot--2");
+  });
+});
+
+describe("POST /studio/local/spawn — members decoded (S1)", () => {
+  const STUDIO_MD = `---
+name: web-studio
+title: Web Studio
+lead: Web Designer
+skills: [frontend-design]
+secrets: []
+mcp: []
+allowedTools: Bash(git *) Edit Write
+---
+You are the Web Designer, lead of Web Studio. Dispatch members; never implement.`;
+  const MEMBER_MD = `---
+name: backend-developer
+description: implements backend steps dispatched by the lead
+tools: Read, Edit, Write
+---
+You are the Backend Developer of Web Studio. Implement exactly the dispatched step.`;
+  const MEMBER_LISTING = JSON.stringify([
+    { name: "backend-developer.md", path: "fleet/blueprint/studios/web-studio/members/backend-developer.md", type: "file" },
+  ]);
+  const STUDIO_FAKE = fakeBlueprintFiles({
+    repo: REPO_SLUG, ref: "v1.0.0",
+    roles: ["web-studio"],
+    roleMd: { name: "web-studio", prompt: "unused", allowedTools: "Bash(git *) Edit Write" },
+    edges: { operator: ["web-studio"] },
+  });
+  function studioFetchFile() {
+    return async (_repo: string, path: string, _ref: string): Promise<string> => {
+      if (path.endsWith("fleet.json")) return STUDIO_FAKE.fleetJson;
+      if (path.endsWith("org.json")) return STUDIO_FAKE.orgJson;
+      if (path === "fleet/blueprint/studios/web-studio/studio.md") return STUDIO_MD;
+      if (path === "fleet/blueprint/studios/web-studio/members") return MEMBER_LISTING;
+      if (path === "fleet/blueprint/studios/web-studio/members/backend-developer.md") return MEMBER_MD;
+      throw new Error(`fetch ${path} failed (404): not found`);
+    };
+  }
+
+  it("returns each member body DECODED — plain markdown, never its base64", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    const res = await handleStudio(
+      localSpawnReq({ role: "web-studio", local: true, localPath: "/tmp/websites" }),
+      noContainerEnv(), studioFetchFile(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as StudioStatus & { members?: Record<string, string> };
+    expect(body.members?.["backend-developer.md"]).toBe(MEMBER_MD);
+    expect(body.members?.["backend-developer.md"]).not.toMatch(/^[A-Za-z0-9+/=]+$/);
+  });
+});
+
+describe("POST /studio/local/spawn — orphan running row (T1a)", () => {
+  // Serves fleet.json/org.json (runSpawn's own policy fetch needs them) but
+  // throws a NON-404 for the studio probe, so resolveBringupEnv fails AFTER
+  // runSpawn already wrote the running row.
+  function throwingBringupFetchFile() {
+    return async (_repo: string, path: string, _ref: string): Promise<string> => {
+      if (path.endsWith("fleet.json")) return FAKE.fleetJson;
+      if (path.endsWith("org.json")) return FAKE.orgJson;
+      if (path.includes("/studios/")) throw new Error("bring-up exploded (simulated)");
+      return FAKE.roleMd;
+    };
+  }
+
+  it("flips the just-written row to stopped and 500s, never leaving a running orphan", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    const res = await handleStudio(
+      localSpawnReq({ role: "release", local: true, localPath: "/tmp/websites" }),
+      noContainerEnv(), throwingBringupFetchFile(),
+    );
+
+    expect(res.status).toBe(500);
+    expect(await res.text()).toMatch(/bring-up|bring up|failed|resolve/i);
+    const row = (await listStudios(env)).find((s) => s.id === "websites--release");
+    expect(row?.state).toBe("stopped");
+    expect(row?.host).toBe("local");
+  });
+});
+
+describe("container-only verbs refuse a host:\"local\" row (T2)", () => {
+  function localRow(id: string): StudioStatus {
+    return {
+      id, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: "operator", spawnTokenHash: null,
+      repoSlug: REPO_SLUG, host: "local", localPath: "/tmp/websites",
+    };
+  }
+
+  it("provision refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/provision"), containerThrowingEnv(),
+    );
+
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("recycle refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/recycle"), containerThrowingEnv(),
+    );
+
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+});
