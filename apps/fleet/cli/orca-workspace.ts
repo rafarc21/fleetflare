@@ -54,6 +54,7 @@ import {
   chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync,
   symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { parseStudioId } from "../src/studio/ids";
 import { repoIdSegment } from "../src/studio/repo";
 import type { StudioStatus } from "../src/studio/types";
@@ -620,7 +621,10 @@ export function localWorktreeCreateArgs(localPath: string, defaultBranch: string
 export function localLaunchCommand(id: string, promptFilePath: string, allowedTools: string, effort: string): string {
   const args = [
     "claude",
-    "--append-system-prompt", `"$(cat ${promptFilePath})"`,
+    // The inner path is quoted too: a worktree path with a space must survive
+    // the `$(cat ...)` expansion (the shell reads the path between the two
+    // quotes), or the launch line breaks on the first space.
+    "--append-system-prompt", `"$(cat "${promptFilePath}")"`,
     "--allowedTools", `"${allowedTools}"`,
   ];
   if (effort !== "") args.push("--effort", effort);
@@ -629,13 +633,17 @@ export function localLaunchCommand(id: string, promptFilePath: string, allowedTo
 
 /**
  * The fail-closed PreToolUse hook command, matcher `.*` — the SAME guarded
- * shape studio-bringup.sh writes for the cloud lead, but PROJECT-scoped: `$PWD`
- * resolves to the worktree at claude's runtime, so a missing or non-executable
- * hook refuses the call (`exit 2`, the only code claude treats as block)
- * rather than waving a write through. Extracted so a test pins it verbatim.
+ * shape studio-bringup.sh writes for the cloud lead, but PROJECT-scoped:
+ * `$CLAUDE_PROJECT_DIR` is claude's own pointer to the project root and is
+ * stable however the lead `cd`'s around inside it, whereas `$PWD` is claude's
+ * CURRENT directory — a lead that `cd`'d into a subdir made `$PWD` wrong, the
+ * script read as "absent", and the `exit 2` refused every tool call (lead AND
+ * members). A missing or non-executable hook refuses the call (`exit 2`, the
+ * only code claude treats as block) rather than waving a write through.
+ * Extracted so a test pins it verbatim.
  */
 export function localLeadGateHookCommand(): string {
-  return 'S="$PWD/.claude/hooks/lead-gate.sh"; ' +
+  return 'S="$CLAUDE_PROJECT_DIR/.claude/hooks/lead-gate.sh"; ' +
     '[ -x "$S" ] || { echo "lead-gate hook absent or not executable -- refusing (decision 11)" >&2; exit 2; }; ' +
     'exec "$S"';
 }
@@ -669,8 +677,8 @@ export interface LocalStudioArgs {
  * The lead is materialized PROJECT-SCOPED, under the worktree's own
  * `.claude/`, never the global `~/.claude/settings.json` (board #20 cancelled
  * that verb) — and the fail-closed hook command resolves the script by
- * `$PWD/.claude/hooks/lead-gate.sh` so the SAME settings.json bytes work no
- * matter where the worktree actually lands on disk.
+ * `$CLAUDE_PROJECT_DIR/.claude/hooks/lead-gate.sh` so the SAME settings.json
+ * bytes work no matter where the worktree actually lands on disk.
  */
 export async function ensureLocalStudioWorktree(
   id: string, deps: OrcaDeps, args: LocalStudioArgs,
@@ -832,6 +840,54 @@ function materializeLocalLead(worktreePath: string, args: LocalStudioArgs, deps:
   // (the members/skills blocks above may have skipped) must still land.
   mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(settingsPath, JSON.stringify(merged, null, 2));
+
+  // Fleet task #1248 review BLOCKER B3: everything written above lives INSIDE
+  // the worktree and is committable — a member `git add -A` would commit the
+  // fail-closed settings.json (blocking every tool for anyone else using the
+  // repo) and the private working set/house rules/brief into a public repo.
+  // The fix is a per-repo exclusion in git's OWN `info/exclude`, never the
+  // repo-tracked `.gitignore` (that would be a diff to push). Best-effort:
+  // a failed exclude write logs and never fails the boot.
+  appendLocalExcludeLines(worktreePath, deps);
+}
+
+/**
+ * The B3 fix's exact lines, plus the git-port shape `appendLocalExcludeLines`
+ * runs on. `git -C <worktree> rev-parse --path-format=absolute --git-path
+ * info/exclude` resolves the worktree's exclude file as an ABSOLUTE path —
+ * the bare `--git-path` form returns a path relative to the repo's git dir,
+ * which `readFileSync`/`writeFileSync` below would resolve against THIS
+ * process's cwd (wherever `fleet spawn --local` ran), not the worktree. For a
+ * linked worktree git maps `info/exclude` to the common git dir's file, which
+ * is the one git actually honours there. Appended idempotently: a line
+ * already present is skipped, so a re-run never stacks duplicates. Never
+ * throws.
+ */
+export interface LocalExcludeRun {
+  (args: string[], cwd: string): { code: number | null; stdout: string; stderr: string };
+}
+
+export const LOCAL_EXCLUDE_LINES = [".fleet/", ".claude/settings.json", ".claude/hooks/", ".claude/agents/", ".claude/skills/"];
+
+export function appendLocalExcludeLines(worktreePath: string, deps: Pick<OrcaDeps, "log">, run: LocalExcludeRun = defaultLocalExcludeRun): void {
+  try {
+    const probe = run(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], worktreePath);
+    const excludePath = probe.code === 0 ? probe.stdout.trim() : "";
+    if (excludePath === "") throw new Error(probe.stderr.trim() || "git could not resolve the exclude path");
+    const existing = readFileSync(excludePath, "utf8").split("\n");
+    const add = LOCAL_EXCLUDE_LINES.filter((line) => !existing.includes(line));
+    if (add.length > 0) writeFileSync(excludePath, [...existing, ...add].join("\n"));
+  } catch (err) {
+    // Best-effort on purpose: the gate above is fail-closed, but the
+    // exclude is only a convenience against a member's later `git add -A` —
+    // a boot must never fail because this write could not land.
+    deps.log(`could not exclude the lead's files from git (${errText(err)})`);
+  }
+}
+
+function defaultLocalExcludeRun(args: string[], cwd: string): { code: number | null; stdout: string; stderr: string } {
+  const proc = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  return { code: proc.status, stdout: proc.stdout ?? "", stderr: proc.stderr ?? "" };
 }
 
 type OrcaWorktree = NonNullable<NonNullable<OrcaEnvelope["result"]>["worktrees"]>[number];
