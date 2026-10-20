@@ -754,6 +754,79 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
     }
   });
 
+  // Finding 3 (fresh-context review of #1228, PR #1235): computeRequestFingerprint
+  // has a DEDICATED branch for `b?.type === "tool_result"` messages that
+  // flattens and hashes `b.content` separately from the whole-body hash —
+  // but no existing test ever sent a `tool_result` block carrying a secret
+  // marker; they only put the marker in a plain `{role:"user",
+  // content: MARKER}` message, which never enters that branch at all. This
+  // proves the tool_result-specific hash branch is leak-proof too, not just
+  // the whole-body hash.
+  it("a secret marker inside a tool_result block never reaches any console.error call (Finding 3)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const upstream = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(partial()); controller.close(); },
+      });
+      const { token, rows, e } = await streamSetup(upstream);
+      const MARKER = "TOP-SECRET-TOOL-RESULT-TEXT-1228";
+      const body = {
+        ...good, stream: true,
+        messages: [
+          { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "nyc" } }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: MARKER }] },
+        ],
+      };
+      const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+      await r.text();
+      await ctx.drain();
+      expect(spy.mock.calls.length).toBeGreaterThan(0);
+      const lines = spy.mock.calls.map((c) => c.map(String).join(" "));
+      const fingerprintLine = lines.find((l) => l.includes("[glm-lead] no_finish_reason") && l.includes("fingerprint="));
+      expect(fingerprintLine).toBeDefined();
+      // The tool_result-specific hash branch actually ran (lastToolResult is
+      // not the empty "0b:-" shape computeRequestFingerprint reports when no
+      // tool_result was present).
+      expect(fingerprintLine).not.toContain("lastToolResult=0b:-");
+      for (const l of lines) expect(l).not.toContain(MARKER);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Finding 4 (fresh-context review of #1228, PR #1235): `bodyBytes: raw.length`
+  // counts UTF-16 code units, not bytes -- every sibling field in the same
+  // fingerprint object (lastToolResultBytes, the lastChunks hashing) already
+  // uses `new TextEncoder().encode(...).byteLength`. A request body with a
+  // multi-byte UTF-8 character (more bytes than JS string .length) proves
+  // bodyBytes now reports the real byte count.
+  it("bodyBytes in the fingerprint line is the real UTF-8 byte count, not the UTF-16 character count (Finding 4)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const upstream = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(partial()); controller.close(); },
+      });
+      const { token, rows, e } = await streamSetup(upstream);
+      // "é" is 1 UTF-16 code unit but 2 UTF-8 bytes -- a body whose real
+      // byte count genuinely differs from its JS string .length.
+      const body = { ...good, stream: true, messages: [{ role: "user", content: "café résumé" }] };
+      const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+      await r.text();
+      await ctx.drain();
+      const raw = JSON.stringify(body);
+      const realByteCount = new TextEncoder().encode(raw).byteLength;
+      // Sanity: this body genuinely has multi-byte characters, so a
+      // bodyBytes==raw.length bug is actually observable here.
+      expect(realByteCount).not.toBe(raw.length);
+      const lines = spy.mock.calls.map((c) => c.map(String).join(" "));
+      const fingerprintLine = lines.find((l) => l.includes("[glm-lead] no_finish_reason") && l.includes("fingerprint="));
+      expect(fingerprintLine).toBeDefined();
+      expect(fingerprintLine).toContain(`bodyBytes=${realByteCount}`);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   // Board issue #304, item 3: the upstream's OWN error message can echo
   // request input — a context-overflow error quoting the prompt is the
   // exact shape that motivated this. `wrangler tail` output outlives the

@@ -418,7 +418,11 @@ async function computeRequestFingerprint(raw: string, body: Json): Promise<Reque
       }
     }
   }
-  return { fingerprintHash: await sha256Hex(raw), bodyBytes: raw.length, toolCount, lastToolResultHash, lastToolResultBytes };
+  // Finding 4 (fresh-context review of #1228, PR #1235): `raw.length` counts
+  // UTF-16 code units, not bytes -- every sibling field here already uses
+  // TextEncoder for a real byte count; this one must too.
+  const bodyBytes = new TextEncoder().encode(raw).byteLength;
+  return { fingerprintHash: await sha256Hex(raw), bodyBytes, toolCount, lastToolResultHash, lastToolResultBytes };
 }
 
 /** Issue #1228: the one console line a no_finish_reason failure writes, in
