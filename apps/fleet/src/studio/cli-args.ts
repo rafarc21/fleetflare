@@ -219,6 +219,17 @@ export type CliCommand =
   | { cmd: "task-reap"; apply: boolean; terminal?: true }
   // Issue #35: delete junior records whose task is already finished.
   | { cmd: "task-junior-sweep"; apply: boolean }
+  // Task #1245: the sprint surface. `sprint` is a noun with operations on it,
+  // same two-word shape `task`/`memory`/`accounts`/`models`/`gate` already
+  // take; the `sprint-` prefix collapses to one printed `fleet sprint ...`
+  // family in verbLine below. `open` creates the milestone — the owner and
+  // goal are stored in the milestone DESCRIPTION, so a milestone whose
+  // description no longer parses reads as owner/goal unknown rather than
+  // erroring the whole listing.
+  | { cmd: "sprint-ls" }
+  | { cmd: "sprint-open"; title: string; owner: string; goal: string }
+  | { cmd: "sprint-status"; title: string | null }
+  | { cmd: "sprint-close"; title: string }
   // Issue #217: delete fleet/rescue/* branches that hold no work (older than
   // N days, and every commit already on the default branch or only tool
   // markers). Dry-run unless --apply.
@@ -314,6 +325,11 @@ export interface TaskBriefArgs {
   junior?: true;
   /** Issue #1133: `--allow-duplicate` opts this task out of the duplicate-task refusal. */
   allowDuplicate?: true;
+  /** Spelled `--backlog` on the command line. Files the task into the
+   *  `backlog` milestone instead of a sprint — the escape hatch when no sprint
+   *  claims it yet. Absent = the task must name a sprint (enforced by the CLI,
+   *  not here). */
+  backlog?: boolean;
   /** Issue #291: `--read-repos owner/a,owner/b`. Read-only access to sibling
    *  repos of the task repo's owner, for the assigned studio, while the task
    *  is live. Validated Worker-side (src/github/read-repos.ts). */
@@ -389,8 +405,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (--force passes it too, but also skips the open-task check — the refusal lines only ever suggest --discard-unsynced on purpose). A rescue-push that fails or cannot confirm the work was saved (killed exec, dead shell, deadline) refuses the same way, naming why. A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it. --park stops it RESUMABLE: a studio whose org-chart edges reach it may resume it FROM ITS CONTAINER (`fleet resume`, the in-container binary) after a cooldown — the Mac CLI's own way to start it again is `fleet provision <id>`. Without --park, only you can start it again. Board issue #332: after a confirmed stop, destroy also prints a NON-BLOCKING `park warning` naming every unmerged PR the studio's tasks still have open (an unmerged, bounced PR needs this lane's history alive; check the PRS column in `fleet ls` before parking) — the warning costs nothing and never blocks, for plain destroy exactly as for --park. --strict-unmerged turns that same check into a REFUSAL before anything is destroyed, naming each PR; a check that cannot answer (an old Worker, a route blip) degrades to one warning line and proceeds — never blocks on a Worker upgrade race.",
   },
   "task-new": {
-    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior] [--read-repos owner/a,owner/b] [--provision [--fresh-session]] [--template retro]",
-    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required, UNLESS --template retro is given (issue #165): it fills the whole brief with the weekly retro's fixed sections (skills/retro-ritual/SKILL.md), and any of --title/--objective/--output/--boundaries given alongside it still overrides just that one field. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given. --read-repos owner/a,owner/b (issue #291) gives the assigned studio a SECOND, read-only GitHub token (contents+metadata read) for those sibling repos while this task is live: same owner as the task repo, at most 15, App installs only; git clone/fetch of those URLs just works, and gh reads it from /workspace/.fleet-read-token. Off unless given; never grants write. --provision (issue #113) files the task and then provisions its assigned studio in the same call, so a task filed against a STOPPED studio no longer needs a separate `fleet provision`; needs --studio or --continues to know which studio, and refuses otherwise. " + FRESH_SESSION_HELP,
+    args: "new --title T --objective O --output F --boundaries B [--sprint S | --backlog] [--studio ID] [--repo owner/name] [--continues N] [--junior] [--read-repos owner/a,owner/b] [--provision [--fresh-session]] [--template retro]",
+    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required, UNLESS --template retro is given (issue #165): it fills the whole brief with the weekly retro's fixed sections (skills/retro-ritual/SKILL.md), and any of --title/--objective/--output/--boundaries given alongside it still overrides just that one field. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given. --read-repos owner/a,owner/b (issue #291) gives the assigned studio a SECOND, read-only GitHub token (contents+metadata read) for those sibling repos while this task is live: same owner as the task repo, at most 15, App installs only; git clone/fetch of those URLs just works, and gh reads it from /workspace/.fleet-read-token. Off unless given; never grants write. --provision (issue #113) files the task and then provisions its assigned studio in the same call, so a task filed against a STOPPED studio no longer needs a separate `fleet provision`; needs --studio or --continues to know which studio, and refuses otherwise. Without --sprint or --backlog the CLI refuses and names the open sprints. " + FRESH_SESSION_HELP,
   },
   "task-ls": {
     args: `ls [--sprint S] [--state ${TASK_STATES.join("|")}] [--studio ID] [--repo owner/name]`,
@@ -407,6 +423,22 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   "task-verify": {
     args: "verify <n>",
     summary: "Mechanically re-check the newest result envelope's verification block (url + steps) and post ONE classifying comment. Read-only: never gates, never moves task state, never closes anything.",
+  },
+  "sprint-ls": {
+    args: "ls",
+    summary: "Every open sprint: title, owner (from the milestone description), goal, and x/y completed. Read-only.",
+  },
+  "sprint-open": {
+    args: 'open "<title>" --maestro <name> --goal "<outcome>"',
+    summary: "Create the sprint milestone. Refuses when a milestone of the same title already exists. The owner and goal are stored in the milestone description. The goal is one outcome, not a list.",
+  },
+  "sprint-status": {
+    args: "status [title]",
+    summary: "One open sprint's progress — `Sprint <title>: x/y (z%)` then a line per non-completed task (n, state, studio) — or, with no title, every open sprint's summary.",
+  },
+  "sprint-close": {
+    args: "close <title>",
+    summary: "Close the sprint: refuses while any task is working/input_required/awaiting_merge or any linked PR is open; moves remaining submitted tasks to the backlog milestone (creating it if missing); closes completed issues; closes the milestone.",
   },
   "memory-ls": {
     args: "ls",
@@ -510,7 +542,7 @@ export function parseIdleDuration(raw: string): number | null {
 function verbLine(cmd: string, help: VerbHelp): string {
   const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory"
     : cmd.startsWith("accounts-") ? "accounts" : cmd.startsWith("models-") ? "models"
-    : cmd.startsWith("gate-") ? "gate" : cmd;
+    : cmd.startsWith("gate-") ? "gate" : cmd.startsWith("sprint-") ? "sprint" : cmd;
   return `fleet ${name}${help.args ? " " + help.args : ""}`;
 }
 
@@ -661,6 +693,72 @@ function idArg<V extends string>(argv: string[], verb: V): { cmd: V; id: string 
   return { cmd: verb, id };
 }
 
+/** `fleet sprint <sub> ...`. Split out of parseCliArgs's switch for the same
+ *  reason parseTask is: a second word and its own grammar read as neither when
+ *  folded into the top-level switch. `open` is the one with value flags; its
+ *  title is a positional (the first token after "open"), and both --maestro
+ *  and --goal are REQUIRED — a milestone with no owner or no goal is a sprint
+ *  nobody can run, refused here rather than filed half-shaped. */
+function parseSprint(argv: string[]): CliCommand {
+  const [sub, ...rest] = argv;
+  if (sub === "ls") {
+    if (rest.length > 0) return usage(`unexpected ${JSON.stringify(rest[0])}`);
+    return { cmd: "sprint-ls" };
+  }
+  if (sub === "open") {
+    const [title, ...flagArgv] = rest;
+    if (title === undefined || title === "" || title.startsWith("--")) {
+      return usage('fleet sprint open "<title>" --maestro <name> --goal "<outcome>"');
+    }
+    let owner: string | undefined;
+    let goal: string | undefined;
+    for (let i = 0; i < flagArgv.length; i++) {
+      const token = flagArgv[i];
+      if (token === "--maestro") {
+        if (owner !== undefined) return usage("--maestro was given twice");
+        const value = flagArgv[++i];
+        if (value === undefined) return usage("fleet sprint open needs --maestro <name>");
+        owner = value;
+        continue;
+      }
+      if (token.startsWith("--maestro=")) {
+        if (owner !== undefined) return usage("--maestro was given twice");
+        owner = token.slice("--maestro=".length);
+        continue;
+      }
+      if (token === "--goal") {
+        if (goal !== undefined) return usage("--goal was given twice");
+        const value = flagArgv[++i];
+        if (value === undefined) return usage('fleet sprint open needs --goal "<outcome>"');
+        goal = value;
+        continue;
+      }
+      if (token.startsWith("--goal=")) {
+        if (goal !== undefined) return usage("--goal was given twice");
+        goal = token.slice("--goal=".length);
+        continue;
+      }
+      return usage(`unexpected ${JSON.stringify(token)}`);
+    }
+    if (owner === undefined) return usage("fleet sprint open needs --maestro <name>");
+    if (goal === undefined) return usage('fleet sprint open needs --goal "<outcome>"');
+    return { cmd: "sprint-open", title, owner, goal };
+  }
+  if (sub === "status") {
+    if (rest.length === 0) return { cmd: "sprint-status", title: null };
+    if (rest.length === 1 && !rest[0].startsWith("--")) return { cmd: "sprint-status", title: rest[0] };
+    return usage("fleet sprint status takes at most one title");
+  }
+  if (sub === "close") {
+    const [title, ...extra] = rest;
+    if (title === undefined || title === "" || title.startsWith("--") || extra.length > 0) {
+      return usage('fleet sprint close <title>');
+    }
+    return { cmd: "sprint-close", title };
+  }
+  return usage(`unknown sprint command ${JSON.stringify(sub ?? "")}`);
+}
+
 /** `fleet task <sub> ...`. Split out of parseCliArgs's switch because it is
  *  the only command with a second word, and folding two grammars into one
  *  switch reads as neither. */
@@ -797,6 +895,7 @@ function parseTask(argv: string[]): CliCommand {
   let provision = false;
   let freshSession = false;
   let allowDuplicate = false;
+  let backlog = false;
   const flagArgs: string[] = [];
   if (sub === "new") {
     for (let i = 0; i < rest.length; i++) {
@@ -805,6 +904,7 @@ function parseTask(argv: string[]): CliCommand {
       if (token === "--allow-duplicate") { allowDuplicate = true; continue; }
       if (token === "--provision") { provision = true; continue; }
       if (token === "--fresh-session") { freshSession = true; continue; }
+      if (token === "--backlog") { backlog = true; continue; }
       flagArgs.push(token);
       // `token` is a value-taking flag's bare NAME (no `--k=v` form, which
       // carries its value inline and consumes nothing further) — its value
@@ -865,7 +965,11 @@ function parseTask(argv: string[]): CliCommand {
     outputFormat: parsed.output ?? template?.outputFormat ?? "",
     boundaries: parsed.boundaries ?? template?.boundaries ?? "",
   };
+  if (parsed.sprint !== undefined && backlog) {
+    return usage("fleet task new --sprint and --backlog are mutually exclusive");
+  }
   if (parsed.sprint !== undefined) brief.milestone = parsed.sprint;
+  else if (backlog) brief.backlog = true;
   if (parsed.studio !== undefined) brief.assignee = parsed.studio;
   if (parsed.repo !== undefined) brief.repo = parsed.repo;
   if (parsed.continues !== undefined) {
@@ -1258,6 +1362,8 @@ export function parseCliArgs(argv: string[]): CliCommand {
     }
     case "task":
       return parseTask(argv.slice(1));
+    case "sprint":
+      return parseSprint(argv.slice(1));
     // Bare `fleet memory` is an alias for `fleet memory ls` — the survey is
     // the only thing you can safely do without thinking, so it is what an
     // operator who typed half a command gets.
