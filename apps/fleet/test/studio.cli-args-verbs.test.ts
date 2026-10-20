@@ -138,6 +138,19 @@ describe("fleet task state --from-none — issue #82", () => {
   });
 });
 
+describe("fleet task state --no-pr — #1247", () => {
+  it("--no-pr alone sets noPr", () => {
+    expect(parseCliArgs(["task", "state", "42", "completed", "--no-pr"]))
+      .toEqual({ cmd: "task-state", number: 42, to: "completed", noPr: true });
+  });
+  it("combines with --from-none, either order", () => {
+    expect(parseCliArgs(["task", "state", "42", "completed", "--from-none", "--no-pr"]))
+      .toEqual({ cmd: "task-state", number: 42, to: "completed", fromNone: true, noPr: true });
+    expect(parseCliArgs(["task", "state", "42", "completed", "--no-pr", "--from-none"]))
+      .toEqual({ cmd: "task-state", number: 42, to: "completed", fromNone: true, noPr: true });
+  });
+});
+
 describe("fleet task reap --terminal — issue #55", () => {
   it("--terminal is a dry run; with --apply it applies; flag order free", () => {
     expect(parseCliArgs(["task", "reap", "--terminal"])).toEqual({ cmd: "task-reap", apply: false, terminal: true });

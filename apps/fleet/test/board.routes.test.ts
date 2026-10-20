@@ -374,6 +374,69 @@ describe("handleBoard", () => {
     expect(await res.text()).toContain("single writer");
   });
 
+  // #1247: completing a gated repo's task must clear the completed gate —
+  // the latest result envelope's PR merged AND green on its head — unless the
+  // caller declares --no-pr.
+  describe("#1247 completed gate", () => {
+    const gatedEnv = { ...testEnv, FLEET_GATE_RUNNER: "on", GATE_RUNNER_REPOS: "acme-org/websites" } as Env;
+
+    function resultEnvelopeComment(prNumber: number): string {
+      const parsed = parseEnvelope({
+        sender: "websites--web-studio", intent: "result", status: "ok", notes: "done",
+        verification: { url: "https://x.test", steps: ["open it"], expected: "it works" },
+        artifacts: [{ kind: "code", pr: `#${prNumber}` }],
+      }, 42, "00000000-0000-0000-0000-000000000000");
+      if (!parsed.ok) throw new Error(parsed.message);
+      return renderEnvelopeComment(parsed.doc);
+    }
+
+    it("refuses completion when the envelope PR is not merged, before any transition write", async () => {
+      authorized();
+      const api = fakeApi({
+        getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })),
+        listComments: vi.fn(async () => [{ id: 1, url: "https://github.com/o/r/issues/42#issuecomment-1",
+          author: "websites--web-studio", createdAt: "2026-10-20T00:00:00Z", body: resultEnvelopeComment(77) }]),
+      });
+      const completedGatePort = {
+        getPullRequest: vi.fn(async () => ({ merged: false })),
+        getHeadSha: vi.fn(async () => "abc123def4567890"),
+        getCommitStatus: vi.fn(async () => ({ state: "success" })),
+      };
+      const res = await handleBoard(
+        req("/studio/board/tasks/42/state", {
+          method: "POST", body: JSON.stringify({ from: "working", to: "completed", repo: "acme-org/websites" }),
+        }),
+        gatedEnv, { api, reach, completedGatePort },
+      );
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain("not merged");
+      // The gate refusal happens before transitionTask: no state write.
+      expect(api.removeLabel).not.toHaveBeenCalled();
+      expect(api.addLabels).not.toHaveBeenCalled();
+    });
+
+    it("--no-pr bypasses the gate and logs the advisory comment after a real transition", async () => {
+      authorized();
+      const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })) });
+      const completedGatePort = {
+        getPullRequest: vi.fn(async () => ({ merged: false })),
+        getHeadSha: vi.fn(async () => "abc123def4567890"),
+        getCommitStatus: vi.fn(async () => ({ state: "success" })),
+      };
+      const res = await handleBoard(
+        req("/studio/board/tasks/42/state", {
+          method: "POST", body: JSON.stringify({ from: "working", to: "completed", repo: "acme-org/websites", noPr: true }),
+        }),
+        gatedEnv, { api, reach, completedGatePort },
+      );
+      expect(res.status).toBe(200);
+      expect((await res.json() as BoardTask).state).toBe("completed");
+      expect(api.createComment).toHaveBeenCalledWith("acme-org/websites", 42, "completed without a gate check (--no-pr)");
+      // The gate port was never consulted on the bypass path.
+      expect(completedGatePort.getPullRequest).not.toHaveBeenCalled();
+    });
+  });
+
   it("POST /tasks/:n/envelope comments and returns the comment url and the stamped struct", async () => {
     authorized();
     const api = fakeApi();
