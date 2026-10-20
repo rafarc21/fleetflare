@@ -3,7 +3,7 @@ import { openSprint, sprintSummaries, closeSprint } from "../src/board/sprint";
 import { envelopeComment, fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import type { BoardApi } from "../src/board/board";
 import type { BoardTask, EnvelopeDoc } from "../src/board/types";
-import type { ListIssuesQuery } from "../src/board/api";
+import { GitHubError, type ListIssuesQuery } from "../src/board/api";
 
 // Sprint policy (open/status/close) over a fake BoardApi. Every assertion is
 // against the port's calls — the pure layer decides HTTP semantics here, and
@@ -140,6 +140,60 @@ describe("closeSprint", () => {
     expect(api.closeMilestone).not.toHaveBeenCalled();
     expect(api.setIssueMilestone).not.toHaveBeenCalled();
     expect(api.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the newest envelope of any task names an open PR, scanning every task in the sprint", async () => {
+    const task10 = task({ number: 10, state: "submitted", labels: ["submitted"] });
+    const task11 = task({ number: 11, state: "submitted", labels: ["submitted"] });
+    const docWithPr46: EnvelopeDoc = {
+      envelope: { msg_id: "m", task_id: 11, sender: "websites--web-studio", intent: "result", schema_version: "1" },
+      payload: {
+        status: "ok", artifacts: [{ kind: "pr", pr: "46" }],
+        evidence: [], open_questions: [], context_digest: [], learnings: [],
+      },
+      notes: "",
+    };
+    const api = fakeApi({
+      listMilestones: vi.fn(async () => [
+        { number: 5, title: "Sprint A", description: "", state: "open" },
+        { number: 99, title: "backlog", description: "", state: "open" },
+      ]),
+      listIssues: vi.fn(async () => [task10, task11]),
+      getIssue: vi.fn(async (_repo: string, number: number) => (number === 10 ? task10 : task11)),
+      listComments: vi.fn(async (_repo: string, number: number) => (number === 11 ? [envelopeComment(docWithPr46)] : [])),
+      getPullRequest: vi.fn(async () => ({ number: 46, merged: false, open: true, title: "" })),
+    });
+    const res = await closeSprint(api, "o/r", "Sprint A");
+    expect(res).toEqual({ ok: false, status: 409, message: expect.stringContaining("task #11 links PR #46") });
+    expect(api.closeMilestone).not.toHaveBeenCalled();
+    expect(api.getIssue).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed with a 502 when the PR read throws", async () => {
+    const sprintTask = task({ number: 10, state: "submitted", labels: ["submitted"] });
+    const resultDoc: EnvelopeDoc = {
+      envelope: { msg_id: "m", task_id: 10, sender: "websites--web-studio", intent: "result", schema_version: "1" },
+      payload: {
+        status: "ok", artifacts: [{ kind: "pr", pr: "99" }],
+        evidence: [], open_questions: [], context_digest: [], learnings: [],
+      },
+      notes: "",
+    };
+    const api = fakeApi({
+      listMilestones: vi.fn(async () => [{ number: 5, title: "Sprint A", description: "", state: "open" }]),
+      listIssues: vi.fn(async () => [sprintTask]),
+      getIssue: vi.fn(async () => sprintTask),
+      listComments: vi.fn(async () => [envelopeComment(resultDoc)]),
+      getPullRequest: vi.fn(async () => {
+        throw new GitHubError(404, "GET /repos/o/r/pulls/99 failed");
+      }),
+    });
+    const res = await closeSprint(api, "o/r", "Sprint A");
+    expect(res).toEqual({
+      ok: false, status: 502,
+      message: 'sprint "Sprint A" close cannot read PR #99 (linked by task #10)',
+    });
+    expect(api.closeMilestone).not.toHaveBeenCalled();
   });
 
   it("does not refuse a sprint whose task's PR is merged or closed", async () => {

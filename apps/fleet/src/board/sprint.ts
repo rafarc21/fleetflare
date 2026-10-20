@@ -14,9 +14,8 @@
 //     never by dropping it.
 
 import { parseMilestoneGoal, parseMilestoneOwner, renderMilestoneDescription } from "./milestone";
-import { resolveOrCreateBacklogMilestone, type BoardApi, type BoardResult } from "./board";
-import { openTasksWithLatestPr } from "./pr-landed";
-import type { BoardTask, BoardTaskState } from "./types";
+import { resolveOrCreateBacklogMilestone, showTask, type BoardApi, type BoardResult } from "./board";
+import { latestResultPr, type BoardTask, type BoardTaskState } from "./types";
 
 /** One open sprint as `fleet sprint status` reads it. `total` is the milestone's
  *  tasks minus canceled — a canceled task is a decision, not work still owed. */
@@ -125,25 +124,41 @@ export async function closeSprint(
   }
 
   // GATE 2: a task whose newest result envelope names an OPEN PR still has
-  // unmerged work. "A task's PR" means the one channel the fleet itself
-  // writes — the §6 envelope's pr artifact — read through the shared scan
-  // (openTasksWithLatestPr), never a title/body regex. A task whose comments
-  // cannot be read refuses (fail closed): an unreadable PR is not "no PR".
-  const views = tasks.map((t) => ({ ...t, stale: false }));
-  const scan = await openTasksWithLatestPr(api, repo, views);
+  // unmerged work — the one channel the fleet itself writes is the §6
+  // envelope's pr artifact, read per task via showTask. Scanned over the
+  // sprint's OWN tasks, not the shared 300-candidate scan: a sprint has no
+  // task cap (its scope is set by a human at planning), so bounding this
+  // gate by anything but the sprint itself would silently skip a PR check.
+  // Both reads fail CLOSED with a named 502 — an unreadable PR is not "no PR".
   const openPrs: { task: BoardTask; pr: number }[] = [];
-  for (const r of scan) {
-    if (r.readFailed) {
+  for (const t of tasks) {
+    let prNumber: number | null;
+    try {
+      const shown = await showTask(api, repo, t.number);
+      if (!shown.ok) {
+        return {
+          ok: false, status: 502,
+          message: `sprint "${title}" close cannot verify task #${t.number}'s PR — its comments could not be read`,
+        };
+      }
+      prNumber = latestResultPr(shown.value.comments);
+    } catch {
       return {
         ok: false, status: 502,
-        message: `sprint "${title}" close cannot verify task #${r.taskNumber}'s PR — its comments could not be read`,
+        message: `sprint "${title}" close cannot verify task #${t.number}'s PR — its comments could not be read`,
       };
     }
-    if (r.prNumber === null) continue;
-    const pr = await api.getPullRequest(repo, r.prNumber);
-    if (!pr.merged && pr.open) {
-      openPrs.push({ task: tasks.find((t) => t.number === r.taskNumber)!, pr: r.prNumber });
+    if (prNumber === null) continue;
+    let pr: { merged: boolean; open: boolean };
+    try {
+      pr = await api.getPullRequest(repo, prNumber);
+    } catch {
+      return {
+        ok: false, status: 502,
+        message: `sprint "${title}" close cannot read PR #${prNumber} (linked by task #${t.number})`,
+      };
     }
+    if (!pr.merged && pr.open) openPrs.push({ task: t, pr: prNumber });
   }
   if (openPrs.length > 0) {
     return {
