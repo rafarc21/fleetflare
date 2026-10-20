@@ -19,7 +19,7 @@ export interface GateDrainQueue {
   peek(): Promise<PullRequestAutoRun[]>;
   /** Atomically appends one pending run, in a single statement. */
   append(pr: PullRequestAutoRun): Promise<void>;
-  /** Atomically removes one queued entry (matched by repo/pr/headSha). */
+  /** Atomically removes one queued entry (matched by the full serialized entry). */
   remove(pr: PullRequestAutoRun): Promise<void>;
 }
 
@@ -53,21 +53,25 @@ export function gateDrainQueue(db: D1Database): GateDrainQueue {
       // the row is read through an explicit subselect; (2) json_remove(value,
       // NULL) returns NULL (not the input) on SQLite, tripping the value NOT
       // NULL constraint, so a WHERE EXISTS guard keeps the UPDATE a no-op for
-      // an already-removed (or never-queued) entry. Matched by repo/pr/headSha:
-      // `$.pr` extracts a number, matching pr.pr, a number; repo/headSha are strings.
+      // an already-removed (or never-queued) entry. Matched by the full
+      // serialized entry: `e.value = json(?)` compares JSON-equality, so a
+      // queuedAt stamp (now part of the entry, #1241 b1) can never match the
+      // wrong run — `json(?)` turns the bind into a JSON value the way
+      // json_each's `e.value` already is.
+      const entry = JSON.stringify(pr);
       await db
         .prepare(
           `UPDATE fleet_state SET value = json_remove(
              value,
              (SELECT '$[' || CAST(e.key AS TEXT) || ']'
               FROM json_each((SELECT value FROM fleet_state WHERE key = ?)) e
-              WHERE json_extract(e.value, '$.repo') = ? AND json_extract(e.value, '$.pr') = ? AND json_extract(e.value, '$.headSha') = ? LIMIT 1)
+              WHERE e.value = json(?) LIMIT 1)
            ), ts = ? WHERE key = ? AND EXISTS (
              SELECT 1 FROM json_each((SELECT value FROM fleet_state WHERE key = ?)) e
-             WHERE json_extract(e.value, '$.repo') = ? AND json_extract(e.value, '$.pr') = ? AND json_extract(e.value, '$.headSha') = ?
+             WHERE e.value = json(?)
            )`,
         )
-        .bind(GATE_DRAIN_QUEUE_KEY, pr.repo, pr.pr, pr.headSha, Date.now(), GATE_DRAIN_QUEUE_KEY, GATE_DRAIN_QUEUE_KEY, pr.repo, pr.pr, pr.headSha)
+        .bind(GATE_DRAIN_QUEUE_KEY, entry, Date.now(), GATE_DRAIN_QUEUE_KEY, GATE_DRAIN_QUEUE_KEY, entry)
         .run();
     },
   };

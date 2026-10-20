@@ -86,6 +86,7 @@ const REAL_WRANGLER = resolve(import.meta.dir, "../../../node_modules/wrangler")
 // Filled by the hooks below. Each test file copies these into its own `let`s
 // through the `assign` callback so test bodies read them as before.
 const state = { root: "", fleet: "", calls: "", config: "", home: "", stubs: "", apiBase: "" };
+export { state as harnessState };
 
 export const DIGEST_A = "sha256:" + "a".repeat(64);
 export const DIGEST_B = "sha256:" + "b".repeat(64);
@@ -167,6 +168,7 @@ export function useDeployRescueHarness(assign: (s: typeof state) => void) {
       "    exit 0 ;;",
       '  "d1 execute fleet")',
       '    case "$*" in',
+      '      *"\'gate_drain\',\'1\'"*) [ "${STUB_SET_FAIL:-0}" = "1" ] && exit 1 ;;',
       '      *"\'gate_drain\',\'0\'"*) [ "${STUB_CLEAR_FAIL:-0}" = "1" ] && exit 1 ;;',
       "    esac",
       "    exit 0 ;;",

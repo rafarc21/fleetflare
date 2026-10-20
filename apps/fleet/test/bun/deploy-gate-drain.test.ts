@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { deploy, harnessState, stub, test, useDeployRescueHarness, withImage, writeConfig } from "./helpers/deploy-rescue-harness";
 
@@ -99,15 +100,27 @@ describe("deploy.sh: drain running gate runs before a Worker deploy (#1232)", ()
       stdin: "ignore", stdout: "pipe", stderr: "pipe",
       detached: true,
     });
-    // Let it set the flag and start polling the (running) instance list.
-    await new Promise((r) => setTimeout(r, 1500));
+    // Let it set the flag and start polling the (running) instance list: wait
+    // until the drain wait has actually issued its first wrangler instance-list
+    // (cold spawn + config checks cost ~3s), so the SIGINT lands while the
+    // foreground child is still polling, not before the drain began.
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      if (existsSync(harnessState.calls) && readFileSync(harnessState.calls, "utf8").includes("workflows instances list")) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
     process.kill(-proc.pid, "SIGINT");
     const [out, err] = await Promise.all([
       new Response(proc.stdout).text(), new Response(proc.stderr).text(),
     ]);
     const code = await proc.exited;
     expect(code).toBe(130);
-    expect(err).toContain("gate runs still running");
+    // The INT trap fires mid-drain (the wait is still polling when the signal
+    // lands), so the refusal line never prints — the drain-wait polling line is
+    // the proof the drain was in progress.
+    expect(err).toContain("still running — waiting");
+    // The INT trap cleared the flag on the way out.
+    expect(readFileSync(harnessState.calls, "utf8")).toContain("'gate_drain','0'");
   });
 
   test("--skip-gate-drain: deploy proceeds with no d1 execute and no poll", () => {

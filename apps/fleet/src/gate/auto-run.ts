@@ -76,6 +76,9 @@ export interface PullRequestAutoRun {
   edited?: boolean;
   /** #1214 round 2: a reopen must re-gate the head, never reuse a finished run. */
   reopened?: boolean;
+  /** #1241 b1: when this PR was queued pending a deploy drain (ms). Stamped by
+   *  the release path only; the webhook path never carries it. */
+  queuedAt?: number;
 }
 
 const AUTO_RUN_ACTIONS: ReadonlySet<string> = new Set(["opened", "synchronize", "ready_for_review", "edited", "reopened"]);
@@ -291,15 +294,28 @@ export async function startEditedGateRun(
  *  edited PR replayed from the pending queue (a remove() throw after a start,
  *  or overlapping cron sweeps) must reattach to the -e run it already started,
  *  never end-and-restart it. Reattaches only to a live same-head edit run the
- *  index records; otherwise falls through to a fresh start. */
+ *  index records; otherwise falls through to a fresh start.
+ *
+ *  #1241 b1: a drain-cap exit leaves a PRE-edit -e run live, and the release
+ *  must never reattach a queued edit to it. `queuedAt` (when set) guards: only
+ *  an -e run whose base36 suffix encodes a time >= queuedAt was started by this
+ *  edit, so a run older than the queue entry is ended and a fresh one starts. */
 export async function startEditedGateRunIdempotent(
-  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex,
+  wf: GateRunStarter, input: { repo: string; pr: number; headSha: string; queuedAt?: number }, index: GateRunIndex,
   now: () => number = Date.now,
   postPending?: (repo: string, headSha: string) => Promise<void>,
 ): Promise<{ runId: string; reused: boolean }> {
   const latest = await index.latest(input.repo, input.pr);
-  const isEditRun = latest !== null && latest.headSha === input.headSha
-    && latest.runId.startsWith(`${await gateRunId(input.repo, input.headSha)}-e`);
+  const baseId = await gateRunId(input.repo, input.headSha);
+  const editRunSuffix = `${baseId}-e`;
+  let isEditRun = latest !== null && latest.headSha === input.headSha
+    && latest.runId.startsWith(editRunSuffix);
+  if (isEditRun && input.queuedAt !== undefined) {
+    const suffix = latest.runId.slice(editRunSuffix.length);
+    const runAt = parseInt(suffix, 36);
+    // NaN (a hand-built / legacy id) is never trusted as newer: not reusable.
+    isEditRun = !Number.isNaN(runAt) && runAt >= input.queuedAt;
+  }
   if (isEditRun) {
     let status: string | null;
     try {
@@ -412,7 +428,7 @@ export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDe
 export async function autoRunPullRequestIdempotent(pr: PullRequestAutoRun, deps: AutoRunDeps): Promise<AutoRunOutcome> {
   if (pr.edited === true) {
     await startEditedGateRunIdempotent(
-      deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha }, deps.index,
+      deps.workflow, { repo: pr.repo, pr: pr.pr, headSha: pr.headSha, queuedAt: pr.queuedAt }, deps.index,
       Date.now, deps.postPending,
     );
     return "started";
