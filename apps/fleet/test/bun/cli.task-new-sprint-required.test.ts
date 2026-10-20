@@ -15,26 +15,9 @@
 // checkout's own remote).
 import { afterEach, describe, expect, test } from "bun:test";
 import { writeCredentials } from "./helpers/credentials";
-import { cleanupTempDirs, FLEET, tmpDir } from "./helpers/fleet-cli";
+import { cleanupTempDirs, runFleetIn, tmpDir } from "./helpers/fleet-cli";
 
 afterEach(cleanupTempDirs);
-
-/** Spawns `fleet <args>` with the given HOME (credentials) and a cwd that
- *  holds no `.git`. Mirrors helpers/fleet-cli.ts's runFleet, but that helper
- *  hardcodes the spawn cwd; the refusal this suite pins depends on the cwd
- *  naming no repo. */
-async function runFleetIn(args: string[], home: string, cwd: string) {
-  const proc = Bun.spawn({
-    cmd: [process.execPath, FLEET, ...args],
-    cwd,
-    env: { PATH: process.env.PATH!, HOME: home },
-    stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  });
-  const [out, err, code] = await Promise.all([
-    new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
-  ]);
-  return { out, err, code };
-}
 
 describe("fleet task new requires a sprint — network error prints a refusal, not a stack trace (issue #1255)", () => {
   test("dead Worker, no --sprint/--backlog: exit 1, names the sprint requirement and the read failure, no stack trace", async () => {
