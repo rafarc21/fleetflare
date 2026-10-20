@@ -132,7 +132,7 @@ on your own machine, never as a cloud studio `ff` can spawn or attach to.)
 fleet ls                    # every studio: state, readiness, burn
 fleet check <id>            # ask the container right now, read-only
 fleet task ls               # the board for this repo
-fleet task new --title T --objective O --output F --boundaries B
+fleet task new --title T --objective O --output F --boundaries B --sprint "Sprint 1"
 fleet provision <id>        # heal a half-built studio, same container
 fleet recycle <id>          # new container on the current image; rescues first
 fleet destroy <id>          # stop for good; rescues first

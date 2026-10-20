@@ -756,6 +756,80 @@ describe("parseCliArgs: task", () => {
       },
     });
   });
+
+  // Task #1245: `--backlog` files the task into the backlog milestone instead
+  // of a sprint — the escape hatch when no sprint claims it yet. Same bare
+  // boolean, same extraction loop, as --junior/--provision/--fresh-session/
+  // --allow-duplicate; and mutually exclusive with --sprint (a task cannot be
+  // in a sprint AND in the backlog).
+  it("task new --backlog sets brief.backlog; bare task new has no backlog key", () => {
+    const a = parseCliArgs(["task", "new", ...flags, "--backlog"]);
+    expect(a.cmd === "task-new" && a.brief.backlog).toBe(true);
+    const b = parseCliArgs(["task", "new", ...flags]);
+    expect(b.cmd === "task-new" && b.brief.backlog).toBeUndefined();
+  });
+
+  it("task new --sprint S --backlog is a usage error (mutually exclusive)", () => {
+    expect(parseCliArgs(["task", "new", ...flags, "--sprint", "Sprint 1", "--backlog"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "new", ...flags, "--backlog", "--sprint", "Sprint 1"]).cmd).toBe("usage");
+  });
+});
+
+// Task #1245: `fleet sprint ls | open | status | close` — the sprint surface.
+// `open` creates the milestone (owner + goal live in its description); `status`
+// reads one sprint's progress (or every open sprint's, bare); `close` moves
+// remaining submitted tasks to the backlog and closes the milestone.
+describe("parseCliArgs: sprint", () => {
+  it("sprint ls takes no further args", () => {
+    expect(parseCliArgs(["sprint", "ls"])).toEqual({ cmd: "sprint-ls" });
+    expect(parseCliArgs(["sprint", "ls", "extra"]).cmd).toBe("usage");
+  });
+
+  it("sprint open parses title, --maestro and --goal", () => {
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "operator", "--goal", "ship X"]))
+      .toEqual({ cmd: "sprint-open", title: "Sprint 3", owner: "operator", goal: "ship X" });
+  });
+
+  it("sprint open accepts --maestro= and --goal= value forms, in either order", () => {
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro=operator", "--goal=ship X"]))
+      .toEqual({ cmd: "sprint-open", title: "Sprint 3", owner: "operator", goal: "ship X" });
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--goal=ship X", "--maestro=operator"]))
+      .toEqual({ cmd: "sprint-open", title: "Sprint 3", owner: "operator", goal: "ship X" });
+  });
+
+  it("sprint open refuses a missing --maestro", () => {
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--goal", "ship X"]).cmd).toBe("usage");
+  });
+
+  it("sprint open refuses a missing --goal", () => {
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "operator"]).cmd).toBe("usage");
+  });
+
+  it("sprint open refuses a missing, empty, or flag-shaped title", () => {
+    expect(parseCliArgs(["sprint", "open", "--maestro", "operator", "--goal", "ship X"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "open", "", "--maestro", "operator", "--goal", "ship X"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "open", "--title", "--maestro", "operator", "--goal", "ship X"]).cmd).toBe("usage");
+  });
+
+  it("sprint open refuses a duplicate --maestro or --goal", () => {
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "a", "--maestro", "b", "--goal", "ship X"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "open", "Sprint 3", "--maestro", "operator", "--goal", "a", "--goal", "b"]).cmd).toBe("usage");
+  });
+
+  it("sprint status: bare → title null; with a title → title set; a flag-shaped title is refused", () => {
+    expect(parseCliArgs(["sprint", "status"])).toEqual({ cmd: "sprint-status", title: null });
+    expect(parseCliArgs(["sprint", "status", "Sprint 1"])).toEqual({ cmd: "sprint-status", title: "Sprint 1" });
+    expect(parseCliArgs(["sprint", "status", "--bad"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "status", "Sprint 1", "extra"]).cmd).toBe("usage");
+  });
+
+  it("sprint close requires exactly one non-empty, non-flag title", () => {
+    expect(parseCliArgs(["sprint", "close", "Sprint 1"])).toEqual({ cmd: "sprint-close", title: "Sprint 1" });
+    expect(parseCliArgs(["sprint", "close"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "close", ""]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "close", "--bad"]).cmd).toBe("usage");
+    expect(parseCliArgs(["sprint", "close", "Sprint 1", "extra"]).cmd).toBe("usage");
+  });
 });
 
 

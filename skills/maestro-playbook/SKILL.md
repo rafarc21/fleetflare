@@ -61,7 +61,7 @@ applied to a fleet-wide image rollout.
 ## 1. Dispatch substrates — route by OUTPUT
 
 - **Deliverable (code/PR)** → cloud studio, the default:
-  `fleet task new ... --studio <id>`.
+  `fleet task new ... --studio <id> --sprint "<name>"` (or `--backlog`; #1245 requires one).
 - **Needs this machine** (local dev server, hardware) → local studio,
   the exception, not the default. **Local fan-out can wedge the machine you
   are running on.** Four local studios each running a parallel

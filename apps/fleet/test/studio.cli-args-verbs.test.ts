@@ -341,6 +341,7 @@ describe("fleet help", () => {
       // of its rendered lines, which is all this test is pinning.
       if (cmd.startsWith("models-")) { expect(help).toContain("fleet models"); continue; }
       if (cmd.startsWith("gate-")) { expect(help).toContain("fleet gate"); continue; }
+      if (cmd.startsWith("sprint-")) { expect(help).toContain("fleet sprint"); continue; }
       const two = ["task-", "memory-", "accounts-"].find((prefix) => cmd.startsWith(prefix));
       const word = two ? `fleet ${two.slice(0, -1)} ${cmd.slice(two.length)}` : `fleet ${cmd}`;
       expect(help).toContain(word);
@@ -358,7 +359,7 @@ describe("fleet help", () => {
     for (const [cmd, help] of Object.entries(VERBS)) {
       const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory"
         : cmd.startsWith("accounts-") ? "accounts" : cmd.startsWith("models-") ? "models"
-        : cmd.startsWith("gate-") ? "gate" : cmd;
+        : cmd.startsWith("gate-") ? "gate" : cmd.startsWith("sprint-") ? "sprint" : cmd;
       expect(CLI_USAGE).toContain(`fleet ${name}${help.args ? " " + help.args : ""}`);
     }
     expect(CLI_USAGE).toContain("fleet help");
@@ -732,6 +733,30 @@ describe("VERBS help text — #501 F3-F11", () => {
   it("junior: stats says an id can appear twice and TOTAL sums both halves (#501 F11)", () => {
     expect(VERBS.junior.summary).toContain("can appear twice");
     expect(VERBS.junior.summary).toContain("sums both halves");
+  });
+});
+
+// Task #1245: `fleet sprint ls | open | status | close` and `task new
+// --backlog`. The VERBS entries exist (the union would not compile without
+// them), the `sprint-` prefix collapses to one printed `fleet sprint` family,
+// and the task-new args line names --backlog.
+describe("fleet sprint + task new --backlog help text", () => {
+  it("CLI_USAGE names the sprint family and --backlog", () => {
+    expect(CLI_USAGE).toContain("fleet sprint");
+    expect(CLI_USAGE).toContain("--backlog");
+  });
+
+  it("every sprint verb has a VERBS entry and a real summary", () => {
+    for (const cmd of ["sprint-ls", "sprint-open", "sprint-status", "sprint-close"] as const) {
+      expect(VERBS[cmd]).toBeDefined();
+      expect(VERBS[cmd].summary.length).toBeGreaterThan(20);
+      expect(VERBS[cmd].summary.trim().endsWith(".")).toBe(true);
+    }
+  });
+
+  it("task-new args names --backlog next to --sprint", () => {
+    expect(VERBS["task-new"].args).toContain("--backlog");
+    expect(VERBS["task-new"].args).toContain("--sprint");
   });
 });
 

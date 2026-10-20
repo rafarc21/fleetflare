@@ -3,6 +3,7 @@ import {
   createIssue, getIssue, listIssues, addLabels, removeLabel,
   createComment, listComments, listMilestones, BOARD_PAGE_SIZE, BOARD_MAX_PAGES,
   listIssueTexts, TASK_TEXTS_MAX_PAGES, countIssues,
+  createMilestone, closeMilestone, setIssueMilestone, listOpenMilestones,
 } from "../src/board/api";
 
 // Same fetch-mocking shape as test/github.api.test.ts — these are the same
@@ -329,11 +330,77 @@ describe("comments", () => {
 });
 
 describe("listMilestones", () => {
-  it("asks for open and closed milestones and returns title/number pairs", async () => {
-    respond = () => Response.json([{ number: 3, title: "Sprint 1" }, { number: 4, title: "Sprint 2" }]);
+  it("asks for open and closed milestones and maps number/title/description/state", async () => {
+    respond = () => Response.json([
+      { number: 3, title: "Sprint 1", description: "first sprint", state: "closed" },
+      { number: 4, title: "Sprint 2", description: null, state: "open" },
+    ]);
     const list = await listMilestones("tok", "o/r");
     expect(calls[0].url).toContain("state=all");
-    expect(list).toEqual([{ number: 3, title: "Sprint 1" }, { number: 4, title: "Sprint 2" }]);
+    expect(list).toEqual([
+      { number: 3, title: "Sprint 1", description: "first sprint", state: "closed" },
+      { number: 4, title: "Sprint 2", description: "", state: "open" },
+    ]);
+  });
+});
+
+describe("createMilestone", () => {
+  it("POSTs title and description, authenticated, and maps number/title", async () => {
+    respond = () => Response.json({ number: 7, title: "Sprint 7" });
+    const created = await createMilestone("tok", "o/r", { title: "Sprint 7", description: "next sprint" });
+
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/milestones");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].headers.authorization).toBe("Bearer tok");
+    expect(calls[0].body).toEqual({ title: "Sprint 7", description: "next sprint" });
+    expect(created).toEqual({ number: 7, title: "Sprint 7" });
+  });
+
+  it("omits description when undefined", async () => {
+    respond = () => Response.json({ number: 8, title: "Sprint 8" });
+    await createMilestone("tok", "o/r", { title: "Sprint 8" });
+    expect(calls[0].body).not.toHaveProperty("description");
+  });
+});
+
+describe("closeMilestone", () => {
+  it("PATCHes state closed to the milestone's URL", async () => {
+    respond = () => Response.json({ number: 3, state: "closed" });
+    await closeMilestone("tok", "o/r", 3);
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/milestones/3");
+    expect(calls[0].method).toBe("PATCH");
+    expect(calls[0].body).toEqual({ state: "closed" });
+  });
+});
+
+describe("setIssueMilestone", () => {
+  it("PATCHes a milestone number onto the issue", async () => {
+    respond = () => Response.json({ number: 12 });
+    await setIssueMilestone("tok", "o/r", 12, 3);
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/issues/12");
+    expect(calls[0].method).toBe("PATCH");
+    expect(calls[0].body).toEqual({ milestone: 3 });
+  });
+
+  it("passes milestone null through, removing the milestone", async () => {
+    respond = () => Response.json({ number: 12 });
+    await setIssueMilestone("tok", "o/r", 12, null);
+    expect(calls[0].body).toEqual({ milestone: null });
+  });
+});
+
+describe("listOpenMilestones", () => {
+  it("asks for open milestones only and maps number/title/description", async () => {
+    respond = () => Response.json([
+      { number: 5, title: "Sprint 5", description: "live sprint" },
+      { number: 6, title: "Sprint 6", description: null },
+    ]);
+    const list = await listOpenMilestones("tok", "o/r");
+    expect(calls[0].url).toContain("state=open");
+    expect(list).toEqual([
+      { number: 5, title: "Sprint 5", description: "live sprint" },
+      { number: 6, title: "Sprint 6", description: "" },
+    ]);
   });
 });
 

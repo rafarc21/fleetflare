@@ -22,7 +22,7 @@ const MSG_ID = "0d9f1c2e-0000-4000-8000-000000000001";
 const task = (overrides: Partial<BoardTask> = {}) =>
   boardTask({ title: "Build the task board", milestone: "Sprint 1", ...overrides });
 const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
-  listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1" }]),
+  listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1", description: "", state: "open" }]),
   ...overrides,
 }, () => task());
 

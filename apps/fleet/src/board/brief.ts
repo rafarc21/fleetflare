@@ -61,6 +61,15 @@ export interface TaskBrief {
    * ordinary refusal. Boolean-only, same discipline as `junior`/`security`.
    */
   allowDuplicate?: boolean;
+  /**
+   * Issue #1245: `--backlog` — file this task into the implicit backlog
+   * milestone rather than a named sprint. §5 says a sprint is a deliberate
+   * open; the backlog is the opposite — the place tasks go when no sprint
+   * claims them yet. Mutually exclusive with `milestone` (enforced at parse
+   * time by cli-args, and defensively in board.ts's createTask). Boolean-only,
+   * same discipline as `junior`/`security`/`allowDuplicate`.
+   */
+  backlog?: boolean;
 }
 
 // GitHub's own limits, not ours — a longer title/body is refused by the API
@@ -156,12 +165,17 @@ export function parseBrief(raw: unknown): BriefResult {
   if (rawAllowDuplicate !== undefined && rawAllowDuplicate !== null && typeof rawAllowDuplicate !== "boolean") {
     return { ok: false, message: "allowDuplicate must be a boolean" };
   }
+  const rawBacklog = body.backlog;
+  if (rawBacklog !== undefined && rawBacklog !== null && typeof rawBacklog !== "boolean") {
+    return { ok: false, message: "backlog must be a boolean" };
+  }
 
   const brief: TaskBrief = {
     title, objective, outputFormat, boundaries, milestone, assignee,
     ...(rawJunior === true ? { junior: true } : {}),
     ...(rawSecurity === true ? { security: true } : {}),
     ...(rawAllowDuplicate === true ? { allowDuplicate: true } : {}),
+    ...(rawBacklog === true ? { backlog: true } : {}),
   };
   const rawKey = body.idempotencyKey;
   if (rawKey !== undefined && rawKey !== null) {

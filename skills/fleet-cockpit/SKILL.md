@@ -617,6 +617,9 @@ CI enforces it (`apps/fleet/scripts/english-check.ts`).
   `fleet task assign <n> <role>` (e.g. `fleet task assign 42 web-studio`).
   That sets `submitted`, labels the studio and wakes it. `ff <role> <n>`
   adopts and attaches in one step.
+  `fleet task new` now requires `--sprint` or `--backlog` (issue #1245) —
+  the CLI refuses otherwise and names the open sprints; the in-container and
+  `ff` paths are unchanged.
 - A studio's GitHub token covers its one work repo; sibling repos 404. A
   task that must READ siblings of the same owner gets
   `--read-repos owner/a,owner/b` on `task new` or `task assign`: a second,

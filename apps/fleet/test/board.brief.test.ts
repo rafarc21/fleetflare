@@ -186,6 +186,21 @@ describe("parseBrief — security (#249)", () => {
   });
 });
 
+// `--backlog` files a task into the backlog milestone — same boolean shape
+// `junior`, `security` and `allowDuplicate` already use.
+describe("parseBrief — backlog", () => {
+  it("backlog: true accepted, absent/false means not set, anything else is a 400", () => {
+    const base = { title: "t", objective: "o", outputFormat: "f", boundaries: "b" };
+    const ok = parseBrief({ ...base, backlog: true });
+    expect(ok.ok && ok.brief.backlog).toBe(true);
+    const off = parseBrief({ ...base, backlog: false });
+    expect(off.ok && off.brief.backlog).toBeUndefined();
+    const absent = parseBrief(base);
+    expect(absent.ok && absent.brief.backlog).toBeUndefined();
+    expect(parseBrief({ ...base, backlog: "true" })).toEqual({ ok: false, message: "backlog must be a boolean" });
+  });
+});
+
 // Issue #1133: `--allow-duplicate` opts a task out of the duplicate-task
 // refusal — same boolean shape `junior` and `security` already use.
 describe("parseBrief — allowDuplicate (#1133)", () => {

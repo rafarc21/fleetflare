@@ -329,12 +329,50 @@ export async function listComments(token: string, repo: string, number: number):
 }
 
 /** Sprints, as GitHub stores them. `state=all` because a sprint that has been
- *  closed is still the milestone its tasks point at. */
-export async function listMilestones(token: string, repo: string): Promise<{ number: number; title: string }[]> {
-  const raw = await ghJson<{ number: number; title: string }[]>(
+ *  closed is still the milestone its tasks point at. `description` is carried
+ *  so an operator opening/status-checking a sprint can see its brief, and
+ *  `state` is the milestone's own open/closed. */
+export async function listMilestones(
+  token: string, repo: string,
+): Promise<{ number: number; title: string; description: string; state: string }[]> {
+  const raw = await ghJson<{ number: number; title: string; description: string | null; state: string }[]>(
     token, "GET", `/repos/${repo}/milestones?state=all&per_page=${BOARD_PAGE_SIZE}`,
   );
-  return raw.map((m) => ({ number: m.number, title: m.title }));
+  return raw.map((m) => ({ number: m.number, title: m.title, description: m.description ?? "", state: m.state }));
+}
+
+/** Creates one sprint milestone. Maps back the number/title GitHub assigned;
+ *  `description` is omitted (not sent as null) when the caller gave none. */
+export async function createMilestone(
+  token: string, repo: string, input: { title: string; description?: string },
+): Promise<{ number: number; title: string }> {
+  const body: Record<string, unknown> = { title: input.title };
+  if (input.description !== undefined) body.description = input.description;
+  const raw = await ghJson<{ number: number; title: string }>(token, "POST", `/repos/${repo}/milestones`, body);
+  return { number: raw.number, title: raw.title };
+}
+
+/** Closes one sprint milestone (`state: "closed"`), the sprint-close write. */
+export async function closeMilestone(token: string, repo: string, number: number): Promise<void> {
+  await ghJson(token, "PATCH", `/repos/${repo}/milestones/${number}`, { state: "closed" });
+}
+
+/** Points an issue at a milestone by number, or removes the milestone when
+ *  `milestone` is null (GitHub's own semantics for a null milestone field). */
+export async function setIssueMilestone(
+  token: string, repo: string, issueNumber: number, milestone: number | null,
+): Promise<void> {
+  await ghJson(token, "PATCH", `/repos/${repo}/issues/${issueNumber}`, { milestone });
+}
+
+/** Open sprints only — the list an operator is opening into or closing. */
+export async function listOpenMilestones(
+  token: string, repo: string,
+): Promise<{ number: number; title: string; description: string }[]> {
+  const raw = await ghJson<{ number: number; title: string; description: string | null }[]>(
+    token, "GET", `/repos/${repo}/milestones?state=open&per_page=${BOARD_PAGE_SIZE}`,
+  );
+  return raw.map((m) => ({ number: m.number, title: m.title, description: m.description ?? "" }));
 }
 
 // --- issue #167: citation-survey text, batched over GraphQL -----------------

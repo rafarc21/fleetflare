@@ -84,7 +84,7 @@ The retro board task itself (the one that runs this whole ritual, not the
 fix tasks it proposes) is filed with:
 
 ```
-fleet task new --template retro
+fleet task new --template retro --backlog
 ```
 
 That fills the brief's four required sections — title, objective, output
@@ -95,6 +95,10 @@ and output shape above, so the weekly task does not need retyping by hand.
 a template supplies the four required sections, nothing more; assignment,
 scheduling, and everything else about the task is decided the same way as
 any other `fleet task new` call.
+
+The weekly retro task is not sprint work, so file it with `--backlog`:
+`fleet task new --template retro --backlog`. Since #1245, `fleet task new`
+refuses without `--sprint` or `--backlog`.
 
 `--template retro` only exists on the operator's Mac CLI
 (`apps/fleet/src/studio/cli-args.ts`) — which is exactly where the weekly

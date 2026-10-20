@@ -20,6 +20,7 @@
 // branch + host, never from the board.
 
 import { parseBrief, refsInBrief, renderBriefPrompt, renderTaskBody, taskKeyMarker, type TaskBrief } from "./brief";
+import { BACKLOG_MILESTONE_TITLE } from "./milestone";
 import { parseEnvelope, parseEnvelopeComment, renderEnvelopeComment } from "./envelope";
 import {
   isStaleBacklog, isTaskState, latestResultPr, studioLabel, taskAssignees, taskStates, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES,
@@ -53,7 +54,11 @@ export interface BoardApi {
   createComment: (repo: string, number: number, body: string) => Promise<{ id: number; url: string }>;
   pullRequestExists: (repo: string, number: number) => Promise<boolean>;
   listComments: (repo: string, number: number) => Promise<BoardComment[]>;
-  listMilestones: (repo: string) => Promise<{ number: number; title: string }[]>;
+  listMilestones: (repo: string) => Promise<{ number: number; title: string; description: string; state: string }[]>;
+  createMilestone: (repo: string, input: { title: string; description?: string }) => Promise<{ number: number; title: string }>;
+  closeMilestone: (repo: string, number: number) => Promise<void>;
+  setIssueMilestone: (repo: string, issueNumber: number, milestone: number | null) => Promise<void>;
+  listOpenMilestones: (repo: string) => Promise<{ number: number; title: string; description: string }[]>;
   // Task #119: the same existence-check shape as pullRequestExists above,
   // for the other two ref kinds a §6 verification step can name. See
   // src/board/verify.ts's attemptVerification, the one caller of all three.
@@ -231,6 +236,32 @@ async function resolveMilestone(api: BoardApi, repo: string, title: string): Pro
 }
 
 /**
+ * The backlog milestone's number, created once on first use. Unlike
+ * resolveMilestone (whose unknown title is a 404 — a sprint is a deliberate
+ * open with a meeting attached), the backlog is the ONE implicit milestone the
+ * board owns: it is the place tasks go when no sprint claims them yet, so a
+ * missing one is created, never refused. Case-insensitive, same as
+ * resolveMilestone, because the title is a fixed constant but GitHub titles
+ * are typed by hand.
+ *
+ * A thrown error from listMilestones/createMilestone propagates — the caller's
+ * try/catch (createTask's createIssue catch, routes' upstreamFailure) handles
+ * it, same as every other upstream read/write on this file's surface.
+ *
+ * Exported so sprint.ts's closeSprint reuses it rather than keeping a second copy.
+ */
+export async function resolveOrCreateBacklogMilestone(api: BoardApi, repo: string): Promise<BoardResult<number>> {
+  const milestones = await api.listMilestones(repo);
+  const found = milestones.find((m) => m.title.toLowerCase() === BACKLOG_MILESTONE_TITLE.toLowerCase());
+  if (found) return { ok: true, value: found.number };
+  const created = await api.createMilestone(repo, {
+    title: BACKLOG_MILESTONE_TITLE,
+    description: "Backlog: tasks awaiting a sprint.",
+  });
+  return { ok: true, value: created.number };
+}
+
+/**
  * Board issue #112 / #70 ask 8: does this brief's own path-looking text
  * overlap a path something else already claims — an open PR's changed
  * files, or another open task's own brief? Never refuses; only warns —
@@ -341,12 +372,25 @@ export async function createTask(
       }
     }
   }
+  // Issue #1245: a task is on one sprint or the backlog, never both.
+  // cli-args enforces this at parse time, but be defensive here too — the
+  // two lanes are mutually exclusive, and filing into both at once would
+  // silently drop one of the caller's two instructions.
+  if (brief.milestone !== null && brief.backlog === true) {
+    return { ok: false, status: 400, message: "a task is on one sprint or the backlog, not both" };
+  }
   const input: IssueInput = {
     title: brief.title,
     body: renderTaskBody(brief),
     labels,
   };
-  if (brief.milestone !== null) {
+  // Backlog resolution takes precedence over a named milestone — the two are
+  // mutually exclusive anyway (refused above), so only one ever runs.
+  if (brief.backlog === true) {
+    const backlog = await resolveOrCreateBacklogMilestone(api, repo);
+    if (!backlog.ok) return backlog;
+    input.milestone = backlog.value;
+  } else if (brief.milestone !== null) {
     const milestone = await resolveMilestone(api, repo, brief.milestone);
     if (!milestone.ok) return milestone;
     input.milestone = milestone.value;
