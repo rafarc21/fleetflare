@@ -1765,3 +1765,81 @@ describe("POST /studio/board/tasks/:n/message — the operator route (issue #110
     expect(wake).not.toHaveBeenCalled();
   });
 });
+
+// Issue #1245: the three sprint routes — GET/POST /studio/board/sprints and
+// POST /studio/board/sprints/close — wired through handleBoard. The policy
+// lives in src/board/sprint.ts; these prove the ROUTE reaches it.
+describe("sprint routes (#1245)", () => {
+  it("GET /studio/board/sprints returns 200 and reads the open milestones", async () => {
+    authorized();
+    const api = fakeApi({
+      listOpenMilestones: vi.fn(async () => [{ number: 1, title: "Sprint 1", description: "Owner: x\nGoal: y" }]),
+      listIssues: vi.fn(async () => []),
+    });
+    const res = await handleBoard(req("/studio/board/sprints"), testEnv, { api, reach });
+    expect(res.status).toBe(200);
+    expect(api.listOpenMilestones).toHaveBeenCalledWith("acme-org/websites");
+    expect(await res.json()).toEqual([{ title: "Sprint 1", owner: "x", goal: "y", completed: 0, total: 0 }]);
+  });
+
+  it("GET /studio/board/sprints?title= filters to one sprint and reads its tasks", async () => {
+    authorized();
+    const listIssues = vi.fn(async () => []);
+    const api = fakeApi({
+      listOpenMilestones: vi.fn(async () => [
+        { number: 1, title: "Sprint 1", description: "Owner: x\nGoal: y" },
+        { number: 2, title: "Sprint 2", description: "Owner: z\nGoal: w" },
+      ]),
+      listIssues,
+    });
+    const res = await handleBoard(req("/studio/board/sprints?title=Sprint%201"), testEnv, { api, reach });
+    expect(res.status).toBe(200);
+    expect(listIssues).toHaveBeenCalledWith("acme-org/websites", { milestone: 1 });
+  });
+
+  it("POST /studio/board/sprints opens a sprint and writes the owner into the description", async () => {
+    authorized();
+    const api = fakeApi();
+    const res = await handleBoard(
+      req("/studio/board/sprints", { method: "POST", body: JSON.stringify({ title: "Sprint 2", owner: "x", goal: "y" }) }),
+      testEnv, { api, reach },
+    );
+    expect(res.status).toBe(200);
+    expect(api.createMilestone).toHaveBeenCalledWith("acme-org/websites", {
+      title: "Sprint 2",
+      description: expect.stringContaining("Owner: x"),
+    });
+  });
+
+  it("a method other than GET/POST on /studio/board/sprints is refused 405", async () => {
+    authorized();
+    const res = await handleBoard(req("/studio/board/sprints", { method: "DELETE" }), testEnv, { api: fakeApi(), reach });
+    expect(res.status).toBe(405);
+  });
+
+  it("POST /studio/board/sprints/close closes the sprint milestone", async () => {
+    authorized();
+    const api = fakeApi({
+      listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1", description: "", state: "open" }]),
+      listIssues: vi.fn(async () => []),
+    });
+    const res = await handleBoard(
+      req("/studio/board/sprints/close", { method: "POST", body: JSON.stringify({ title: "Sprint 1" }) }),
+      testEnv, { api, reach },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ movedToBacklog: [], closed: [] });
+    expect(api.closeMilestone).toHaveBeenCalledWith("acme-org/websites", 3);
+  });
+
+  it("GET /studio/board/sprints/close is refused 405", async () => {
+    authorized();
+    const res = await handleBoard(req("/studio/board/sprints/close"), testEnv, { api: fakeApi(), reach });
+    expect(res.status).toBe(405);
+  });
+
+  it("401s without an Access header — the same gate every board route is behind", async () => {
+    const res = await handleBoard(new Request("https://x/studio/board/sprints"), testEnv, { api: fakeApi(), reach });
+    expect(res.status).toBe(401);
+  });
+});

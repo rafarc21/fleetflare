@@ -55,6 +55,7 @@ import { openTasksWithLatestPr } from "./pr-landed";
 import { closeTaskOnPromote } from "./close-action";
 import { studioOpenPrs, type OpenPr } from "./open-prs";
 import { completedGate, type CompletedGatePort } from "./completed-gate";
+import { openSprint, sprintSummaries, closeSprint } from "./sprint";
 import { runTaskReap, type ReapDeps, type LandedCheck } from "../studio/task-reap";
 import { isGateRunnerRepo } from "../gate/config";
 import { GATE_STATUS_CONTEXT } from "../gate/status-post";
@@ -596,6 +597,81 @@ async function handleOpenPrsRoute(
   return Response.json({ repo, prs, unknown });
 }
 
+// --- issue #1245: GET|POST /studio/board/sprints ----------------------------
+//
+// The three sprint verbs the fleet does — open, status (summaries), close —
+// wired here, over the same BoardApi every board route already holds. The
+// rules (refusing a duplicate title, a sprint with work still in flight, an
+// unknown sprint) all live in src/board/sprint.ts; this is only the plumbing,
+// same split every other route in this file draws.
+
+/**
+ * `GET /studio/board/sprints?title=<name>` — the open-sprint summaries. A
+ * `title` narrows to the one open milestone matching it; the policy function's
+ * own 404 answers an unknown title. `POST /studio/board/sprints` opens one
+ * from the body's `{ title, owner, goal }`.
+ */
+async function handleSprintsRoute(
+  req: Request, env: Env, api: BoardApi, reach: RepoReachFetch,
+): Promise<Response> {
+  const method = req.method;
+  const pathname = new URL(req.url).pathname;
+  // Method gate before anything that costs a call, so a wrong verb never
+  // mints a token — reap's own gate order.
+  if (method !== "GET" && method !== "POST") return new Response("method not allowed", { status: 405 });
+
+  const body = method === "POST" ? await jsonBody(req) : {};
+  const repoResult = await resolveBoardRepo(
+    { reachRepo: reach },
+    {
+      requested: method === "GET" ? new URL(req.url).searchParams.get("repo") ?? undefined : body.repo,
+      defaultSlug: env.AGENT_REPO,
+    },
+  );
+  if (!repoResult.ok) return respond(repoResult);
+  const repo = repoResult.value;
+
+  try {
+    if (method === "GET") {
+      const title = new URL(req.url).searchParams.get("title");
+      return respond(await sprintSummaries(api, repo, title));
+    }
+    return respond(await openSprint(api, repo, {
+      title: typeof body.title === "string" ? body.title : "",
+      owner: typeof body.owner === "string" ? body.owner : "",
+      goal: typeof body.goal === "string" ? body.goal : "",
+    }));
+  } catch (err) {
+    return upstreamFailure(err, method, pathname);
+  }
+}
+
+/**
+ * `POST /studio/board/sprints/close { title }` — closes the sprint milestone,
+ * moving in-flight work to the backlog rather than dropping it. The refusal
+ * rules (work still in flight, an open PR linked, an unknown title) are
+ * closeSprint's own; this only wires the write.
+ */
+async function handleSprintCloseRoute(
+  req: Request, env: Env, api: BoardApi, reach: RepoReachFetch,
+): Promise<Response> {
+  if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+  const pathname = new URL(req.url).pathname;
+  try {
+    const body = await jsonBody(req);
+    const title = typeof body.title === "string" ? body.title : "";
+    if (title.trim() === "") return new Response("sprint close needs a title", { status: 400 });
+    const repoResult = await resolveBoardRepo(
+      { reachRepo: reach },
+      { requested: typeof body.repo === "string" ? body.repo : undefined, defaultSlug: env.AGENT_REPO },
+    );
+    if (!repoResult.ok) return respond(repoResult);
+    return respond(await closeSprint(api, repoResult.value, title));
+  } catch (err) {
+    return upstreamFailure(err, req.method, pathname);
+  }
+}
+
 /**
  * Issue #35: `POST /studio/board/tasks/junior-sweep {apply?, repo?, after?, limit?}` (limit clamped to JUNIOR_SWEEP_PAGE) — same
  * shape and repo resolution as tasks/reap. Dry-run unless `apply: true`.
@@ -944,6 +1020,14 @@ export async function handleBoard(
   // reason as reap above — this path names no task number.
   if (url.pathname === "/studio/board/open-prs") {
     return handleOpenPrsRoute(req, env, api, reach);
+  }
+  // Issue #1245: the sprint routes — same "own check" reason as reap above;
+  // these paths name no task number and share the /studio/board/ prefix.
+  if (url.pathname === "/studio/board/sprints") {
+    return handleSprintsRoute(req, env, api, reach);
+  }
+  if (url.pathname === "/studio/board/sprints/close") {
+    return handleSprintCloseRoute(req, env, api, reach);
   }
 
   const m = BOARD_ROUTE_RE.exec(url.pathname);
