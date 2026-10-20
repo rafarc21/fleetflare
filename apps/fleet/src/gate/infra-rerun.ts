@@ -18,6 +18,11 @@ const INFRA_CAUSE = new RegExp([
   // Workflows' own step timeout, and an AbortSignal.timeout on a leg call (#1135).
   "[Ee]xecution timed out",
   "operation was aborted",
+  // #1230: the outbound git proxy's own two failure shapes, surfaced inside a
+  // checkout/clone/fetch failed: description — the proxy connection dropped, or
+  // its git-protocol stream was garbled. Neither is the code under test.
+  "remote end hung up",
+  "bad line length",
 ].join("|"));
 
 /** An error leg is infra-class by its cause. A leg whose first attempt was red
@@ -106,13 +111,14 @@ export function rerunStarted(result: unknown): boolean {
 
 /** The rerun's pending status, posted after the run stamps its progress. The stamp comes
  *  first: the watchdog reads it, so a stale stamp lets it end this run in the middle of its
- *  own rerun start (#1148 review). Returns whether the post landed. */
+ *  own rerun start (#1148 review). #1226: `post` now throws instead of returning whether it
+ *  failed — it propagates, same as any other step failure. */
 export async function announceInfraRerun(deps: {
   touch: () => Promise<void>;
-  post: () => Promise<boolean>;
-}): Promise<boolean> {
+  post: () => Promise<void>;
+}): Promise<void> {
   await deps.touch();
-  return deps.post();
+  await deps.post();
 }
 
 /** The status a poller sees for a run that may have handed off to its infra

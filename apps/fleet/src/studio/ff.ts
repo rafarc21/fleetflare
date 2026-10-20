@@ -60,9 +60,9 @@ export const FF_HELP = [
   "time, it does not buy more capacity, and a session limit stops all of them.",
   "",
   "The repo comes from `git remote origin` in the current directory; outside a",
-  "git repo, ff falls back to the fleet's default repo. A studio that is not",
-  "provisioned is provisioned first — ff waits for it and never attaches to a",
-  "half-built container.",
+  "git repo, ff refuses (run `fleet spawn <role> --repo owner/name` instead of",
+  "guessing a default). A studio that is not provisioned is provisioned first —",
+  "ff waits for it and never attaches to a half-built container.",
   "",
   "Both task forms need a repo: the task is assigned to <repo>--<role>, and",
   "outside a git repo there is no such name to assign it to.",
@@ -254,9 +254,8 @@ export function describeState(row: StudioStatus | null | undefined): string {
 export type FfDecision =
   /** Provisioned already — attach now, no waiting. */
   | { kind: "attach"; id: string }
-  /** No such studio. `id` is null ONLY when this folder names no repo: the
-   *  Worker then derives the id from the fleet's default repo (which this
-   *  side does not know) and returns it.
+  /** No such studio. `id` is null only in the no-repo case, which now REFUSES
+   *  (ffDecision returns kind:"error") — a spawn never carries a null id.
    *
    *  Issue #269: `instance` is present only on the `--new` path, where it is
    *  the number THIS side allocated and the number the spawn request must
@@ -285,10 +284,10 @@ export type FfDecision =
  * Without one, the id cannot be derived: the fleet default repo is
  * deployment config (env.AGENT_REPO) that no route publishes. Two honest
  * answers replace guessing at it — the registry already holds exactly one
- * studio for this role (use it), or it holds none (spawn with no repo and
- * let the Worker name the child from its own default). More than one is the
- * only case with no honest answer, and it refuses by name rather than
- * picking.
+ * studio for this role (use it), or it holds none (REFUSE, naming the
+ * --repo escape hatch — issue #1229; the old spawn-on-default fallback billed
+ * idling studios). More than one is the only case with no honest answer, and
+ * it refuses by name rather than picking.
  *
  * `repoSlug` is the SAME repo `repoSegment` was folded from (null alongside
  * it), and it is here for one reason: since board #21, `.` and `_` fold onto
@@ -369,7 +368,16 @@ export function ffDecision(
   }
 
   const row = id === null ? undefined : rows.find((r) => r.id === id);
-  if (row === undefined) return { kind: "spawn", id };
+  // Issue #1229: with no candidate and no repo, spawning on the fleet's
+  // default repo is the silent-wrong-target this whole feature removes — the
+  // default is deployment config this side cannot see. Refuse and name the
+  // --repo escape hatch instead of letting the Worker pick a default.
+  if (row === undefined) {
+    if (id === null) {
+      return { kind: "error", message: `no git remote here; cd into the repo you mean, or run: fleet spawn ${role} --repo owner/name` };
+    }
+    return { kind: "spawn", id };
+  }
 
   // A row that predates dynamic repo selection carries `repoSlug: null` — it
   // was cloned from the fleet default, and there is nothing to disagree with.

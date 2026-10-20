@@ -15,7 +15,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree, postCommitStatus,
+  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree,
 } from "../github/api";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
@@ -29,8 +29,8 @@ import {
 } from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
-  bundleKeyFor, outcomeLegs, pendingStatusArgs, planBundleLeg, planUnionLegs, verdictToStatusArgs,
-  type OutcomeLeg, type PlanInput, type PlannedLeg,
+  bundleKeyFor, carriedGreenByLeg, greenLegsOf, outcomeLegs, pendingStatusArgs, planBundleLeg, planFingerprint, planUnionLegs, verdictToStatusArgs,
+  type CarryGreen, type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
 import { bundleStepEnabled, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
@@ -39,7 +39,8 @@ import { d1RunIndex } from "./auto-run-env";
 import {
   announceInfraRerun, infraRerunDecision, launchInfraRerun, recordInfraRerun, rerunInstanceId, rerunStarted, rerunStatusArgs,
 } from "./infra-rerun";
-import { postGateStatus, type StatusPort } from "./status-post";
+import { postGateStatus, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
+import { realStatusPort } from "./status-post-env";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
 export interface GateWorkflowParams {
@@ -49,21 +50,43 @@ export interface GateWorkflowParams {
   rerunOf?: string;
   /** Set on an auto-rerun (#1119): the head the first run gated. A moved head ends the rerun. */
   headSha?: string;
+  /** #1230: the prior run's green legs. Valid only while head sha, base sha and
+   *  the plan fingerprint all match this run's own resolve — any mismatch is a
+   *  full replan (carriedGreenByLeg returns empty), never a stale carry. */
+  carryGreen?: CarryGreen;
 }
 
 // Vitest shard count comes from the fleet.json gate block (default 8, capped by
 // planLegs at MAX_LEGS_PER_PR). vitestCmd's {i}/{n} renders as i/n per shard.
 
+// #1226: every `statusPostFailed` below is now hardcoded `false` at every
+// return site that reaches it — a real post failure throws out of run()
+// before any `return` executes (postGateStatus's new throw contract), so this
+// field can never actually be observed `true` on a completed instance
+// anymore. It stays only for the JSON shape's backward compatibility
+// (routes.ts forwards it; cli/gate.ts's gateWatchExitCode still branches on
+// it) — removing it is a separate, bigger decision outside this fix's scope.
 export type GateRunOutcome =
-  | { state: "success" | "failure" | "error"; description?: string; statusPostFailed: boolean; legs: OutcomeLeg[] }
-  | { rerun: string; statusPostFailed: boolean; legs: OutcomeLeg[] }
+  | {
+      state: "success" | "failure" | "error"; description?: string; statusPostFailed: boolean; legs: OutcomeLeg[];
+      /** #1230: the plan this run resolved to. Only the two post-plan returns
+       *  below set these; the early-return paths (fail/precheck/skip) never
+       *  reach a plan, so they carry neither. */
+      baseSha?: string; planFingerprint?: string;
+      /** #1230 maestro review: the sha this run actually resolved and tested
+       *  (`resolved.headSha` from the live resolve-pr step), never an input
+       *  echo. The D1 run index's `headSha` is only the dispatch-time label and
+       *  can go stale when a run is slow to start and the index's entry is
+       *  reused for a later push to the same sha (see routes.ts). */
+      headSha?: string;
+    }
+  | { rerun: string; statusPostFailed: boolean; legs: OutcomeLeg[]; baseSha?: string; planFingerprint?: string; headSha?: string }
   | { skipped: string; statusPostFailed: boolean };
 
 export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
   /** The real GitHub calls behind every gate/verdict post in this run. */
   private statusPort(): StatusPort {
-    const mintToken = repoTokenMinter(this.env);
-    return { mintToken, postCommitStatus };
+    return realStatusPort(this.env);
   }
 
   async run(event: WorkflowEvent<GateWorkflowParams>, step: WorkflowStep): Promise<GateRunOutcome> {
@@ -124,9 +147,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     });
     // A failure posts on the head: a bad head config, or a base with no gate block (#1132).
     if (decision.action === "fail") {
-      const statusPostFailed = await step.do("post-head-invalid", async () =>
+      await step.do("post-head-invalid", STATUS_POST_STEP_CONFIG, async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: decision.description }));
-      return { state: "failure", description: decision.description, statusPostFailed, legs: [] };
+      return { state: "failure", description: decision.description, statusPostFailed: false, legs: [] };
     }
     // #1169: the merge prechecks GitHub auto-merge would otherwise skip —
     // closing keyword + leak scan on title/body/diff/commit identities. Runs
@@ -152,9 +175,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
     if (precheckFailure.length > 0) {
       const description = capStatusDescription(precheckFailure[0]);
-      const statusPostFailed = await step.do("post-precheck-failure", async () =>
+      await step.do("post-precheck-failure", STATUS_POST_STEP_CONFIG, async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description }));
-      return { state: "failure", description, statusPostFailed, legs: [] };
+      return { state: "failure", description, statusPostFailed: false, legs: [] };
     }
 
     // #1176: a green run must not certify a title/body edited after the run
@@ -172,9 +195,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     };
     const postRecheckFailure = async (failures: string[]) => {
       const description = capStatusDescription(failures[0]);
-      const statusPostFailed = await step.do("post-recheck-failure", async () =>
+      await step.do("post-recheck-failure", STATUS_POST_STEP_CONFIG, async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description }));
-      return { state: "failure" as const, description, statusPostFailed, legs: [] };
+      return { state: "failure" as const, description, statusPostFailed: false, legs: [] };
     };
 
     if (decision.action === "skip") {
@@ -189,9 +212,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // route and CLI report the same red the downgraded skip posts to GitHub.
       const guarded = guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
         { state: "success", description: "no gated paths changed" });
-      const statusPostFailed = await step.do("post-skip-status", async () =>
+      await step.do("post-skip-status", STATUS_POST_STEP_CONFIG, async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
-      return { ...guarded, statusPostFailed, legs: [] };
+      return { ...guarded, statusPostFailed: false, legs: [] };
     }
 
     // The bun-test lane is the head's own test files under each block's root,
@@ -217,13 +240,20 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       base === null ? null : planFor(base, bunFiles.base),
       head ? planFor(head, bunFiles.head) : null,
     );
+    // #1230: the plan's fingerprint, and the prior run's green legs it still
+    // applies to (empty on any mismatch: a different head, base or plan is a
+    // full replan, never a stale carry).
+    const fingerprint = planFingerprint(legs);
+    const carriedByLeg = carriedGreenByLeg(event.payload.carryGreen, {
+      headSha: resolved.headSha, baseSha: resolved.baseSha, planFingerprint: fingerprint,
+    });
 
     // Promise.all over step-backed legs: each leg's own steps are independent,
     // and aggregateVerdict reads results in configured leg order either way.
     // The run has a leg plan, so say it is running before any leg starts (#1088).
     // A reattach starts no instance and never reaches here, so it posts nothing.
     // A failed POST is reported to the log only and never blocks the run.
-    await step.do("post-pending", async () =>
+    await step.do("post-pending", STATUS_POST_STEP_CONFIG, async () =>
       postGateStatus(this.statusPort(), repo, resolved.headSha, pendingStatusArgs(event.instanceId, legs.length)));
 
     // #1080: one bundle for the run, built by one leg before the others start,
@@ -251,11 +281,17 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     const touch = (): Promise<void> =>
       markRunProgress(d1RunIndex(this.env.DB), repo, pr, event.instanceId, Date.now());
     const results = await Promise.all(
-      legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName,
-        {
-          baseRef: resolved.baseRef, pr: String(pr), private: resolved.private,
-          bundleKey: bundled ? bundleKey : undefined, mergeBase: bundled ? resolved.mergeBaseSha : undefined,
-        }, planned, touch)),
+      legs.map((planned) => {
+        // #1230: a leg already green in the carry rides straight into the
+        // verdict; everything else dispatches to GATE_RUNNER as before.
+        const carried = carriedByLeg.get(planned.leg);
+        if (carried !== undefined) return Promise.resolve(carried as LegRunResult);
+        return runLeg(this.env, step, event.instanceId, owner, repoName,
+          {
+            baseRef: resolved.baseRef, pr: String(pr), private: resolved.private,
+            bundleKey: bundled ? bundleKey : undefined, mergeBase: bundled ? resolved.mergeBaseSha : undefined,
+          }, planned, touch);
+      }),
     );
 
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
@@ -269,7 +305,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     if (final.state === "error" && infraRerunDecision(results, event.payload.rerunOf)) {
       const rerunId = rerunInstanceId(event.instanceId);
       // The progress stamp goes first, so the watchdog never reads this run as stalled mid-start (#1148 review).
-      const statusPostFailed = await step.do("post-infra-rerun", async () => announceInfraRerun({
+      await step.do("post-infra-rerun", STATUS_POST_STEP_CONFIG, async () => announceInfraRerun({
         touch,
         post: () => postGateStatus(this.statusPort(), repo, resolved.headSha, rerunStatusArgs(event.instanceId)),
       }));
@@ -277,7 +313,16 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // run out, the outcome is "failed" and the final error verdict posts below.
       const started = await step.do("start-infra-rerun", async () => launchInfraRerun({
         create: () => this.env.GATE_WORKFLOW.create({
-          id: rerunId, params: { repo, pr, headSha: resolved.headSha, rerunOf: event.instanceId },
+          id: rerunId,
+          params: {
+            repo, pr, headSha: resolved.headSha, rerunOf: event.instanceId,
+            // #1230: the legs that already went green carry forward, so the
+            // rerun only dispatches the infra-failed ones.
+            carryGreen: {
+              headSha: resolved.headSha, baseSha: resolved.baseSha, planFingerprint: fingerprint,
+              legs: greenLegsOf(results),
+            },
+          },
         }),
         get: () => this.env.GATE_WORKFLOW.get(rerunId),
         // The rerun takes the PR's run pointer, so a manual start finds it (#1084).
@@ -291,7 +336,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         return "failed" as const;
       });
       // A step result cached before the outcome became a string replays as `true` (#1150 review).
-      if (rerunStarted(started)) return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results) };
+      if (rerunStarted(started)) {
+        return {
+          rerun: rerunId, statusPostFailed: false, legs: outcomeLegs(results),
+          baseSha: resolved.baseSha, planFingerprint: fingerprint, headSha: resolved.headSha,
+        };
+      }
     }
 
     // #1176: before the verdict post, re-read title/body once more — only a
@@ -316,12 +366,16 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       ? guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
         { state: "success", description: verdictArgs.description })
       : verdictArgs;
-    const statusPostFailed = await step.do("post-verdict", async () =>
+    await step.do("post-verdict", STATUS_POST_STEP_CONFIG, async () =>
       postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
     // Per-leg output (#1049) rides in the final result, in plan order. #1214
     // round 2: `guarded` (not `final`) rides, so a downgraded success reports
-    // failure here exactly as GitHub sees it.
-    return { ...guarded, statusPostFailed, legs: outcomeLegs(results) };
+    // failure here exactly as GitHub sees it. #1230: baseSha/planFingerprint ride
+    // too, so a later `--failed-only` rerun can validate its own carry against them.
+    return {
+      ...guarded, statusPostFailed: false, legs: outcomeLegs(results),
+      baseSha: resolved.baseSha, planFingerprint: fingerprint, headSha: resolved.headSha,
+    };
   }
 }
 

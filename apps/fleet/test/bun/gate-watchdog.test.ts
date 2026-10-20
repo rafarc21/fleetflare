@@ -69,19 +69,25 @@ function fakeIndex(initial: GateRunRecord | null) {
 
 type Post = { repo: string; headSha: string; state: string; description?: string };
 
-function harness(opts: { initial?: GateRunRecord | null; redLeg?: boolean; postFails?: boolean; runs?: Record<string, string> } = {}) {
+function harness(opts: {
+  initial?: GateRunRecord | null; redLeg?: boolean; postFails?: boolean; runs?: Record<string, string>;
+  headStatus?: (repo: string, headSha: string) => Promise<{ state: string } | undefined>;
+} = {}) {
   const engine = fakeEngine();
   for (const [id, status] of Object.entries(opts.runs ?? { "gate-x": "running" })) {
     engine.runs.set(id, { status, params: {} });
   }
   const { index, head } = fakeIndex(opts.initial === undefined ? { headSha: HEAD, runId: "gate-x", progressedAt: T0 } : opts.initial);
   const posts: Post[] = [];
+  // #1226: post follows postGateStatus's throw contract — a failure is an
+  // exception, never a swallowed boolean.
   const post = async (repo: string, headSha: string, args: { state: string; description?: string }) => {
     posts.push({ repo, headSha, ...args });
-    return opts.postFails === true;
+    if (opts.postFails === true) throw new Error("status post failed");
   };
   const hasRedLeg = async () => opts.redLeg === true;
-  const sweep = (now: number) => sweepStalledRuns({ index, workflow: engine.workflow, post, hasRedLeg, now: () => now });
+  const headStatus = opts.headStatus ?? (async () => undefined);
+  const sweep = (now: number) => sweepStalledRuns({ index, workflow: engine.workflow, post, headStatus, hasRedLeg, now: () => now });
   return { engine, index, head, posts, sweep, opts };
 }
 
@@ -217,8 +223,9 @@ describe("sweepStalledRuns: a red check that fails is retried, then ends final a
     const deps = {
       index: h.index, workflow: h.engine.workflow,
       post: async (repo: string, headSha: string, args: { state: string; description?: string }) => {
-        h.posts.push({ repo, headSha, ...args }); return false;
+        h.posts.push({ repo, headSha, ...args });
       },
+      headStatus: async () => undefined,
       hasRedLeg: async () => { if (redCheckFails) throw new Error("github down"); return false; },
       now: () => T0 + GATE_STALL_MS,
     };
@@ -240,7 +247,8 @@ describe("sweepStalledRuns: the final verdict is stamped before its post (#1156 
     let stampAtPost: number | undefined;
     await sweepStalledRuns({
       index: h.index, workflow: h.engine.workflow, hasRedLeg: async () => true, now: () => now,
-      post: async (repo, headSha, args) => { stampAtPost = h.head()?.progressedAt; h.posts.push({ repo, headSha, ...args }); return false; },
+      headStatus: async () => undefined,
+      post: async (repo, headSha, args) => { stampAtPost = h.head()?.progressedAt; h.posts.push({ repo, headSha, ...args }); },
     });
     expect(stampAtPost).toBe(now);
     expect(h.head()?.progressedAt).toBe(-1);
@@ -274,7 +282,8 @@ describe("sweepStalledRuns: a repo the gate runner is off for is retired at once
     const h = harness();
     const result = await sweepStalledRuns({
       index: h.index, workflow: h.engine.workflow, hasRedLeg: async () => false, now: () => T0 + GATE_STALL_MS,
-      post: async (repo, headSha, args) => { h.posts.push({ repo, headSha, ...args }); return false; },
+      headStatus: async () => undefined,
+      post: async (repo, headSha, args) => { h.posts.push({ repo, headSha, ...args }); },
       gated: () => false,
     });
     expect(result).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
@@ -372,6 +381,24 @@ describe("hasRedResult: a leg's decisive stored result decides red, as the run's
     const files = { [`${P}/shard-lint-try2.json`]: "failure" };
     expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
   });
+
+  it("a try-3 that passed decides the leg over tries 1 and 2: not red (#1231: more than one infra retry)", async () => {
+    const files = {
+      [`${P}/shard-lint.json`]: "error",
+      [`${P}/shard-lint-try2.json`]: "failure",
+      [`${P}/shard-lint-try3.json`]: "success",
+    };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(false);
+  });
+
+  it("a try-3 that failed decides the leg over a passing try-2: red (#1231: the latest try always decides)", async () => {
+    const files = {
+      [`${P}/shard-lint.json`]: "error",
+      [`${P}/shard-lint-try2.json`]: "success",
+      [`${P}/shard-lint-try3.json`]: "failure",
+    };
+    expect(await hasRedResult(Object.keys(files), store(files))).toBe(true);
+  });
 });
 
 describe("sweepStalledRuns: only a finished run is retired; an unknown status is read again (#1150 review)", () => {
@@ -380,5 +407,21 @@ describe("sweepStalledRuns: only a finished run is retired; an unknown status is
     expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
     expect(h.head()?.progressedAt).toBe(T0);
     expect(await h.sweep(T0 + GATE_STALL_MS + 60_000)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+  });
+});
+
+describe("sweepStalledRuns: an errored run that never posted its own verdict is reconciled once before it is retired (#1226)", () => {
+  it("an errored run with no landed head status gets one reconciliation post, then is retired", async () => {
+    const h = harness({ runs: { "gate-x": "errored" }, headStatus: async () => undefined });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([{ repo: REPO, headSha: HEAD, state: "error", description: expect.stringContaining("ended without a verdict") }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("an errored run whose head already shows a terminal status is never clobbered: no reconciliation post, still retired", async () => {
+    const h = harness({ runs: { "gate-x": "errored" }, headStatus: async () => ({ state: "success" }) });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
   });
 });

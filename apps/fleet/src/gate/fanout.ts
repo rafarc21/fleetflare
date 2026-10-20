@@ -181,11 +181,19 @@ export function headLegName(name: string): string {
   return shard ? `${shard[1]}@head-${shard[2]}` : `${name}@head`;
 }
 
-/** A leg's runnable content: the install, the command, the deadline and the
- *  image it runs on (#1091 review round 2). Two legs with the same content run
- *  once; a leg that differs in any of them runs again as its head copy. */
+/** A leg's runnable identity: the install, the command, the deadline and the
+ *  image it runs on, each normalized to the value the leg actually runs with
+ *  (#1091 review round 2; #1230 review: planFingerprint shares this so an
+ *  unset `timeoutMin`/`image` and its explicit default fingerprint the same
+ *  — they are the identical run, not a different one). */
+function legIdentity(l: PlannedLeg): [string, string, number, string] {
+  return [l.installCmd, l.legCmd, legTimeoutMin(l.timeoutMin), l.image ?? DEFAULT_GATE_IMAGE];
+}
+
+/** A leg's runnable content (#1091 review round 2). Two legs with the same
+ *  content run once; a leg that differs in any of them runs again as its head copy. */
 function legContent(l: PlannedLeg): string {
-  return JSON.stringify([l.installCmd, l.legCmd, legTimeoutMin(l.timeoutMin), l.image ?? DEFAULT_GATE_IMAGE]);
+  return JSON.stringify(legIdentity(l));
 }
 
 /** The legs of a run whose PR changes fleet.json (#1091 review). Every base
@@ -201,6 +209,51 @@ export function planUnionLegs(base: PlanInput | null, head: PlanInput | null): P
   const headLegs = planLegs({ ...head, legName: headLegName })
     .filter((l) => !seen.has(legContent(l)) && !(l.leg === "merge-tree" && baseLegs.length > 0));
   return [...baseLegs, ...headLegs];
+}
+
+// #1230: carrying a prior run's green legs into a rerun, so the rerun only
+// dispatches the legs that are not already green.
+export interface CarryGreen {
+  headSha: string;
+  baseSha: string;
+  planFingerprint: string;
+  legs: LegResult[];
+}
+
+/** One run's planned legs, fingerprinted by their runnable content (leg name +
+ *  install/cmd/timeout/image, normalized by the SAME legIdentity legContent
+ *  uses for planUnionLegs, but WITH the leg name and over the WHOLE plan:
+ *  this compares two different runs' plans, not a base vs. head leg within
+ *  one). Two runs that plan identical legs get the same fingerprint; any
+ *  difference (a changed fleet.json, a different shard count) changes it. */
+export function planFingerprint(legs: PlannedLeg[]): string {
+  return JSON.stringify(legs.map((l) => [l.leg, ...legIdentity(l)]));
+}
+
+/** A run's green legs: `state === "success"`, the only state a carry may ever
+ *  pass forward (#1230). The one filter every carry producer and consumer
+ *  shares, so none hand-rolls its own copy. */
+export function greenLegsOf<T extends LegResult>(legs: T[]): T[] {
+  return legs.filter((l) => l.state === "success");
+}
+
+/** The prior run's green legs, valid ONLY while head sha, base sha and the
+ *  plan fingerprint all match this run's own resolve (#1230): a carry from a
+ *  different sha or a changed config must never count, so a mismatch returns
+ *  an empty map — the caller then runs every leg fresh, same as no carry at
+ *  all. Filters to `state === "success"` itself (via greenLegsOf): a caller
+ *  must only ever put green legs in `carry.legs`, but this must not trust
+ *  that blindly. */
+export function carriedGreenByLeg(
+  carry: CarryGreen | undefined, ctx: { headSha: string; baseSha: string; planFingerprint: string },
+): Map<string, LegResult> {
+  if (
+    carry === undefined || carry.headSha !== ctx.headSha || carry.baseSha !== ctx.baseSha
+    || carry.planFingerprint !== ctx.planFingerprint
+  ) {
+    return new Map();
+  }
+  return new Map(greenLegsOf(carry.legs).map((l) => [l.leg, l]));
 }
 
 const LEG_STATES = new Set<LegResult["state"]>(["success", "failure", "error"]);

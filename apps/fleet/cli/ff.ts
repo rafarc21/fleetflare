@@ -146,11 +146,9 @@ async function readOutcome(creds: Credentials, id: string): Promise<VerdictOutco
 
 /**
  * POST /studio/spawn — the operator spawn cmdSpawn already uses, with the
- * detected repo riding along exactly as it does there (omitted entirely when
- * this folder names none, so the Worker's own default is the single source of
- * that fallback). Returns the child's id, which for the no-repo case is the
- * ONLY way to learn it: it is derived from env.AGENT_REPO, which no route
- * publishes.
+ * detected repo riding along exactly as it does there. A folder that names no
+ * repo refuses before this is ever called (main/ffDecision, #1229), so the
+ * repo is always the detected one and the returned id is always nameable.
  *
  * A 409 whose body is spawn.ts's own "studio exists" is NOT a failure here:
  * it means something created the studio between this command's `ls` and its
@@ -560,7 +558,7 @@ async function main(): Promise<void> {
     }
     say(`repo ${detected.slug} (from git remote origin)`);
   } else {
-    say(`${detected.reason} — using the fleet's default repo`);
+    say(`${detected.reason} — no git remote; resolving by the one existing ${parsed.role} studio, refusing if several`);
   }
 
   const decision = ffDecision(

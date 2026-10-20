@@ -5,11 +5,11 @@
 // (not a gate block) turns a repo off: a gated repo with no valid gate config
 // fails red (#1132).
 import type { Env } from "../env";
-import { postCommitStatus } from "../github/api";
-import { repoTokenMinter } from "../github/auth";
 import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
 import { postGateStatus } from "./status-post";
+import { realStatusPort } from "./status-post-env";
 import type { StalledRun, WatchdogIndex } from "./watchdog";
+import { gateDraining, gateDrainQueue } from "./drain";
 
 /** The per-PR gate run pointer on the D1 gate_pr_head table (migrations 0007, 0008).
  *  Keyed by lowercased repo, the way gateRunId keys a run (#1082). */
@@ -78,16 +78,15 @@ export function d1WatchdogIndex(db: D1Database): WatchdogIndex {
 }
 
 /** #1191/#1214: the pending-status post a fresh run puts up before it is created,
- *  so GitHub never sees the head without a pending gate/verdict. A failed POST
- *  returns true (postGateStatus's contract) and is swallowed here: a pending
- *  post must never block the run that follows it. */
+ *  so GitHub never sees the head without a pending gate/verdict. #1226: postGateStatus
+ *  now throws on a failed post (no step.do/Workflow retry wraps this call site — it
+ *  runs before the Workflow instance even exists) — caught and logged here, same as
+ *  before: a pending post must never block the run that follows it. */
 function pendingPost(env: Env, description: string) {
   return async (repo: string, headSha: string): Promise<void> => {
-    await postGateStatus(
-      { mintToken: repoTokenMinter(env), postCommitStatus },
-      repo, headSha,
-      { state: "pending", description },
-    );
+    await postGateStatus(realStatusPort(env), repo, headSha, { state: "pending", description }).catch((err: unknown) => {
+      console.error(`gate auto-run ${repo} ${headSha.slice(0, 8)}: pending status post failed`, err);
+    });
   };
 }
 
@@ -95,6 +94,16 @@ function pendingPost(env: Env, description: string) {
  *  whatever a run did. */
 export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<void> {
   try {
+    // #1232: a Worker deploy is draining — queue the run as pending instead of
+    // starting it, so the deploy does not kill it mid-leg. A pending status still
+    // goes up, so GitHub never sees the head without a gate (#1191). The cron
+    // releases the queue once the flag clears.
+    if (await gateDraining(env.DB)) {
+      await gateDrainQueue(env.DB).append(pr);
+      await pendingPost(env, "queued (gate draining for deploy)")(pr.repo, pr.headSha);
+      console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: queued (draining)`);
+      return;
+    }
     const outcome = await autoRunPullRequest(pr, {
       workflow: env.GATE_WORKFLOW,
       index: d1RunIndex(env.DB),
@@ -103,5 +112,30 @@ export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<
     console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: ${outcome}`);
   } catch (err) {
     console.error(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)} failed`, err);
+  }
+}
+
+/** #1232: releases the pending queue once the drain flag is clear. One queued PR
+ *  that fails to start is kept (replayed next minute); a started one leaves the
+ *  queue. Runs from the every-minute cron (src/index.ts). */
+export async function drainPendingGateRuns(env: Env): Promise<void> {
+  if (env.FLEET_GATE_RUNNER !== "on") return;
+  if (await gateDraining(env.DB)) return;
+  const queue = gateDrainQueue(env.DB);
+  const queued = await queue.peek();
+  for (const pr of queued) {
+    try {
+      const outcome = await autoRunPullRequest(pr, {
+        workflow: env.GATE_WORKFLOW,
+        index: d1RunIndex(env.DB),
+        postPending: pendingPost(env, pr.edited === true ? "running (edited title/body recheck)" : "running (fresh gate run)"),
+      });
+      console.log(`gate drain release ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: ${outcome}`);
+      // Remove only after the run started: a crash mid-loop keeps the rest queued.
+      await queue.remove(pr);
+    } catch (err) {
+      console.error(`gate drain release ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)} failed`, err);
+      // left in the queue; replayed next minute
+    }
   }
 }

@@ -50,6 +50,8 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     "lint: HTTP 503 after 0 min",
     "lint: Execution timed out after 30 min",
     "lint: The operation was aborted due to timeout after 28 min",
+    "lint: checkout failed: fatal: remote end hung up after 2 min",
+    "lint: clone failed: fatal: remote-curl: bad line length character: UNKNO after 1 min",
   ])("infra: %s", (description) => {
     expect(isInfraLegFailure({ leg: "lint", state: "error", description })).toBe(true);
   });
@@ -303,14 +305,22 @@ describe("rerunStarted: a cached start result from before the outcome union stil
   });
 });
 
-describe("announceInfraRerun: progress is stamped before the rerun's pending status (#1148 review)", () => {
+describe("announceInfraRerun: progress is stamped before the rerun's pending status (#1148 review, #1226)", () => {
   it("the touch runs before the post, so a watchdog never sees a stale stamp during the rerun's start", async () => {
     const calls: string[] = [];
-    const posted = await announceInfraRerun({
+    await announceInfraRerun({
       touch: async () => { calls.push("touch"); },
-      post: async () => { calls.push("post"); return false; },
+      post: async () => { calls.push("post"); },
     });
     expect(calls).toEqual(["touch", "post"]);
-    expect(posted).toBe(false);
+  });
+
+  it("a post that throws propagates: the caller's step fails loudly, never a silently swallowed boolean (#1226)", async () => {
+    const calls: string[] = [];
+    await expect(announceInfraRerun({
+      touch: async () => { calls.push("touch"); },
+      post: async () => { calls.push("post"); throw new Error("gate/verdict HTTP 503"); },
+    })).rejects.toThrow(/503/);
+    expect(calls).toEqual(["touch", "post"]);
   });
 });

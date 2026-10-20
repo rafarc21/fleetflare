@@ -82,14 +82,21 @@ export type CliCommand =
   // — both pool keys map to a glm-led studio with that pool model pinned as
   // the main model (readLeadTypeRequest, src/studio/spawn.ts), so the wire
   // value here is still the raw string the operator typed, unresolved.
-  | { cmd: "spawn"; role: string; newInstance: boolean; leadType?: "claude" | "glm" | "kimi" | "deepseek" }
+  // Issue #1229: `--repo <owner/name>` overrides CWD detection (the RAW
+  // value, unresolved — cli-args.ts stays pure; cmdSpawn resolves it).
+  // Present ONLY when the flag was given, so a bare `spawn <role>` keeps its
+  // exact pre-#1229 parse shape.
+  | { cmd: "spawn"; role: string; newInstance: boolean; leadType?: "claude" | "glm" | "kimi" | "deepseek"; repo?: string }
   // Issue #115: `cancelFreshSession` — `--no-fresh-session`, mutually
   // exclusive with `freshSession` above.
   // Issue #231: `discardSession` — `--discard-session`, the operator's
   // stated override of provisionWithStorage's own involuntary-stop refusal.
   // Issue #1074 ask 2: `forceMappedAccount`, present (`true`) only when
   // `--account mapped` was given — same shape and meaning as recycle's.
-  | { cmd: "provision"; id: string; freshSession: boolean; cancelFreshSession: boolean; discardSession: boolean; forceMappedAccount?: true }
+  // Issue #1229: `--repo <owner/name>`, raw and unresolved — cmdProvision
+  // resolves it; present ONLY when given, so a bare `provision <id>` keeps
+  // its exact pre-#1229 parse shape.
+  | { cmd: "provision"; id: string; freshSession: boolean; cancelFreshSession: boolean; discardSession: boolean; forceMappedAccount?: true; repo?: string }
   // Issue #37: one studio, checked LIVE, right now. The container check
   // (provision.ts's provisionedCheckCmd) always tested the right things;
   // until this verb, nothing exposed it on demand, so the only way to tell a
@@ -273,7 +280,7 @@ export type CliCommand =
   // #715 Phase 1: `fleet gate [start <pr> | watch <pr>]` — the operator
   // surface for the gate-runner Workflow (POST /studio/gate/start, GET
   // /studio/gate/status). Same sub-action-word shape `models-*` uses above.
-  | { cmd: "gate-run"; pr: number }
+  | { cmd: "gate-run"; pr: number; failedOnly?: boolean }
   | { cmd: "gate-start"; pr: number }
   | { cmd: "gate-watch"; pr: number; runId: string }
   | { cmd: "usage"; message: string };
@@ -353,12 +360,12 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Upload the Mac clipboard image into the studio and print the in-container path. ctrl-v does this inline while attached.",
   },
   spawn: {
-    args: "<role> [--new] [--lead claude|glm|kimi|deepseek]",
-    summary: "Create a studio for <role> in the repo you are standing in (the roles this fleet declares in fleet.json). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them. Issue #249: `--lead glm` boots this studio's lead on this fleet's own GLM-translation route instead of a Claude account — no Claude quota spent, sticky for the studio's whole life (set once, here, never re-asked on a later provision/restart/recycle). `--lead claude` is the explicit, redundant spelling of today's default. #717: `--lead kimi` / `--lead deepseek` are also glm-led, with that pool model (`fleet models`) pinned as the studio's main model instead of the round-robin default. maestro is spawnable from the Mac (the operator edge); ff refuses it (always local, issue #250), and `--new` never applies to it (singleton).",
+    args: "<role> [--new] [--lead claude|glm|kimi|deepseek] [--repo owner/name]",
+    summary: "Create a studio for <role> in the repo you are standing in (the roles this fleet declares in fleet.json). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them. Issue #249: `--lead glm` boots this studio's lead on this fleet's own GLM-translation route instead of a Claude account — no Claude quota spent, sticky for the studio's whole life (set once, here, never re-asked on a later provision/restart/recycle). `--lead claude` is the explicit, redundant spelling of today's default. #717: `--lead kimi` / `--lead deepseek` are also glm-led, with that pool model (`fleet models`) pinned as the studio's main model instead of the round-robin default. maestro is spawnable from the Mac (the operator edge); ff refuses it (always local, issue #250), and `--new` never applies to it (singleton). Refuses when the cwd names no repo and no --repo is given — it never falls back to the fleet's default (pass --repo owner/name).",
   },
   provision: {
-    args: "<id> [--fresh-session [--discard-session]|--no-fresh-session] [--account mapped]",
-    summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict. " + FRESH_SESSION_HELP + " Issue #115: --no-fresh-session cancels a pending fresh-session intent left armed by a PRIOR --fresh-session attempt that failed before it was confirmed — that intent otherwise keeps forcing every later provision (flagged or not) to run fresh until one finally succeeds; this call clears it explicitly and proceeds as an ordinary (non-fresh) provision. `fleet ls` shows a pending intent as \"FRESH SESSION <id>: fresh-session pending\". Issue #231: --fresh-session on a studio whose last stop was an involuntary platform replacement (not a park/destroy) with a non-trivial session REFUSES (409), naming the session's real size — recovering from a replacement should resume, not discard real work. --discard-session forces it anyway, as a stated choice.",
+    args: "<id> [--fresh-session [--discard-session]|--no-fresh-session] [--account mapped] [--repo owner/name]",
+    summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict. " + FRESH_SESSION_HELP + " Issue #115: --no-fresh-session cancels a pending fresh-session intent left armed by a PRIOR --fresh-session attempt that failed before it was confirmed — that intent otherwise keeps forcing every later provision (flagged or not) to run fresh until one finally succeeds; this call clears it explicitly and proceeds as an ordinary (non-fresh) provision. `fleet ls` shows a pending intent as \"FRESH SESSION <id>: fresh-session pending\". Issue #231: --fresh-session on a studio whose last stop was an involuntary platform replacement (not a park/destroy) with a non-trivial session REFUSES (409), naming the session's real size — recovering from a replacement should resume, not discard real work. --discard-session forces it anyway, as a stated choice. --repo overrides detection; with neither, and the id not derived from the cwd, provision sends no repo (address-by-id).",
   },
   check: {
     args: "<id>",
@@ -471,8 +478,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   // #715: two cmd literals share the `gate` word; verbLine's `gate-` prefix
   // collapse folds both back into one "fleet gate ..." help family.
   "gate-run": {
-    args: "run <pr>",
-    summary: "Start a gate-runner run for <pr> and wait for its verdict; exit 0 green, 1 red, 2 error or gate off. The repo is the folder's own origin.",
+    args: "run [--failed-only] <pr>",
+    summary: "Start a gate-runner run for <pr> and wait for its verdict; exit 0 green, 1 red, 2 error or gate off. --failed-only reruns only the latest run's red legs, carrying its green ones. The repo is the folder's own origin.",
   },
   "gate-start": {
     args: "start <pr>",
@@ -958,8 +965,11 @@ export function parseCliArgs(argv: string[]): CliCommand {
       // Issue #249: `--lead glm` rides alongside `--new`, either order — a
       // small token walk rather than the fixed-shape checks above, since
       // there are now two independent flags instead of one bare boolean.
+      // Issue #1229: `--repo <v>`/`--repo=<v>` joins the same walk — three
+      // independent flags, any order, none of them mutually exclusive.
       let newInstance = false;
       let leadType: "claude" | "glm" | "kimi" | "deepseek" | undefined;
+      let repo: string | undefined;
       for (let i = 0; i < rest.length; i++) {
         const token = rest[i];
         if (token === "--new" && !newInstance) { newInstance = true; continue; }
@@ -972,9 +982,25 @@ export function parseCliArgs(argv: string[]): CliCommand {
           i += 1;
           continue;
         }
+        if (token === "--repo") {
+          if (repo !== undefined) return usage("--repo was given twice");
+          const value = rest[++i];
+          if (value === undefined) return usage("--repo needs a value");
+          repo = value;
+          continue;
+        }
+        if (token.startsWith("--repo=")) {
+          if (repo !== undefined) return usage("--repo was given twice");
+          repo = token.slice("--repo=".length);
+          continue;
+        }
         return usage(`unexpected ${JSON.stringify(token)}`);
       }
-      return { cmd: "spawn", role: arg, newInstance, ...(leadType === undefined ? {} : { leadType }) };
+      return {
+        cmd: "spawn", role: arg, newInstance,
+        ...(leadType === undefined ? {} : { leadType }),
+        ...(repo === undefined ? {} : { repo }),
+      };
     }
     // Issue #28: `--fresh-session`, same bespoke flag shape as recycle's own.
     // Issue #115: plus `--no-fresh-session` — same "each at most once,
@@ -987,15 +1013,40 @@ export function parseCliArgs(argv: string[]): CliCommand {
       // Issue #1074 ask 2: `--account mapped`, pulled out of `rest` BEFORE the
       // boolean-flag scan — same bespoke shape and same literal-"mapped" rule
       // as recycle below (board task #131 ask 2).
+      // Issue #1229: `--repo <v>`/`--repo=<v>` is pulled out the same way —
+      // it is value-taking, so the boolean scan below must never see either
+      // of its tokens (`--repo` itself, or its value).
       const rest0 = argv.slice(2);
-      const accountIdx = rest0.indexOf("--account");
       let forceMappedAccount = false;
+      let repo: string | undefined;
       let rest = rest0;
-      if (accountIdx !== -1) {
-        if (rest0.indexOf("--account", accountIdx + 1) !== -1) return usage("--account was given twice");
-        if (rest0[accountIdx + 1] !== "mapped") return usage('fleet provision: --account only accepts "mapped"');
-        forceMappedAccount = true;
-        rest = [...rest0.slice(0, accountIdx), ...rest0.slice(accountIdx + 2)];
+      for (let i = 0; i < rest.length; i++) {
+        const token = rest[i];
+        if (token === "--account") {
+          if (forceMappedAccount) return usage("--account was given twice");
+          const value = rest[i + 1];
+          if (value !== "mapped") return usage('fleet provision: --account only accepts "mapped"');
+          forceMappedAccount = true;
+          rest = [...rest.slice(0, i), ...rest.slice(i + 2)];
+          i -= 1;
+          continue;
+        }
+        if (token === "--repo") {
+          if (repo !== undefined) return usage("--repo was given twice");
+          const value = rest[i + 1];
+          if (value === undefined) return usage("--repo needs a value");
+          repo = value;
+          rest = [...rest.slice(0, i), ...rest.slice(i + 2)];
+          i -= 1;
+          continue;
+        }
+        if (token.startsWith("--repo=")) {
+          if (repo !== undefined) return usage("--repo was given twice");
+          repo = token.slice("--repo=".length);
+          rest = [...rest.slice(0, i), ...rest.slice(i + 1)];
+          i -= 1;
+          continue;
+        }
       }
       const known = ["--fresh-session", "--no-fresh-session", "--discard-session"];
       const stray = rest.find((f, i) => !known.includes(f) || rest.indexOf(f) !== i);
@@ -1013,7 +1064,11 @@ export function parseCliArgs(argv: string[]): CliCommand {
       // same "unknown/invalid combination" usage-error convention this
       // parser already gives `--fresh-session`/`--no-fresh-session` above.
       if (discardSession && !freshSession) return usage("--discard-session needs --fresh-session on the same call");
-      return { cmd: "provision", id: arg, freshSession, cancelFreshSession, discardSession, ...(forceMappedAccount ? { forceMappedAccount: true } : {}) };
+      return {
+        cmd: "provision", id: arg, freshSession, cancelFreshSession, discardSession,
+        ...(forceMappedAccount ? { forceMappedAccount: true } : {}),
+        ...(repo === undefined ? {} : { repo }),
+      };
     }
     // Issue #96: same bespoke shape as `destroy --force` below, same reasons.
     // Issue #28: plus `--fresh-session`, either order, each at most once.
@@ -1318,10 +1373,15 @@ export function parseCliArgs(argv: string[]): CliCommand {
         return { cmd: "gate-watch", pr: Number(rest[1]), runId: rest[2] };
       }
       if (rest[0] === "run") {
-        if (rest.length !== 2 || !/^\d+$/.test(rest[1])) return usage("usage: fleet gate run <pr>");
-        return { cmd: "gate-run", pr: Number(rest[1]) };
+        // #1230: --failed-only may appear before or after the PR number.
+        const failedOnly = rest.includes("--failed-only");
+        const positional = rest.slice(1).filter((a) => a !== "--failed-only");
+        if (positional.length !== 1 || !/^\d+$/.test(positional[0])) {
+          return usage("usage: fleet gate run [--failed-only] <pr>");
+        }
+        return { cmd: "gate-run", pr: Number(positional[0]), ...(failedOnly ? { failedOnly: true } : {}) };
       }
-      return usage("usage: fleet gate [run <pr> | start <pr> | watch <pr> <runId>]");
+      return usage("usage: fleet gate [run [--failed-only] <pr> | start <pr> | watch <pr> <runId>]");
     }
     default:
       return { cmd: "usage", message: CLI_USAGE };

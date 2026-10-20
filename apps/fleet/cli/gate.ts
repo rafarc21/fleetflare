@@ -72,6 +72,13 @@ export function gateStartLine(body: { runId: string; reused?: boolean }, pr: num
     : `gate-start: started fresh run ${body.runId} for PR #${pr}`;
 }
 
+/** The one line a drain-queued start prints (#1232): the manual start route
+ *  answers `{started:false, pending:true}` without a run id, so there is
+ *  nothing to poll — the operator retries after the deploy. */
+export function gateQueuedLine(pr: number): string {
+  return `gate-start: queued (gate draining for deploy) for PR #${pr} — retry after the deploy`;
+}
+
 export async function cmdGateStart(creds: Credentials, pr: number): Promise<void> {
   const repo = await gatedRepo();
   if (!repo) return;
@@ -84,10 +91,15 @@ export async function cmdGateStart(creds: Credentials, pr: number): Promise<void
   } catch (err) {
     throw new Error(`fleet gate-start: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
-  const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; error?: string };
+  const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; pending?: boolean; error?: string };
   if (!res.ok || body.error) {
     console.error(`gate-start failed: ${body.error ?? res.status}`);
     process.exitCode = 2;
+    return;
+  }
+  if (body.pending === true) {
+    console.error(gateQueuedLine(pr));
+    process.exitCode = 2; // match runGate: a queued start is not a started run
     return;
   }
   console.log(gateStartLine({ runId: body.runId ?? "", reused: body.reused }, pr));
@@ -206,6 +218,8 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
 export interface GateRunOptions {
   /** Poll interval. Tests shorten it; the CLI keeps the 5s default. */
   pollMs?: number;
+  /** #1230: rerun only the PR's latest run's red legs, carrying its green ones. */
+  failedOnly?: boolean;
 }
 
 /** `fleet gate run <pr>`: start the run, then poll its run id to a verdict.
@@ -217,11 +231,19 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
   try {
     const res = await fetch(new URL("/studio/gate/start", creds.workerUrl), {
       method: "POST", headers: { ...accessHeaders(creds), "content-type": "application/json" },
-      body: JSON.stringify({ repo, pr }),
+      body: JSON.stringify({ repo, pr, ...(opts.failedOnly ? { failedOnly: true } : {}) }),
     });
-    const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; error?: string };
-    if (!res.ok || body.error || typeof body.runId !== "string") {
+    const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; pending?: boolean; error?: string };
+    if (!res.ok || body.error) {
       console.error(`gate-start failed: ${body.error ?? res.status}`);
+      return 2;
+    }
+    if (body.pending === true) {
+      console.error(gateQueuedLine(pr));
+      return 2;
+    }
+    if (typeof body.runId !== "string") {
+      console.error(`gate-start failed: ${res.status}`);
       return 2;
     }
     runId = body.runId;
@@ -255,9 +277,9 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
 }
 
 /** The CLI entry: the repo comes from the folder's own origin, as every repo-scoped verb does. */
-export async function cmdGateRun(creds: Credentials, pr: number): Promise<void> {
+export async function cmdGateRun(creds: Credentials, pr: number, opts: { failedOnly?: boolean } = {}): Promise<void> {
   const repo = await gatedRepo();
   if (!repo) return;
-  process.exitCode = await runGate(creds, repo, pr);
+  process.exitCode = await runGate(creds, repo, pr, opts);
 }
 

@@ -5,6 +5,8 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import { handleGateRoute } from "../src/gate/routes";
 import { gateRunId } from "../src/gate/auto-run";
+import { setFlag, deleteFlag } from "../src/state";
+import { d1RunIndex } from "../src/gate/auto-run-env";
 import type { Env } from "../src/env";
 
 const REPO = "acme/example";
@@ -153,6 +155,26 @@ describe("handleGateRoute", () => {
   });
 });
 
+// #1232: while a Worker deploy drains running gate runs, the manual start queues
+// as pending instead of creating a run the deploy would kill.
+describe("POST /studio/gate/start while a deploy drains (#1232)", () => {
+  it("with gate_drain set, returns pending and never creates a run", async () => {
+    await setFlag(testEnv.DB, "gate_drain", "1", Date.now());
+    try {
+      const env = fakeEnv();
+      const req = new Request("https://worker/studio/gate/start", {
+        method: "POST", body: JSON.stringify({ repo: REPO, pr: 1 }),
+      });
+      const res = await handleGateRoute(req, env, headSha);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ started: false, pending: true });
+      expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
+    } finally {
+      await deleteFlag(testEnv.DB, "gate_drain");
+    }
+  });
+});
+
 // #1085 (refs #715): a manual start reuses only a LIVE run of the sha. Once the
 // sha's run has finished, the same POST starts a fresh run under a new id.
 describe("POST /studio/gate/start after the sha's run finished (#1085)", () => {
@@ -271,6 +293,22 @@ describe("GET /studio/gate/status per-leg output (#1049)", () => {
     const res = await handleGateRoute(req, env);
     expect(await res.json()).toEqual(output);
   });
+
+  // #1230: a `--failed-only` rerun of this run builds its own carry from these
+  // fields, so the status route must surface them, not just `legs`.
+  it("a complete run's output also carries baseSha and planFingerprint through", async () => {
+    const env = fakeEnv();
+    const output = {
+      state: "success", statusPostFailed: false, legs: [{ leg: "merge-tree", state: "success" }],
+      baseSha: "b".repeat(40), planFingerprint: "fp-7",
+    };
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({ status: "complete", output })),
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(await res.json()).toMatchObject({ baseSha: "b".repeat(40), planFingerprint: "fp-7" });
+  });
 });
 
 // #1144: an unknown run id is a JSON 404, and any other throw a JSON 500. A
@@ -294,6 +332,177 @@ describe("GET /studio/gate/status with a run id the Workflow does not know (#114
     expect(res.status).toBe(500);
     expect(res.headers.get("content-type")).toBe("application/json");
     expect(await res.json()).toEqual({ error: "gate status unavailable" });
+  });
+});
+
+// #1230: `fleet gate run --failed-only <pr>` reruns only the legs the PR's
+// latest run did not already go green on.
+describe("POST /studio/gate/start with failedOnly (#1230)", () => {
+  it("no prior gate run for the PR -> 404 naming the rerun it has nothing to carry from", async () => {
+    const env = fakeEnv();
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 201, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "no prior gate run for this PR to rerun failed legs from" });
+    expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
+  });
+
+  it("a prior run whose status carries no legs/baseSha/planFingerprint -> 409, nothing started", async () => {
+    const env = fakeEnv();
+    await d1RunIndex(env.DB).record(REPO, 202, { headSha: HEAD, runId: "run-202", progressedAt: Date.now() });
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "run-202") {
+        return { status: vi.fn(async () => ({ status: "complete", output: { state: "success", statusPostFailed: false } })) };
+      }
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 202, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "latest gate run has no leg results to carry" });
+    expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
+  });
+
+  it("a complete prior run with green legs builds carryGreen from its own green legs for the new run", async () => {
+    const env = fakeEnv();
+    await d1RunIndex(env.DB).record(REPO, 203, { headSha: HEAD, runId: "run-203", progressedAt: Date.now() });
+    const legs = [
+      { leg: "merge-tree", state: "success" },
+      { leg: "lint", state: "failure", description: "3 errors" },
+    ];
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "run-203") {
+        return {
+          status: vi.fn(async () => ({
+            status: "complete",
+            output: {
+              state: "failure", description: "1/2 green", statusPostFailed: false, legs,
+              baseSha: "b".repeat(40), planFingerprint: "fp-9", headSha: HEAD,
+            },
+          })),
+        };
+      }
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 203, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(200);
+    // Only "merge-tree" is a green leg; the red "lint" never rides along.
+    expect(env.GATE_WORKFLOW.create).toHaveBeenCalledWith({
+      id: expect.any(String),
+      params: {
+        repo: REPO, pr: 203,
+        carryGreen: { headSha: HEAD, baseSha: "b".repeat(40), planFingerprint: "fp-9", legs: [{ leg: "merge-tree", state: "success" }] },
+      },
+    });
+  });
+
+  // #1230 review: the auto-infra-rerun carry (workflow.ts) passes full leg
+  // results through, so ms/summary survive into the rerun's verdict. The
+  // --failed-only carry must do the same: a leg's wall time and test summary
+  // are real leg-run output (OutcomeLeg already carries both), not something
+  // this route should silently drop on the way into carryGreen.
+  it("a green leg's ms/summary survive into the --failed-only carry, not just leg/state/description", async () => {
+    const env = fakeEnv();
+    await d1RunIndex(env.DB).record(REPO, 205, { headSha: HEAD, runId: "run-205", progressedAt: Date.now() });
+    const legs = [
+      { leg: "merge-tree", state: "success", ms: 4321, summary: "1 passed" },
+      { leg: "lint", state: "failure", description: "3 errors" },
+    ];
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "run-205") {
+        return {
+          status: vi.fn(async () => ({
+            status: "complete",
+            output: {
+              state: "failure", description: "1/2 green", statusPostFailed: false, legs,
+              baseSha: "b".repeat(40), planFingerprint: "fp-11", headSha: HEAD,
+            },
+          })),
+        };
+      }
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 205, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(200);
+    expect(env.GATE_WORKFLOW.create).toHaveBeenCalledWith({
+      id: expect.any(String),
+      params: {
+        repo: REPO, pr: 205,
+        carryGreen: {
+          headSha: HEAD, baseSha: "b".repeat(40), planFingerprint: "fp-11",
+          legs: [{ leg: "merge-tree", state: "success", ms: 4321, summary: "1 passed" }],
+        },
+      },
+    });
+  });
+
+  // #1230 maestro review: the D1 index's `headSha` is only the dispatch-time
+  // label `recordRun` stored when the run was created — a run that is slow to
+  // start can resolve (and actually test) a DIFFERENT live head than the one
+  // its run id was dispatched for (two pushes dedupe onto the same run id;
+  // the run's own late `resolve-pr` step reads whichever head is live then).
+  // When the run's own resolved headSha disagrees with the index's stale
+  // label, the carry must never be built from it: treat it exactly like
+  // "nothing to carry" (the same 409 as no legs/baseSha/planFingerprint).
+  it("stored head sha differs from the run's own resolved head sha: no carry, never a false green", async () => {
+    const env = fakeEnv();
+    await d1RunIndex(env.DB).record(REPO, 206, { headSha: HEAD, runId: "run-206", progressedAt: Date.now() });
+    const legs = [{ leg: "merge-tree", state: "success" }];
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "run-206") {
+        return {
+          status: vi.fn(async () => ({
+            status: "complete",
+            output: {
+              state: "success", statusPostFailed: false, legs,
+              baseSha: "b".repeat(40), planFingerprint: "fp-12",
+              // The run actually resolved and tested a DIFFERENT head than
+              // the D1 index's dispatch-time label (HEAD).
+              headSha: "d".repeat(40),
+            },
+          })),
+        };
+      }
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 206, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "latest gate run has no leg results to carry" });
+    expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
+  });
+
+  // #1230 review: the GET status handler wraps gateRunStatus in a
+  // try/catch mapping a not-found instance to a clean 404; the failedOnly
+  // branch called the same gateRunStatus with no such guard, so an
+  // expired/unknown instance behind a stale D1 pointer threw uncaught
+  // through the whole call stack instead of returning clean JSON.
+  it("a prior run whose instance the Workflow no longer knows -> clean JSON error, never an uncaught throw", async () => {
+    const env = fakeEnv();
+    await d1RunIndex(env.DB).record(REPO, 204, { headSha: HEAD, runId: "run-204", progressedAt: Date.now() });
+    env.GATE_WORKFLOW.get = vi.fn(async (id: string) => {
+      if (id === "run-204") throw new Error("instance.not_found");
+      throw new Error(`no instance ${id}`);
+    }) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 204, failedOnly: true }),
+    });
+    const res = await handleGateRoute(req, env, headSha);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "no such gate run", runId: "run-204" });
+    expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, spyOn } from "bun:test";
-import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, runGate, formatMs, legLines, gateStartLine, type GateStatusResponse } from "../../cli/gate";
+import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, runGate, formatMs, legLines, gateStartLine, gateQueuedLine, type GateStatusResponse } from "../../cli/gate";
 
 // #1085 (refs #715): the start line says whether the run was reattached or fresh.
 describe("gateStartLine: reattached to a live run vs a fresh run (#1085)", () => {
@@ -8,6 +8,12 @@ describe("gateStartLine: reattached to a live run vs a fresh run (#1085)", () =>
   });
   it("not reused (a fresh run) -> started fresh run", () => {
     expect(gateStartLine({ runId: "run-2", reused: false }, 7)).toBe("gate-start: started fresh run run-2 for PR #7");
+  });
+});
+
+describe("gateQueuedLine", () => {
+  it("names the retry", () => {
+    expect(gateQueuedLine(7)).toBe("gate-start: queued (gate draining for deploy) for PR #7 — retry after the deploy");
   });
 });
 
@@ -130,9 +136,33 @@ describe("runGate exit codes", () => {
     expect(stub.seen.statusCalls).toBe(0);
   });
 
+  it("start answers pending (gate draining): 2, prints the queued line, never polls", async () => {
+    const stub = stubWorker({ start: () => Response.json({ started: false, pending: true }), statuses: [{ state: "success" }] });
+    expect(await runGate(stub.creds, "acme/example", 7, { pollMs: 1 })).toBe(2);
+    expect(stub.seen.statusCalls).toBe(0);
+  });
+
   it("unreachable Worker -> 2", async () => {
     const dead = { ...creds, workerUrl: "http://127.0.0.1:1" };
     expect(await runGate(dead, "acme/example", 7, { pollMs: 1 })).toBe(2);
+  });
+});
+
+// #1230: `fleet gate run --failed-only <pr>` sets failedOnly on the start body.
+describe("runGate: the start body's failedOnly flag (#1230)", () => {
+  beforeEach(() => { server = undefined; });
+  afterEach(() => { server?.stop(true); });
+
+  it("failedOnly set -> the start POST body carries failedOnly: true", async () => {
+    const stub = stubWorker({ start: STARTED, statuses: [{ state: "success" }] });
+    await runGate(stub.creds, "acme/example", 7, { pollMs: 1, failedOnly: true });
+    expect(stub.seen.starts).toEqual([{ repo: "acme/example", pr: 7, failedOnly: true }]);
+  });
+
+  it("failedOnly absent -> the body carries no failedOnly key at all", async () => {
+    const stub = stubWorker({ start: STARTED, statuses: [{ state: "success" }] });
+    await runGate(stub.creds, "acme/example", 7, { pollMs: 1 });
+    expect(stub.seen.starts).toEqual([{ repo: "acme/example", pr: 7 }]);
   });
 });
 
