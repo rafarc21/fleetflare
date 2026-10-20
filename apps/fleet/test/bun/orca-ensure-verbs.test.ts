@@ -16,6 +16,9 @@
 // orca-registry-teardown.test.ts, and the registry, locks, and ROW column live
 // in orca-registry-rows.test.ts.
 import { test, describe, expect } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   studioWorkspaceName,
   orcaPresent,
@@ -350,6 +353,16 @@ describe("local studio workspace — fleet task #1248", () => {
     expect(cmd).not.toContain("--dangerously-skip-permissions");
   });
 
+  test("localLaunchCommand arms the gate with a STUDIO_ID=<id> env-assignment prefix", () => {
+    // On the Mac STUDIO_ID is never set, so lead-gate.sh's own first line
+    // (`[ -n "${STUDIO_ID:-}" ] || exit 0`) would exit 0 before any gate
+    // logic. The prefix is the arming switch: claude — and every hook
+    // subprocess it spawns — inherits STUDIO_ID, and the gate goes active.
+    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    expect(cmd.startsWith("STUDIO_ID=websites--pilot claude")).toBe(true);
+    expect(cmd).not.toContain("--dangerously-skip-permissions");
+  });
+
   test("localLaunchCommand omits --effort when the role carries none", () => {
     expect(localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "")).not.toContain("--effort");
   });
@@ -403,6 +416,36 @@ describe("local studio workspace — fleet task #1248", () => {
     // worktree path), never in ~/.claude.
     const path = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
     expect(path).toBeDefined();
+  });
+
+  test("materializes the lead gate with IS_MAESTRO baked to False (a local studio is never maestro)", async () => {
+    // The copied hook must not keep the repo-tracked placeholder
+    // `IS_MAESTRO = __IS_MAESTRO_BOOL__`: if the gate ever ran, that bare
+    // name is a python NameError -> exit 1 -> PERMITS the call (only exit 2
+    // blocks). The bake into the copied bytes is the trust anchor — same
+    // reason studio-bringup.sh runs its own substitution on the copy, never
+    // leaves the value to be re-derived from a separate file at decision time.
+    const root = mkdtempSync(join(tmpdir(), "orca-local-"));
+    const worktreePath = join(root, "worktree");
+    try {
+      const f = fake({
+        "worktree create": ok(JSON.stringify({
+          ok: true,
+          result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: worktreePath } },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      const hookBytes = readFileSync(join(worktreePath, ".claude", "hooks", "lead-gate.sh"), "utf8");
+      expect(hookBytes).toContain("IS_MAESTRO = False");
+      expect(hookBytes).not.toContain("__IS_MAESTRO_BOOL__");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("a worktree create failure is fail-closed: one stderr line, no throw", async () => {
