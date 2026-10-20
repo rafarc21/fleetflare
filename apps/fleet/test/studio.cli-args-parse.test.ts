@@ -916,3 +916,53 @@ describe("spawn / provision --repo (issue #1229)", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--repo"]).cmd).toBe("usage");
   });
 });
+
+// Fleet task #1248: `fleet spawn <role> --local [--path <abs>]` — a studio
+// that runs on the operator's Mac instead of a container. `--local` is a bare
+// boolean; `--path` is value-taking (`--path <abs>` and `--path=<abs>`), and
+// the CLI resolves an empty localPath later (git toplevel). `--path` without
+// `--local` is a usage error, never a silent no-op flag.
+describe("spawn --local (fleet task #1248)", () => {
+  it("--local alone sets local: { localPath: \"\" } for later git-toplevel resolution", () => {
+    expect(parseCliArgs(["spawn", "pilot", "--local"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, local: { localPath: "" } });
+  });
+
+  it("--path <abs> and --path=<abs> carry the path, and --local --path combine in any order", () => {
+    expect(parseCliArgs(["spawn", "pilot", "--local", "--path", "/abs/clone"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, local: { localPath: "/abs/clone" } });
+    expect(parseCliArgs(["spawn", "pilot", "--path=/abs/clone", "--local"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, local: { localPath: "/abs/clone" } });
+    expect(parseCliArgs(["spawn", "pilot", "--path", "/abs/clone", "--local"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, local: { localPath: "/abs/clone" } });
+  });
+
+  it("--local composes with --new, --lead and --repo", () => {
+    expect(parseCliArgs(["spawn", "pilot", "--new", "--lead", "glm", "--repo", "acme/faux", "--local", "--path", "/abs/clone"]))
+      .toEqual({
+        cmd: "spawn", role: "pilot", newInstance: true, leadType: "glm", repo: "acme/faux",
+        local: { localPath: "/abs/clone" },
+      });
+  });
+
+  it("--path without --local is a usage error naming --local", () => {
+    const parsed = parseCliArgs(["spawn", "pilot", "--path", "/abs/clone"]);
+    expect(parsed.cmd).toBe("usage");
+    if (parsed.cmd === "usage") expect(parsed.message).toContain("--local");
+  });
+
+  it("a duplicate --path or --local is a usage error, and --path with no value refuses", () => {
+    expect(parseCliArgs(["spawn", "pilot", "--local", "--path", "/a", "--path", "/b"]).cmd).toBe("usage");
+    expect(parseCliArgs(["spawn", "pilot", "--local", "--local"]).cmd).toBe("usage");
+    expect(parseCliArgs(["spawn", "pilot", "--local", "--path"]).cmd).toBe("usage");
+  });
+
+  it("bare spawn still carries no local key (byte-identical to pre-#1248)", () => {
+    const bare = parseCliArgs(["spawn", "pilot"]);
+    expect(bare.cmd === "spawn" && "local" in bare).toBe(false);
+  });
+
+  it("spawn's args line names --local [--path <abs>]", () => {
+    expect(VERBS.spawn.args).toContain("--local [--path <abs>]");
+  });
+});

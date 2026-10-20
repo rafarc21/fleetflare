@@ -131,6 +131,39 @@ describe("parseFfArgs", () => {
     expect(parseFfArgs(["pilot", "--new", "fix", "the", "header"]).cmd).toBe("usage");
   });
 
+  // Fleet task #1248: `ff <role> --local` — the same exact-token recognition
+  // `--new` has, anywhere in argv, and it does not touch the positional
+  // grammar (a task that merely CONTAINS "--local" is left alone).
+  it("--local is recognised by exact token, anywhere in argv, and sets local: true", () => {
+    expect(parseFfArgs(["pilot", "--local"]))
+      .toEqual({ cmd: "ff", role: "pilot", task: null, newInstance: false, local: true });
+    expect(parseFfArgs(["--local", "pilot"]))
+      .toEqual({ cmd: "ff", role: "pilot", task: null, newInstance: false, local: true });
+    expect(parseFfArgs(["pilot", "--local", "fix the header"]))
+      .toEqual({ cmd: "ff", role: "pilot", task: { kind: "new", text: "fix the header" }, newInstance: false, local: true });
+    expect(parseFfArgs(["--local"])).toEqual({ cmd: "ff", role: DEFAULT_FF_ROLE, task: null, newInstance: false, local: true });
+  });
+
+  it("a task that merely CONTAINS --local stays the task, local off", () => {
+    expect(parseFfArgs(["pilot", "drop the --local flag"]))
+      .toEqual({ cmd: "ff", role: "pilot", task: { kind: "new", text: "drop the --local flag" }, newInstance: false, local: false });
+  });
+
+  it("--local composes with --new, and --new's positional counting still holds", () => {
+    expect(parseFfArgs(["pilot", "--new", "--local"]))
+      .toEqual({ cmd: "ff", role: "pilot", task: null, newInstance: true, local: true });
+    expect(parseFfArgs(["pilot", "--new", "--local", "fix", "the", "header"]).cmd).toBe("usage");
+  });
+
+  it("bare ff --local still resolves to the (refused) maestro role, so ffDecision short-circuits it", () => {
+    expect(parseFfArgs([]).local).toBe(false);
+    expect(parseFfArgs(["--local"]).role).toBe(DEFAULT_FF_ROLE);
+  });
+
+  it("the help text names --local", () => {
+    expect(FF_HELP).toContain("--local");
+  });
+
   it("refuses issue #0 — there is no such issue to adopt", () => {
     expect(parseFfArgs(["web-studio", "0"]).cmd).toBe("usage");
   });

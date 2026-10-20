@@ -21,6 +21,10 @@ import {
   orcaPresent,
   ensureStudioWorkspace,
   reconcileStudioWorkspaces,
+  ensureLocalStudioWorktree,
+  localWorktreeCreateArgs,
+  localLaunchCommand,
+  localLeadGateHookCommand,
   type OrcaDeps,
   type OrcaResult,
 } from "../../cli/orca-workspace";
@@ -301,4 +305,100 @@ describe("ensureStudioWorkspace — the five hard requirements", () => {
   });
 
 
+});
+
+// ---------------------------------------------------------------------------
+// Fleet task #1248: `ensureLocalStudioWorktree` — a LOCAL studio (host:"local")
+// materializes its lead into an Orca worktree checked out from a LOCAL clone
+// (`path:<localPath>`), with the SAME lead-gate + agents + skills the cloud
+// container gets, and launches claude via `orca terminal create`. Everything
+// is best-effort-fail-safe like `ensureStudioWorkspace`: one try/catch, one
+// stderr line, never a throw to the caller.
+
+describe("local studio workspace — fleet task #1248", () => {
+  test("localWorktreeCreateArgs emits the exact worktree create argv", () => {
+    expect(localWorktreeCreateArgs("/abs/clone", "main", "websites--pilot")).toEqual([
+      "worktree", "create",
+      "--repo", "path:/abs/clone",
+      "--base-branch", "origin/main",
+      "--agent", "claude",
+      "--name", "studio-websites--pilot",
+      "--no-parent", "--setup", "skip", "--json",
+    ]);
+  });
+
+  test("localLaunchCommand quotes the prompt-by-file and carries allowedTools/effort", () => {
+    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *) Edit Write", "max");
+    expect(cmd).toContain("--append-system-prompt \"$(cat /w/.fleet/working-set.md)\"");
+    expect(cmd).toContain("--allowedTools \"Bash(git *) Edit Write\"");
+    expect(cmd).toContain("--effort max");
+    expect(cmd).toContain("--dangerously-skip-permissions");
+    // The shell fragment is single-quoted, so the "$(cat ...)" survives
+    // Orca's own re-parse of the --command string.
+    expect(cmd).toMatch(/'[^']*\$\(cat [^']*\)[^']*'/);
+  });
+
+  test("localLaunchCommand omits --effort when the role carries none", () => {
+    expect(localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "")).not.toContain("--effort");
+  });
+
+  test("localLeadGateHookCommand is the fail-closed PreToolUse command, matcher .*", () => {
+    const cmd = localLeadGateHookCommand();
+    expect(cmd).toContain("lead-gate hook absent or not executable -- refusing (decision 11)");
+    expect(cmd).toContain("exit 2");
+    expect(cmd).toContain("exec");
+  });
+
+  test("a missing orca binary is a no-op with the same orca-not-found line", async () => {
+    const f = fake({}, { hasBinary: () => null, env: { TERM_PROGRAM: "Apple_Terminal" } });
+    const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+      localPath: "/abs/clone", defaultBranch: "main", prompt: "p", allowedTools: "Bash(git *)",
+    });
+    expect(outcome.kind).toBe("skipped");
+    expect(f.calls).toEqual([]);
+    expect(f.lines).toHaveLength(1);
+    expect(f.lines[0]).toContain("orca not found");
+  });
+
+  test("creates the worktree, materializes the working set, and launches claude via terminal create", async () => {
+    const f = fake({
+      "worktree create": CREATED,
+      "terminal create": TERM_CREATED,
+    });
+    const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+      localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+    });
+    expect(outcome.kind).toBe("created");
+
+    const create = f.calls.find((c) => c[0] === "worktree" && c[1] === "create");
+    expect(create).toBeDefined();
+    expect(create).toContain("--repo");
+    expect(create).toContain("path:/abs/clone");
+    expect(create).toContain("--base-branch");
+    expect(create).toContain("origin/main");
+    expect(create).toContain("--agent");
+    expect(create).toContain("claude");
+    expect(create).toContain("studio-websites--pilot");
+
+    const term = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
+    expect(term).toBeDefined();
+    expect(term).toContain("websites--pilot");
+    const cmd = term![term!.indexOf("--command") + 1];
+    expect(cmd).toContain("--append-system-prompt");
+    expect(cmd).toContain("$(cat");
+
+    // The prompt and settings landed on the worktree path (the fixture's
+    // worktree path), never in ~/.claude.
+    const path = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
+    expect(path).toBeDefined();
+  });
+
+  test("a worktree create failure is fail-closed: one stderr line, no throw", async () => {
+    const f = fake({ "worktree create": { ok: false, stdout: "", stderr: "boom", timedOut: false } });
+    const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+      localPath: "/abs/clone", defaultBranch: "main", prompt: "p", allowedTools: "Bash(git *)",
+    });
+    expect(outcome.kind).toBe("failed");
+    expect(f.lines.length).toBe(1);
+  });
 });
