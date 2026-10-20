@@ -10,7 +10,7 @@ import { GitHubError } from "../src/board/api";
 const task = (overrides: Partial<BoardTask> = {}) =>
   boardTask({ title: "Build the task board", milestone: "Sprint 1", ...overrides });
 const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
-  listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1" }]),
+  listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1", description: "", state: "open" }]),
   ...overrides,
 }, () => task());
 

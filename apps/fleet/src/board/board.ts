@@ -53,7 +53,11 @@ export interface BoardApi {
   createComment: (repo: string, number: number, body: string) => Promise<{ id: number; url: string }>;
   pullRequestExists: (repo: string, number: number) => Promise<boolean>;
   listComments: (repo: string, number: number) => Promise<BoardComment[]>;
-  listMilestones: (repo: string) => Promise<{ number: number; title: string }[]>;
+  listMilestones: (repo: string) => Promise<{ number: number; title: string; description: string; state: string }[]>;
+  createMilestone: (repo: string, input: { title: string; description?: string }) => Promise<{ number: number; title: string }>;
+  closeMilestone: (repo: string, number: number) => Promise<void>;
+  setIssueMilestone: (repo: string, issueNumber: number, milestone: number | null) => Promise<void>;
+  listOpenMilestones: (repo: string) => Promise<{ number: number; title: string; description: string }[]>;
   // Task #119: the same existence-check shape as pullRequestExists above,
   // for the other two ref kinds a §6 verification step can name. See
   // src/board/verify.ts's attemptVerification, the one caller of all three.

@@ -34,6 +34,7 @@ import {
 import {
   createIssue, getIssue, listIssues, addLabels, removeLabel, countIssues,
   createComment, listComments, listMilestones, GitHubError,
+  createMilestone, closeMilestone, setIssueMilestone, listOpenMilestones,
 } from "./api";
 import {
   createTask, transitionTask, commentEnvelope, listTasks, showTask, resolveBoardRepo, assignTask,
@@ -101,6 +102,11 @@ export function githubBoardApi(env: Env, leakDeps: Partial<LeakGuardDeps> = {}):
     pullRequestExists: async (repo, number) => pullRequestExists(await token(repo), repo, number),
     listComments: async (repo, number) => listComments(await token(repo), repo, number),
     listMilestones: async (repo) => listMilestones(await token(repo), repo),
+    createMilestone: async (repo, input) => createMilestone(await token(repo), repo, input),
+    closeMilestone: async (repo, number) => closeMilestone(await token(repo), repo, number),
+    setIssueMilestone: async (repo, issueNumber, milestone) =>
+      setIssueMilestone(await token(repo), repo, issueNumber, milestone),
+    listOpenMilestones: async (repo) => listOpenMilestones(await token(repo), repo),
     branchExists: async (repo, branch) => branchExists(await token(repo), repo, branch),
     commitExists: async (repo, sha) => commitExists(await token(repo), repo, sha),
     closeIssue: async (repo, number, reason) => closeIssueApi(await token(repo), repo, number, reason),
