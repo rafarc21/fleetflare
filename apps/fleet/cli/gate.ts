@@ -99,6 +99,7 @@ export async function cmdGateStart(creds: Credentials, pr: number): Promise<void
   }
   if (body.pending === true) {
     console.error(gateQueuedLine(pr));
+    process.exitCode = 2; // match runGate: a queued start is not a started run
     return;
   }
   console.log(gateStartLine({ runId: body.runId ?? "", reused: body.reused }, pr));

@@ -495,7 +495,11 @@ cd "$FLEET_DIR"
 # --skip-gate-drain (consumed above, never passed to wrangler) skips it loudly;
 # it is a separate gate from --allow-unrescued and does not ride on it.
 GATE_DRAIN=0
-if is_plain_deploy ${ARGS[@]+"${ARGS[@]}"} && grep -v '^[[:space:]]*//' "$LOCAL_CONFIG" | grep -q '"binding"[[:space:]]*:[[:space:]]*"GATE_WORKFLOW"'; then
+# Match the binding on a comment-stripped copy with a bash regex, never a
+# grep -q pipe: under `set -o pipefail` a pipe's grep -q early-exits on a match
+# and SIGPIPEs its producer, which would silently skip the drain on a large config.
+GATE_CONFIG_BODY="$(grep -v '^[[:space:]]*//' "$LOCAL_CONFIG")"
+if is_plain_deploy ${ARGS[@]+"${ARGS[@]}"} && [[ "$GATE_CONFIG_BODY" =~ \"binding\"[[:space:]]*:[[:space:]]*\"GATE_WORKFLOW\" ]]; then
   GATE_DRAIN=1
 fi
 if [[ "$GATE_DRAIN" == 1 && "$SKIP_GATE_DRAIN" == 1 ]]; then

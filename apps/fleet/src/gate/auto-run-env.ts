@@ -124,9 +124,8 @@ export async function drainPendingGateRuns(env: Env): Promise<void> {
   if (env.FLEET_GATE_RUNNER !== "on") return;
   if (await gateDraining(env.DB)) return;
   const queue = gateDrainQueue(env.DB);
-  const queued = await queue.peek();
+  const queued = await queue.claim();
   if (queued.length === 0) return;
-  const remaining: PullRequestAutoRun[] = [];
   for (const pr of queued) {
     try {
       const outcome = await autoRunPullRequest(pr, {
@@ -137,8 +136,7 @@ export async function drainPendingGateRuns(env: Env): Promise<void> {
       console.log(`gate drain release ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: ${outcome}`);
     } catch (err) {
       console.error(`gate drain release ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)} failed`, err);
-      remaining.push(pr);
+      await queue.append(pr);
     }
   }
-  await queue.write(remaining);
 }

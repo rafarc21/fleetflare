@@ -29,7 +29,7 @@ describe("gateDrainQueue: the pending auto-runs over fleet_state", () => {
 
   it("write then peek round-trips an array of PullRequestAutoRun", async () => {
     const queue = gateDrainQueue(env.DB);
-    await queue.write([pr]);
+    await queue.append(pr);
     expect(await queue.peek()).toEqual([pr]);
   });
 
@@ -41,10 +41,10 @@ describe("gateDrainQueue: the pending auto-runs over fleet_state", () => {
     expect(await queue.peek()).toEqual([pr, second]);
   });
 
-  it("write([]) clears the queue", async () => {
+  it("claim removes and returns the queue", async () => {
     const queue = gateDrainQueue(env.DB);
-    await queue.write([pr]);
-    await queue.write([]);
+    await queue.append(pr);
+    expect(await queue.claim()).toEqual([pr]);
     expect(await queue.peek()).toEqual([]);
   });
 
@@ -83,7 +83,7 @@ describe("drainPendingGateRuns: the every-minute release of the pending queue", 
   it("with the flag clear and a queued PR, creates the run and ends with an empty queue", async () => {
     const queued: PullRequestAutoRun = { repo: "acme/drain-release", pr: 101, headSha: "c".repeat(40), baseSha: "d".repeat(40) };
     const create = vi.fn(async () => ({ id: "unused" }));
-    await gateDrainQueue(env.DB).write([queued]);
+    await gateDrainQueue(env.DB).append(queued);
     await drainPendingGateRuns(fakeEnv({ create }));
     expect(create).toHaveBeenCalledOnce();
     expect(create).toHaveBeenCalledWith({
@@ -97,7 +97,7 @@ describe("drainPendingGateRuns: the every-minute release of the pending queue", 
     const queued: PullRequestAutoRun = { repo: "acme/drain-blocked", pr: 102, headSha: "e".repeat(40), baseSha: "f".repeat(40) };
     const create = vi.fn(async () => ({ id: "unused" }));
     await setFlag(env.DB, GATE_DRAIN_FLAG, "1", 0);
-    await gateDrainQueue(env.DB).write([queued]);
+    await gateDrainQueue(env.DB).append(queued);
     await drainPendingGateRuns(fakeEnv({ create }));
     expect(create).not.toHaveBeenCalled();
     expect(await gateDrainQueue(env.DB).peek()).toEqual([queued]);
@@ -107,7 +107,7 @@ describe("drainPendingGateRuns: the every-minute release of the pending queue", 
     const queued: PullRequestAutoRun = { repo: "acme/drain-throw", pr: 103, headSha: "9".repeat(40), baseSha: "8".repeat(40) };
     const create = vi.fn(async () => { throw new Error("create failed"); });
     const get = vi.fn(async () => { throw new Error("instance not found"); });
-    await gateDrainQueue(env.DB).write([queued]);
+    await gateDrainQueue(env.DB).append(queued);
     await drainPendingGateRuns(fakeEnv({ create, get }));
     expect(create).toHaveBeenCalled();
     expect(await gateDrainQueue(env.DB).peek()).toEqual([queued]);

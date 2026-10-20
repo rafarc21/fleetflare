@@ -6,7 +6,7 @@
 // the flag clears. A pending status still goes up for the queued PR, so GitHub
 // never sees the head without a gate (#1191).
 import type { PullRequestAutoRun } from "./auto-run";
-import { getFlag, setFlag, flagIsSet } from "../state";
+import { getFlag, flagIsSet } from "../state";
 
 export const GATE_DRAIN_FLAG = "gate_drain";
 export const GATE_DRAIN_QUEUE_KEY = "gate_drain_pending";
@@ -14,13 +14,15 @@ export const GATE_DRAIN_QUEUE_KEY = "gate_drain_pending";
 /** The pending queue, stored as one JSON array over fleet_state. `append` is
  *  one D1 statement (json_insert), so two concurrent deliveries both land —
  *  never the read-then-write lost update src/state.ts's incrementCounter
- *  comment warns about. `write` replaces the whole array and is only for the
- *  single every-minute drain writer. */
+ *  comment warns about. `claim` atomically removes the whole array in one
+ *  DELETE ... RETURNING, so the cron's release cannot race a concurrent append
+ *  (a concurrent append after the delete writes a fresh row, never lost). */
 export interface GateDrainQueue {
   peek(): Promise<PullRequestAutoRun[]>;
   /** Atomically appends one pending run, in a single statement. */
   append(pr: PullRequestAutoRun): Promise<void>;
-  write(runs: PullRequestAutoRun[]): Promise<void>;
+  /** Atomically removes and returns the whole queue. */
+  claim(): Promise<PullRequestAutoRun[]>;
 }
 
 export function gateDrainQueue(db: D1Database): GateDrainQueue {
@@ -46,8 +48,19 @@ export function gateDrainQueue(db: D1Database): GateDrainQueue {
         .bind(GATE_DRAIN_QUEUE_KEY, entry, Date.now(), entry)
         .run();
     },
-    async write(runs: PullRequestAutoRun[]): Promise<void> {
-      await setFlag(db, GATE_DRAIN_QUEUE_KEY, JSON.stringify(runs), Date.now());
+    async claim(): Promise<PullRequestAutoRun[]> {
+      const row = await db
+        .prepare(`DELETE FROM fleet_state WHERE key = ? RETURNING value`)
+        .bind(GATE_DRAIN_QUEUE_KEY)
+        .first<{ value: string }>();
+      if (row === null) return [];
+      try {
+        const parsed: unknown = JSON.parse(row.value);
+        return Array.isArray(parsed) ? (parsed as PullRequestAutoRun[]) : [];
+      } catch {
+        // A corrupt queue is dropped (and its row removed): nothing to start.
+        return [];
+      }
     },
   };
 }
