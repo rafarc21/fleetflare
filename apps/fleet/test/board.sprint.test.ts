@@ -125,6 +125,25 @@ describe("sprintSummaries", () => {
       value: [{ title: "Sprint A", owner: "alice", goal: "ship A", completed: 1, total: 1 }],
     });
   });
+
+  it("still counts a CLOSED task carrying TWO state labels — drift, kept visible not dropped", async () => {
+    const api = fakeApi({
+      listOpenMilestones: vi.fn(async () => [
+        { number: 1, title: "Sprint A", description: "Owner: alice\nGoal: ship A" },
+      ]),
+      listIssues: vi.fn(async () => [
+        task({ number: 10, state: null, labels: ["working", "completed"], open: false }),
+      ]),
+    });
+    const res = await sprintSummaries(api, "o/r", null);
+    // The collapsed `state` is null for drift, so it never matches the
+    // `completed` filter — but its two labels still mean it counts toward
+    // `total`, exactly as listTasks keeps drift visible rather than hiding it.
+    expect(res).toEqual({
+      ok: true,
+      value: [{ title: "Sprint A", owner: "alice", goal: "ship A", completed: 0, total: 1 }],
+    });
+  });
 });
 
 describe("closeSprint", () => {

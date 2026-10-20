@@ -15,10 +15,12 @@
 
 import { parseMilestoneGoal, parseMilestoneOwner, renderMilestoneDescription } from "./milestone";
 import { resolveOrCreateBacklogMilestone, showTask, type BoardApi, type BoardResult } from "./board";
-import { latestResultPr, type BoardTask, type BoardTaskState } from "./types";
+import { latestResultPr, taskStates, type BoardTask, type BoardTaskState } from "./types";
 
 /** One open sprint as `fleet sprint status` reads it. `total` is the milestone's
- *  tasks minus canceled — a canceled task is a decision, not work still owed. */
+ *  counted tasks minus canceled: a task counts while open, or closed but still
+ *  carrying a board state label — a canceled task is a decision, not work still
+ *  owed, and a closed issue with no state label is repo history, not sprint work. */
 export interface SprintSummary {
   title: string;
   owner: string | null;
@@ -40,10 +42,13 @@ async function resolveMilestoneByTitle(api: BoardApi, repo: string, title: strin
 
 /** A task worth counting: open, or closed but still carrying a board state
  *  label (terminal states close the issue, but the board label outlives it).
- *  A CLOSED issue with no state label is repo history, not sprint work — it
- *  must not inflate the sprint's denominator. */
+ *  A CLOSED issue with NO state label is repo history, not sprint work — it
+ *  must not inflate the sprint's denominator. A closed task carrying TWO state
+ *  labels is drift, kept counted and visible rather than silently dropped
+ *  (same posture listTasks takes: filtering it out would hide the thing that
+ *  needs fixing). */
 function countsTowardsSprint(t: BoardTask): boolean {
-  return t.open || t.state !== null;
+  return t.open || taskStates(t.labels).length > 0;
 }
 
 /** The states that mean "work is still genuinely in flight" — a task in one of

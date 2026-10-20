@@ -107,6 +107,19 @@ describe("createTask", () => {
       expect(vi.mocked(api.createIssue).mock.calls[0][1].milestone).toBe(9);
     });
 
+    it("an empty re-list after create trusts the create's own number — read-lag, not a fork", async () => {
+      let calls = 0;
+      const api = fakeApi({
+        listMilestones: vi.fn(async () => calls++ === 0 ? [] : []),
+        createMilestone: vi.fn(async () => ({ number: 9, title: "backlog" })),
+      });
+      const res = await createTask(api, "o/r", { ...brief, backlog: true });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(api.createMilestone).toHaveBeenCalled();
+      expect(vi.mocked(api.createIssue).mock.calls[0][1].milestone).toBe(9);
+    });
+
     it("refuses a brief naming both a sprint and the backlog — one lane only", async () => {
       const api = fakeApi();
       const res = await createTask(api, "o/r", { ...brief, milestone: "Sprint 1", backlog: true });
