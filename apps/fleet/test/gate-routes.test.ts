@@ -535,11 +535,13 @@ describe("GET /studio/gate/status after the watchdog ended the run for its infra
 describe("POST /studio/gate/protect (#1247)", () => {
   it("runs the pure protect over the injected port and returns the before/after", async () => {
     const env = fakeEnv({ FLEET_GATE_RUNNER: "off" });
-    const calls: Array<{ method: string; repo: string; branch?: string; contexts?: string[] }> = [];
+    const calls: Array<{ method: string; repo: string; branch?: string; contexts?: string[]; strict?: boolean }> = [];
     const protect: ProtectPort = {
       getDefaultBranch: async (repo) => { calls.push({ method: "getDefaultBranch", repo }); return "main"; },
       getProtection: async (repo, branch) => { calls.push({ method: "getProtection", repo, branch }); return { contexts: ["lint"] }; },
-      setProtection: async (repo, branch, contexts) => { calls.push({ method: "setProtection", repo, branch, contexts }); },
+      createProtection: async (repo, branch, contexts) => { calls.push({ method: "createProtection", repo, branch, contexts }); },
+      addRequiredContexts: async (repo, branch, contexts) => { calls.push({ method: "addRequiredContexts", repo, branch, contexts }); },
+      setStrict: async (repo, branch, strict) => { calls.push({ method: "setStrict", repo, branch, strict }); },
     };
     const req = new Request("https://worker/studio/gate/protect", {
       method: "POST", body: JSON.stringify({ repo: "acme/websites" }),
@@ -552,7 +554,8 @@ describe("POST /studio/gate/protect (#1247)", () => {
     expect(calls).toEqual([
       { method: "getDefaultBranch", repo: "acme/websites" },
       { method: "getProtection", repo: "acme/websites", branch: "main" },
-      { method: "setProtection", repo: "acme/websites", branch: "main", contexts: ["lint", "gate/verdict"] },
+      { method: "addRequiredContexts", repo: "acme/websites", branch: "main", contexts: ["gate/verdict"] },
+      { method: "setStrict", repo: "acme/websites", branch: "main", strict: false },
     ]);
   });
 
@@ -577,7 +580,9 @@ describe("POST /studio/gate/protect (#1247)", () => {
     const protect: ProtectPort = {
       getDefaultBranch: async () => { throw new Error("read acme/x failed (404): Not Found"); },
       getProtection: async () => ({ contexts: [] }),
-      setProtection: async () => {},
+      createProtection: async () => {},
+      addRequiredContexts: async () => {},
+      setStrict: async () => {},
     };
     const req = new Request("https://worker/studio/gate/protect", {
       method: "POST", body: JSON.stringify({ repo: "acme/x" }),
@@ -592,7 +597,9 @@ describe("POST /studio/gate/protect (#1247)", () => {
     const protect: ProtectPort = {
       getDefaultBranch: async () => { throw new Error("read acme/x failed (403): Forbidden"); },
       getProtection: async () => ({ contexts: [] }),
-      setProtection: async () => {},
+      createProtection: async () => {},
+      addRequiredContexts: async () => {},
+      setStrict: async () => {},
     };
     const req = new Request("https://worker/studio/gate/protect", {
       method: "POST", body: JSON.stringify({ repo: "acme/x" }),

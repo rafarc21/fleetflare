@@ -6,6 +6,7 @@ import {
   listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES, listOpenPulls, OPEN_PULLS_MAX_PAGES,
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
+  setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict,
 } from "../src/github/api";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
 
@@ -1025,6 +1026,38 @@ describe("the 300-char error cut (#309 finding 4)", () => {
 // from the standard set (GH_HEADERS_GET's only difference is the undefined
 // deletion marker), so nothing else in this file can tell caller-wins from
 // base-wins. ghRequest is exported as the test seam precisely for this pin.
+// #1247: the protect create/update split. A full PUT replaces the WHOLE rule
+// and must carry all four keys (omitting required_pull_request_reviews 422s) —
+// the regression the BLOCK was about. Once a rule exists, only the
+// sub-resource POST/PATCH endpoints are used, never another PUT.
+describe("branch protection create/update split (#1247)", () => {
+  it("setBranchProtectionRule PUTs a fresh rule with all four required keys", async () => {
+    await setBranchProtectionRule("tok", "o/r", "main", ["gate/verdict"]);
+    expect(calls[0].method).toBe("PUT");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/main/protection");
+    expect(calls[0].body).toEqual({
+      required_status_checks: { strict: false, contexts: ["gate/verdict"] },
+      enforce_admins: false,
+      required_pull_request_reviews: null,
+      restrictions: null,
+    });
+  });
+
+  it("addBranchProtectionContexts POSTs only the contexts sub-resource", async () => {
+    await addBranchProtectionContexts("tok", "o/r", "main", ["gate/verdict"]);
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/main/protection/required_status_checks/contexts");
+    expect(calls[0].body).toEqual({ contexts: ["gate/verdict"] });
+  });
+
+  it("setBranchProtectionStrict PATCHes strict on the required-status sub-resource", async () => {
+    await setBranchProtectionStrict("tok", "o/r", "main", false);
+    expect(calls[0].method).toBe("PATCH");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/main/protection/required_status_checks");
+    expect(calls[0].body).toEqual({ strict: false });
+  });
+});
+
 describe("ghRequest's merge order (#311 finding 3)", () => {
   it("a caller's header beats the standard set; a custom key rides alongside the rest", async () => {
     await ghRequest("tok", "https://api.github.com/repos/o/r", {

@@ -380,16 +380,54 @@ export async function getBranchProtection(
   return { contexts: raw.filter((c): c is string => typeof c === "string") };
 }
 
-/** PUT a branch-protection rule: required status checks (strict=false) for the
- *  given contexts, no admin bypass, no push restriction. Idempotent on GitHub. */
-export async function setBranchProtection(
+/** PUT a fresh branch-protection rule (the CREATE path). GitHub's PUT replaces
+ *  the whole rule and requires all four keys — omitting
+ *  `required_pull_request_reviews` 422s — so this must run ONLY when no rule
+ *  exists yet; the update path below touches nothing else. */
+export async function setBranchProtectionRule(
   token: string, repo: string, branch: string, contexts: string[],
 ): Promise<void> {
   await ghRequest(
     token,
     `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection`,
-    { method: "PUT", body: JSON.stringify({ required_status_checks: { strict: false, contexts }, enforce_admins: false, restrictions: null }) },
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        required_status_checks: { strict: false, contexts },
+        enforce_admins: false,
+        required_pull_request_reviews: null,
+        restrictions: null,
+      }),
+    },
     `set ${repo} branch protection`,
+  );
+}
+
+/** Append required-status contexts to an EXISTING rule (the UPDATE path). A
+ *  full PUT here would wipe the rule's reviews/restrictions/admin setting, so
+ *  this POSTs only the contexts sub-resource. Adding a context already present
+ *  is a harmless no-op. */
+export async function addBranchProtectionContexts(
+  token: string, repo: string, branch: string, contexts: string[],
+): Promise<void> {
+  await ghRequest(
+    token,
+    `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection/required_status_checks/contexts`,
+    { method: "POST", body: JSON.stringify({ contexts }) },
+    `add ${repo} branch protection contexts`,
+  );
+}
+
+/** Set strict on an EXISTING rule's required status checks (PATCH), without
+ *  rewriting any other part of the rule. */
+export async function setBranchProtectionStrict(
+  token: string, repo: string, branch: string, strict: boolean,
+): Promise<void> {
+  await ghRequest(
+    token,
+    `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`,
+    { method: "PATCH", body: JSON.stringify({ strict }) },
+    `set ${repo} branch protection strict`,
   );
 }
 

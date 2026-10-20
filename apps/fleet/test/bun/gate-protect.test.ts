@@ -8,54 +8,69 @@ function fakePort(opts: {
 }): ProtectPort & {
   getDefaultBranch: ReturnType<typeof vi.fn>;
   getProtection: ReturnType<typeof vi.fn>;
-  setProtection: ReturnType<typeof vi.fn>;
+  createProtection: ReturnType<typeof vi.fn>;
+  addRequiredContexts: ReturnType<typeof vi.fn>;
+  setStrict: ReturnType<typeof vi.fn>;
 } {
   const port = {
     getDefaultBranch: vi.fn(async () => opts.branch ?? "main"),
     getProtection: vi.fn(async () => opts.before === null ? null : { contexts: opts.before ?? [] }),
-    setProtection: vi.fn(async () => {}),
+    createProtection: vi.fn(async () => {}),
+    addRequiredContexts: vi.fn(async () => {}),
+    setStrict: vi.fn(async () => {}),
   };
   return port;
 }
 
 describe("runGateProtect", () => {
-  it("idempotent: an existing gate/verdict means after equals before (deduped) and changed: false", async () => {
-    const port = fakePort({ before: ["lint", "gate/verdict"] });
+  it("no protection rule at all: full PUT creates it, nothing appended or re-pinned", async () => {
+    const port = fakePort({ before: null });
     const result = await runGateProtect(port, "acme/websites");
     expect(result.branch).toBe("main");
-    expect(result.before).toEqual(["lint", "gate/verdict"]);
-    expect(result.after).toEqual(["lint", "gate/verdict"]);
-    expect(result.changed).toBe(false);
-    expect(port.setProtection).toHaveBeenCalledWith("acme/websites", "main", ["lint", "gate/verdict"]);
+    expect(result.before).toEqual([]);
+    expect(result.after).toEqual(["gate/verdict"]);
+    expect(result.changed).toBe(true);
+    expect(port.createProtection).toHaveBeenCalledWith("acme/websites", "main", ["gate/verdict"]);
+    expect(port.addRequiredContexts).not.toHaveBeenCalled();
+    expect(port.setStrict).not.toHaveBeenCalled();
   });
 
-  it("first protect: adds gate/verdict and reports changed", async () => {
+  it("existing rule without gate/verdict: appends the context and re-pins strict, never a PUT", async () => {
     const port = fakePort({ before: ["lint"] });
     const result = await runGateProtect(port, "acme/websites");
     expect(result.before).toEqual(["lint"]);
     expect(result.after).toEqual(["lint", "gate/verdict"]);
     expect(result.changed).toBe(true);
+    expect(port.addRequiredContexts).toHaveBeenCalledWith("acme/websites", "main", ["gate/verdict"]);
+    expect(port.setStrict).toHaveBeenCalledWith("acme/websites", "main", false);
+    expect(port.createProtection).not.toHaveBeenCalled();
   });
 
-  it("no protection rule at all: before [], after [gate/verdict], changed", async () => {
-    const port = fakePort({ before: null });
+  it("existing rule already has gate/verdict: still appends + re-pins strict, after deduped, changed false", async () => {
+    const port = fakePort({ before: ["lint", "gate/verdict"] });
     const result = await runGateProtect(port, "acme/websites");
-    expect(result.before).toEqual([]);
-    expect(result.after).toEqual(["gate/verdict"]);
-    expect(result.changed).toBe(true);
+    expect(result.before).toEqual(["lint", "gate/verdict"]);
+    expect(result.after).toEqual(["lint", "gate/verdict"]);
+    expect(result.changed).toBe(false);
+    expect(port.addRequiredContexts).toHaveBeenCalledWith("acme/websites", "main", ["gate/verdict"]);
+    expect(port.setStrict).toHaveBeenCalledWith("acme/websites", "main", false);
+    expect(port.createProtection).not.toHaveBeenCalled();
   });
 
   it("uses the default branch for both the read and the write", async () => {
     const port = fakePort({ branch: "trunk", before: ["lint"] });
     await runGateProtect(port, "acme/websites");
     expect(port.getProtection).toHaveBeenCalledWith("acme/websites", "trunk");
-    expect(port.setProtection).toHaveBeenCalledWith("acme/websites", "trunk", ["lint", GATE_STATUS_CONTEXT]);
+    expect(port.addRequiredContexts).toHaveBeenCalledWith("acme/websites", "trunk", [GATE_STATUS_CONTEXT]);
   });
 
-  it("always PUTs, even when unchanged, so a flipped strict is re-pinned", async () => {
-    const port = fakePort({ before: ["gate/verdict"] });
-    const result = await runGateProtect(port, "acme/websites");
-    expect(result.changed).toBe(false);
-    expect(port.setProtection).toHaveBeenCalledTimes(1);
+  it("idempotent second run: changed reflects only the delta", async () => {
+    const first = fakePort({ before: ["lint"] });
+    const firstResult = await runGateProtect(first, "acme/websites");
+    expect(firstResult.changed).toBe(true);
+    const second = fakePort({ before: ["lint", GATE_STATUS_CONTEXT] });
+    const secondResult = await runGateProtect(second, "acme/websites");
+    expect(secondResult.changed).toBe(false);
+    expect(secondResult.after).toEqual(["lint", GATE_STATUS_CONTEXT]);
   });
 });

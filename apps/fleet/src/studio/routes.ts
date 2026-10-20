@@ -227,7 +227,10 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
     // GATE_RUNNER_REPOS list. gateBlock is assigned here but only invoked by
     // runSpawn for a gated repo (see spawn.ts's guard), so no token is minted
     // and no branch is read for a non-gated spawn.
-    gatedRepos: parseGateRunnerRepos(env.GATE_RUNNER_REPOS),
+    // The board's completed-gate checks FLEET_GATE_RUNNER === "on"; the spawn
+    // guard must match, or a repo with the runner off would still refuse to
+    // spawn. Runner off = no repo is gated.
+    gatedRepos: env.FLEET_GATE_RUNNER === "on" ? parseGateRunnerRepos(env.GATE_RUNNER_REPOS) : [],
     gateBlock: async (repoSlug: string) => {
       const mint = repoTokenMinter(env);
       // The guard is about the DEFAULT-branch config, so read that branch's

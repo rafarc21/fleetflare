@@ -8,7 +8,9 @@
 // binding's OWN native instance-status API, not a second GitHub read.
 import type { Env } from "../env";
 import { getPullRequestHeadSha } from "../github/api";
-import { getDefaultBranch, getBranchProtection, setBranchProtection } from "../github/api";
+import {
+  getDefaultBranch, getBranchProtection, setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict,
+} from "../github/api";
 import { redactSecrets } from "../studio/redact";
 import { runGateProtect, type ProtectPort } from "./protect";
 import { repoTokenMinter } from "../github/auth";
@@ -45,7 +47,9 @@ export function realProtectPort(env: Env): ProtectPort {
   return {
     getDefaultBranch: async (repo) => getDefaultBranch(await mint(repo), repo),
     getProtection: async (repo, branch) => getBranchProtection(await mint(repo), repo, branch),
-    setProtection: async (repo, branch, contexts) => setBranchProtection(await mint(repo), repo, branch, contexts),
+    createProtection: async (repo, branch, contexts) => setBranchProtectionRule(await mint(repo), repo, branch, contexts),
+    addRequiredContexts: async (repo, branch, contexts) => addBranchProtectionContexts(await mint(repo), repo, branch, contexts),
+    setStrict: async (repo, branch, strict) => setBranchProtectionStrict(await mint(repo), repo, branch, strict),
   };
 }
 
