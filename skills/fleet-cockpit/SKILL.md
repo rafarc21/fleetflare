@@ -74,6 +74,12 @@ web-studio" cannot both be true for two tasks on the same repo — pick one.
 Several related tasks can share one studio; see the collision-free grouping rule
 in `fleet/blueprint/studios/web-studio/studio.md`.
 
+**One maestro = one open sprint.** A maestro owns one open sprint at a time —
+the milestone whose `Owner:` description line names it — and files every task
+into that sprint. Scope is frozen at planning; new asks and review follow-ups
+go to the backlog or the next sprint, never into the frozen current one.
+Progress is reported as `Sprint w: x/y (z%)` from `fleet sprint status`.
+
 **Where a role is defined — studio first.** `provision.ts` tries
 `fleet/blueprint/studios/<name>/studio.md` BEFORE `fleet/blueprint/roles/<name>.md`.
 `roles/` holds only `pilot` and `scratch`; `maestro`, `web-studio` and
