@@ -155,10 +155,11 @@ describe("the watchdog sweep on the real table: finished runs never starve a hun
         };
       },
     };
-    const post = async () => false;
-    const first = await sweepStalledRuns({ index: d1WatchdogIndex(env.DB), workflow, post, hasRedLeg: async () => false, now: () => now });
+    const post = async () => {};
+    const headStatus = async () => undefined;
+    const first = await sweepStalledRuns({ index: d1WatchdogIndex(env.DB), workflow, post, headStatus, hasRedLeg: async () => false, now: () => now });
     expect(first.filter((r) => r.runId.startsWith("gate-fin-")).every((r) => r.outcome === "skipped")).toBe(true);
-    const second = await sweepStalledRuns({ index: d1WatchdogIndex(env.DB), workflow, post, hasRedLeg: async () => false, now: () => now });
+    const second = await sweepStalledRuns({ index: d1WatchdogIndex(env.DB), workflow, post, headStatus, hasRedLeg: async () => false, now: () => now });
     expect(second.find((r) => r.runId === "gate-hung")).toEqual({ runId: "gate-hung", outcome: "rerun" });
     expect(await index.latest("acme/starve-hung", 1)).toMatchObject({ runId: "rerun-gate-hung" });
   });

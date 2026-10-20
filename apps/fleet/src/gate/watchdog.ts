@@ -85,8 +85,14 @@ export interface WatchdogDeps {
   index: WatchdogIndex;
   workflow: WatchdogWorkflow;
   /** Posts a commit status on the head: the real GitHub call in the Worker, a recorder in tests.
-   *  Returns true when the post failed after its retries (postGateStatus's contract), false when it landed. */
-  post: (repo: string, headSha: string, args: { state: "pending" | "error" | "failure"; description: string }) => Promise<boolean>;
+   *  #1226: throws (carrying the real cause) instead of returning whether the post failed —
+   *  postGateStatus's own contract now, retried by the caller's step, never swallowed here. */
+  post: (repo: string, headSha: string, args: { state: "pending" | "error" | "failure"; description: string }) => Promise<void>;
+  /** gate/verdict's current state on the head, read without posting (#1226): used only so an
+   *  errored run that never got to post ITS OWN verdict can be reconciled without ever
+   *  clobbering a verdict some other path already landed. Undefined when there is no status
+   *  yet, or the read failed. */
+  headStatus: (repo: string, headSha: string) => Promise<{ state: string } | undefined>;
   /** Whether the gate runner is on for a repo. A repo it is off for is never read past this check (#1148 review). */
   gated?: (repo: string) => boolean;
   /** Whether any leg of the run stored a red result. A red result is final, never rerun (#1119). */
@@ -135,6 +141,21 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
   if (!isLiveStatus(status)) {
     // Only a finished run is retired. "unknown" can be a blip: the next sweep reads it again.
     if (status === "complete" || status === "errored" || status === "terminated") {
+      // #1226: an "errored" run may have ended before it ever got to post its
+      // OWN verdict (the exact production bug: the post throws, the step's
+      // retries exhaust, the Workflow instance errors). One best-effort
+      // reconciliation post, ONLY while the head's real GitHub status is not
+      // already something terminal — never clobber a verdict some other path
+      // already landed. A failure here is logged and swallowed: the run is
+      // already dead either way, and the row is retired regardless.
+      if (status === "errored") {
+        const current = await deps.headStatus(repo, headSha).catch(() => undefined);
+        if (current === undefined || current.state === "pending") {
+          await deps.post(repo, headSha, {
+            state: "error", description: `gate: run ended without a verdict (run ${runId})`,
+          }).catch((err) => console.error(`gate watchdog: reconciliation post failed for ${runId}`, err));
+        }
+      }
       await deps.index.retire(repo, pr, runId, row.progressedAt ?? 0);
     }
     return "skipped";
@@ -188,30 +209,33 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
 /** Ends a stalled run with its final verdict. The progress stamp lands first
  *  (#1156 item 3): a concurrent sweep reads a fresh stamp, so a slow post is
  *  never re-stalled. The post lands before the end and the retire (#1156 item 4):
- *  a post that failed after its retries restores the pre-stamp progress and
- *  rethrows so the next sweep retries the verdict — unless the run is at/over
+ *  a post that failed after its retries (#1226: `deps.post` throws, carrying
+ *  the real cause) restores the pre-stamp progress and rethrows the ORIGINAL
+ *  error so the next sweep retries the verdict — unless the run is at/over
  *  the final age, when the row leaves the sweep regardless, so it ends and
- *  retires, logging the lost verdict. */
+ *  retires, logging the lost verdict with the real cause. */
 async function endRunFinal(
   deps: WatchdogDeps, row: StalledRun, now: number,
   args: { state: "error" | "failure"; description: string },
 ): Promise<WatchdogOutcome> {
   const prior = row.progressedAt ?? 0;
   await deps.index.progress(row.repo, row.pr, row.runId, now);
-  const postFailed = await deps.post(row.repo, row.headSha, args);
-  if (postFailed) {
+  try {
+    await deps.post(row.repo, row.headSha, args);
+  } catch (err) {
     // At the final age the row leaves the sweep next minute regardless, so end
     // and retire it and log the lost verdict rather than restore and retry.
     if (now - prior >= GATE_WATCHDOG_FINAL_AGE_MS) {
       console.error(
         `gate watchdog: final status post failed at the final age for ${row.runId}; verdict lost (${args.state}: ${args.description})`,
+        err,
       );
       await endRunOrThrow(deps.workflow, row.runId);
       await deps.index.retire(row.repo, row.pr, row.runId, now);
       return "final";
     }
     await deps.index.progress(row.repo, row.pr, row.runId, prior);
-    throw new Error(`gate watchdog: final status post failed for ${row.runId}`);
+    throw err;
   }
   await endRunOrThrow(deps.workflow, row.runId);
   await deps.index.retire(row.repo, row.pr, row.runId, now);

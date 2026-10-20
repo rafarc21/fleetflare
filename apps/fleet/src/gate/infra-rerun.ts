@@ -111,13 +111,14 @@ export function rerunStarted(result: unknown): boolean {
 
 /** The rerun's pending status, posted after the run stamps its progress. The stamp comes
  *  first: the watchdog reads it, so a stale stamp lets it end this run in the middle of its
- *  own rerun start (#1148 review). Returns whether the post landed. */
+ *  own rerun start (#1148 review). #1226: `post` now throws instead of returning whether it
+ *  failed — it propagates, same as any other step failure. */
 export async function announceInfraRerun(deps: {
   touch: () => Promise<void>;
-  post: () => Promise<boolean>;
-}): Promise<boolean> {
+  post: () => Promise<void>;
+}): Promise<void> {
   await deps.touch();
-  return deps.post();
+  await deps.post();
 }
 
 /** The status a poller sees for a run that may have handed off to its infra
