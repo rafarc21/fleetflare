@@ -1591,8 +1591,24 @@ async function cmdProvision(
   // repoIdSegment), so a dotted repo only ever agrees with its own id through
   // that same fold — comparing the raw short name would make every
   // `fleet provision` inside a dotted repo send no repo at all.
+  const idRepo = parseStudioId(id)?.repo ?? null;
+  // Issue #1237 nit 1: an EXPLICIT --repo that disagrees with the id's segment
+  // is a stated intent the Worker would 400 on — refuse it locally, naming
+  // both, instead of silently dropping the flag into a bodyless provision. A
+  // cwd-DETECTED repo that disagrees stays bodyless (the existing address-by-id
+  // contract: the folder is not the operator's statement of the target).
+  if (r.ok && repoFlag !== undefined && idRepo !== null) {
+    const seg = repoIdSegment(r.slug.split("/")[1]);
+    if (seg !== idRepo) {
+      console.error(
+        `fleet provision: --repo ${r.slug} does not match studio id repo segment "${idRepo}" — ` +
+        "the id and the checkout would name different repos",
+      );
+      process.exit(1);
+    }
+  }
   const matchesId = r.ok
-    ? (() => { const seg = repoIdSegment(r.slug.split("/")[1]); return seg !== null && seg === parseStudioId(id)?.repo; })()
+    ? (() => { const seg = repoIdSegment(r.slug.split("/")[1]); return seg !== null && seg === idRepo; })()
     : false;
   if (matchesId && r.ok) {
     console.error(repoFlag === undefined
