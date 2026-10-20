@@ -891,12 +891,19 @@ const FAILURE_REASON_CAP = 300;
  *  model's own upstream value, or (every candidate exhausted) the last
  *  model tried and the message it failed with. Either way `usedModel`/
  *  `attempts` are what the caller's usage row needs regardless of outcome —
- *  see `runModelPoolOverflow`'s own doc comment. */
+ *  see `runModelPoolOverflow`'s own doc comment.
+ *
+ *  Finding 7 (fresh-context review of #1228, PR #1235): these 4 variants
+ *  used to be discriminated via ad hoc `"x" in overflow` checks at call
+ *  sites, while its sibling `ConsumeOutcome` (introduced in the same diff,
+ *  right below) already uses a clean `kind` literal tag. Given the same
+ *  style here for internal consistency — every call site now narrows on
+ *  `overflow.kind` instead of a property-presence check. */
 type ModelOverflowResult =
-  | { ok: true; upstream: Json; usedModel: string; attempts: number; collected?: CollectedFrames }
-  | { ok: false; usedModel: string; attempts: number; lastMessage: string }
-  | { ok: false; usedModel: string; attempts: number; noFinishExhausted: true; lastNoFinish?: PumpResult }
-  | { ok: false; usedModel: string; attempts: number; pumpError: string };
+  | { kind: "ok"; upstream: Json; usedModel: string; attempts: number; collected?: CollectedFrames }
+  | { kind: "exhausted"; usedModel: string; attempts: number; lastMessage: string }
+  | { kind: "no_finish_exhausted"; usedModel: string; attempts: number; lastNoFinish?: PumpResult }
+  | { kind: "pump_error"; usedModel: string; attempts: number; pumpError: string };
 
 /** Issue #1228: what the non-streaming caller folds its reply from — the
  *  translator frames plus the pump's own result. */
@@ -934,8 +941,8 @@ async function attemptOnce(
   value: Json, modelId: string, usedModel: string, attempts: number,
 ): Promise<AttemptOutcome> {
   const outcome = await consume(value, modelId);
-  if (outcome.kind === "plain") return { accept: true, result: { ok: true, upstream: value, usedModel, attempts } };
-  if (outcome.kind === "pump_error") return { accept: true, result: { ok: false, usedModel, attempts, pumpError: outcome.message } };
+  if (outcome.kind === "plain") return { accept: true, result: { kind: "ok", upstream: value, usedModel, attempts } };
+  if (outcome.kind === "pump_error") return { accept: true, result: { kind: "pump_error", usedModel, attempts, pumpError: outcome.message } };
   const fr = outcome.frames.result;
   // Issue #1228: the stream ends without a finish_reason AFTER the caller
   // has consumed it (env.AI.run itself succeeded). An out=0 no_finish_reason
@@ -944,7 +951,7 @@ async function attemptOnce(
   // (success, or a no_finish_reason that DID produce output — Finding 1) is
   // not that shape, so the walk stops here and reports it as-is.
   if (fr.ok || !(fr.failure === "no_finish_reason" && fr.outputTokens === 0)) {
-    return { accept: true, result: { ok: true, upstream: value, usedModel, attempts, collected: outcome.frames } };
+    return { accept: true, result: { kind: "ok", upstream: value, usedModel, attempts, collected: outcome.frames } };
   }
   return { accept: false, frame: fr };
 }
@@ -1004,7 +1011,7 @@ async function runModelPoolOverflow(
           ? run().then((value) => ({ value, attempts: 1 }))
           : runAiWithRetry(run, { baseMs }));
       attempts += r.attempts;
-      if (consume === undefined) return { ok: true, upstream: r.value, usedModel, attempts };
+      if (consume === undefined) return { kind: "ok", upstream: r.value, usedModel, attempts };
       const first = await attemptOnce(consume, r.value, pm.id, usedModel, attempts);
       if (first.accept) return first.result;
       lastNoFinish = first.frame;
@@ -1015,7 +1022,7 @@ async function runModelPoolOverflow(
       lastNoFinish = second.frame;
       // Same-model retry also failed the same way: move to the next candidate.
       if (hasNext) continue;
-      return { ok: false, usedModel, attempts, noFinishExhausted: true, lastNoFinish };
+      return { kind: "no_finish_exhausted", usedModel, attempts, lastNoFinish };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       lastMessage = message;
@@ -1025,7 +1032,7 @@ async function runModelPoolOverflow(
       if (!(isRateLimited(message) || isOverflowRoutingError(message) || status === 504 || status === 529)) break;
     }
   }
-  return { ok: false, usedModel, attempts, lastMessage };
+  return { kind: "exhausted", usedModel, attempts, lastMessage };
 }
 
 export async function handleFleetAnthropicMessages(
@@ -1145,13 +1152,13 @@ export async function handleFleetAnthropicMessages(
   const { usedModel, attempts } = overflow;
   const headersAt = Date.now();
 
-  if (!overflow.ok) {
+  if (overflow.kind !== "ok") {
     // Issue #1228: every candidate ended with an out=0 no_finish_reason —
     // the request is poisonous to every model, not rate-limited. A 500 keeps
     // the client retrying the SAME body 12x; a 400 (invalid_request_error) is
     // the one shape Claude Code reads as "stop, don't retry". Log the
     // fingerprint once more (hashes/sizes only) and count the failure.
-    if ("noFinishExhausted" in overflow) {
+    if (overflow.kind === "no_finish_exhausted") {
       const nf = overflow.lastNoFinish;
       // The fingerprint line was already written inside the walk's consume
       // callback (one per no_finish_reason, including this last one); here
@@ -1165,7 +1172,7 @@ export async function handleFleetAnthropicMessages(
     }
     // Issue #1228: a pump bug while collecting the non-streaming reply stays
     // the fixed-message 500 it always was — never folded into the failover.
-    if ("pumpError" in overflow) {
+    if (overflow.kind === "pump_error") {
       logUsage(env, ctx, studio.id, {
         model: usedModel, stream, inputTokens: 0, outputTokens: 0, ok: false,
         failure: `pump_error: ${overflow.pumpError}`, startedAt, attempts, timeToHeaders: headersAt - startedAt,
