@@ -113,7 +113,13 @@ describe("pull_request delivery while a deploy drains (#1232)", () => {
     try {
       await autoRunFromEnv(e, pr);
       expect(create).not.toHaveBeenCalled();
-      expect(await gateDrainQueue(env.DB).peek()).toEqual([pr]);
+      // #1241 b1: the queued entry is the PR plus a queuedAt stamp (the release
+      // reattach guard's input), so match the fields and the stamp's shape, not
+      // a bare deep-equal on the unstamped input.
+      const queued = await gateDrainQueue(env.DB).peek();
+      expect(queued).toHaveLength(1);
+      expect(queued[0]).toMatchObject({ repo: pr.repo, pr: pr.pr, headSha: pr.headSha, baseSha: pr.baseSha });
+      expect(typeof queued[0].queuedAt).toBe("number");
     } finally {
       await deleteFlag(env.DB, "gate_drain");
       await deleteFlag(env.DB, "gate_drain_pending");
