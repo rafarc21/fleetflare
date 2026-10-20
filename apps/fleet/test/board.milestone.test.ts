@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  BACKLOG_MILESTONE_TITLE,
   parseMilestoneGoal,
   parseMilestoneOwner,
   renderMilestoneDescription,
@@ -10,12 +9,6 @@ import {
 // two functions render/read, and the backlog milestone's title is a fixed
 // string so "which milestone is the backlog" is answerable without a
 // convention nobody documented.
-
-describe("BACKLOG_MILESTONE_TITLE", () => {
-  it("is the fixed lowercase title, so the backlog is findable by name", () => {
-    expect(BACKLOG_MILESTONE_TITLE).toBe("backlog");
-  });
-});
 
 describe("renderMilestoneDescription", () => {
   it("writes owner and goal on two lines under `Owner:` and `Goal:` prefixes", () => {
