@@ -5,10 +5,10 @@
 // (not a gate block) turns a repo off: a gated repo with no valid gate config
 // fails red (#1132).
 import type { Env } from "../env";
-import { postCommitStatus } from "../github/api";
+import { getCommitContextStatus, postCommitStatus } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
 import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
-import { postGateStatus } from "./status-post";
+import { GATE_STATUS_CONTEXT, postGateStatus } from "./status-post";
 import type { StalledRun, WatchdogIndex } from "./watchdog";
 
 /** The per-PR gate run pointer on the D1 gate_pr_head table (migrations 0007, 0008).
@@ -78,16 +78,19 @@ export function d1WatchdogIndex(db: D1Database): WatchdogIndex {
 }
 
 /** #1191/#1214: the pending-status post a fresh run puts up before it is created,
- *  so GitHub never sees the head without a pending gate/verdict. A failed POST
- *  returns true (postGateStatus's contract) and is swallowed here: a pending
- *  post must never block the run that follows it. */
+ *  so GitHub never sees the head without a pending gate/verdict. #1226: postGateStatus
+ *  now throws on a failed post (no step.do/Workflow retry wraps this call site — it
+ *  runs before the Workflow instance even exists) — caught and logged here, same as
+ *  before: a pending post must never block the run that follows it. */
 function pendingPost(env: Env, description: string) {
   return async (repo: string, headSha: string): Promise<void> => {
-    await postGateStatus(
-      { mintToken: repoTokenMinter(env), postCommitStatus },
-      repo, headSha,
-      { state: "pending", description },
-    );
+    const port = {
+      mintToken: repoTokenMinter(env), postCommitStatus,
+      getCommitStatus: (token: string, r: string, sha: string) => getCommitContextStatus(token, r, sha, GATE_STATUS_CONTEXT),
+    };
+    await postGateStatus(port, repo, headSha, { state: "pending", description }).catch((err: unknown) => {
+      console.error(`gate auto-run ${repo} ${headSha.slice(0, 8)}: pending status post failed`, err);
+    });
   };
 }
 

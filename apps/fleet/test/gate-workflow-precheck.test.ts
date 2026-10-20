@@ -214,7 +214,7 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     if (statusPostFailOn.has(statusPostCalls)) {
       return Promise.reject(new Error(`gate/verdict HTTP 503 (attempt ${statusPostCalls})`));
     }
-    lastPostedStatus = init!.body === undefined ? undefined : (JSON.parse(init.body as string) as { state: string; description?: string });
+    lastPostedStatus = init?.body === undefined ? undefined : (JSON.parse(init.body as string) as { state: string; description?: string });
     return Promise.resolve(json({}));
   }
   if (method === "GET" && /\/commits\/[0-9a-f]{40}\/status$/.test(url)) {
