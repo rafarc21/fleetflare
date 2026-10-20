@@ -251,14 +251,29 @@ async function resolveMilestone(api: BoardApi, repo: string, title: string): Pro
  * Exported so sprint.ts's closeSprint reuses it rather than keeping a second copy.
  */
 export async function resolveOrCreateBacklogMilestone(api: BoardApi, repo: string): Promise<BoardResult<number>> {
-  const milestones = await api.listMilestones(repo);
-  const found = milestones.find((m) => m.title.toLowerCase() === BACKLOG_MILESTONE_TITLE.toLowerCase());
-  if (found) return { ok: true, value: found.number };
-  const created = await api.createMilestone(repo, {
+  const oldest = (ms: { number: number; title: string }[]) =>
+    ms
+      .filter((m) => m.title.toLowerCase() === BACKLOG_MILESTONE_TITLE.toLowerCase())
+      .sort((a, b) => a.number - b.number)[0];
+
+  const before = await api.listMilestones(repo);
+  const existing = oldest(before);
+  if (existing) return { ok: true, value: existing.number };
+
+  await api.createMilestone(repo, {
     title: BACKLOG_MILESTONE_TITLE,
     description: "Backlog: tasks awaiting a sprint.",
   });
-  return { ok: true, value: created.number };
+  // Re-list after create: a concurrent first use may have created one between
+  // our check and our create. Reuse the OLDEST (lowest number) — the first one
+  // filed — rather than trusting our just-created copy, so two racing creates
+  // cannot fork the board into two backlog milestones.
+  const after = await api.listMilestones(repo);
+  const reuse = oldest(after);
+  if (reuse) return { ok: true, value: reuse.number };
+  // Defensive: createMilestone reported success but the re-list found nothing
+  // (an upstream hiccup). Report the list failure as an upstream error.
+  return { ok: false, status: 502, message: `backlog milestone was created in ${repo} but is not listed — re-run` };
 }
 
 /**

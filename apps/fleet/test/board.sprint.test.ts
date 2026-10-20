@@ -317,8 +317,14 @@ describe("closeSprint", () => {
   });
 
   it("creates the backlog milestone when it is missing", async () => {
+    let calls = 0;
     const api = fakeApi({
-      listMilestones: vi.fn(async () => [{ number: 5, title: "Sprint A", description: "", state: "open" }]),
+      listMilestones: vi.fn(async () => calls++ < 2
+        ? [{ number: 5, title: "Sprint A", description: "", state: "open" }]
+        : [
+            { number: 5, title: "Sprint A", description: "", state: "open" },
+            { number: 99, title: "backlog", description: "", state: "open" },
+          ]),
       listIssues: vi.fn(async () => [task({ number: 11, state: "submitted", labels: ["submitted"] })]),
       createMilestone: vi.fn(async () => ({ number: 99, title: "backlog" })),
     });

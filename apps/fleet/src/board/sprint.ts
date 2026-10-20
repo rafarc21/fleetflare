@@ -38,6 +38,14 @@ async function resolveMilestoneByTitle(api: BoardApi, repo: string, title: strin
   return { ok: true, value: found.number };
 }
 
+/** A task worth counting: open, or closed but still carrying a board state
+ *  label (terminal states close the issue, but the board label outlives it).
+ *  A CLOSED issue with no state label is repo history, not sprint work — it
+ *  must not inflate the sprint's denominator. */
+function countsTowardsSprint(t: BoardTask): boolean {
+  return t.open || t.state !== null;
+}
+
 /** The states that mean "work is still genuinely in flight" — a task in one of
  *  these must not be swept into the backlog or dropped by a sprint close. */
 const IN_FLIGHT_STATES: readonly BoardTaskState[] = ["working", "input_required", "awaiting_merge"];
@@ -70,10 +78,13 @@ export async function openSprint(
 
 /**
  * `fleet sprint status` — every open sprint with its owner, goal and
- * completed/total task counts. `total` counts every task except canceled; a
- * drifted task (state null) still counts, because it is in the milestone and
- * not canceled. A `title` narrows to the one open milestone matching it,
- * case-insensitively, 404 when none does.
+ * completed/total task counts. A task counts toward `total` only while it is
+ * OPEN, or closed but still carrying a board state label; a CLOSED issue with
+ * no state label is repo history, not sprint work, and is excluded from the
+ * denominator (see countsTowardsSprint). Canceled tasks are excluded from
+ * `total` either way — a canceled task is a decision, not work still owed. A
+ * `title` narrows to the one open milestone matching it, case-insensitively,
+ * 404 when none does.
  */
 export async function sprintSummaries(
   api: BoardApi, repo: string, title: string | null,
@@ -91,8 +102,8 @@ export async function sprintSummaries(
       title: m.title,
       owner: parseMilestoneOwner(m.description),
       goal: parseMilestoneGoal(m.description),
-      completed: tasks.filter((t) => t.state === "completed").length,
-      total: tasks.filter((t) => t.state !== "canceled").length,
+      completed: tasks.filter((t) => countsTowardsSprint(t) && t.state === "completed").length,
+      total: tasks.filter((t) => countsTowardsSprint(t) && t.state !== "canceled").length,
     });
   }
   return { ok: true, value: summaries };
@@ -182,8 +193,8 @@ export async function closeSprint(
     if (t.state === "completed") {
       await api.closeIssue(repo, t.number, "completed");
       closed.push(t.number);
-    } else if (t.state === "canceled") {
-      // finished work — never moved, never closed here
+    } else if (t.state === "canceled" || !t.open) {
+      // finished or already closed — never moved, never closed here
     } else {
       await api.setIssueMilestone(repo, t.number, backlog.value);
       movedToBacklog.push(t.number);

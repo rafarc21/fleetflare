@@ -57,8 +57,11 @@ describe("createTask", () => {
   // opposite — the place tasks go when no sprint claims them yet.
   describe("backlog milestone (#1245)", () => {
     it("creates the backlog milestone on first use and files the task into it", async () => {
+      let calls = 0;
       const api = fakeApi({
-        listMilestones: vi.fn(async () => []),
+        listMilestones: vi.fn(async () => calls++ === 0 ? [] : [
+          { number: 9, title: "backlog", description: "", state: "open" },
+        ]),
         createMilestone: vi.fn(async () => ({ number: 9, title: "backlog" })),
       });
       const res = await createTask(api, "o/r", { ...brief, backlog: true });
