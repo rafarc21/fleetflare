@@ -79,9 +79,11 @@ export function isSpawnTokenShaped(raw: string | null): raw is string {
 export const DEFAULT_MAX_STUDIOS = 100;
 
 /** Issue #81: what the cap counts. A `stopped` row (destroy keeps it) runs no
- *  container; 62 of them held a fleet at 100/100 with 3 studios running. */
+ *  container; 62 of them held a fleet at 100/100 with 3 studios running. A
+ *  `host:"local"` row (fleet task #1248) runs no container either — it lives
+ *  on the operator's Mac — so it never counts toward DEFAULT_MAX_STUDIOS. */
 export function liveStudioCount(rows: StudioStatus[]): number {
-  return rows.filter((r) => r.state !== "stopped").length;
+  return rows.filter((r) => r.state !== "stopped" && r.host !== "local").length;
 }
 
 /**
@@ -368,6 +370,25 @@ export function readInstanceRequest(body: unknown): number | "next" | null {
 }
 
 /**
+ * Fleet task #1248: the `local` request field — a local studio runs on the
+ * operator's Mac, not in a container, and only WHERE differs. `undefined`
+ * out when the field is absent or null (cloud, byte-compat — the ordinary
+ * case, same "absent means today's behaviour" contract readInstanceRequest/
+ * readLeadTypeRequest already keep). `null` out on malformed: `local`
+ * truthy but `localPath` not a non-empty string — a local spawn cannot
+ * proceed without naming the clone path, so a missing one is a 400, never a
+ * silently-ignored field. Else the local shape itself.
+ */
+export function readLocalRequest(body: unknown): { local: true; localPath: string } | undefined | null {
+  const local = (body as { local?: unknown } | null)?.local;
+  if (local === undefined || local === null) return undefined;
+  if (!local) return undefined;
+  const localPath = (body as { localPath?: unknown } | null)?.localPath;
+  if (typeof localPath !== "string" || localPath.length === 0) return null;
+  return { local: true, localPath };
+}
+
+/**
  * Issue #249: the `leadType` request field — `fleet spawn --lead glm`'s
  * whole wire surface, on BOTH spawn routes (`/studio/spawn`'s operator body
  * and `/fleet/spawn`'s machine body both resolve to this one `runSpawn`
@@ -622,6 +643,20 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
     );
   }
 
+  // Fleet task #1248: `fleet spawn --local` / `ff --local`. Read before any
+  // org.json fetch or registry scan, same cheapest-check-first order. Only
+  // the claim placeholder and the provisionChild config below carry it —
+  // the org/role/instance/brief/claim decision logic is byte-identical to a
+  // cloud spawn.
+  const local = readLocalRequest(body);
+  if (local === null) {
+    return new Response(
+      `bad localPath ${JSON.stringify((body as { localPath?: unknown }).localPath)} — ` +
+      'a local spawn names the clone path',
+      { status: 400 },
+    );
+  }
+
   // #1070: an explicit `leadType` in the request always wins. Absent, a
   // glm-led parent's member is glm-led too — its container gets no Claude
   // OAuth token and routes through the pool like the lead does. Absent under
@@ -745,6 +780,10 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
       id: target.full, state: "provisioning", tailscaleHost: null, lastRefresh: null, error: null,
       lastRefreshError: null, burn: null, spawnedBy: parent.id, spawnTokenHash: null,
       repoSlug: parent.repoSlug ?? null,
+      // Fleet task #1248: the claim placeholder carries the local identity so
+      // a reader that hits it before the route's own recordStudio write lands
+      // still sees a local row, never a bare cloud placeholder.
+      ...(local === undefined ? {} : { host: "local" as const, localPath: local.localPath }),
     });
     if (release !== null || wanted !== "next") break;
     instance = target.instance + 1;
@@ -797,6 +836,10 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
       repo: claimed.repo, role: claimed.role,
       ...(claimed.instance === 1 ? {} : { instance: claimed.instance }),
       spawnedBy: parent.id, repoSlug: parent.repoSlug, briefPrompt,
+      // Fleet task #1248: the local shape rides the ProvisionConfig (as
+      // `host`/`localPath`, its own field names) so the route's
+      // registerLocalStudio can write the local identity onto the row.
+      ...(local === undefined ? {} : { host: "local" as const, localPath: local.localPath }),
       // Issue #249: omitted rather than sent as `"claude"` on the ordinary
       // path, same "absent means today's behaviour" discipline `instance`
       // just above follows — runProvision only ever reads this on a

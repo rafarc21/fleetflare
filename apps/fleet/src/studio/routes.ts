@@ -16,20 +16,26 @@ import { getStudioStub, getStudioStubForRow, realDoClassForRole } from "./profil
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { TERMINAL_PATH } from "./terminal";
 import { PASTE_MIME_EXT, PASTE_MAX_BYTES } from "./paste";
-import { listStudios, expireBurnWindow, claimStudioRow, claimStoppedRow, withAccountResolution } from "./registry";
+import {
+  listStudios, getStudioRow, recordStudio, expireBurnWindow, claimStudioRow, claimStoppedRow, withAccountResolution,
+} from "./registry";
 import { renderTerminalPage } from "./page";
 import { renderGridPage, scrubPreview, type GridCard } from "./grid";
 import {
   runSpawn, runResume, resolveSpawnParent, resolveSpawnPolicy, resolveMaxStudios, liveStudioCount, isSpawnTokenShaped,
-  SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type ResumeDeps, type SpawnParent,
+  readLocalRequest, SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type ResumeDeps, type SpawnParent,
 } from "./spawn";
-import { reachRepo, repoTokenMinter } from "../github/auth";
+import { reachRepo, repoTokenMinter, mintRepoToken } from "../github/auth";
 import type { RepoReachFetch } from "../github/reach";
 import { fetchRepoFile, getDefaultBranch } from "../github/api";
 import { resolveWorkRepo, parseRepoSlug, type WorkRepoDeps } from "./repo";
-import { briefPromptResolver } from "../board/routes";
+import { briefPromptResolver, assignedBriefResolver } from "../board/routes";
 import { resolveProjectCard } from "../directus/card";
 import { redactSecrets } from "./redact";
+import { resolveOpsRepo } from "../ops-repo";
+import { juniorEnabled } from "../junior/gate";
+import { resolveBringupEnv, type ProvisionDeps, type RoleEnv, type StudioEnv } from "./provision";
+import { localRowStatus } from "./local-spawn";
 import type { Observed } from "./observed";
 import { logWakeOutcome } from "./wake";
 import {
@@ -198,6 +204,50 @@ function githubRepoReach(env: Env): RepoReachFetch {
 
 function repoDeps(reach: RepoReachFetch): WorkRepoDeps {
   return { reachRepo: reach };
+}
+
+/**
+ * Fleet task #1248: base64-decode UTF-8 (the inverse of base64.ts's
+ * base64EncodeUtf8, which is what ROLE_PROMPT_B64/STUDIO_MEMBERS_B64 carry).
+ * A bare `atob` returns Latin-1 — every prompt now carries house rules whose
+ * em dashes are multi-byte — so the bytes are decoded as UTF-8, the same
+ * helper test/helpers/routes-studio-harness.ts's decodeRolePrompt already
+ * uses for exactly this reason.
+ */
+function base64DecodeUtf8(b64: string): string {
+  return new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+}
+
+/**
+ * Fleet task #1248: the local-spawn route's bring-up env. reuses
+ * provision.ts's resolveBringupEnv over a REAL, Env-backed ProvisionDeps
+ * built here (there is no Env->ProvisionDeps builder outside do.ts's own
+ * DO-scoped deps()): the only fields resolveBringupEnv reaches are
+ * fetchBlueprintFile, resolveAssignedBrief, juniorEnabled, opsRepo, and
+ * fetchOpsFile — exactly the set wired below, mirrored from do.ts's deps().
+ */
+function localProvisionDeps(env: Env, fetchFile: BlueprintFetch): ProvisionDeps {
+  const mint = repoTokenMinter(env);
+  const opsRepo = resolveOpsRepo(env);
+  return {
+    sbExec: async () => { throw new Error("local bring-up never execs a container"); },
+    recordStudio: (status) => recordStudio(env, status),
+    now: () => new Date().toISOString(),
+    fetchBlueprintFile: (repo, path, ref) => fetchFile(repo, path, ref),
+    memoryRepo: opsRepo,
+    opsRepo,
+    juniorEnabled: (slug) => juniorEnabled(env, slug),
+    resolveAssignedBrief: assignedBriefResolver(env),
+    ...(opsRepo === null
+      ? {}
+      : {
+        // Same contents:read-narrowed fetch do.ts's opsFileFetcher performs,
+        // inlined here because importing do.ts would drag the DO class into
+        // this module (see this file's own header).
+        fetchOpsFile: async (path, ref) =>
+          fetchRepoFile(await mintRepoToken(env, opsRepo, { permissions: { contents: "read" } }), opsRepo, path, ref),
+      }),
+  };
 }
 
 /**
@@ -414,6 +464,80 @@ export async function handleStudio(
       id: OPERATOR_ID, role: OPERATOR_ID, repo: repo.segment, repoSlug: repo.slug,
     };
     return runSpawn(deps, parent, body);
+  }
+
+  /**
+   * Fleet task #1248: `fleet spawn --local` / `ff --local`. The operator's
+   * local spawn — same runSpawn core as /studio/spawn (same org chart,
+   * same fleet.json role check, same id allocation, same brief), but the
+   * provision half writes a D1 row (`host:"local"`, `localPath`) instead of
+   * dispatching to a container DO, and no maestro is woken (the sweep
+   * supervises containers only). `resolveWorkRepo` still verifies the repo
+   * exactly as the cloud route does — a local studio clones the same code
+   * from the same place, just on the operator's Mac.
+   *
+   * Handled before ROUTE_RE, beside /studio/spawn, for the same reason:
+   * this path has no studio id segment to match.
+   */
+  if (url.pathname === "/studio/local/spawn") {
+    if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+    const body = (await spawnBody(req)) as { repo?: unknown };
+    // This is the LOCAL spawn route — a body that does not say `local: true`
+    // is a caller error, not a cloud spawn. readLocalRequest's own `null`
+    // (malformed localPath) is left to runSpawn's identical check below.
+    if (readLocalRequest(body) === undefined) {
+      return new Response('local spawn requires {"local": true, "localPath": "<absolute path>"}', { status: 400 });
+    }
+    const deps = spawnDeps(env, fetchFile, resolveBrief);
+    const repo = await resolveWorkRepo(repoDeps(reach), {
+      requested: body.repo, defaultSlug: env.AGENT_REPO, rows: await deps.listStudios(),
+    });
+    if (!repo.ok) return new Response(repo.message, { status: repo.status });
+    const parent: SpawnParent = {
+      id: OPERATOR_ID, role: OPERATOR_ID, repo: repo.segment, repoSlug: repo.slug,
+    };
+    const res = await runSpawn(
+      {
+        ...deps,
+        // Local override: register the row straight into D1 — no DO, no
+        // container. notifyMaestro is a no-op: the sweep supervises
+        // containers only, and a local studio is never one.
+        provisionChild: (childId, cfg) => recordStudio(env, localRowStatus(childId, cfg)).then(() => localRowStatus(childId, cfg)),
+        notifyMaestro: async () => {},
+      },
+      parent,
+      body,
+    );
+    if (res.status !== 200) return res;
+
+    // runSpawn succeeded — resolve the bring-up env over the real
+    // ProvisionDeps and attach it to the response so the CLI can launch
+    // claude with the exact prompt/tools/effort the container would get.
+    const status = (await res.json()) as StudioStatus;
+    const cfg: ProvisionConfig = {
+      repo: parent.repo, role: parseStudioId(status.id)?.role ?? "",
+      spawnedBy: OPERATOR_ID, repoSlug: parent.repoSlug,
+      ...((body as { leadType?: "claude" | "glm" }).leadType !== undefined
+        ? { leadType: (body as { leadType: "claude" | "glm" }).leadType }
+        : {}),
+    };
+    const { bringupEnv } = await resolveBringupEnv(
+      localProvisionDeps(env, fetchFile), cfg, env.AGENT_REPO, parent.repoSlug ?? env.AGENT_REPO,
+      status.leadType,
+    );
+    const studioEnv = "STUDIO_NAME" in bringupEnv && bringupEnv.STUDIO_NAME !== "" ? bringupEnv : null;
+    const members = studioEnv
+      ? (JSON.parse(base64DecodeUtf8(studioEnv.STUDIO_MEMBERS_B64 || "e30=")) as Record<string, string>)
+      : undefined;
+    return Response.json({
+      ...status,
+      prompt: base64DecodeUtf8(bringupEnv.ROLE_PROMPT_B64),
+      allowedTools: bringupEnv.ROLE_ALLOWED_TOOLS,
+      effort: bringupEnv.ROLE_EFFORT,
+      ...(members !== undefined ? { members } : {}),
+      ...(studioEnv ? { skills: studioEnv.STUDIO_SKILLS } : {}),
+      leadType: status.leadType,
+    });
   }
 
   /**
@@ -1454,6 +1578,22 @@ export async function handleStudio(
     // studio whose edges reach it (StudioStatus.parked). Sent only when set,
     // so a plain destroy's RPC is the byte-identical pre-#59 call.
     const park = url.searchParams.get("park") === "true";
+
+    // Fleet task #1248: a local studio has no container — destroying it is a
+    // registry row flip, never an RPC. The host stays "local" (it is still
+    // local, just stopped), and the cloud path below is untouched.
+    const localRow = await getStudioRow(env, id.full);
+    if (localRow?.host === "local") {
+      const stopped: StudioStatus = {
+        ...localRow,
+        state: "stopped",
+        parked: park,
+        stoppedAt: new Date().toISOString(),
+      };
+      await recordStudio(env, stopped);
+      return Response.json(burnView(stopped));
+    }
+
     try {
       const result = park
         ? await stub.destroyStudio(force, discardUnsynced, true)

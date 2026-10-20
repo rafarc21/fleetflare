@@ -70,8 +70,10 @@ afterEach(() => {
 describe("POST /studio/local/spawn", () => {
   it("401 without an Access header (real verifyAccess, not mocked)", async () => {
     const res = await handleStudio(
-      localSpawnReq({ role: "release", local: true, localPath: "/tmp/x" }), noContainerEnv(),
-      fakeFetchFile(),
+      new Request("https://x/studio/local/spawn", {
+        method: "POST", body: JSON.stringify({ role: "release", local: true, localPath: "/tmp/x" }),
+      }),
+      noContainerEnv(), fakeFetchFile(),
     );
     expect(res.status).toBe(401);
   });
