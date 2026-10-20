@@ -298,12 +298,26 @@ export async function startEditedGateRunIdempotent(
   postPending?: (repo: string, headSha: string) => Promise<void>,
 ): Promise<{ runId: string; reused: boolean }> {
   const latest = await index.latest(input.repo, input.pr);
-  if (
-    latest !== null && latest.headSha === input.headSha
-    && latest.runId.startsWith(`${await gateRunId(input.repo, input.headSha)}-e`)
-    && isLiveStatus(await statusOf(wf, latest.runId))
-  ) {
-    return { runId: latest.runId, reused: true };
+  const isEditRun = latest !== null && latest.headSha === input.headSha
+    && latest.runId.startsWith(`${await gateRunId(input.repo, input.headSha)}-e`);
+  if (isEditRun) {
+    let status: string | null;
+    try {
+      status = (await (await wf.get(latest.runId)).status()).status;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // "not found" = the -e run is genuinely gone: fall through to a fresh
+      // start. Any other throw is a transient read failure — THROW so the entry
+      // stays queued; falling through would endIfLive a possibly-live run, the
+      // exact kill-and-restart this function exists to prevent (#1241 a).
+      if (/not[ _.-]?found/i.test(msg)) {
+        return startEditedGateRun(wf, input, index, now, postPending);
+      }
+      throw err;
+    }
+    if (isLiveStatus(status)) return { runId: latest.runId, reused: true };
+    // terminal: fall through to a fresh start (endIfLive no-ops on it).
+    return startEditedGateRun(wf, input, index, now, postPending);
   }
   return startEditedGateRun(wf, input, index, now, postPending);
 }
