@@ -603,19 +603,28 @@ export function localWorktreeCreateArgs(localPath: string, defaultBranch: string
  *  element, so the line stays a few hundred bytes however large the brief is
  *  (studio-bringup.sh's own issue #6 technique). Pure so a test pins it.
  *
+ *  The `STUDIO_ID=<id>` env-assignment prefix is the ARMING SWITCH: on the
+ *  operator's Mac STUDIO_ID is never set in the ambient environment (the cloud
+ *  container arms the gate via its own process env, the Mac has none by
+ *  default), so gates/lead-gate.sh's first line — `[ -n "${STUDIO_ID:-}" ] ||
+ *  exit 0` — would exit 0 before ANY gate logic ran and the lead would be
+ *  ungated. The prefix makes claude — and every hook subprocess it spawns —
+ *  inherit STUDIO_ID, so the gate actually arms. It is a shell env-assignment
+ *  prefix, valid for the `--command` string Orca runs.
+ *
  *  Deliberately NO --dangerously-skip-permissions: this lead runs on the
  *  operator's own Mac, not a Firecracker microVM, so permission prompts stay
  *  on — the lead-gate PreToolUse hook (not --disallowedTools, which would
  *  starve members too) is the structural guard against the lead implementing,
  *  and the operator is present to approve the members' writes. */
-export function localLaunchCommand(_id: string, promptFilePath: string, allowedTools: string, effort: string): string {
+export function localLaunchCommand(id: string, promptFilePath: string, allowedTools: string, effort: string): string {
   const args = [
     "claude",
     "--append-system-prompt", `"$(cat ${promptFilePath})"`,
     "--allowedTools", `"${allowedTools}"`,
   ];
   if (effort !== "") args.push("--effort", effort);
-  return args.join(" ");
+  return `STUDIO_ID=${id} ${args.join(" ")}`;
 }
 
 /**
@@ -778,6 +787,18 @@ function materializeLocalLead(worktreePath: string, args: LocalStudioArgs, deps:
   // (exit 2) when the script is missing or not executable. Never touches
   // ~/.claude/settings.json. Throws on either failure: the caller's one catch
   // turns it into { kind: "failed" }, so no ungated lead ever boots.
+  //
+  // IS_MAESTRO is baked to `False` into the COPIED file's bytes, right after
+  // the copy lands, never left as the repo-tracked placeholder. A local
+  // studio is never maestro (maestro is refused locally), and its members ARE
+  // real dispatched members, so `False` is the correct bake: their tool calls
+  // get the unconditional non-maestro exemption and the lead's own write-
+  // shaped calls are blocked. Same reason studio-bringup.sh bakes it into the
+  // container's copy: tamper-with-the-bytes is the trust anchor, never
+  // re-derived from a separate file at decision time — an earlier revision
+  // read a plain file at runtime and a subagent could overwrite it via Bash.
+  // Left unbaked, the placeholder's bare name is a python NameError -> exit 1
+  // -> which PERMITS the call (only exit 2 blocks).
   const hooksDir = join(claudeDir, "hooks");
   mkdirSync(hooksDir, { recursive: true });
   const hookDest = join(hooksDir, "lead-gate.sh");
@@ -787,6 +808,13 @@ function materializeLocalLead(worktreePath: string, args: LocalStudioArgs, deps:
   }
   copyFileSync(hookSource, hookDest);
   chmodSync(hookDest, 0o755);
+  const hookBytes = readFileSync(hookDest, "utf8");
+  const placeholder = "IS_MAESTRO = __IS_MAESTRO_BOOL__";
+  const occurrences = hookBytes.split(placeholder).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(`lead-gate copy ${hookDest} carried the IS_MAESTRO placeholder ${occurrences} times, expected 1 — refusing to materialize an ungated lead (decision 11)`);
+  }
+  writeFileSync(hookDest, hookBytes.replace(placeholder, "IS_MAESTRO = False"));
 
   const settingsPath = join(claudeDir, "settings.json");
   let cfg: Record<string, unknown>;
