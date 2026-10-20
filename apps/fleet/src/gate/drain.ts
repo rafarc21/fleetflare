@@ -1,0 +1,42 @@
+// #1232: the gate drain flag and its pending queue. A Worker deploy sets
+// `gate_drain` while it drains running gate runs, so a run started mid-leg
+// would be killed by the deploy. While the flag is set, a pull_request
+// delivery (autoRunFromEnv) and the manual start route both queue instead of
+// start. The every-minute cron (drainPendingGateRuns) releases the queue once
+// the flag clears. A pending status still goes up for the queued PR, so GitHub
+// never sees the head without a gate (#1191).
+import type { PullRequestAutoRun } from "./auto-run";
+import { getFlag, setFlag, flagIsSet } from "../state";
+
+export const GATE_DRAIN_FLAG = "gate_drain";
+export const GATE_DRAIN_QUEUE_KEY = "gate_drain_pending";
+
+/** The pending queue, stored as one JSON array over fleet_state. */
+export interface GateDrainQueue {
+  peek(): Promise<PullRequestAutoRun[]>;
+  write(runs: PullRequestAutoRun[]): Promise<void>;
+}
+
+export function gateDrainQueue(db: D1Database): GateDrainQueue {
+  return {
+    async peek(): Promise<PullRequestAutoRun[]> {
+      const raw = await getFlag(db, GATE_DRAIN_QUEUE_KEY);
+      if (raw === null) return [];
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        return Array.isArray(parsed) ? (parsed as PullRequestAutoRun[]) : [];
+      } catch {
+        // Fail-closed: a corrupt queue drops nothing and starts nothing.
+        return [];
+      }
+    },
+    async write(runs: PullRequestAutoRun[]): Promise<void> {
+      await setFlag(db, GATE_DRAIN_QUEUE_KEY, JSON.stringify(runs), Date.now());
+    },
+  };
+}
+
+/** Whether a Worker deploy is currently draining running gate runs. */
+export async function gateDraining(db: D1Database): Promise<boolean> {
+  return flagIsSet(db, GATE_DRAIN_FLAG);
+}

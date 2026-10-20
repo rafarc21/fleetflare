@@ -1,5 +1,6 @@
 import type { Env } from "./env";
 import { sweepGateRunsFromEnv } from "./gate/watchdog-env";
+import { drainPendingGateRuns } from "./gate/auto-run-env";
 import { handleTelegramWebhook } from "./telegram/webhook";
 import { handleGithubWebhook } from "./github/webhook";
 import { AGENTS, telegramConfig } from "./agents/registry";
@@ -203,6 +204,13 @@ async function handleScheduled(controller: ScheduledController, env: Env, ctx: E
     await sweepGateRunsFromEnv(env);
   } catch (err) {
     console.error("gate watchdog sweep failed", err);
+  }
+  // #1232: release the gate runs queued while a deploy was draining. Only runs
+  // once the drain flag is clear (the deploy script clears it after the deploy).
+  try {
+    await drainPendingGateRuns(env);
+  } catch (err) {
+    console.error("gate drain release sweep failed", err);
   }
   // Board #334: the AgentDO watchdog is part of the legacy Telegram
   // surface — off, nobody polls AgentDO (its container never starts).

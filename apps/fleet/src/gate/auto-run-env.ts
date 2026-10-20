@@ -10,6 +10,7 @@ import { repoTokenMinter } from "../github/auth";
 import { autoRunPullRequest, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
 import { postGateStatus } from "./status-post";
 import type { StalledRun, WatchdogIndex } from "./watchdog";
+import { gateDraining, gateDrainQueue } from "./drain";
 
 /** The per-PR gate run pointer on the D1 gate_pr_head table (migrations 0007, 0008).
  *  Keyed by lowercased repo, the way gateRunId keys a run (#1082). */
@@ -95,6 +96,18 @@ function pendingPost(env: Env, description: string) {
  *  whatever a run did. */
 export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<void> {
   try {
+    // #1232: a Worker deploy is draining — queue the run as pending instead of
+    // starting it, so the deploy does not kill it mid-leg. A pending status still
+    // goes up, so GitHub never sees the head without a gate (#1191). The cron
+    // releases the queue once the flag clears.
+    if (await gateDraining(env.DB)) {
+      const queue = gateDrainQueue(env.DB);
+      const runs = await queue.peek();
+      await queue.write([...runs, pr]);
+      await pendingPost(env, "queued (gate draining for deploy)")(pr.repo, pr.headSha);
+      console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: queued (draining)`);
+      return;
+    }
     const outcome = await autoRunPullRequest(pr, {
       workflow: env.GATE_WORKFLOW,
       index: d1RunIndex(env.DB),
@@ -104,4 +117,30 @@ export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<
   } catch (err) {
     console.error(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)} failed`, err);
   }
+}
+
+/** #1232: releases the pending queue once the drain flag is clear. One queued PR
+ *  that fails to start is kept (replayed next minute); a started one leaves the
+ *  queue. Runs from the every-minute cron (src/index.ts). */
+export async function drainPendingGateRuns(env: Env): Promise<void> {
+  if (env.FLEET_GATE_RUNNER !== "on") return;
+  if (await gateDraining(env.DB)) return;
+  const queue = gateDrainQueue(env.DB);
+  const queued = await queue.peek();
+  if (queued.length === 0) return;
+  const remaining: PullRequestAutoRun[] = [];
+  for (const pr of queued) {
+    try {
+      const outcome = await autoRunPullRequest(pr, {
+        workflow: env.GATE_WORKFLOW,
+        index: d1RunIndex(env.DB),
+        postPending: pendingPost(env, pr.edited === true ? "running (edited title/body recheck)" : "running (fresh gate run)"),
+      });
+      console.log(`gate drain release ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: ${outcome}`);
+    } catch (err) {
+      console.error(`gate drain release ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)} failed`, err);
+      remaining.push(pr);
+    }
+  }
+  await queue.write(remaining);
 }
