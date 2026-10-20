@@ -3,7 +3,7 @@
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
 import { describe, it, expect, spyOn } from "bun:test";
-import { combineCauses, gateRunnerName, legResultReader, runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
+import { combineCauses, gateRunnerName, legResultReader, MAX_COMBINED_CAUSE_CHARS, runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
 
@@ -162,7 +162,7 @@ describe("runLegStep: two infra retries, not one (#1231)", () => {
     const dispatch = async () => { sent++; return reply({ error: `attempt ${sent} boom` }, 503); };
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result.state).toBe("error");
-    expect(result.description!.length).toBeLessThanOrEqual(140);
+    expect(result.description!.length).toBeLessThanOrEqual(MAX_COMBINED_CAUSE_CHARS);
     expect(result.description).toContain("attempt 1 boom");
     expect(result.description).toContain("attempt 2 boom");
     expect(result.description).toContain("attempt 3 boom");
@@ -177,7 +177,7 @@ describe("combineCauses: every failed attempt's cause, joined, capped at 140 cha
 
   it("causes that together exceed 140 chars are cut to exactly 140 chars, ending with an ellipsis", () => {
     const result = combineCauses(["x".repeat(60), "y".repeat(60), "z".repeat(60)]);
-    expect(result.length).toBe(140);
+    expect(result.length).toBe(MAX_COMBINED_CAUSE_CHARS);
     expect(result.endsWith("…")).toBe(true);
   });
 });

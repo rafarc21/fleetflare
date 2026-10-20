@@ -129,6 +129,9 @@ export async function runLegStep(
   const deadlineMs = deps.stepDeadlineMs ?? legStepDeadlineMs(planned.timeoutMin);
   const attempt = (name: string, targetFor: (tryNo: number) => PlannedLeg): Promise<LegRunResult> => {
     let tryNo = 0;
+    // Persists across this step's own Workflows retries (same closure, like
+    // tryNo above) — one cause per failed attempt, so the final throw (if
+    // retries run out) carries all of them, never just the last.
     const causes: string[] = [];
     return step.do(name, LEG_STEP_CONFIG, async () => {
       const target = targetFor(++tryNo);
