@@ -560,7 +560,7 @@ async function main(): Promise<void> {
     }
     say(`repo ${detected.slug} (from git remote origin)`);
   } else {
-    say(`${detected.reason} — using the fleet's default repo`);
+    say(`${detected.reason} — no git remote; refusing to use the default repo`);
   }
 
   const decision = ffDecision(

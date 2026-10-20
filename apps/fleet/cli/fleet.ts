@@ -29,7 +29,7 @@ import { grabClipboardPng } from "./paste-mac";
 import { classifyInput, CTRL_V } from "./input";
 import { parseCliArgs, renderHelp } from "../src/studio/cli-args";
 import { parseStudioId } from "../src/studio/ids";
-import { parseGitRemote, refuseBadSegment, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
+import { parseGitRemote, parseRepoSlug, refuseBadSegment, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
 import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior, cmdJuniorStats } from "./junior";
 import { cmdAccounts, cmdAccountsSync, cmdAccountsHold, cmdAccountsClear } from "./accounts";
@@ -1457,6 +1457,28 @@ function reportRepo(cmd: string, detected: DetectedRepo): void {
   else console.error(`${cmd}: ${detected.reason} — using the fleet's default repo`);
 }
 
+export type RepoForCreate =
+  | { ok: true; slug: string }
+  | { ok: false; message: string };
+
+/** The studio-CREATING verbs' repo gate (issue #1229): a cwd that names no
+ *  repo and no `--repo` refuses instead of falling back to the fleet default.
+ *  `--repo` wins over detection (the same precedence `tabs`/`task new` use),
+ *  and a malformed `--repo` is a refusal, never a guess. */
+export function requireRepoForCreate(
+  cmd: string, repoFlag: string | undefined, detected: DetectedRepo,
+): RepoForCreate {
+  if (repoFlag !== undefined) {
+    const parsed = parseRepoSlug(repoFlag);
+    if (!parsed) return { ok: false, message: `${cmd}: bad --repo ${JSON.stringify(repoFlag)} — expected "owner/name"` };
+    return { ok: true, slug: `${parsed.owner}/${parsed.repo}` };
+  }
+  if (detected.slug === null) {
+    return { ok: false, message: `${cmd}: no git remote here; pass --repo owner/name` };
+  }
+  return { ok: true, slug: detected.slug };
+}
+
 // ---------------------------------------------------------------------------
 // fleet spawn / fleet provision — Fleet Spawn P3, Task 3 (R-P3-2/R-P3-3).
 // Both are one authenticated POST + a one-row table print, the same shape
@@ -1470,13 +1492,23 @@ function reportRepo(cmd: string, detected: DetectedRepo): void {
  */
 async function cmdSpawn(
   creds: Credentials, role: string, newInstance: boolean, leadType?: "claude" | "glm" | "kimi" | "deepseek",
+  repoFlag?: string,
 ): Promise<void> {
   // Dynamic repo selection (P4a): the detected repo rides along as `repo`.
-  // Omitted entirely when this folder names none — the Worker's own default
-  // is then the single source of that fallback, rather than this CLI
-  // guessing one and the Worker guessing a second.
+  // Issue #1229: unlike before, a cwd that names none and no `--repo` is a
+  // refusal, not a fallback — `requireRepoForCreate` exits before any fetch,
+  // so the Worker's own default is never the source of a guessed target.
   const detected = await detectRepo();
-  reportRepo("fleet spawn", detected);
+  const r = requireRepoForCreate("fleet spawn", repoFlag, detected);
+  if (!r.ok) {
+    console.error(r.message);
+    process.exit(1);
+  }
+  // The repo is always sent now: detection or --repo, never omitted — the
+  // omitted case (no repo anywhere) no longer reaches the body at all.
+  console.error(repoFlag === undefined
+    ? `fleet spawn: repo ${r.slug} (from git remote origin)`
+    : `fleet spawn: target repo ${r.slug} (--repo)`);
   const res = await fetch(new URL("/studio/spawn", creds.workerUrl), {
     method: "POST",
     headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
@@ -1495,7 +1527,7 @@ async function cmdSpawn(
     // Worker's own readLeadTypeRequest (src/studio/spawn.ts) is what maps
     // either to a glm-led studio with that pool model pinned.
     body: JSON.stringify({
-      role, ...(detected.slug ? { repo: detected.slug } : {}),
+      role, repo: r.slug,
       ...(newInstance ? { instance: "next" } : {}),
       ...(leadType === undefined ? {} : { leadType }),
     }),
@@ -1509,6 +1541,7 @@ async function cmdSpawn(
     console.error("fleet spawn: answered 200 but the body was not a studio row");
     process.exit(1);
   }
+  console.error(`fleet spawn: repo ${r.slug} → ${spawned.id}`);
   console.log(formatTable([spawned]));
   // Issue #305: stderr, like reportRepo — stdout stays the table.
   const spawnAccount = formatAccountResolution("fleet spawn", spawned);
@@ -1532,7 +1565,7 @@ async function cmdSpawn(
  */
 async function cmdProvision(
   creds: Credentials, id: string, freshSession = false, cancelFreshSession = false, discardSession = false,
-  forceMappedAccount = false,
+  forceMappedAccount = false, repoFlag?: string,
 ): Promise<void> {
   // Dynamic repo selection (P4a): unlike spawn, this command is ADDRESSED by
   // a studio id, and that id already names a repo segment. The detected repo
@@ -1543,13 +1576,29 @@ async function cmdProvision(
   // resolves a bodyless provision to whatever repo the studio is already
   // bound to.
   const detected = await detectRepo();
+  // Issue #1229: provision is ADDRESSED by id — the id's own repo segment IS
+  // the address — so a cwd that names no repo (and no --repo) stays a
+  // legitimate bodyless provision: the Worker resolves it to the studio's
+  // bound repo, never a guessed fallback. Only a malformed --repo is a
+  // refusal here, unlike spawn where the id is DERIVED from the cwd and a
+  // no-remote cwd means no target at all.
+  const r = requireRepoForCreate("fleet provision", repoFlag, detected);
+  if (repoFlag !== undefined && !r.ok) {
+    console.error(r.message);
+    process.exit(1);
+  }
   // Board #21: the id's repo half is the FOLDED segment (repo.ts's
   // repoIdSegment), so a dotted repo only ever agrees with its own id through
   // that same fold — comparing the raw short name would make every
   // `fleet provision` inside a dotted repo send no repo at all.
-  const detectedSegment = detected.slug === null ? null : repoIdSegment(detected.slug.split("/")[1]);
-  const matchesId = detectedSegment !== null && detectedSegment === parseStudioId(id)?.repo;
-  if (matchesId) reportRepo("fleet provision", detected);
+  const matchesId = r.ok
+    ? (() => { const seg = repoIdSegment(r.slug.split("/")[1]); return seg !== null && seg === parseStudioId(id)?.repo; })()
+    : false;
+  if (matchesId && r.ok) {
+    console.error(repoFlag === undefined
+      ? `fleet provision: repo ${r.slug} (from git remote origin)`
+      : `fleet provision: target repo ${r.slug} (--repo)`);
+  }
   // Issue #115: same query-string convention `?fresh-session=true` already
   // uses. cli-args.ts's own parsing already refuses both flags at once, so
   // at most one of freshSession/cancelFreshSession is ever true here.
@@ -1567,7 +1616,7 @@ async function cmdProvision(
   const res = await fetch(studioUrl(creds, id, provisionPath), {
     method: "POST",
     headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
-    body: JSON.stringify(matchesId ? { repo: detected.slug } : {}),
+    body: JSON.stringify(matchesId && r.ok ? { repo: r.slug } : {}),
   });
   if (!res.ok) {
     console.error(repairFailureLine("provision", res.status, await res.text()));
@@ -3385,9 +3434,9 @@ async function main(): Promise<void> {
     case "paste":
       return cmdPaste(creds, parsed.id);
     case "spawn":
-      return cmdSpawn(creds, parsed.role, parsed.newInstance, parsed.leadType);
+      return cmdSpawn(creds, parsed.role, parsed.newInstance, parsed.leadType, parsed.repo);
     case "provision":
-      return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession, parsed.discardSession, parsed.forceMappedAccount === true);
+      return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession, parsed.discardSession, parsed.forceMappedAccount === true, parsed.repo);
     case "recycle":
       return cmdRecycle(creds, parsed.id, parsed.discardUnsynced, parsed.freshSession, parsed.forceMappedAccount === true);
     case "destroy":
