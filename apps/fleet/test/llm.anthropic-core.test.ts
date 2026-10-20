@@ -16,11 +16,13 @@ import {
 } from "../src/llm/anthropic-route";
 import { GLM_LEAD_MODEL, GLM_MIN_MAX_TOKENS } from "../src/llm/translate";
 import { OSS_LEAD_CONTINUE_RULE } from "../src/llm/lead-rule";
+import { POOL, type PoolModel } from "../src/llm/models";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { fakeCtx } from "./helpers/fake-ctx";
 import { lockedUsageLogDb } from "./helpers/d1-locked";
+import { getNoFinishReasonFailures } from "../src/llm/model-store";
 
 const ME = "acme-org--web-studio";
 // Maestro review round 1, MAJOR 2: every row here carries `leadType: "glm"`
@@ -60,6 +62,26 @@ async function setup(
 }
 
 const good = { model: "claude-opus-4-5", max_tokens: 100, messages: [{ role: "user", content: "hi" }] };
+
+/** Issue #1228: a smaller variant of `setup()` above — takes a caller-built
+ *  `ai` stub directly (so a test can assert on its own `run` mock's call
+ *  sequence) and forwards the pool/retryDeps test-injection seams
+ *  `handleFleetAnthropicMessages`'s own 5th/6th params expose. Mirrors
+ *  `llm.anthropic-stream.test.ts`'s own `callRoute` helper — needed here
+ *  because the no_finish_reason retry/failover/non-retriable tests below are
+ *  the first in THIS file to need a fixture pool or injected retryDeps. */
+async function callRoute(opts: {
+  ai: { run: ReturnType<typeof vi.fn> };
+  envOverrides?: Partial<Env>;
+  pool?: readonly PoolModel[];
+  body?: unknown;
+  retryDeps?: { sleep?: (ms: number) => Promise<void>; random?: () => number };
+}) {
+  const token = mintSpawnToken();
+  const rows = async () => [row(ME, await hashSpawnToken(token))];
+  const e = { ...env, FLEET_JUNIOR: "on", AI: opts.ai, ...FAST_RETRY, ...(opts.envOverrides ?? {}) } as unknown as Env;
+  return handleFleetAnthropicMessages(req({ token, body: opts.body }), e, ctx, rows, opts.pool, opts.retryDeps);
+}
 
 function req(opts: { token?: string | null; apiKey?: string; body?: unknown; path?: string; method?: string }) {
   const headers: Record<string, string> = {};
@@ -362,5 +384,285 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(r.status).toBe(529);
     expect(await r.json()).toEqual({ type: "error", error: { type: "overloaded_error", message: "AiError: capacity exceeded" } });
+  });
+});
+
+// Issue #1228: the non-streaming path's own `consume` callback
+// (`runModelPoolOverflow`, anthropic-route.ts) is where the real retry/
+// failover/non-retriable logic lives — the streaming path can't retry once
+// the Response has left, so it only fingerprints and counts. These tests
+// exercise that callback end to end, through the real HTTP handler, the way
+// `llm.anthropic-stream.test.ts` already covers the streaming half. The
+// route always requests `stream: true` from the upstream internally (Issue
+// #1099, finding 1), even for a client's non-streaming request, so every
+// `env.AI.run` fixture here must resolve to a `ReadableStream<Uint8Array>` of
+// raw OpenAI SSE bytes — a plain object resolves to `{ kind: "plain" }` in
+// the consume callback and skips all no_finish_reason logic entirely.
+describe("handleFleetAnthropicMessages — no_finish_reason retry/failover/non-retriable (#1228)", () => {
+  // Same fixture shape as llm.anthropic-stream.test.ts's own `partial()`: a
+  // chunk with content but no `usage` field, so `state.outputTokens` stays
+  // 0 — the exact "out=0 no_finish_reason" condition the consume callback
+  // retries/fails over on — and the stream ends without ever setting a
+  // `finish_reason`. A fresh ReadableStream per call: a stream can only be
+  // read once, and each test's `env.AI.run` mock is called more than once.
+  const noFinishStream = () => new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`));
+      controller.close();
+    },
+  });
+  // A normal, complete upstream stream: one chunk carrying both the text and
+  // the `finish_reason`/`usage` the fixture above never sends.
+  const goodStream = () => new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+        choices: [{ delta: { content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 3, completion_tokens: 2 },
+      })}\n\n`));
+      controller.close();
+    },
+  });
+  const MARKER = "TOP-SECRET-PROMPT-TEXT-1228";
+
+  it("an out=0 no_finish_reason retries the same model once, then succeeds", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      let calls = 0;
+      const run = vi.fn(async () => { calls++; return calls === 1 ? noFinishStream() : goodStream(); });
+      const body = { ...good, messages: [{ role: "user", content: MARKER }] };
+      const r = await callRoute({ ai: { run }, body });
+      expect(r.status).toBe(200);
+      expect(run).toHaveBeenCalledTimes(2);
+      const replyBody = await r.json();
+      expect(replyBody).toMatchObject({
+        type: "message", role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn",
+      });
+
+      await ctx.drain();
+      const rowsLogged = await usageRows();
+      expect(rowsLogged).toHaveLength(1);
+      // Issue #335's `attempts` accumulates every env.AI.run call this one
+      // request cost — the initial try plus the one same-model retry.
+      expect(rowsLogged[0]).toMatchObject({ ok: 1, error: null, inputTokens: 3, outputTokens: 2, attempts: 2 });
+
+      // The intermediate failure (first attempt) still gets its own
+      // fingerprint line, even though the retry recovered the turn — same
+      // "every no_finish_reason, including one that recovers" discipline
+      // the route's own doc comment on this call site describes.
+      const lines = spy.mock.calls.map((c) => c.map(String).join(" "));
+      const fingerprintLines = lines.filter((l) => l.includes("[glm-lead] no_finish_reason") && l.includes("fingerprint="));
+      expect(fingerprintLines).toHaveLength(1);
+      expect(fingerprintLines[0]).toContain("bodyBytes=");
+      expect(fingerprintLines[0]).toContain("tools=");
+      expect(fingerprintLines[0]).toContain("lastToolResult=");
+      expect(fingerprintLines[0]).toContain("lastChunks=");
+      expect(fingerprintLines[0]).toContain("usageIn=");
+      expect(fingerprintLines[0]).toContain("usageOut=");
+      // Never a bare "call failed" line either — the request ended ok=1.
+      expect(lines.some((l) => l.includes("call failed"))).toBe(false);
+      for (const l of lines) expect(l).not.toContain(MARKER);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("same-model retry fails again, the pool fails over to the next model, which succeeds", async () => {
+    const kimi: PoolModel = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi];
+    const seen: string[] = [];
+    let calls = 0;
+    // The first model tried gets BOTH its calls (initial + same-model retry)
+    // answered with the no-finish fixture; the model it fails over to gets
+    // the good stream on its own first call.
+    const run = vi.fn(async (model: string) => {
+      calls++;
+      seen.push(model);
+      return calls <= 2 ? noFinishStream() : goodStream();
+    });
+    const r = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(r.status).toBe(200);
+    expect(seen).toHaveLength(3);
+    // Same model, retried once...
+    expect(seen[0]).toBe(seen[1]);
+    // ...then failed over to the OTHER pool model.
+    expect(seen[2]).not.toBe(seen[0]);
+
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    // Global Constraint (#717): logUsage records the model actually used —
+    // the one that recovered the turn, never the one that exhausted its
+    // own retry first.
+    expect(rowsLogged[0]).toMatchObject({ ok: 1, model: seen[2] });
+    expect(rowsLogged[0].model).not.toBe(seen[0]);
+  });
+
+  // Finding 1 (fresh-context review of #1228, PR #1235, BLOCKING): the
+  // 3-strike cap used to increment ONCE per client request, at the very end
+  // of the whole `runModelPoolOverflow` walk, while that walk itself burns
+  // up to `order.length * 2` real `env.AI.run` calls per request (every
+  // candidate's initial try plus its same-model retry). Every upstream out=0
+  // no_finish_reason occurrence now counts toward the cap as it happens, so
+  // with the default single-model pool here the SECOND client request
+  // already trips the cap on its very first attempt (2 occurrences from
+  // request 1, a 3rd occurrence 1 call into request 2) — never a third
+  // identical ROUND TRIP, and the total env.AI.run calls across the whole
+  // scenario stays at 3, not the pre-fix worst case.
+  it("every pool model exhausts with out=0 no_finish_reason: first failure is retriable (529), second identical failure is non-retriable (400) — total upstream calls stay bounded", async () => {
+    // Issue #1228 (3): the SAME identical-input body sent repeatedly —
+    // computeRequestFingerprint hashes the raw pre-parse body string, so
+    // repeated calls with the same JS object serialize to byte-identical raw
+    // bodies, and all of them land under the same fingerprint/studio key.
+    const body = { ...good, messages: [{ role: "user", content: "same poison body every single time" }] };
+    const run = vi.fn(async () => noFinishStream());
+
+    const first = await callRoute({ ai: { run }, body });
+    expect(first.status).toBe(529);
+    expect(await first.json()).toMatchObject({
+      type: "error", error: { type: "overloaded_error", message: "upstream stream ended without a finish reason; retry the turn" },
+    });
+    // The single-model pool's initial try plus its one same-model retry —
+    // 2 real upstream completions for this first request.
+    expect(run.mock.calls.length).toBe(2);
+
+    const second = await callRoute({ ai: { run }, body });
+    expect(second.status).toBe(400);
+    expect(await second.json()).toEqual({
+      type: "error",
+      error: { type: "invalid_request_error", message: "upstream repeatedly failed to complete this request; compact context and retry" },
+    });
+    // The cap trips on the SECOND request's very first attempt (the 3rd
+    // occurrence overall) — the walk stops dead right there, never spending
+    // a same-model retry on a request already proven poisonous.
+    expect(run.mock.calls.length).toBe(3);
+
+    // Issue #1228: the entry gate at the top of the handler refuses a 3rd
+    // identical request OUTRIGHT — the literal "client stops its 12x retry
+    // loop" proof — before spending any more AI budget on a request already
+    // proven to fail 3 times.
+    const callsBeforeThird = run.mock.calls.length;
+    const third = await callRoute({ ai: { run }, body });
+    expect(third.status).toBe(400);
+    expect(await third.json()).toEqual({
+      type: "error",
+      error: { type: "invalid_request_error", message: "upstream repeatedly failed to complete this request; compact context and retry" },
+    });
+    expect(run.mock.calls.length).toBe(callsBeforeThird);
+
+    const fourth = await callRoute({ ai: { run }, body });
+    expect(fourth.status).toBe(400);
+    // Burn bound proof: 3 real upstream completions total for this entire
+    // scenario (4 client requests), never the pre-fix worst case of up to
+    // `order.length * 2` calls PER request before the cap was even checked.
+    expect(run.mock.calls.length).toBe(3);
+  });
+
+  // Finding 1's own TDD proof, using a 3-model pool (the shape the bug
+  // report itself used): every upstream occurrence counts toward the cap as
+  // it happens, so the cap can trip MID-WALK, inside a single client
+  // request, long before every candidate has even been tried.
+  it("a 3-model pool trips the 3-strike cap mid-walk on a SINGLE request, not after 3 client round trips (burn bound)", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const run = vi.fn(async () => noFinishStream());
+    const body = { ...good, messages: [{ role: "user", content: "same poison body, 3-model pool" }] };
+
+    const first = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body });
+    // Model 0's initial try + its same-model retry + model 1's initial try
+    // are 3 real occurrences, all within this ONE request — the cap trips
+    // right there, and the walk stops instead of continuing on to model 1's
+    // own retry or model 2 at all.
+    expect(first.status).toBe(400);
+    expect(run.mock.calls.length).toBe(3);
+
+    // A second identical request is refused OUTRIGHT at the entry gate —
+    // zero further env.AI.run calls. Total upstream completions for this
+    // whole scenario: 3 — not the pre-fix worst case of up to
+    // 3 models x 2 attempts x 3 round trips = 18.
+    const second = await callRoute({ ai: { run }, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, body });
+    expect(second.status).toBe(400);
+    expect(run.mock.calls.length).toBe(3);
+  });
+
+  // Finding 4 (fresh-context review of #1228, PR #1235, BLOCKING): a D1
+  // failure while recording the no_finish_reason streak (network blip,
+  // binding down) used to propagate all the way up through
+  // `recordAndRespondNoFinish` as an unhandled rejection — a 500 WORSE than
+  // the 529 a transient no_finish_reason would otherwise get. This DB stub
+  // throws on the exact statement `recordNoFinishReasonFailure` runs
+  // (unique `'1|' || ?` literal) and forwards everything else to the real
+  // D1, so only the poison-counting write is affected.
+  it("a D1 failure while recording the poison streak falls back to a safe 529, never crashes the request", async () => {
+    const throwingDb = {
+      prepare: (sql: string) => {
+        if (sql.includes("'1|' || ?")) throw new Error("D1_ERROR: network blip");
+        return env.DB.prepare(sql);
+      },
+    } as unknown as Env["DB"];
+    const run = vi.fn(async () => noFinishStream());
+    const body = { ...good, messages: [{ role: "user", content: "d1 down while counting poison" }] };
+
+    const r = await callRoute({ ai: { run }, envOverrides: { DB: throwingDb }, body });
+    expect(r.status).toBe(529);
+    expect(await r.json()).toEqual({
+      type: "error",
+      error: { type: "overloaded_error", message: "upstream stream ended without a finish reason; retry the turn" },
+    });
+  });
+
+  // Finding 1 (fresh-context review of #1228, PR #1235): the bottom
+  // non-streaming failure branch used to key ONLY on `result.failure ===
+  // "no_finish_reason"`, with no `outputTokens === 0` check — unlike the
+  // retry walk's own gate a few lines up in runModelPoolOverflow, which
+  // only treats an out=0 no_finish_reason as retriable/poison-countable.
+  // The incident's own data says poison runs die after 0-1.6k out tokens,
+  // not always 0, so a single-model pool whose no_finish_reason stream DID
+  // carry output tokens used to be wrongly fingerprinted/counted toward the
+  // SAME 3-strike poison streak meant only for the out=0 shape — risking a
+  // false-positive permanent 400 on an unrelated flaky request.
+  it("a no_finish_reason WITH output tokens is not poison-counted — falls through to the generic error path", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // A chunk that carries real `usage.completion_tokens` (so
+      // state.outputTokens > 0) but never a finish_reason — the "died with
+      // SOME output" shape, as opposed to noFinishStream()'s out=0 shape.
+      const noFinishWithOutputStream = () => new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+            choices: [{ delta: { content: "partial but priced" } }],
+            usage: { prompt_tokens: 3, completion_tokens: 5 },
+          })}\n\n`));
+          controller.close();
+        },
+      });
+      const run = vi.fn(async () => noFinishWithOutputStream());
+      const body = { ...good, messages: [{ role: "user", content: "flaky but not poison" }] };
+      const r = await callRoute({ ai: { run }, body });
+
+      // NOT the poison-streak shapes (529 overloaded_error / 400
+      // invalid_request_error) — it falls through to classifyAiError's own
+      // generic mapping for the translator's own error-frame message.
+      expect(r.status).not.toBe(529);
+      expect(r.status).not.toBe(400);
+      expect(r.status).toBe(500);
+      expect(await r.json()).toEqual({
+        type: "error",
+        error: { type: "api_error", message: "upstream stream ended without a finish reason" },
+      });
+
+      // Only ONE console.error fingerprint line for this single frame (the
+      // overflow walk's own consume callback) — the bottom branch must not
+      // log it a second time now that it falls through instead.
+      const lines = spy.mock.calls.map((c) => c.map(String).join(" "));
+      const fingerprintLines = lines.filter((l) => l.includes("[glm-lead] no_finish_reason") && l.includes("fingerprint="));
+      expect(fingerprintLines).toHaveLength(1);
+
+      // Never counted toward the 3-strike poison streak either.
+      const raw = JSON.stringify(body);
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+      const fingerprintHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+      expect(await getNoFinishReasonFailures(env.DB, ME, fingerprintHash)).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

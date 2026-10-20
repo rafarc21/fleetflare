@@ -20,7 +20,7 @@ import {
 import { aggregateLeadUsage } from "../src/junior/usage";
 import { GLM_LEAD_MODEL } from "../src/llm/translate";
 import { POOL, type PoolModel } from "../src/llm/models";
-import { setAssignedModel } from "../src/llm/model-store";
+import { setAssignedModel, getNoFinishReasonFailures, recordNoFinishReasonFailure } from "../src/llm/model-store";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -137,6 +137,33 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     ]);
     expect(text).toContain('"text":"hi"');
     expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, expect.objectContaining({ stream: true, stream_options: { include_usage: true } }));
+  });
+
+  // #1228 fresh-context review round 2, Finding 2: the defensive branch for
+  // a provider that ignored `stream: true` and returned a plain object
+  // anyway is a SUCCESS path, same as the real streaming success just
+  // above — it must clear the poison streak too, not just log usage.
+  it("the 'provider ignored stream:true' defensive fallback success path clears the poison streak", async () => {
+    const body = { ...good, stream: true, messages: [{ role: "user", content: "defensive fallback clears streak" }] };
+    const raw = JSON.stringify(body);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+    const fingerprintHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+    // Seed a live (but sub-3) streak for this exact fingerprint so clearing
+    // it is actually observable.
+    await recordNoFinishReasonFailure(env.DB, ME, fingerprintHash);
+
+    const run = vi.fn(async () => ({
+      choices: [{ message: { role: "assistant", content: "plain object despite stream:true" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 3, completion_tokens: 2 },
+    }));
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    await ctx.drain();
+    expect(await getNoFinishReasonFailures(env.DB, ME, fingerprintHash)).toBe(0);
   });
 
   // Maestro review round 1, MAJOR 3: the exact bug — a mid-stream upstream
@@ -684,6 +711,91 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
     expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "no_finish_reason" });
   });
 
+  // #1228 fresh-context review round 2, Finding 1: mirrors
+  // llm.anthropic-core.test.ts's "a no_finish_reason WITH output tokens is
+  // not poison-counted" test (round 1's fix for the non-streaming branches)
+  // — same scenario, but through the STREAMING path's own pump result
+  // handler, the third call site that hand-checked
+  // `result.failure === "no_finish_reason"` with no `outputTokens === 0`
+  // gate and was missed when round 1 added it to the other two. Sending the
+  // identical body 3+ times must never trip the 3-strike poison streak —
+  // the model answered with SOME output before the stream cut, a normal
+  // transient failure, not the out=0 poison shape.
+  it("a no_finish_reason WITH output tokens (streaming) is not poison-counted — a 4th identical send still reaches env.AI.run", async () => {
+    const noFinishWithOutputStream = () => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+          choices: [{ delta: { content: "partial but priced" } }],
+          usage: { prompt_tokens: 3, completion_tokens: 5 },
+        })}\n\n`));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => noFinishWithOutputStream());
+    const body = { ...good, stream: true, messages: [{ role: "user", content: "flaky but not poison, streaming" }] };
+
+    for (let i = 0; i < 3; i++) {
+      const r = await callRoute({ ai: { run }, body });
+      expect(r.status).toBe(200);
+      await r.text();
+      await ctx.drain();
+    }
+
+    // Never counted toward the 3-strike poison streak.
+    const raw = JSON.stringify(body);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+    const fingerprintHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+    expect(await getNoFinishReasonFailures(env.DB, ME, fingerprintHash)).toBe(0);
+
+    // The entry gate at the top of the handler only refuses once that
+    // counter hits 3 — never having moved off 0, a 4th identical send still
+    // reaches env.AI.run instead of being refused outright.
+    const callsBeforeFourth = run.mock.calls.length;
+    const fourth = await callRoute({ ai: { run }, body });
+    expect(fourth.status).toBe(200);
+    await fourth.text();
+    await ctx.drain();
+    expect(run.mock.calls.length).toBe(callsBeforeFourth + 1);
+  });
+
+  // Finding 3 (fresh-context review of #1228, PR #1235): mirrors
+  // llm.anthropic-core.test.ts's non-streaming "every pool model exhausts
+  // with out=0 no_finish_reason" test through the STREAMING path. Streaming
+  // has no retry/failover at all (the Response has already left by the
+  // time the pump result is known), so each identical send costs exactly 1
+  // upstream call; the entry gate still refuses the 4th outright once the
+  // 3rd send's background counting has landed.
+  it("3 streaming out=0 no_finish_reason failures (identical body) make the entry gate refuse a 4th identical request", async () => {
+    const noFinishStream = () => new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(partial()); controller.close(); },
+    });
+    const run = vi.fn(async () => noFinishStream());
+    const body = { ...good, stream: true, messages: [{ role: "user", content: "same poison body, streaming" }] };
+
+    for (let i = 0; i < 3; i++) {
+      const r = await callRoute({ ai: { run }, body });
+      expect(r.status).toBe(200);
+      await r.text();
+      await ctx.drain();
+    }
+
+    const raw = JSON.stringify(body);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+    const fingerprintHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+    expect(await getNoFinishReasonFailures(env.DB, ME, fingerprintHash)).toBe(3);
+
+    // The entry gate at the top of the handler refuses a 4th identical
+    // request OUTRIGHT — env.AI.run is never called for it.
+    const callsBeforeFourth = run.mock.calls.length;
+    const fourth = await callRoute({ ai: { run }, body });
+    expect(fourth.status).toBe(400);
+    expect(await fourth.json()).toEqual({
+      type: "error",
+      error: { type: "invalid_request_error", message: "upstream repeatedly failed to complete this request; compact context and retry" },
+    });
+    expect(run.mock.calls.length).toBe(callsBeforeFourth);
+  });
+
   it("the client dropping the stream records client_abort and cancels the upstream", async () => {
     let cancelled = false;
     const upstream = new ReadableStream<Uint8Array>({
@@ -731,13 +843,97 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
       const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
       await r.text();
       await ctx.drain();
-      expect(spy).toHaveBeenCalledTimes(1);
-      const line = spy.mock.calls[0].map(String).join(" ");
+      expect(spy).toHaveBeenCalledTimes(2);
+      const lines = spy.mock.calls.map((c) => c.map(String).join(" "));
       // Issue #304: the reason is now failureClass()'s own output — class/
       // status only. `no_finish_reason` carries no upstream text, so its
       // redacted form is the string itself, unchanged.
-      expect(line).toBe(`[glm-lead] call failed studio=${ME} stream=true in=0 out=0 reason=no_finish_reason`);
-      expect(line).not.toContain("TOP-SECRET-PROMPT-TEXT");
+      expect(lines[0]).toBe(`[glm-lead] call failed studio=${ME} stream=true in=0 out=0 reason=no_finish_reason`);
+      // Issue #1228: a second line carries the request fingerprint — hashes
+      // and sizes only, never the prompt text itself.
+      expect(lines[1]).toContain("[glm-lead] no_finish_reason");
+      expect(lines[1]).toContain("fingerprint=");
+      expect(lines[1]).toContain("bodyBytes=");
+      expect(lines[1]).toContain("tools=");
+      expect(lines[1]).toContain("lastToolResult=");
+      expect(lines[1]).toContain("lastChunks=");
+      expect(lines[1]).toContain("usageIn=");
+      expect(lines[1]).toContain("usageOut=");
+      expect(lines[1]).not.toContain("TOP-SECRET-PROMPT-TEXT");
+      expect(lines[0]).not.toContain("TOP-SECRET-PROMPT-TEXT");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Finding 3 (fresh-context review of #1228, PR #1235): computeRequestFingerprint
+  // has a DEDICATED branch for `b?.type === "tool_result"` messages that
+  // flattens and hashes `b.content` separately from the whole-body hash —
+  // but no existing test ever sent a `tool_result` block carrying a secret
+  // marker; they only put the marker in a plain `{role:"user",
+  // content: MARKER}` message, which never enters that branch at all. This
+  // proves the tool_result-specific hash branch is leak-proof too, not just
+  // the whole-body hash.
+  it("a secret marker inside a tool_result block never reaches any console.error call (Finding 3)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const upstream = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(partial()); controller.close(); },
+      });
+      const { token, rows, e } = await streamSetup(upstream);
+      const MARKER = "TOP-SECRET-TOOL-RESULT-TEXT-1228";
+      const body = {
+        ...good, stream: true,
+        messages: [
+          { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "nyc" } }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: MARKER }] },
+        ],
+      };
+      const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+      await r.text();
+      await ctx.drain();
+      expect(spy.mock.calls.length).toBeGreaterThan(0);
+      const lines = spy.mock.calls.map((c) => c.map(String).join(" "));
+      const fingerprintLine = lines.find((l) => l.includes("[glm-lead] no_finish_reason") && l.includes("fingerprint="));
+      expect(fingerprintLine).toBeDefined();
+      // The tool_result-specific hash branch actually ran (lastToolResult is
+      // not the empty "0b:-" shape computeRequestFingerprint reports when no
+      // tool_result was present).
+      expect(fingerprintLine).not.toContain("lastToolResult=0b:-");
+      for (const l of lines) expect(l).not.toContain(MARKER);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Finding 4 (fresh-context review of #1228, PR #1235): `bodyBytes: raw.length`
+  // counts UTF-16 code units, not bytes -- every sibling field in the same
+  // fingerprint object (lastToolResultBytes, the lastChunks hashing) already
+  // uses `new TextEncoder().encode(...).byteLength`. A request body with a
+  // multi-byte UTF-8 character (more bytes than JS string .length) proves
+  // bodyBytes now reports the real byte count.
+  it("bodyBytes in the fingerprint line is the real UTF-8 byte count, not the UTF-16 character count (Finding 4)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const upstream = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(partial()); controller.close(); },
+      });
+      const { token, rows, e } = await streamSetup(upstream);
+      // "é" is 1 UTF-16 code unit but 2 UTF-8 bytes -- a body whose real
+      // byte count genuinely differs from its JS string .length.
+      const body = { ...good, stream: true, messages: [{ role: "user", content: "café résumé" }] };
+      const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+      await r.text();
+      await ctx.drain();
+      const raw = JSON.stringify(body);
+      const realByteCount = new TextEncoder().encode(raw).byteLength;
+      // Sanity: this body genuinely has multi-byte characters, so a
+      // bodyBytes==raw.length bug is actually observable here.
+      expect(realByteCount).not.toBe(raw.length);
+      const lines = spy.mock.calls.map((c) => c.map(String).join(" "));
+      const fingerprintLine = lines.find((l) => l.includes("[glm-lead] no_finish_reason") && l.includes("fingerprint="));
+      expect(fingerprintLine).toBeDefined();
+      expect(fingerprintLine).toContain(`bodyBytes=${realByteCount}`);
     } finally {
       spy.mockRestore();
     }

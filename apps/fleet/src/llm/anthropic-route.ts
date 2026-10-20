@@ -32,7 +32,7 @@ import {
 } from "./translate";
 import { isSmallModelName, pickModels } from "./router";
 import { withOssLeadContinueRule } from "./lead-rule";
-import { getAssignedModel, getModelStates, getRunawayAvoid, markRunawayAvoid } from "./model-store";
+import { getAssignedModel, getModelStates, getRunawayAvoid, markRunawayAvoid, recordNoFinishReasonFailure, clearNoFinishReasonFailures, getNoFinishReasonFailures } from "./model-store";
 import { POOL, modelById, type PoolModel } from "./models";
 
 export const ANTHROPIC_MESSAGES_PATH = "/fleet/llm/anthropic/v1/messages";
@@ -134,7 +134,25 @@ function extractPresentedToken(req: Request): string | null {
  *  Issue #302: `failure` names WHICH abnormal end it was (see
  *  `failureReason`), so the usage row and the console line can tell an idle
  *  stall from an upstream error from a client that hung up. */
-interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean; failure?: string }
+interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean; failure?: string; /** #1228: the last 2 raw upstream `data:` payloads (model OUTPUT, never prompt). */ lastChunks?: string[] }
+
+/** #1228 fresh-context review round 2, Finding 1/3: the ONE poison shape
+ *  every call site that touches the no_finish_reason streak must check the
+ *  SAME way — a `no_finish_reason` that produced ZERO output tokens. The
+ *  incident's own data says poison runs die after 0-1.6k out tokens, not
+ *  always 0, so a `no_finish_reason` that DID produce some output is a
+ *  normal, transient failure (the model answered, then the stream cut) —
+ *  never fingerprinted toward the 3-strike streak, and never counted by
+ *  `recordNoFinishReasonFailure`. This used to be a hand-written
+ *  `fr.failure === "no_finish_reason" && fr.outputTokens === 0` copied at
+ *  three separate call sites (`attemptOnce`, the non-streaming collected-
+ *  failure branch, and the streaming pump's own result handler) — the third
+ *  copy was missed when round 1 of this review added the `outputTokens`
+ *  gate to the other two, which is exactly the kind of drift one shared
+ *  predicate closes off for good. */
+function isPoisonNoFinish(r: { failure?: string; outputTokens: number }): boolean {
+  return r.failure === "no_finish_reason" && r.outputTokens === 0;
+}
 
 /** Issue #302: how long `pumpAnthropicStream` waits on one `reader.read()`
  *  before giving up on the upstream. A live GLM-lead run stalled ~8 minutes
@@ -378,6 +396,107 @@ export function failureClass(failure: string): string {
   return colon === -1 ? failure : failure.slice(0, colon);
 }
 
+// ---------------------------------------------------------------------------
+// Issue #1228: request fingerprinting for no_finish_reason diagnosis
+// ---------------------------------------------------------------------------
+
+/** What `computeRequestFingerprint` resolves to — enough to identify a poison
+ *  request and reason about its shape WITHOUT ever logging raw prompt bytes. */
+interface RequestFingerprint {
+  /** SHA-256 of the whole raw body (the durable "identical input" signal). */
+  fingerprintHash: string;
+  bodyBytes: number;
+  toolCount: number;
+  /** SHA-256 + byte length of the LAST tool_result's flattened content, or
+   *  `""`/`0` when the request carried none. */
+  lastToolResultHash: string;
+  lastToolResultBytes: number;
+}
+
+/** Issue #1228: a poison request recurs even after /clear (fresh message
+ *  history), so the poison lives in system/tools/request shape — the whole
+ *  raw body is the fingerprint, and the last tool_result + tool count say
+ *  where. Everything here is hashes or sizes; no raw content reaches a log. */
+async function computeRequestFingerprint(raw: string, body: Json): Promise<RequestFingerprint> {
+  const toolCount = Array.isArray(body?.tools) ? body.tools.length : 0;
+  let lastToolResultHash = "";
+  let lastToolResultBytes = 0;
+  for (const m of Array.isArray(body?.messages) ? body.messages : []) {
+    if (!Array.isArray(m?.content)) continue;
+    for (const b of m.content) {
+      if (b?.type === "tool_result") {
+        // Same flatten as translate.ts's flattenTextLike (string | [{text}]).
+        const content = typeof b.content === "string"
+          ? b.content
+          : Array.isArray(b.content)
+            ? b.content.filter((x: Json) => x && x.type === "text" && typeof x.text === "string").map((x: Json) => x.text).join("\n\n")
+            : "";
+        lastToolResultBytes = new TextEncoder().encode(content).byteLength;
+        lastToolResultHash = await sha256Hex(content);
+      }
+    }
+  }
+  // Finding 4 (fresh-context review of #1228, PR #1235): `raw.length` counts
+  // UTF-16 code units, not bytes -- every sibling field here already uses
+  // TextEncoder for a real byte count; this one must too.
+  const bodyBytes = new TextEncoder().encode(raw).byteLength;
+  return { fingerprintHash: await sha256Hex(raw), bodyBytes, toolCount, lastToolResultHash, lastToolResultBytes };
+}
+
+/** Issue #1228: the one console line a no_finish_reason failure writes, in
+ *  addition to `logUsage`'s own line. Carries ONLY hashes and sizes — never
+ *  prompt text. `lastChunks` is model OUTPUT (already sent toward the client),
+ *  logged as SHA-256 hashes + byte sizes anyway for consistency. */
+async function logNoFinishReasonFingerprint(
+  studioId: string, fingerprint: RequestFingerprint, lastChunks: string[] | undefined,
+  inputTokens: number, outputTokens: number,
+): Promise<void> {
+  const chunkHashes: string[] = [];
+  for (const c of lastChunks ?? []) chunkHashes.push(`${new TextEncoder().encode(c).byteLength}b:${await sha256Hex(c)}`);
+  console.error(
+    `[glm-lead] no_finish_reason studio=${studioId} fingerprint=${fingerprint.fingerprintHash} bodyBytes=${fingerprint.bodyBytes} tools=${fingerprint.toolCount} lastToolResult=${fingerprint.lastToolResultBytes}b:${fingerprint.lastToolResultHash || "-"} lastChunks=${chunkHashes.length > 0 ? chunkHashes.join(",") : "-"} usageIn=${inputTokens} usageOut=${outputTokens}`,
+  );
+}
+
+/** Code review (Standards axis, #1228 fresh-context review, Finding 6):
+ *  "record this out=0 no_finish_reason failure, check the 3-strike poison
+ *  threshold, and answer with the matching body" — the `noFinishExhausted`
+ *  branch (every pool candidate exhausted) and the final collected-failure
+ *  branch (no next model to fail over to at all) in
+ *  `handleFleetAnthropicMessages` used to each carry their own identical
+ *  copy of this. One shared helper means Finding 1's bug class (the
+ *  `outputTokens === 0` gate) only has one place left it could recur on.
+ *  Returns the streak count too — the `noFinishExhausted` call site's own
+ *  usage row still wants it in its failure message. */
+async function recordAndRespondNoFinish(
+  db: D1Database, studioId: string, fingerprintHash: string,
+): Promise<{ n: number; response: Response }> {
+  let n: number;
+  try {
+    n = await recordNoFinishReasonFailure(db, studioId, fingerprintHash);
+  } catch (e) {
+    // Finding 4 (fresh-context review of #1228, PR #1235, BLOCKING): a D1
+    // failure here (network blip, binding down, or the model-store's own
+    // "no row" guard firing) used to propagate all the way up through this
+    // function's caller as an unhandled rejection — a 500 WORSE than the
+    // 529 a transient no_finish_reason would otherwise get. Falling back to
+    // the safe retriable response is never worse than that 529, never a
+    // crash, and never silently escalates to the non-retriable 400 either
+    // — an `n` read off a failed D1 call can't be trusted enough to compare
+    // against the 3-strike threshold.
+    console.error("[glm-lead] recordNoFinishReasonFailure failed", e instanceof Error ? e.message : String(e));
+    return { n: 0, response: json(anthropicErrorBody("overloaded_error", "upstream stream ended without a finish reason; retry the turn"), 529) };
+  }
+  // Issue #1228 (3): after 3 identical-input failures the request is proven
+  // poisonous — stop the client's 12x retry loop with a non-retriable 400.
+  // Before that threshold it is a normal retriable overload (529), the
+  // shape that moves the client's turn on.
+  const response = n >= 3
+    ? json(anthropicErrorBody("invalid_request_error", "upstream repeatedly failed to complete this request; compact context and retry"), 400)
+    : json(anthropicErrorBody("overloaded_error", "upstream stream ended without a finish reason; retry the turn"), 529);
+  return { n, response };
+}
+
 /** Builds the Anthropic SSE byte stream for one request: the prelude,
  *  then every chunk the upstream OpenAI-compatible stream yields, translated
  *  through translate.ts's pure state machine, then the closing frames. Kept
@@ -469,6 +588,11 @@ export async function pumpAnthropicStream(
   const state = createStreamState({ thinkTags: poolModel?.thinkTags === true });
   const reader = upstream.getReader();
   const cancelUpstream = () => { reader.cancel().catch(() => {}); };
+  // Issue #1228: the last 2 raw upstream `data:` payloads, kept so a
+  // no_finish_reason fingerprint can say WHAT the upstream last emitted. These
+  // are model output only — never the request body — so they are safe to log
+  // (as hashes, not raw bytes).
+  const lastChunks: string[] = [];
   // Issue #1099 (review, finding 5): an aborted runaway never gets the upstream
   // usage chunk, so its output count is the scan's own estimate (see
   // runawayTokenEstimate) rather than the 0 the stream would otherwise report.
@@ -477,7 +601,7 @@ export async function pumpAnthropicStream(
     outputTokens: ok ? Math.min(state.outputTokens, requestedMaxTokens)
       : failure?.startsWith("runaway:") ? Math.min(Math.max(state.outputTokens, runawayTokenEstimate(state)), requestedMaxTokens)
       : state.outputTokens,
-    ok, ...(failure === undefined ? {} : { failure }),
+    ok, ...(failure === undefined ? {} : { failure }), lastChunks: [...lastChunks],
   });
 
   try {
@@ -533,6 +657,8 @@ export async function pumpAnthropicStream(
         for (const line of frame.split("\n")) {
           const parsed = parseSseDataLine(line);
           if (parsed === "DONE" || parsed === null) continue;
+          lastChunks.push(line.slice(5).trim());
+          if (lastChunks.length > 2) lastChunks.shift();
           // Board issue #284 (b): an explicit upstream error chunk — checked
           // BEFORE applyOpenAIStreamChunk, which would otherwise see no
           // `choices[0]` on a chunk shaped like this and silently no-op.
@@ -798,10 +924,74 @@ const FAILURE_REASON_CAP = 300;
  *  model's own upstream value, or (every candidate exhausted) the last
  *  model tried and the message it failed with. Either way `usedModel`/
  *  `attempts` are what the caller's usage row needs regardless of outcome —
- *  see `runModelPoolOverflow`'s own doc comment. */
+ *  see `runModelPoolOverflow`'s own doc comment.
+ *
+ *  Finding 7 (fresh-context review of #1228, PR #1235): these 4 variants
+ *  used to be discriminated via ad hoc `"x" in overflow` checks at call
+ *  sites, while its sibling `ConsumeOutcome` (introduced in the same diff,
+ *  right below) already uses a clean `kind` literal tag. Given the same
+ *  style here for internal consistency — every call site now narrows on
+ *  `overflow.kind` instead of a property-presence check. */
 type ModelOverflowResult =
-  | { ok: true; upstream: Json; usedModel: string; attempts: number }
-  | { ok: false; usedModel: string; attempts: number; lastMessage: string };
+  | { kind: "ok"; upstream: Json; usedModel: string; attempts: number; collected?: CollectedFrames }
+  | { kind: "exhausted"; usedModel: string; attempts: number; lastMessage: string }
+  // Finding 1 (fresh-context review of #1228, PR #1235, BLOCKING): `response`
+  // is the Response `recordPoison` already computed at the point the cap
+  // either tripped or was last checked — see `runModelPoolOverflow`'s own
+  // doc comment. The caller returns it as-is instead of recomputing it.
+  | { kind: "no_finish_exhausted"; usedModel: string; attempts: number; lastNoFinish?: PumpResult; response?: Response }
+  | { kind: "pump_error"; usedModel: string; attempts: number; pumpError: string };
+
+/** Issue #1228: what the non-streaming caller folds its reply from — the
+ *  translator frames plus the pump's own result. */
+type CollectedFrames = Awaited<ReturnType<typeof collectAnthropicFrames>>;
+
+/** What the `consume` callback resolves to: the reassembled frames (the
+ *  normal case), a non-stream object the provider returned in place of a
+ *  stream, or a pump bug (kept distinct so it stays the same fixed-message
+ *  500 it always was, never folded into the no_finish_reason failover). */
+type ConsumeOutcome =
+  | { kind: "collected"; frames: CollectedFrames }
+  | { kind: "plain" }
+  | { kind: "pump_error"; message: string };
+
+/** Code review (Standards axis, #1228 fresh-context review, Finding 5): the
+ *  outcome of running `consume` against one `env.AI.run` value — either the
+ *  walk should stop and return `result` right away (a plain reply, a pump
+ *  bug, or anything that is not an out=0 no_finish_reason — see the
+ *  `fr.ok || !(...)` condition below, the ONE gate this also shares with
+ *  the bottom non-streaming failure branch in `handleFleetAnthropicMessages`,
+ *  Finding 1), or the walk should keep going (`frame` is the out=0
+ *  no_finish_reason PumpResult to remember as `lastNoFinish`). */
+type AttemptOutcome =
+  | { accept: true; result: ModelOverflowResult }
+  | { accept: false; frame: PumpResult };
+
+/** Code review (Standards axis, #1228 fresh-context review, Finding 5):
+ *  "consume one upstream value, decide whether an out=0 no_finish_reason
+ *  means retry/failover or something else means stop" — the initial attempt
+ *  and the same-model retry inside `runModelPoolOverflow`'s loop used to be
+ *  two hand-written, byte-identical copies of this. Pure aside from the
+ *  `consume` call itself. */
+async function attemptOnce(
+  consume: (value: Json, modelId: string) => Promise<ConsumeOutcome>,
+  value: Json, modelId: string, usedModel: string, attempts: number,
+): Promise<AttemptOutcome> {
+  const outcome = await consume(value, modelId);
+  if (outcome.kind === "plain") return { accept: true, result: { kind: "ok", upstream: value, usedModel, attempts } };
+  if (outcome.kind === "pump_error") return { accept: true, result: { kind: "pump_error", usedModel, attempts, pumpError: outcome.message } };
+  const fr = outcome.frames.result;
+  // Issue #1228: the stream ends without a finish_reason AFTER the caller
+  // has consumed it (env.AI.run itself succeeded). An out=0 no_finish_reason
+  // is a transient upstream failure another model may answer: retry the
+  // SAME model once, then move to the next candidate. Anything else
+  // (success, or a no_finish_reason that DID produce output — Finding 1) is
+  // not that shape, so the walk stops here and reports it as-is.
+  if (fr.ok || !isPoisonNoFinish(fr)) {
+    return { accept: true, result: { kind: "ok", upstream: value, usedModel, attempts, collected: outcome.frames } };
+  }
+  return { accept: false, frame: fr };
+}
 
 /** Code review (Standards axis, #717): extracted verbatim out of
  *  `handleFleetAnthropicMessages`'s own body — the self-contained walk over
@@ -822,16 +1012,49 @@ type ModelOverflowResult =
  *  call cost (see `handleFleetAnthropicMessages`'s own doc comment on
  *  `startedAt`/`attempts`). Pure aside from the `ai.run` call itself — no
  *  env/ctx/studio reach-in, so a caller supplies exactly what the walk
- *  needs and nothing more. */
+ *  needs and nothing more.
+ *
+ *  Finding 1 (fresh-context review of #1228, PR #1235, BLOCKING): this walk
+ *  can burn up to `order.length * 2` real `env.AI.run` calls per client
+ *  request (every candidate's initial try plus its same-model retry), but
+ *  the 3-strike poison cap used to only get checked ONCE per client
+ *  request, at the very end of the whole walk — a 3-model pool could burn
+ *  18 upstream completions across 3 client requests before the cap tripped,
+ *  worse than the incident's own 12. `recordPoison` (only supplied on the
+ *  non-streaming path, which is the only one that retries/fails over at
+ *  all) is called immediately after EVERY out=0 no_finish_reason occurrence
+ *  — both the initial attempt's and the same-model retry's — so every real
+ *  upstream failure counts toward the cap as it happens, and the walk stops
+ *  dead the instant the cap trips instead of continuing to retry or fail
+ *  over a request already proven poisonous. */
 async function runModelPoolOverflow(
   ai: NonNullable<Env["AI"]>, order: string[], body: Json,
   gatewayId: string | undefined, baseMs: number,
   retryDeps?: { sleep?: (ms: number) => Promise<void>; random?: () => number },
+  consume?: (value: Json, modelId: string) => Promise<ConsumeOutcome>,
+  recordPoison?: () => Promise<{ n: number; response: Response }>,
 ): Promise<ModelOverflowResult> {
   let attempts = 0;
   let usedModel = order[0];
   let lastMessage = "";
   const seen = new Set<string>();
+  let lastNoFinish: PumpResult | undefined;
+  // The most recent `recordPoison()` result — reused at the walk's natural
+  // exhaustion point (every candidate tried, none tripped the cap) instead
+  // of recomputing the same 529 response a second time.
+  let lastPoison: { n: number; response: Response } | undefined;
+  // Records `frame` as the latest no_finish_reason, then (when `recordPoison`
+  // is supplied) counts it toward the cap right away. Returns the walk's
+  // final result the instant the cap trips, so the caller can return it
+  // without trying this model's retry or failing over to the next candidate.
+  const checkPoisonCap = async (frame: PumpResult): Promise<ModelOverflowResult | undefined> => {
+    lastNoFinish = frame;
+    if (recordPoison === undefined) return undefined;
+    lastPoison = await recordPoison();
+    return lastPoison.n >= 3
+      ? { kind: "no_finish_exhausted", usedModel, attempts, lastNoFinish, response: lastPoison.response }
+      : undefined;
+  };
   for (const [index, modelId] of order.entries()) {
     const pm = modelById(modelId) ?? POOL[0];
     usedModel = pm.id;
@@ -855,7 +1078,21 @@ async function runModelPoolOverflow(
         : hasNext
           ? run().then((value) => ({ value, attempts: 1 }))
           : runAiWithRetry(run, { baseMs }));
-      return { ok: true, upstream: r.value, usedModel, attempts: attempts + r.attempts };
+      attempts += r.attempts;
+      if (consume === undefined) return { kind: "ok", upstream: r.value, usedModel, attempts };
+      const first = await attemptOnce(consume, r.value, pm.id, usedModel, attempts);
+      if (first.accept) return first.result;
+      const firstCapped = await checkPoisonCap(first.frame);
+      if (firstCapped !== undefined) return firstCapped;
+      const retried = await runAiWithRetry(run, { baseMs });
+      attempts += retried.attempts;
+      const second = await attemptOnce(consume, retried.value, pm.id, usedModel, attempts);
+      if (second.accept) return second.result;
+      const secondCapped = await checkPoisonCap(second.frame);
+      if (secondCapped !== undefined) return secondCapped;
+      // Same-model retry also failed the same way: move to the next candidate.
+      if (hasNext) continue;
+      return { kind: "no_finish_exhausted", usedModel, attempts, lastNoFinish, response: lastPoison?.response };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       lastMessage = message;
@@ -865,7 +1102,7 @@ async function runModelPoolOverflow(
       if (!(isRateLimited(message) || isOverflowRoutingError(message) || status === 504 || status === 529)) break;
     }
   }
-  return { ok: false, usedModel, attempts, lastMessage };
+  return { kind: "exhausted", usedModel, attempts, lastMessage };
 }
 
 export async function handleFleetAnthropicMessages(
@@ -911,6 +1148,18 @@ export async function handleFleetAnthropicMessages(
   // the call boundary into this one.
   if (!ai) return text("not found", 404);
 
+  // Issue #1228: hash the raw body ONCE (fingerprint also keyed by it) and
+  // refuse a request already proven to fail 3x before spending any more AI
+  // budget. `raw` is the pre-lead-rule body — identical on every retry of
+  // the same client request, which is the signal that matters here.
+  const fingerprint = await computeRequestFingerprint(raw, body);
+  if (await getNoFinishReasonFailures(env.DB, studio.id, fingerprint.fingerprintHash) >= 3) {
+    console.error(
+      `[glm-lead] no_finish_reason studio=${studio.id} fingerprint=${fingerprint.fingerprintHash} repeated=3+ refused`,
+    );
+    return json(anthropicErrorBody("invalid_request_error", "upstream repeatedly failed to complete this request; compact context and retry"), 400);
+  }
+
   // Task 4 (spec 2026-10-13-model-pool-design, Components 3/4): the ordered
   // list of models this call walks. Pool off keeps the exact pre-#717
   // behavior — `pickModels` returns `[POOL[0].id]` (GLM) unconditionally
@@ -946,11 +1195,74 @@ export async function handleFleetAnthropicMessages(
   // number of `env.AI.run` calls this one Messages-API request cost.
   const startedAt = Date.now();
   const stream = body.stream === true;
-  const overflow = await runModelPoolOverflow(ai, order, body, gatewayId, leadAiRetryBaseMs(env), retryDeps);
+  // Issue #1228: the non-streaming caller consumes the upstream stream inside
+  // the overflow walk so an out=0 no_finish_reason retries once then fails
+  // over to the next model. The streaming caller cannot retry after the
+  // Response has left, so it passes no `consume` and keeps the old behavior.
+  //
+  // Round 2 review, Finding 4: named and extracted out of the
+  // `runModelPoolOverflow` call below (was a ~17-line inline closure as its
+  // 6th argument) — purely cosmetic, no behavior change.
+  const consumeNonStreaming = async (value: Json, modelId: string): Promise<ConsumeOutcome> => {
+    if (!(value instanceof ReadableStream)) return { kind: "plain" as const };
+    try {
+      const frames = await collectAnthropicFrames(
+        value, `msg_${crypto.randomUUID().replace(/-/g, "")}`, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(modelId), req.signal,
+      );
+      // Issue #1228: every no_finish_reason — including the intermediate one
+      // that then retries/fails over — gets its fingerprint line here, so a
+      // poison request leaves a full trail even when a later model recovers.
+      if (frames.result.failure === "no_finish_reason") {
+        await logNoFinishReasonFingerprint(studio.id, fingerprint, frames.result.lastChunks, frames.result.inputTokens, frames.result.outputTokens);
+      }
+      return { kind: "collected" as const, frames };
+    } catch (e) {
+      return { kind: "pump_error" as const, message: e instanceof Error ? e.message : String(e) };
+    }
+  };
+  const overflow = await runModelPoolOverflow(
+    ai, order, body, gatewayId, leadAiRetryBaseMs(env), retryDeps,
+    stream ? undefined : consumeNonStreaming,
+    // Finding 1: only the non-streaming path retries/fails over at all, so
+    // only it needs every occurrence counted toward the cap as it happens —
+    // same gating as `consumeNonStreaming` just above.
+    stream ? undefined : () => recordAndRespondNoFinish(env.DB, studio.id, fingerprint.fingerprintHash),
+  );
   const { usedModel, attempts } = overflow;
   const headersAt = Date.now();
 
-  if (!overflow.ok) {
+  if (overflow.kind !== "ok") {
+    // Issue #1228: every candidate ended with an out=0 no_finish_reason —
+    // the request is poisonous to every model, not rate-limited. A 500 keeps
+    // the client retrying the SAME body 12x; a 400 (invalid_request_error) is
+    // the one shape Claude Code reads as "stop, don't retry". Log the
+    // fingerprint once more (hashes/sizes only) and count the failure.
+    if (overflow.kind === "no_finish_exhausted") {
+      const nf = overflow.lastNoFinish;
+      // Finding 1: the fingerprint line was already written inside the
+      // walk's consume callback (one per no_finish_reason occurrence); the
+      // 3-try cap itself was also already counted and checked inside the
+      // walk, at the point the cap tripped (or, if it never did, at the
+      // last occurrence) — `overflow.response` is that same Response,
+      // computed once, never recomputed here. The fallback below only
+      // covers the type-level `undefined` case; at runtime this branch is
+      // only reached when `recordPoison` was supplied (the non-streaming
+      // path), so `overflow.response` is always set.
+      logUsage(env, ctx, studio.id, {
+        model: usedModel, stream, inputTokens: nf?.inputTokens ?? 0, outputTokens: nf?.outputTokens ?? 0, ok: false,
+        failure: "no_finish_reason exhausted all models", startedAt, attempts, timeToHeaders: headersAt - startedAt,
+      });
+      return overflow.response ?? json(anthropicErrorBody("overloaded_error", "upstream stream ended without a finish reason; retry the turn"), 529);
+    }
+    // Issue #1228: a pump bug while collecting the non-streaming reply stays
+    // the fixed-message 500 it always was — never folded into the failover.
+    if (overflow.kind === "pump_error") {
+      logUsage(env, ctx, studio.id, {
+        model: usedModel, stream, inputTokens: 0, outputTokens: 0, ok: false,
+        failure: `pump_error: ${overflow.pumpError}`, startedAt, attempts, timeToHeaders: headersAt - startedAt,
+      });
+      return json(anthropicErrorBody("api_error", "upstream stream failed"), 500);
+    }
     // Spec Component 4: "all exhausted -> 429 + retry-after (shortest known
     // reset)" — every candidate model either 429'd/3021'd or exhausted its
     // own transient retry. A rate-limited exhaustion is reported as 429
@@ -986,7 +1298,13 @@ export async function handleFleetAnthropicMessages(
       // provider that ignored `stream: true` and returned a plain object
       // anyway is translated through the non-streaming path rather than
       // crashing on `.getReader()`.
+      //
+      // Round 2 review, Finding 2: unlike the other two success paths below
+      // (the real streaming success and the non-streaming collected
+      // success), this defensive branch never cleared the poison streak —
+      // same ctx.waitUntil + .catch(() => {}) pattern as those two.
       const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
+      ctx.waitUntil(clearNoFinishReasonFailures(env.DB, studio.id, fingerprint.fingerprintHash).catch(() => {}));
       logUsage(env, ctx, studio.id, { model: usedModel, stream: true, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts, timeToHeaders: headersAt - startedAt });
       return json(anthropic, 200);
     }
@@ -1013,7 +1331,7 @@ export async function handleFleetAnthropicMessages(
     ctx.waitUntil(
       pumpAnthropicStream(upstream, writer, id, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel),
         { pingMs: leadStreamPingMs(env), signal: req.signal })
-        .then((result) => {
+        .then(async (result) => {
           const runaway = result.failure?.startsWith("runaway:") === true;
           // The aborted upstream never reports prompt tokens; estimate them (see requestInputEstimate).
           const inputTokens = runaway && result.inputTokens === 0 ? requestInputEstimate() : result.inputTokens;
@@ -1021,6 +1339,37 @@ export async function handleFleetAnthropicMessages(
           // Issue #1099: the retry (a 529 the client re-sends) moves to the next model.
           if (runaway && avoidOn) {
             ctx.waitUntil(markRunawayAvoid(env.DB, studio.id, usedModel).catch(() => {}));
+          }
+          // Issue #1228: the streaming path can't retry (the Response already
+          // left), but it still fingerprints and counts a no_finish_reason so
+          // the entry gate refuses the SAME poison request on its next send.
+          //
+          // Round 2 review, Finding 1: this used to key on bare
+          // `result.failure === "no_finish_reason"`, with no `outputTokens
+          // === 0` gate — the one call site round 1's fix (see
+          // `isPoisonNoFinish`'s own doc comment) missed. A no_finish_reason
+          // WITH output is a normal, transient failure, not poison — it
+          // matches the non-streaming collected-failure branch below by not
+          // fingerprinting or counting it at all, same as that branch does
+          // for the identical shape.
+          // Finding 2 (fresh-context review of #1228, PR #1235, accepted
+          // limitation): this counting runs inside `ctx.waitUntil`, in the
+          // BACKGROUND after the SSE response has already started
+          // streaming to the client. A client that resends the identical
+          // body very fast — before this background write lands — could
+          // race past the counter and see the cap trip on its 4th send
+          // instead of exactly its 3rd: an off-by-one slop, never an
+          // unbounded burn (streaming has no retry/failover at all, so each
+          // resend still costs exactly 1 upstream call either way). There is
+          // no way to know the failure before the response has already
+          // started streaming without buffering the whole reply first,
+          // which would defeat streaming's own purpose — so this is
+          // accepted as-is, not fixed here.
+          if (isPoisonNoFinish(result)) {
+            ctx.waitUntil(logNoFinishReasonFingerprint(studio.id, fingerprint, result.lastChunks, inputTokens, result.outputTokens));
+            ctx.waitUntil(recordNoFinishReasonFailure(env.DB, studio.id, fingerprint.fingerprintHash).catch(() => {}));
+          } else if (result.ok) {
+            ctx.waitUntil(clearNoFinishReasonFailures(env.DB, studio.id, fingerprint.fingerprintHash).catch(() => {}));
           }
         })
         .catch((e) => logUsage(env, ctx, studio.id, {
@@ -1039,7 +1388,12 @@ export async function handleFleetAnthropicMessages(
   // `requestedMaxTokens` was previously omitted here entirely, so an
   // inflated upstream `completion_tokens` reached the client, and this logged
   // usage row, completely unclamped.
-  if (!(upstream instanceof ReadableStream)) {
+  //
+  // Issue #1228: the overflow walk already consumed the winning model's stream
+  // (its `consume` callback) and handed back `collected` — the translator
+  // frames + pump result. Only when the provider returned a non-stream object
+  // (`collected` absent) does this path fall back to the plain-object shape.
+  if (overflow.collected === undefined) {
     const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
     logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts, timeToHeaders: headersAt - startedAt });
     return json(anthropic, 200);
@@ -1047,19 +1401,7 @@ export async function handleFleetAnthropicMessages(
   // Issue #1099 (review round 3, finding 3): the reply is folded from the stream
   // translator's frames, so a runaway is caught before any byte goes out (529),
   // and a stream that ends without a finish_reason is an error, never a 200.
-  let collected: Awaited<ReturnType<typeof collectAnthropicFrames>>;
-  try {
-    collected = await collectAnthropicFrames(
-      upstream, `msg_${crypto.randomUUID().replace(/-/g, "")}`, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel), req.signal,
-    );
-  } catch (e) {
-    logUsage(env, ctx, studio.id, {
-      model: usedModel, stream: false, inputTokens: 0, outputTokens: 0, ok: false,
-      failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`, startedAt, attempts, timeToHeaders: headersAt - startedAt,
-    });
-    return json(anthropicErrorBody("api_error", "upstream stream failed"), 500);
-  }
-  const { result, sse } = collected;
+  const { result, sse } = overflow.collected;
   // Issue #1147: the client hung up while the reply was being collected. Nobody
   // will read the JSON, so it is a failure here, never an ok row.
   // UNMEASURED IN PRODUCTION (review round 2): on workerd 1.20260730 a non-
@@ -1091,8 +1433,30 @@ export async function handleFleetAnthropicMessages(
       model: usedModel, stream: false, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ok: false,
       failure: `upstream_error ${type}: ${message}`, startedAt, attempts, timeToHeaders: headersAt - startedAt,
     });
+    // Issue #1228: a no_finish_reason that produced output is NOT a poison
+    // request (the model answered, then the stream cut) — it stays a normal
+    // error. Only the out=0 shape is fingerprinted and counted; that one
+    // reaches this line only when there was no next model to fail over to
+    // (a single-model pool, or LEAD_MODEL_OVERFLOW=off).
+    //
+    // Finding 1 (fresh-context review of #1228, PR #1235): this used to key
+    // ONLY on `result.failure === "no_finish_reason"`, with no `outputTokens
+    // === 0` check — unlike `attemptOnce`'s own gate above (and
+    // `runModelPoolOverflow`'s retry walk it came from), which only treats
+    // an OUT=0 no_finish_reason as retriable/poison-countable. The incident's
+    // own data says poison runs die after 0-1.6k out tokens, not always 0, so
+    // this branch used to wrongly fingerprint/count a no_finish_reason WITH
+    // output toward the same 3-strike streak meant only for the out=0 shape
+    // — risking a false-positive permanent 400 on an unrelated flaky request,
+    // and double-logging the fingerprint for the same frame (once inside the
+    // overflow walk's own `consume` callback, once again here).
+    if (isPoisonNoFinish(result)) {
+      await logNoFinishReasonFingerprint(studio.id, fingerprint, result.lastChunks, result.inputTokens, result.outputTokens);
+      return (await recordAndRespondNoFinish(env.DB, studio.id, fingerprint.fingerprintHash)).response;
+    }
     return json(anthropicErrorBody(type, overrideMessage ?? message), status);
   }
+  ctx.waitUntil(clearNoFinishReasonFailures(env.DB, studio.id, fingerprint.fingerprintHash).catch(() => {}));
   logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ok: true, startedAt, attempts, timeToHeaders: headersAt - startedAt });
   return json(foldAnthropicFrames(sse), 200);
 }
