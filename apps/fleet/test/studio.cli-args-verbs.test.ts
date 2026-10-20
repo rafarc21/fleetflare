@@ -698,6 +698,22 @@ describe("VERBS help text — #501 F3-F11", () => {
     expect(VERBS.inspect.summary).toContain("lines=N");
   });
 
+  // Issue #1229: spawn/provision now refuse a cwd that names no repo and no
+  // --repo given (never fall back to the fleet default). The args lines name
+  // the flag, and the summaries state the refusal so an agent reading `fleet
+  // help` discovers the escape hatch before hitting the error.
+  it("spawn/provision args lines name --repo owner/name (#1229)", () => {
+    expect(VERBS.spawn.args).toContain("--repo owner/name");
+    expect(VERBS.provision.args).toContain("--repo owner/name");
+  });
+
+  it("spawn/provision summaries state the no-repo refusal (#1229)", () => {
+    expect(VERBS.spawn.summary).toContain("Refuses when the cwd names no repo");
+    expect(VERBS.spawn.summary).toContain("never falls back to the fleet's default");
+    expect(VERBS.provision.summary).toContain("--repo overrides detection");
+    expect(VERBS.provision.summary).toContain("address-by-id");
+  });
+
   // F11: the stats table has no dedup across the remote/local halves — an
   // id on both sides prints twice, and TOTAL covers both.
   it("junior: stats says an id can appear twice and TOTAL sums both halves (#501 F11)", () => {
@@ -733,6 +749,17 @@ describe("gate start / gate watch", () => {
   it("gate run with no PR or a non-numeric PR -> usage", () => {
     expect(parseCliArgs(["gate", "run"]).cmd).toBe("usage");
     expect(parseCliArgs(["gate", "run", "abc"]).cmd).toBe("usage");
+  });
+  // #1230: --failed-only parses before or after the PR number.
+  it("gate run --failed-only <pr> parses failedOnly: true", () => {
+    expect(parseCliArgs(["gate", "run", "--failed-only", "715"])).toEqual({
+      cmd: "gate-run", pr: 715, failedOnly: true,
+    });
+  });
+  it("gate run <pr> --failed-only parses failedOnly: true too", () => {
+    expect(parseCliArgs(["gate", "run", "715", "--failed-only"])).toEqual({
+      cmd: "gate-run", pr: 715, failedOnly: true,
+    });
   });
   it("gate with no sub-verb -> usage", () => {
     expect(parseCliArgs(["gate"]).cmd).toBe("usage");

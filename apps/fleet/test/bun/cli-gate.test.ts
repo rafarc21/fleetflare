@@ -148,6 +148,24 @@ describe("runGate exit codes", () => {
   });
 });
 
+// #1230: `fleet gate run --failed-only <pr>` sets failedOnly on the start body.
+describe("runGate: the start body's failedOnly flag (#1230)", () => {
+  beforeEach(() => { server = undefined; });
+  afterEach(() => { server?.stop(true); });
+
+  it("failedOnly set -> the start POST body carries failedOnly: true", async () => {
+    const stub = stubWorker({ start: STARTED, statuses: [{ state: "success" }] });
+    await runGate(stub.creds, "acme/example", 7, { pollMs: 1, failedOnly: true });
+    expect(stub.seen.starts).toEqual([{ repo: "acme/example", pr: 7, failedOnly: true }]);
+  });
+
+  it("failedOnly absent -> the body carries no failedOnly key at all", async () => {
+    const stub = stubWorker({ start: STARTED, statuses: [{ state: "success" }] });
+    await runGate(stub.creds, "acme/example", 7, { pollMs: 1 });
+    expect(stub.seen.starts).toEqual([{ repo: "acme/example", pr: 7 }]);
+  });
+});
+
 describe("parseStatusResponse", () => {
   it("valid JSON status object parses", () => {
     const parsed = parseStatusResponse(JSON.stringify({ state: "success" }));

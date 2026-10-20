@@ -337,8 +337,15 @@ describe("ffDecision — --new allocates a fresh instance (#269)", () => {
 });
 
 describe("ffDecision — outside any repo", () => {
-  it("spawns with no id at all, so the Worker names it from the fleet default repo", () => {
-    expect(ffDecision([], null, "release-studio", null)).toEqual({ kind: "spawn", id: null });
+  // Issue #1229: with no candidate studio and no repo, ff can no longer spawn
+  // on the fleet default repo (deployment config this side cannot see) — it
+  // refuses and names the --repo escape hatch instead of guessing.
+  it("refuses when there is no studio and no repo, naming the --repo escape hatch", () => {
+    const decision = ffDecision([], null, "release-studio", null);
+    expect(decision.kind).toBe("error");
+    if (decision.kind !== "error") throw new Error("unreachable");
+    expect(decision.message).toContain("no git remote here");
+    expect(decision.message).toContain("fleet spawn release-studio --repo owner/name");
   });
 
   it("uses the one existing studio for that role", () => {
