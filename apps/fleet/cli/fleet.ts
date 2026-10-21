@@ -1910,6 +1910,39 @@ async function cmdLocalSpawn(
 }
 
 /**
+ * #1259 round 4 fix 4: `cmdProvision`'s local-resume branch POSTs once to
+ * `/provision`, and that POST — routes.ts's own provision branch — already
+ * flips the row's state to "running" (local-spawn.ts's `localRowStatus`)
+ * before any of the checks that follow can run: their own data (localPath,
+ * prompt/allowedTools, the clone's default branch, the materialized
+ * worktree's outcome) only arrives IN that POST's response or afterward, so
+ * none of them could ever run earlier. Every refusal past that point must
+ * flip the row back to stopped itself — best-effort, through the SAME
+ * `/destroy` route a local row's own teardown already uses (a synchronous
+ * D1 flip for a `host:"local"` row, confirmed no container/task-gate
+ * checks run for it — see routes.ts's destroy branch) — or the row is left
+ * reading "running" with no lead behind it, and routes.ts's own `/provision`
+ * then refuses the operator's very next retry with a 409 ("not stopped").
+ *
+ * `res.ok` is checked and reported distinctly (round 3 left this
+ * unchecked): a flip-back that itself failed must say so, never be
+ * silently assumed to have worked.
+ */
+async function flipLocalRowToStopped(creds: Credentials, id: string): Promise<void> {
+  try {
+    const res = await fetch(studioUrl(creds, id, destroyPath(false, false)), {
+      method: "POST",
+      headers: accessHeaders(creds),
+    });
+    if (!res.ok) {
+      console.error(`fleet provision: ${id} could not be flipped back to stopped (${res.status}) — the row may still read "running" with no lead behind it`);
+    }
+  } catch (err) {
+    console.error(`fleet provision: ${id} could not be flipped back to stopped — ${errText(err)}`);
+  }
+}
+
+/**
  * Explicit provision — POST /studio/:id/provision (routes.ts's existing,
  * already-tested route; this command adds no new server-side behaviour, only
  * a direct way to call it without `fleet spawn`'s org-chart check, e.g. for
@@ -2010,18 +2043,21 @@ async function cmdProvision(
     const localPath = body.localPath;
     if (typeof localPath !== "string" || localPath === "") {
       console.error("fleet provision: the local row answered without a localPath — cannot re-materialize the worktree");
+      await flipLocalRowToStopped(creds, id);
       process.exit(1);
     }
     const prompt = body.prompt ?? "";
     const allowedTools = body.allowedTools ?? "";
     if (prompt === "" || allowedTools === "") {
       console.error("fleet provision: the local row answered without prompt/allowedTools — cannot launch the lead");
+      await flipLocalRowToStopped(creds, id);
       process.exit(1);
     }
     const gitRun = defaultGitRun();
     const defaultBranch = await resolveDefaultBranch(gitRun, localPath);
     if (defaultBranch === null) {
       console.error("fleet provision: could not resolve the default branch of the local clone — cannot re-materialize the worktree");
+      await flipLocalRowToStopped(creds, id);
       process.exit(1);
     }
     // Same origin rule as the spawn path: the clone the row names must be the
@@ -2035,27 +2071,17 @@ async function cmdProvision(
       // Fix 3 (#1259 round 3): `fleet provision` takes no `--path` flag at
       // all — that flag belongs to `fleet spawn --local --path <abs>`, the
       // ORIGINAL bring-up, not this resume. The real remedy here is fixing
-      // the clone's own git remote, or respawning fresh from the right one.
-      console.error(`fleet provision: the clone at ${localPath} has ${originDesc}, not ${studio.repoSlug} — a local studio must be built from the repo it targets; fix the clone's origin (git -C ${localPath} remote set-url origin <url>) or destroy this row and fleet spawn --local --path <the right clone>`);
-      // The POST just above (routes.ts's provision branch) already flipped
-      // this row's state to "running" (local-spawn.ts's localRowStatus)
-      // before this check could ever run — the bound repoSlug this check
-      // needs only arrives IN that POST's own response, so the origin check
-      // cannot run any earlier. Left alone, this refusal would leave a
-      // "running" row with no lead process behind it. Flip it back with the
-      // SAME /destroy route a local row's own teardown already uses — the
-      // local branch of that route is a synchronous D1 flip, no container,
-      // no task-gate checks, so one best-effort POST is enough; a failed
-      // flip still exits 1 below, same as before this fix (the operator can
-      // always `fleet destroy` by hand).
-      try {
-        await fetch(studioUrl(creds, id, destroyPath(false, false)), {
-          method: "POST",
-          headers: accessHeaders(creds),
-        });
-      } catch {
-        // best-effort — see comment above.
-      }
+      // the clone's own git remote, THEN re-running provision.
+      //
+      // #1259 round 4 fix 4: the hint used to end "...or destroy this row
+      // and fleet spawn --local --path <the right clone>" — a dead end,
+      // since `fleet destroy`'s default KEEPS the row (round 3's own
+      // finding), so a respawn with the SAME id would 409 "studio exists"
+      // (src/studio/spawn.ts). The flip-back below is exactly what makes
+      // "fix the origin, then re-run fleet provision" the REAL remedy:
+      // routes.ts's own `/provision` only resumes a `stopped` local row.
+      console.error(`fleet provision: the clone at ${localPath} has ${originDesc}, not ${studio.repoSlug} — a local studio must be built from the repo it targets; fix the clone's origin (git -C ${localPath} remote set-url origin <url>), then re-run: fleet provision ${id}`);
+      await flipLocalRowToStopped(creds, id);
       process.exit(1);
     }
     const outcome = await ensureLocalStudioWorktree(studio.id, defaultOrcaDeps(), {
@@ -2077,6 +2103,7 @@ async function cmdProvision(
       const why = outcome.why;
       console.error(`fleet provision: ${studio.id} has no local lead — the Orca worktree did not materialize (${why})`);
       console.error(`  tear the registered row down with: fleet destroy ${studio.id}`);
+      await flipLocalRowToStopped(creds, id);
       process.exit(1);
     }
     // A local studio's Orca terminal IS its lead; there is no cloud sidebar row.

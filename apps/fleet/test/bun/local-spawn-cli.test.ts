@@ -27,6 +27,18 @@ let repo: string;
 // The local row the stub answers POST /studio/websites--release/provision
 // with. `localPath` is swapped by the gitlab-origin test before it runs.
 let provisionLocalPath: string | undefined;
+// #1259 round 4 fix 4: overrides the stub's default 200-ok answer for the
+// flip-back-to-stopped POST a refused local resume makes — undefined means
+// the default success response below (every ordinary refusal test's flip-
+// back succeeds silently, unchanged from before this override existed); set
+// by the one test that needs the flip-back itself to FAIL.
+let destroyAnswer: (() => Response) | undefined;
+// #1259 round 4 fix 4: overrides for the /provision stub's prompt and
+// allowedTools fields — undefined means the normal non-empty values below,
+// so every existing test is unaffected; set by the tests proving the
+// "no prompt/allowedTools" refusal flips the row back too.
+let provisionPromptOverride: string | undefined;
+let provisionAllowedToolsOverride: string | undefined;
 
 // The spawn row the stub answers POST /studio/local/spawn with — the three
 // fields parseStudioStatus demands (id/state/error) plus repoSlug, and the
@@ -53,9 +65,13 @@ beforeAll(() => {
           id: "websites--release", state: "running", error: null, repoSlug: "acme/faux",
           tailscaleHost: null, lastRefresh: null,
           host: "local", localPath: provisionLocalPath ?? repo,
-          prompt: "You are release. Merge carefully.", allowedTools: "Bash(git *) Edit",
+          prompt: provisionPromptOverride ?? "You are release. Merge carefully.",
+          allowedTools: provisionAllowedToolsOverride ?? "Bash(git *) Edit",
           effort: "",
         });
+      }
+      if (url.pathname === "/studio/websites--release/destroy" && req.method === "POST") {
+        return destroyAnswer ? destroyAnswer() : Response.json({ id: "websites--release", state: "stopped" });
       }
       return new Response("not found", { status: 404 });
     },
@@ -93,6 +109,14 @@ async function runFleetLocal(args: string[], extraEnv: Record<string, string> = 
   const code = await proc.exited;
   clearTimeout(killer);
   return { out, err, code };
+}
+
+/** `traffic` accumulates for the whole file's lifetime (never reset between
+ *  tests), so every flip-back-assertion below diffs a BEFORE/AFTER count
+ *  rather than asserting an absolute one — the same delta discipline the
+ *  `/studio/local/spawn` assertions above already use. */
+function countDestroyCalls(): number {
+  return traffic.filter((t) => t.method === "POST" && t.path === "/studio/websites--release/destroy").length;
 }
 
 async function runFfLocal(args: string[]) {
@@ -192,9 +216,18 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
     // means ensureLocalStudioWorktree returns skipped, so the local branch must
     // exit non-zero naming fleet destroy — proving it fired (the cloud path
     // would have printed the row and exited 0).
+    const destroyBefore = countDestroyCalls();
     const r = await runFleetLocal(["provision", "websites--release"]);
     expect(r.code).toBe(1);
     expect(r.err).toContain("fleet destroy websites--release");
+    // #1259 round 4 fix 4: the "no local lead" exit (ensureLocalStudioWorktree
+    // skipped/failed) must flip the row it just POSTed "running" back to
+    // stopped too, same as the origin-mismatch exit already did — else a
+    // resume attempt that hits "no orca" leaves the row stuck "running"
+    // with no lead process behind it, forever (routes.ts's own `/provision`
+    // refuses a non-stopped local row with a 409, so the operator's very
+    // next retry would be blocked).
+    expect(countDestroyCalls() - destroyBefore).toBe(1);
   }, 40_000);
 
   test("a local row whose clone has a non-GitHub origin refuses before any worktree materialization (item 7)", async () => {
@@ -207,6 +240,7 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
     writeFileSync(fakeOrca, "#!/bin/sh\nexit 0\n");
     chmodSync(fakeOrca, 0o755);
     provisionLocalPath = gitlabRepo;
+    const destroyBefore = countDestroyCalls();
     try {
       execFileSync("git", ["init", "-q"], { cwd: gitlabRepo });
       execFileSync("git", ["remote", "add", "origin", "https://gitlab.com/acme/faux.git"], { cwd: gitlabRepo });
@@ -218,13 +252,21 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
       // Fix 3 (#1259 round 3): `fleet provision` takes no `--path` flag — the
       // old message's hint was bogus.
       expect(r.err).not.toContain("pass --path");
+      // #1259 round 4 fix 4: the old hint chained "destroy this row and
+      // fleet spawn --local" — but `fleet destroy`'s default KEEPS the row
+      // (round 3's own finding), so a respawn with the SAME id would 409
+      // "studio exists" (src/studio/spawn.ts). The real remedy is simply
+      // fixing the clone's origin and re-running `fleet provision`, which
+      // the flip-back below makes possible again (routes.ts's `/provision`
+      // only resumes a `stopped` local row).
+      expect(r.err).not.toContain("fleet spawn --local");
+      expect(r.err).toContain("fleet provision websites--release");
       // The POST already flipped this row to "running" before this refusal
       // could run (the bound repoSlug it needs only arrives IN that POST's
       // response) — the refusal must flip it back with the SAME /destroy
       // route a local row's own teardown uses, or the row sits stuck
       // "running" with no lead process behind it.
-      const destroyCalls = traffic.filter((t) => t.method === "POST" && t.path === "/studio/websites--release/destroy");
-      expect(destroyCalls.length).toBe(1);
+      expect(countDestroyCalls() - destroyBefore).toBe(1);
     } finally {
       provisionLocalPath = undefined;
       rmSync(gitlabRepo, { recursive: true, force: true });
@@ -258,6 +300,74 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
     } finally {
       provisionLocalPath = undefined;
       rmSync(wrongRepo, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  // #1259 round 4 fix 4: the 3 other refusal exits in this SAME local-resume
+  // branch — "no localPath", "no prompt/allowedTools", "could not resolve
+  // the default branch" — run on the exact same already-flipped-to-running
+  // row the origin check above does, and must flip it back too.
+  test("a local row answering without a localPath flips the row back to stopped (#1259 round 4 fix 4)", async () => {
+    provisionLocalPath = ""; // typeof check passes ("" is a string); the === "" guard is what this test is for
+    const destroyBefore = countDestroyCalls();
+    try {
+      const r = await runFleetLocal(["provision", "websites--release"]);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("without a localPath");
+      expect(countDestroyCalls() - destroyBefore).toBe(1);
+    } finally {
+      provisionLocalPath = undefined;
+    }
+  }, 40_000);
+
+  test("a local row answering without prompt/allowedTools flips the row back to stopped (#1259 round 4 fix 4)", async () => {
+    provisionPromptOverride = "";
+    const destroyBefore = countDestroyCalls();
+    try {
+      const r = await runFleetLocal(["provision", "websites--release"]);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("without prompt/allowedTools");
+      expect(countDestroyCalls() - destroyBefore).toBe(1);
+    } finally {
+      provisionPromptOverride = undefined;
+    }
+  }, 40_000);
+
+  test("a local row whose clone's default branch cannot be resolved flips the row back to stopped (#1259 round 4 fix 4)", async () => {
+    // A real git repo with no `origin/HEAD` symbolic-ref at all (unlike every
+    // other test's clone fixtures above) — resolveDefaultBranch has nothing
+    // to resolve.
+    const noBranchRepo = mkdtempSync(join(tmpdir(), "local-provision-no-branch-"));
+    execFileSync("git", ["init", "-q"], { cwd: noBranchRepo });
+    provisionLocalPath = noBranchRepo;
+    const destroyBefore = countDestroyCalls();
+    try {
+      const r = await runFleetLocal(["provision", "websites--release"]);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("could not resolve the default branch");
+      expect(countDestroyCalls() - destroyBefore).toBe(1);
+    } finally {
+      provisionLocalPath = undefined;
+      rmSync(noBranchRepo, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  // Fix 4 (#1259 round 4): `res.ok` on the flip-back POST is now checked —
+  // a flip-back that itself fails must say so distinctly, never be silently
+  // assumed to have worked.
+  test("a flip-back POST that itself fails is reported distinctly, never silently assumed to have worked (#1259 round 4 fix 4)", async () => {
+    // No orca binary, TERM_PROGRAM=not-orca (the default): hits the "no
+    // local lead" exit — any of the 5 flip-back sites shares the same
+    // helper, so this one case proves `res.ok` is honored for all of them.
+    destroyAnswer = () => new Response("destroy route unavailable", { status: 500 });
+    try {
+      const r = await runFleetLocal(["provision", "websites--release"]);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("has no local lead"); // the actual refusal still ran first
+      expect(r.err).toContain("could not be flipped back to stopped");
+      expect(r.err).toContain("500");
+    } finally {
+      destroyAnswer = undefined;
     }
   }, 40_000);
 
