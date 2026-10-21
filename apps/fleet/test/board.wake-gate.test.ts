@@ -80,7 +80,7 @@ describe("wakeStudioFor", () => {
   });
 
   it("local row → local refusal with the digest, and NO container RPC", async () => {
-    const d = deps({ studioState: vi.fn(async () => ({ state: "running", repoSlug: REPO, host: "local" })) });
+    const d = deps({ studioState: vi.fn(async () => ({ state: "running", repoSlug: REPO, host: "local" as const })) });
     expect(await gate(d)).toEqual({ woke: false, reason: "LOCAL", local: true, digest: DIGEST });
     expect(d.wake).not.toHaveBeenCalled();
   });

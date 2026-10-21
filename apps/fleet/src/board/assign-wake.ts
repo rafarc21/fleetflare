@@ -61,7 +61,7 @@ export interface AssignWakeDeps {
    * `undefined` means "claude" (StudioStatus.leadType's own doc comment),
    * same as every reader of that field.
    */
-  studioState: (studioId: string) => Promise<{ state: string; repoSlug: string | null; leadType?: "claude" | "glm" } | null>;
+  studioState: (studioId: string) => Promise<{ state: string; repoSlug: string | null; leadType?: "claude" | "glm"; host?: "local" } | null>;
   /** RPC into that studio's own Durable Object. The DO applies its own
    *  stopped/pane gates (src/studio/wake.ts's runGatedWake) — this port never
    *  types into a container itself. */
@@ -83,7 +83,7 @@ export interface AssignWakeDeps {
  *  failure this issue is about, and a silent non-wake would reproduce it. */
 export type AssignWakeReport =
   | { woke: true; digest: string }
-  | { woke: false; reason: string };
+  | { woke: false; reason: string; local?: true; digest?: string };
 
 /**
  * The wake prompt: a POINTER at the task, never a copy of it.
@@ -218,6 +218,7 @@ export async function wakeOnAssign(
         `Spawn it (ff <role> ${task.number}) and it boots on this task.`,
       stopped: `${studioId} is stopped — no wake was sent, because starting its container costs money ` +
         `silently. Provision it and the task is delivered on bring-up.`,
+      local: `${studioId} is a local studio — it has no container to wake. The lead is woken by Orca terminal send instead.`,
       repoMismatch: (repoSlug) => repoMismatchMessage(studioId, repoSlug, task.repo),
     },
   });

@@ -95,6 +95,7 @@ export async function sendTaskMessage(
         "because starting its container costs money silently.",
       repoMismatch: (repoSlug) => `${assignees[0]} is provisioned for ${repoSlug}, not ${repo} — the message on task ` +
         `#${number} is posted, but a lead for another repo cannot see it.`,
+      local: `${assignees[0]} is a local studio — no container to wake. Wake its lead by Orca terminal send from the operator's machine.`,
     },
   });
   return { ok: true, value: { comment, wake } };

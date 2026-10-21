@@ -59,6 +59,7 @@ import { parseStudioId } from "../src/studio/ids";
 import { repoIdSegment } from "../src/studio/repo";
 import type { StudioStatus } from "../src/studio/types";
 import type { BoardTask } from "../src/board/types";
+import type { AssignWakeReport } from "../src/board/assign-wake";
 import { salvageContext, type SalvageOutcome, type SalvageDestination } from "./context-salvage";
 import { attachTitleState, ATTACH_STALE_MS } from "./attach-liveness";
 import { errText } from "./diag";
@@ -1492,6 +1493,52 @@ export async function findAttachHandle(id: string, deps: OrcaDeps): Promise<stri
     deps.log(`${id}: attach handle lookup failed — ${errText(err)}`);
     return null;
   }
+}
+
+/**
+ * Fleet task #1259 item 2: wake a LOCAL studio's lead. A local row has no
+ * container, so the Worker's assign wake refuses with `{local:true}` and this
+ * CLI turns that into the Orca equivalent of the container wake: resolve the
+ * studio's healthy attach terminal and type the digest into it. Fail closed —
+ * not under Orca, no healthy attach terminal, or a failed send all report a
+ * refusal, never a silent non-wake.
+ */
+export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps): Promise<AssignWakeReport> {
+  if (!orcaPresent(deps)) {
+    return {
+      woke: false,
+      reason: `${id} is a local studio but this is not an Orca session — no wake was sent. ` +
+        `Wake it yourself with: fleet task show`,
+    };
+  }
+  const handle = await findAttachHandle(id, deps);
+  if (handle === null) {
+    return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
+  }
+  try {
+    const res = await deps.run(["terminal", "send", "--terminal", handle, "--text", digest, "--enter"], LIST_TIMEOUT_MS);
+    if (res.timedOut || !res.ok) {
+      return { woke: false, reason: `terminal send failed: ${(res.stderr || res.stdout).trim().slice(0, 200)}` };
+    }
+    return { woke: true, digest };
+  } catch (err) {
+    return { woke: false, reason: errText(err) };
+  }
+}
+
+/**
+ * The CLI half of item 2: swap a `{local:true}` assign-wake refusal for the
+ * Orca terminal send that actually wakes the local lead. Everything else
+ * passes through untouched, so a container studio's report is byte-identical
+ * to before.
+ */
+export async function resolveLocalWake(
+  report: AssignWakeReport | undefined, studioId: string | null, deps: OrcaDeps,
+): Promise<AssignWakeReport | undefined> {
+  if (report && !report.woke && report.local === true && studioId !== null && report.digest !== undefined) {
+    return sendLocalWake(studioId, report.digest, deps);
+  }
+  return report;
 }
 
 // ---------------------------------------------------------------------------

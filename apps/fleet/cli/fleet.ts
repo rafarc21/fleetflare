@@ -82,6 +82,7 @@ import { formatMemoryTable, MEMORY_LEGEND, type MemoryFileRow } from "./memory-f
 import {
   openStudioRow, closeStudioRow, reconcileStudioWorkspaces, planStudioWorkspaces, defaultOrcaDeps,
   studioWorkspaceTitle, readStudioRows, findAttachHandle, ensureLocalStudioWorktree, resolveStudioWorktreePath,
+  resolveLocalWake,
   type OrcaDeps, type TabsReport, type TabsPlanEntry,
 } from "./orca-workspace";
 import type { StudioStatus } from "../src/studio/types";
@@ -2219,8 +2220,8 @@ function repoQuery(slug: string | null): string {
  *  given work and never heard about it is the whole of that issue. */
 type AssignedTask = BoardTask & { wake?: AssignWakeReport; pathWarnings?: string[] };
 
-function reportAssignWake(task: AssignedTask): void {
-  const line = formatAssignWake(task.wake);
+async function reportAssignWake(task: AssignedTask): Promise<void> {
+  const line = formatAssignWake(await resolveLocalWake(task.wake, task.assignee, defaultOrcaDeps()));
   if (line !== null) console.log(line);
 }
 
@@ -2312,7 +2313,7 @@ async function cmdTaskNew(
   }
   const task = (await res.json()) as AssignedTask;
   console.log(formatTaskTable([task]));
-  reportAssignWake(task);
+  await reportAssignWake(task);
   reportPathWarnings(task);
   if (brief.readRepos && task.assignee !== null) reportReadRepos("fleet task new", task.assignee, brief.readRepos);
   // Issue #113 ask 9: --provision boots or heals the assigned studio in the
@@ -2393,7 +2394,7 @@ async function cmdTaskAssign(
     }),
   })) as AssignedTask;
   console.log(formatTaskTable([task]));
-  reportAssignWake(task);
+  await reportAssignWake(task);
   if (readRepos && task.assignee !== null) reportReadRepos("fleet task assign", task.assignee, readRepos);
 }
 
