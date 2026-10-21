@@ -360,12 +360,20 @@ export async function getDefaultBranch(token: string, repo: string): Promise<str
   return body.default_branch;
 }
 
-/** The required-status contexts currently on a branch's protection rule, or
- *  null when the branch has no protection rule at all (404). A rule with no
- *  required status checks reads as an empty list. */
+/** The required-status state of a branch's protection rule, or null when the
+ *  branch has no rule at all (404). `hasRequiredStatusChecks` distinguishes a
+ *  rule that has no required-status-check block (contexts POST would 404) from
+ *  one whose block exists but lists nothing; `enforceAdmins` reads the
+ *  enforce_admins sub-object (an `{enabled}` object, not a bare boolean). */
+export interface BranchProtectionState {
+  contexts: string[];
+  hasRequiredStatusChecks: boolean;
+  enforceAdmins: boolean;
+}
+
 export async function getBranchProtection(
   token: string, repo: string, branch: string,
-): Promise<{ contexts: string[] } | null> {
+): Promise<BranchProtectionState | null> {
   const { res, text } = await ghRequest(
     token,
     `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection`,
@@ -374,10 +382,16 @@ export async function getBranchProtection(
     [404],
   );
   if (res.status === 404) return null;
-  const body = JSON.parse(text || "{}") as { required_status_checks?: { contexts?: unknown } | null };
+  const body = JSON.parse(text || "{}") as {
+    required_status_checks?: { contexts?: unknown } | null;
+    enforce_admins?: { enabled?: unknown } | null;
+  };
   const raw = body.required_status_checks?.contexts;
-  if (!Array.isArray(raw)) return { contexts: [] };
-  return { contexts: raw.filter((c): c is string => typeof c === "string") };
+  return {
+    contexts: Array.isArray(raw) ? raw.filter((c): c is string => typeof c === "string") : [],
+    hasRequiredStatusChecks: body.required_status_checks !== undefined && body.required_status_checks !== null,
+    enforceAdmins: body.enforce_admins?.enabled === true,
+  };
 }
 
 /** PUT a fresh branch-protection rule (the CREATE path). GitHub's PUT replaces
@@ -428,6 +442,34 @@ export async function setBranchProtectionStrict(
     `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`,
     { method: "PATCH", body: JSON.stringify({ strict }) },
     `set ${repo} branch protection strict`,
+  );
+}
+
+/** PATCH the whole required_status_checks sub-resource of an existing rule
+ *  (strict + contexts together) — the fallback for a rule that has no
+ *  required-status-check block, where the contexts POST would 404. */
+export async function setBranchProtectionRequiredStatusChecks(
+  token: string, repo: string, branch: string, strict: boolean, contexts: string[],
+): Promise<void> {
+  await ghRequest(
+    token,
+    `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`,
+    { method: "PATCH", body: JSON.stringify({ strict, contexts }) },
+    `set ${repo} branch protection required status checks`,
+  );
+}
+
+/** Turn OFF admin enforcement on an existing rule. The enforce_admins
+ *  sub-resource has no PATCH: DELETE is the only way to disable it without
+ *  rewriting the whole rule with a PUT. */
+export async function disableBranchProtectionEnforceAdmins(
+  token: string, repo: string, branch: string,
+): Promise<void> {
+  await ghRequest(
+    token,
+    `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection/enforce_admins`,
+    { method: "DELETE" },
+    `disable ${repo} branch protection enforce admins`,
   );
 }
 
@@ -1507,4 +1549,24 @@ export async function getBranchSha(token: string, repo: string, branch: string):
   );
   if (typeof raw.sha !== "string") throw new Error(`read ${repo} branch ${branch} sha failed: no sha`);
   return raw.sha;
+}
+
+/** PR numbers referencing a task, newest first, via GitHub's issue search. A
+ *  bare number matches the PR title ("(#N)", this fleet's own convention), body
+ *  ("Refs #N") and comments. `head:` cannot express "task number in branch
+ *  name" (it is prefix-only), so title/body/comment references are the match
+ *  channel. */
+export async function findPullRequestsReferencingTask(
+  token: string, repo: string, taskNumber: number,
+): Promise<number[]> {
+  const q = `repo:${repo} is:pr ${taskNumber}`;
+  const raw = await ghJson<{ items?: { number: number; pull_request?: unknown }[] }>(
+    token,
+    `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=30&sort=created&order=desc`,
+    { method: "GET", headers: GH_HEADERS_GET(token) },
+    `search ${repo} PRs referencing task #${taskNumber}`,
+  );
+  return (raw.items ?? [])
+    .filter((i) => i.pull_request !== undefined && Number.isInteger(i.number))
+    .map((i) => i.number);
 }

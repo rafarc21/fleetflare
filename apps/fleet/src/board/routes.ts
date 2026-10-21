@@ -29,7 +29,7 @@ import {
   listPullsForCommit, getIssueCloser, type IssueCloser, pullClaimsIssue,
   listMatchingBranches, commitDate, compareFiles, deleteBranch,
   repoIsPrivate, fetchRepoFile, listOpenPullFiles,
-  getPullRequestHeadSha, getCommitContextStatus,
+  getPullRequestHeadSha, getCommitContextStatus, findPullRequestsReferencingTask,
 } from "../github/api";
 import {
   createIssue, getIssue, listIssues, addLabels, removeLabel, countIssues,
@@ -54,7 +54,7 @@ import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify"
 import { openTasksWithLatestPr } from "./pr-landed";
 import { closeTaskOnPromote } from "./close-action";
 import { studioOpenPrs, type OpenPr } from "./open-prs";
-import { completedGate, type CompletedGatePort } from "./completed-gate";
+import { completedGate, fallbackTaskPr, type CompletedGatePort } from "./completed-gate";
 import { openSprint, sprintSummaries, closeSprint } from "./sprint";
 import { runTaskReap, type ReapDeps, type LandedCheck } from "../studio/task-reap";
 import { isGateRunnerRepo } from "../gate/config";
@@ -358,6 +358,7 @@ function realCompletedGatePort(env: Env): CompletedGatePort {
       const s = await getCommitContextStatus(await mint(repo), repo, sha, GATE_STATUS_CONTEXT);
       return s?.state === undefined ? undefined : { state: s.state };
     },
+    findTaskPrs: async (repo, taskNumber) => findPullRequestsReferencingTask(await mint(repo), repo, taskNumber),
   };
 }
 
@@ -1119,13 +1120,12 @@ export async function handleBoard(
         if (!shown.ok) return respond(shown);
         const pr = latestResultPr(shown.value.comments);
         if (pr === null) {
-          return respond({
-            ok: false, status: 409,
-            message: "no PR in the latest result envelope — pass --no-pr for a research/retro task, or report a PR first",
-          });
+          const fallback = await fallbackTaskPr(completedGatePort, repo.value, number);
+          if (!fallback.ok) return respond(fallback);
+        } else {
+          const gate = await completedGate(completedGatePort, repo.value, pr);
+          if (!gate.ok) return respond(gate);
         }
-        const gate = await completedGate(completedGatePort, repo.value, pr);
-        if (!gate.ok) return respond(gate);
       }
       const transitioned = await transitionTask(api, repo.value, number, body);
       if (transitioned.ok && body.to === "completed" && gateEnforced && body.noPr === true) {
