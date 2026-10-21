@@ -1640,16 +1640,16 @@ export async function gitIsDirty(run: GitRun, path: string): Promise<boolean> {
 }
 
 /** `git -C <path> rev-list --count @{u}..` — how many commits are unpushed.
- *  A non-zero exit (no upstream configured, no remote, shallow clone) reads
- *  as NOT ahead (0): with no upstream to compare against, nothing can be said
- *  to be "ahead of" it, and "nothing to lose relative to a missing upstream"
- *  is the documented choice — the dirty check above is what still protects
- *  any local work. */
-export async function gitAheadCount(run: GitRun, path: string): Promise<number> {
+ *  `null` on a non-zero exit (no upstream configured, no remote, shallow
+ *  clone): with no upstream to compare against, the count cannot be proven,
+ *  so the caller must treat it as UNSYNCED and keep the tree — the dirty
+ *  check is not the only thing standing between a local destroy and unpushed
+ *  work. Fail closed, never "0 ahead". */
+export async function gitAheadCount(run: GitRun, path: string): Promise<number | null> {
   const { code, stdout } = await run(["-C", path, "rev-list", "--count", "@{u}.."]);
-  if (code !== 0) return 0;
+  if (code !== 0) return null;
   const n = Number(stdout.trim());
-  return Number.isInteger(n) && n >= 0 ? n : 0;
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 /** The destroy decision's injectable seam: WHICH path the dirty/ahead git
@@ -1677,10 +1677,18 @@ export async function localWorktreeRemoval(
   const path = await deps.resolveWorktreePath(id);
   if (path === null) return { remove: false, note: "worktree path could not be resolved — kept" };
   const [dirty, ahead] = await Promise.all([gitIsDirty(deps.run, path), gitAheadCount(deps.run, path)]);
-  const decision = localTeardownDecision(flags, dirty, ahead > 0);
-  return decision.action === "remove"
-    ? { remove: true, note: decision.note }
-    : { remove: false, note: decision.note };
+  // `null` = no upstream: the tree's commits are unsynced by definition, and
+  // a local destroy must never remove work it cannot recreate. Folding it
+  // into `unsynced` makes the decision keep the tree; the note below names
+  // the no-upstream cause rather than the "unpushed commits" wording that
+  // would wrongly imply there is an upstream to push to.
+  const unsynced = ahead === null || ahead > 0;
+  const decision = localTeardownDecision(flags, dirty, unsynced);
+  if (decision.action === "remove") return { remove: true, note: decision.note };
+  if (ahead === null && !dirty && flags.force && flags.discardUnsynced && !flags.park) {
+    return { remove: false, note: "kept — the worktree has no upstream, so its commits are unsynced; --discard-unsynced never removes unpushed work" };
+  }
+  return { remove: false, note: decision.note };
 }
 
 /** `git rev-parse --show-toplevel` — the local clone's absolute path, used
