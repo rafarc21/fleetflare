@@ -338,4 +338,112 @@ describe("container-only verbs refuse a host:\"local\" row (T2)", () => {
     expect(text).toContain("container");
     expect(text).toContain("fleet destroy");
   });
+
+  it("status refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/status", "GET"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("provisioned refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/provisioned", "GET"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("rescue refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/rescue"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("inspect refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/inspect", "GET"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("wake refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/wake"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("ws/terminal refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/ws/terminal", "GET"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("terminal refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/terminal", "GET"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("paste refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/paste"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("clear-session-guard refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/clear-session-guard"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
 });
