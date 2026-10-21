@@ -1761,6 +1761,7 @@ interface LocalSpawnResponse extends StudioStatus {
   members?: Record<string, string>;
   skills?: string;
   leadType?: "claude" | "glm";
+  completionGate?: boolean;
 }
 
 /**
@@ -1876,6 +1877,7 @@ export async function spawnLocalStudio(
     ...(body.effort !== undefined ? { effort: body.effort } : {}),
     ...(body.members !== undefined ? { members: body.members } : {}),
     ...(typeof body.skills === "string" ? { skills: body.skills.split(",") } : {}),
+    ...(body.completionGate !== undefined ? { completionGate: body.completionGate } : {}),
   });
   if (outcome.kind !== "created") {
     // `why` rides the two outcomes ensureLocalStudioWorktree can actually

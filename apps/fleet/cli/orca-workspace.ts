@@ -618,7 +618,7 @@ export function localWorktreeCreateArgs(localPath: string, defaultBranch: string
  *  on — the lead-gate PreToolUse hook (not --disallowedTools, which would
  *  starve members too) is the structural guard against the lead implementing,
  *  and the operator is present to approve the members' writes. */
-export function localLaunchCommand(id: string, promptFilePath: string, allowedTools: string, effort: string): string {
+export function localLaunchCommand(id: string, worktreePath: string, promptFilePath: string, allowedTools: string, effort: string): string {
   const args = [
     "claude",
     // The inner path is quoted too: a worktree path with a space must survive
@@ -628,7 +628,8 @@ export function localLaunchCommand(id: string, promptFilePath: string, allowedTo
     "--allowedTools", `"${allowedTools}"`,
   ];
   if (effort !== "") args.push("--effort", effort);
-  return `STUDIO_ID=${id} ${args.join(" ")}`;
+  // FLEET_WORKSPACE points session-reemit/completion-gate at the worktree's .fleet/, not the container /workspace default.
+  return `STUDIO_ID=${id} FLEET_WORKSPACE="${worktreePath}" ${args.join(" ")}`;
 }
 
 /**
@@ -664,6 +665,9 @@ export interface LocalStudioArgs {
   members?: Record<string, string>;
   /** Skill names to symlink into the worktree's `.claude/skills`. */
   skills?: string[];
+  /** Tier-0 completion gate: install the completion-gate Stop hook when the
+   *  roster writes code (writesCode on the members). */
+  completionGate?: boolean;
 }
 
 /**
@@ -711,7 +715,7 @@ export async function ensureLocalStudioWorktree(
 
     materializeLocalLead(worktreePath, args, deps);
 
-    const command = localLaunchCommand(id, join(worktreePath, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
+    const command = localLaunchCommand(id, worktreePath, join(worktreePath, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
     const term = await orcaJson(
       deps,
       ["terminal", "create", "--worktree", selector, "--title", id, "--command", command, "--json"],
@@ -864,6 +868,67 @@ function materializeLocalLead(worktreePath: string, args: LocalStudioArgs, deps:
   // (the members/skills blocks above may have skipped) must still land.
   mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(settingsPath, JSON.stringify(merged, null, 2));
+
+  // Item 1 (#1259): the container installs four more hooks than the local
+  // path did. Copy each from gates/ (single source of truth, same as the
+  // lead gate), chmod 0755, then merge its settings.json entry. The three
+  // observability hooks fail OPEN (warn + skip on a missing source); the
+  // completion gate fails CLOSED when completionGate is set — a code-writing
+  // studio with no verification gate must not boot (Tier 0).
+  const copyHook = (name: string, failClosed: boolean): string | null => {
+    const src = join(import.meta.dir, "..", "..", "..", "gates", `${name}.sh`);
+    if (!existsSync(src)) {
+      if (failClosed) {
+        throw new Error(`${name} source ${src} missing — refusing to materialize a lead with no verification gate (Tier 0)`);
+      }
+      deps.log(`declared hook "${name}" has no source at ${src} — studio boots without it`);
+      return null;
+    }
+    const dest = join(hooksDir, `${name}.sh`);
+    copyFileSync(src, dest);
+    chmodSync(dest, 0o755);
+    return dest;
+  };
+  const failOpenCmd = (name: string) =>
+    `S="$CLAUDE_PROJECT_DIR/.claude/hooks/${name}.sh"; [ -x "$S" ] && exec "$S"; exit 0`;
+  const failClosedCmd = (name: string, why: string) =>
+    `S="$CLAUDE_PROJECT_DIR/.claude/hooks/${name}.sh"; ` +
+    `[ -x "$S" ] || { echo "${name} hook absent or not executable -- refusing (${why})" >&2; exit 2; }; ` +
+    `exec "$S"`;
+
+  const hooksSettingsPath = join(claudeDir, "settings.json");
+  let hooksCfg: Record<string, unknown>;
+  try {
+    hooksCfg = JSON.parse(readFileSync(hooksSettingsPath, "utf8")) as Record<string, unknown>;
+    if (typeof hooksCfg !== "object" || hooksCfg === null || Array.isArray(hooksCfg)) hooksCfg = {};
+  } catch {
+    hooksCfg = {};
+  }
+  const hooksMap = (hooksCfg.hooks ?? {}) as Record<string, unknown>;
+  const eventArr = (evt: string): unknown[] => {
+    if (!Array.isArray(hooksMap[evt])) hooksMap[evt] = [];
+    return hooksMap[evt] as unknown[];
+  };
+  const addHookEntry = (evt: string, command: string, matcher?: string) => {
+    const entry = { ...(matcher !== undefined ? { matcher } : {}), hooks: [{ type: "command", command }] };
+    const arr = eventArr(evt);
+    const name = command.match(/([a-z-]+)\.sh/)?.[1] ?? command;
+    const filtered = arr.filter((e) => !JSON.stringify(e).includes(`${name}.sh`));
+    filtered.push(entry);
+    hooksMap[evt] = filtered;
+  };
+
+  if (copyHook("session-reemit", false)) addHookEntry("SessionStart", failOpenCmd("session-reemit"));
+  if (copyHook("install-marker", false)) addHookEntry("PostToolUse", failOpenCmd("install-marker"), ".*");
+  if (copyHook("activity-heartbeat", false)) {
+    for (const evt of ["SessionStart", "UserPromptSubmit", "Stop", "Notification"]) {
+      addHookEntry(evt, failOpenCmd("activity-heartbeat"));
+    }
+  }
+  if (args.completionGate) {
+    if (copyHook("completion-gate", true)) addHookEntry("Stop", failClosedCmd("completion-gate", "Tier 0"));
+  }
+  writeFileSync(hooksSettingsPath, JSON.stringify({ ...hooksCfg, hooks: hooksMap }, null, 2));
 
   // Fleet task #1248 review BLOCKER B3: everything written above lives INSIDE
   // the worktree and is committable — a member `git add -A` would commit the
