@@ -571,6 +571,17 @@ describe("local studio workspace — fleet task #1248", () => {
       expect(hookText("Stop")).toContain("completion-gate.sh");
       // completion-gate is FAIL-CLOSED: exit 2 on missing script.
       expect(hookText("Stop")).toContain("exit 2");
+
+      // Every hook command resolves its script by $CLAUDE_PROJECT_DIR (claude's
+      // stable project-root pointer), never $PWD (a lead that cd's would break
+      // $PWD and the gate would refuse every call) — the SAME anchor
+      // localLeadGateHookCommand builds.
+      expect(localLeadGateHookCommand()).toContain("$CLAUDE_PROJECT_DIR/.claude/hooks/lead-gate.sh");
+      expect(localLeadGateHookCommand()).not.toContain("$PWD");
+      for (const evt of ["PreToolUse", "SessionStart", "PostToolUse", "UserPromptSubmit", "Stop", "Notification"]) {
+        expect(hookText(evt)).toContain("$CLAUDE_PROJECT_DIR/.claude/hooks/");
+        expect(hookText(evt)).not.toContain("$PWD");
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
