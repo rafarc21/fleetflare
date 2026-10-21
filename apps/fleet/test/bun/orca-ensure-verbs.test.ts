@@ -45,6 +45,10 @@ import { ORCA_ENV, ok, terminals } from "./helpers/orca-fixtures";
 // throws) and the real function once the export lands (green).
 const { localSettingsPath } = await import("../../cli/orca-workspace");
 
+// item 2: same dynamic-import trick for the new local-wake exports — red
+// survives the module link, green gets the real functions.
+const { sendLocalWake, resolveLocalWake } = await import("../../cli/orca-workspace");
+
 // ---------------------------------------------------------------------------
 // Fakes. `run` records every argv it was handed, which is how the "makes NO
 // orca call" and "no second create" tests assert absence rather than outcome.
@@ -741,5 +745,51 @@ describe("resolveStudioWorktreePath (B1 fix round)", () => {
   test("null when the worktree list has no row for the studio", async () => {
     const f = fake({ "worktree list": worktrees("staging") });
     expect(await resolveStudioWorktreePath("websites--pilot", f.deps)).toBeNull();
+  });
+});
+
+describe("local studio wake via orca terminal send (item 2)", () => {
+  const WID = "repo-websites::/w/studio-websites--pilot";
+
+  test("sendLocalWake types the digest into the healthy attach terminal", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID }),
+      "terminal send": ok("{}"),
+    });
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+    const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter"]);
+  });
+
+  test("sendLocalWake refuses when there is no healthy attach terminal", async () => {
+    const f = fake({ "worktree list": worktrees("studio-websites--pilot"), "terminal list": terminals(false) });
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out.woke).toBe(false);
+  });
+
+  test("sendLocalWake refuses outside an Orca session", async () => {
+    const f = fake({});
+    f.deps.env = {};
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out.woke).toBe(false);
+  });
+
+  test("resolveLocalWake passes a non-local report through untouched", async () => {
+    const f = fake({});
+    const report = { woke: false as const, reason: "STOPPED" };
+    expect(await resolveLocalWake(report, "x", f.deps)).toBe(report);
+  });
+
+  test("resolveLocalWake swaps a local refusal for the terminal send", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID }),
+      "terminal send": ok("{}"),
+    });
+    const report = { woke: false as const, reason: "LOCAL", local: true as const, digest: "WAKE #1" };
+    const out = await resolveLocalWake(report, "websites--pilot", f.deps);
+    expect(out).toEqual({ woke: true, digest: "WAKE #1" });
   });
 });
