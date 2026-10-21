@@ -1166,6 +1166,8 @@ export async function handleStudio(
   const stub = await getStudioStub(env, id.full);
 
   if (action === "status" && req.method === "GET") {
+    const refused = await refuseLocalRow(env, id.full, "status");
+    if (refused) return refused;
     return Response.json(burnView(await stub.getStatusDetail()));
   }
   /**
@@ -1196,6 +1198,8 @@ export async function handleStudio(
    * a reason reaches stored status.
    */
   if (action === "provisioned" && req.method === "GET") {
+    const refused = await refuseLocalRow(env, id.full, "provisioned");
+    if (refused) return refused;
     try {
       const verdict = await stub.checkProvisioned(id.repo);
       return Response.json(
@@ -1281,6 +1285,8 @@ export async function handleStudio(
    * checkout/markers-only studio: not an error, nothing to report.
    */
   if (action === "rescue" && req.method === "POST") {
+    const refused = await refuseLocalRow(env, id.full, "rescue");
+    if (refused) return refused;
     let result: Awaited<ReturnType<typeof stub.rescueNow>>;
     try {
       result = await stub.rescueNow();
@@ -1315,6 +1321,8 @@ export async function handleStudio(
    * override).
    */
   if (action === "clear-session-guard" && req.method === "POST") {
+    const refused = await refuseLocalRow(env, id.full, "clear-session-guard");
+    if (refused) return refused;
     try {
       return Response.json(await stub.clearSessionGuard());
     } catch (err) {
@@ -1353,6 +1361,8 @@ export async function handleStudio(
    * rides along regardless, for free.
    */
   if (action === "inspect" && req.method === "GET") {
+    const refused = await refuseLocalRow(env, id.full, "inspect");
+    if (refused) return refused;
     const linesParam = Number(url.searchParams.get("lines"));
     const tailLines = Number.isFinite(linesParam) && linesParam > 0 ? linesParam : undefined;
     // Board #91: `runInspect` is total, but the RPC to reach it is not — a
@@ -1535,6 +1545,8 @@ export async function handleStudio(
    * itself failing: then nothing answered about the container at all.
    */
   if (action === "wake" && req.method === "POST") {
+    const refused = await refuseLocalRow(env, id.full, "wake");
+    if (refused) return refused;
     let prompt: unknown;
     try {
       const parsed: unknown = await req.json();
@@ -1704,6 +1716,8 @@ export async function handleStudio(
     // method, and pinning the path here keeps that test independent of
     // whatever the public URL looks like. The Upgrade header must survive the
     // rewrite or the DO answers 426 — asserted in test/studio.ws.test.ts.
+    const refused = await refuseLocalRow(env, id.full, "ws/terminal");
+    if (refused) return refused;
     return stub.fetch(new Request(`https://studio${TERMINAL_PATH}`, { headers: req.headers }));
   }
   if (action === "terminal" && req.method === "GET") {
@@ -1713,6 +1727,8 @@ export async function handleStudio(
     // consistency with the rest of this handler is free. No DO round trip:
     // the page is a static, pre-bundled artifact (page.ts) with just the
     // studio id substituted in, so it never touches `stub`.
+    const refused = await refuseLocalRow(env, id.full, "terminal");
+    if (refused) return refused;
     return new Response(renderTerminalPage(id.full), {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
@@ -1723,6 +1739,8 @@ export async function handleStudio(
     // check costs nothing to do first. The Content-Length check is the fast
     // path for size: an honest oversized upload is rejected off the header
     // alone, no read at all.
+    const refused = await refuseLocalRow(env, id.full, "paste");
+    if (refused) return refused;
     const contentType = req.headers.get("Content-Type") ?? "";
     if (!PASTE_MIME_EXT[contentType]) return new Response("unsupported content type", { status: 415 });
 
