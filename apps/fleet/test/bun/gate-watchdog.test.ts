@@ -71,7 +71,7 @@ type Post = { repo: string; headSha: string; state: string; description?: string
 
 function harness(opts: {
   initial?: GateRunRecord | null; redLeg?: boolean; postFails?: boolean; runs?: Record<string, string>;
-  headStatus?: (repo: string, headSha: string) => Promise<{ state: string } | undefined>;
+  headStatus?: (repo: string, headSha: string) => Promise<{ state: string; description?: string } | undefined>;
 } = {}) {
   const engine = fakeEngine();
   for (const [id, status] of Object.entries(opts.runs ?? { "gate-x": "running" })) {
@@ -420,6 +420,100 @@ describe("sweepStalledRuns: an errored run that never posted its own verdict is 
 
   it("an errored run whose head already shows a terminal status is never clobbered: no reconciliation post, still retired", async () => {
     const h = harness({ runs: { "gate-x": "errored" }, headStatus: async () => ({ state: "success" }) });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a pending head naming a DIFFERENT run is a newer same-head run: no reconciliation post, still retired", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "running (run gate-y) — 2 legs" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a pending head naming THIS run is reconciled: the one error post lands", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "running (run gate-x) — 2 legs" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([{ repo: REPO, headSha: HEAD, state: "error", description: expect.stringContaining("ended without a verdict") }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a pending head whose description starts with this run id but names a longer run is a newer same-head run: no reconciliation post, still retired (#1243)", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "running (run gate-x-p7) — 2 legs" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a pre-create pending with no run id is reconciled: the one error post lands, retired (#1243)", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "running (fresh gate run)" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([{ repo: REPO, headSha: HEAD, state: "error", description: expect.stringContaining("ended without a verdict") }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a pre-create pending with no run id, edited variant, is reconciled: the one error post lands, retired (#1243)", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "running (edited title/body recheck)" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([{ repo: REPO, headSha: HEAD, state: "error", description: expect.stringContaining("ended without a verdict") }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a terminal failure head is never clobbered: no reconciliation post, still retired", async () => {
+    const h = harness({ runs: { "gate-x": "errored" }, headStatus: async () => ({ state: "failure" }) });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a terminal error head is never clobbered: no reconciliation post, still retired", async () => {
+    const h = harness({ runs: { "gate-x": "errored" }, headStatus: async () => ({ state: "error" }) });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a pending head naming this run id with a -r suffix is a newer same-head rerun: no reconciliation post, still retired", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "running (run gate-x-p7-r3) — 2 legs" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a rerun-status head naming THIS run is reconciled: the one error post lands, retired", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "rerun after infra error (run gate-x)" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([{ repo: REPO, headSha: HEAD, state: "error", description: expect.stringContaining("ended without a verdict") }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a queued drain marker is a newer run's status, never clobbered: no reconciliation post, still retired", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "queued (gate draining for deploy)" }),
+    });
     expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
     expect(h.posts).toEqual([]);
     expect(h.head()?.progressedAt).toBe(-1);

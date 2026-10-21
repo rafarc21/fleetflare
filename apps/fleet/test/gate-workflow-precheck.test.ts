@@ -217,13 +217,14 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     lastPostedStatus = init?.body === undefined ? undefined : (JSON.parse(init.body as string) as { state: string; description?: string });
     return Promise.resolve(json({}));
   }
-  if (method === "GET" && /\/commits\/[0-9a-f]{40}\/status$/.test(url)) {
+  if (method === "GET" && /\/commits\/[0-9a-f]{40}\/statuses/.test(url)) {
     // #1226: postGateStatus's read-back confirmation — reflects whatever the
     // last successful POST above landed, so every pre-existing test's clean
-    // single-attempt post still confirms and resolves.
-    return Promise.resolve(json({
-      statuses: lastPostedStatus === undefined ? [] : [{ context: GATE_STATUS_CONTEXT, ...lastPostedStatus }],
-    }));
+    // single-attempt post still confirms and resolves. The per-context
+    // statuses endpoint returns a plain array, empty when nothing posted.
+    return Promise.resolve(json(
+      lastPostedStatus === undefined ? [] : [{ context: GATE_STATUS_CONTEXT, ...lastPostedStatus }],
+    ));
   }
   return Promise.reject(new Error(`unexpected fetch: ${method} ${url}`));
 }

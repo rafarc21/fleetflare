@@ -150,18 +150,21 @@ export function isStalled(run: GateRunRecord, now: number): boolean {
     || (run.progressedAt !== undefined && run.progressedAt > 0 && now - run.progressedAt >= GATE_STALL_MS);
 }
 
-/** Ends the run when it is still live. Returns true only when it was ended: a
- *  run already finished, or a terminate that fails, is not a superseded run and
- *  never blocks the start of the new one. */
+/** Ends the run when it is still live. Returns true only when it was ended; an
+ *  unknown instance (get throws) returns false and never blocks the caller. A
+ *  LIVE instance whose terminate fails THROWS (#1243): a caller ending the run
+ *  of a DIFFERENT head sha catches it, but a same-head caller must not proceed
+ *  to a second live run of that head (#1148 item 2). */
 async function endIfLive(wf: GateRunStarter, runId: string): Promise<boolean> {
+  let instance: GateRunInstance;
   try {
-    const instance = await wf.get(runId);
-    if (!LIVE_STATUSES.has((await instance.status()).status)) return false;
-    await instance.terminate();
-    return true;
+    instance = await wf.get(runId);
   } catch {
     return false;
   }
+  if (!LIVE_STATUSES.has((await instance.status()).status)) return false;
+  await instance.terminate();
+  return true;
 }
 
 /** Ends a run when it is still live, and throws when the end fails. A stalled
@@ -190,7 +193,16 @@ async function recordRun(
   const previous = await index.latest(input.repo, input.pr);
   await index.record(input.repo, input.pr, { headSha: input.headSha, runId, progressedAt: now() });
   if (previous === null || previous.runId === runId) return { runId, reused: false };
-  const superseded = await endIfLive(wf, previous.runId);
+  // #1243: a failed terminate here never leaves two live runs of the SAME head
+  // (a same-head live run was already reused or ended before recordRun); the new
+  // run still starts, the leak is logged, and no superseded run is reported (#1082).
+  let superseded: boolean;
+  try {
+    superseded = await endIfLive(wf, previous.runId);
+  } catch (err) {
+    console.error("gate: previous run not ended", err);
+    superseded = false;
+  }
   return { runId, reused: false, supersededRunId: superseded ? previous.runId : undefined };
 }
 

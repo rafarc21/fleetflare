@@ -1470,19 +1470,33 @@ export async function postCommitStatus(
   );
 }
 
+/** Page cap for getCommitContextStatus (below) — the per-context statuses
+ *  endpoint pages via the Link header; >1000 statuses on one sha truncates
+ *  (read as "context absent"). Same posture as OPEN_PULLS_MAX_PAGES. */
+export const COMMIT_STATUSES_MAX_PAGES = 10;
+
 /** gate/verdict's (or any context's) current state for one commit, read right
- *  after a post to confirm it actually landed (#1226) — the combined-status
- *  endpoint lists every context's latest status. Undefined when the context
- *  has no status yet for this sha. */
+ *  after a post to confirm it actually landed (#1226). Reads the per-context
+ *  `statuses` endpoint (newest-first per context), not the combined-status
+ *  endpoint which lists only the first 30 contexts and so hid gate/verdict on
+ *  a busy head; paged via the Link header up to COMMIT_STATUSES_MAX_PAGES.
+ *  Undefined when the context has no status yet for this sha. */
 export async function getCommitContextStatus(
   token: string, repo: string, sha: string, context: string,
 ): Promise<{ state: string; description?: string } | undefined> {
-  const raw = await ghJson<{ statuses?: { context?: string; state?: string; description?: string }[] }>(
-    token, `https://api.github.com/repos/${repo}/commits/${sha}/status`, { method: "GET" },
-    `read ${repo}@${sha} commit status`,
-  );
-  const match = raw.statuses?.find((s) => s.context === context);
-  return match?.state === undefined ? undefined : { state: match.state, description: match.description };
+  let url: string | null = `https://api.github.com/repos/${repo}/commits/${sha}/statuses?per_page=100`;
+  for (let page = 1; page <= COMMIT_STATUSES_MAX_PAGES && url !== null; page++) {
+    const { res, text } = await ghRequest(
+      token, url, { method: "GET", headers: GH_HEADERS_GET(token) }, `read ${repo}@${sha} commit status`,
+    );
+    for (const s of JSON.parse(text) as { context?: string; state?: string; description?: string }[]) {
+      if (s.context === context) {
+        return s.state === undefined ? undefined : { state: s.state, description: s.description };
+      }
+    }
+    url = nextPageLink(res.headers.get("link"));
+  }
+  return undefined;
 }
 
 /** Head commit sha of one PR. getPullRequest does not return it. */

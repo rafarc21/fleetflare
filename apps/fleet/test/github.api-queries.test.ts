@@ -4,6 +4,7 @@ import {
   closingIssuesForPull, getPullRequest, commitReachableFromBranch, getIssueCloser,
   pullsWithClosingIssuesForCommits, pullClaimsIssue,
   listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES, listOpenPulls, OPEN_PULLS_MAX_PAGES,
+  getCommitContextStatus, COMMIT_STATUSES_MAX_PAGES,
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
   setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict,
@@ -188,6 +189,69 @@ describe("listOpenPulls", () => {
   it("throws GitHub's own words on a non-2xx", async () => {
     respond = () => new Response('{"message":"Not Found"}', { status: 404 });
     await expect(listOpenPulls("tok", "o/r")).rejects.toThrow(/Not Found/);
+  });
+});
+
+describe("getCommitContextStatus", () => {
+  const status = (context: string, state: string, description?: string) => ({ context, state, description });
+
+  it("reads the per-context statuses endpoint and finds the context past 30 others", async () => {
+    const statuses = [
+      ...Array.from({ length: 45 }, (_, i) => status(`ci/build-${i}`, "success")),
+      status("gate/verdict", "success", "all good"),
+    ];
+    respond = () => Response.json(statuses);
+    const result = await getCommitContextStatus("tok", "o/r", "abc123", "gate/verdict");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/commits/abc123/statuses?per_page=100");
+    expect(calls[0].headers).toStrictEqual(GH_GET_HEADERS);
+    expect(result).toEqual({ state: "success", description: "all good" });
+  });
+
+  it("pages through the Link header to find the context on page 2", async () => {
+    let page = 0;
+    respond = () => {
+      page++;
+      return page === 1
+        ? new Response(JSON.stringify(Array.from({ length: 100 }, (_, i) => status(`ci/${i}`, "success"))), {
+            status: 200,
+            headers: {
+              link: '<https://api.github.com/repos/o/r/commits/abc123/statuses?per_page=100&page=2>; rel="next"',
+            },
+          })
+        : Response.json([status("gate/verdict", "pending", "running")]);
+    };
+    const result = await getCommitContextStatus("tok", "o/r", "abc123", "gate/verdict");
+    expect(calls).toHaveLength(2);
+    expect(calls[1].url).toBe("https://api.github.com/repos/o/r/commits/abc123/statuses?per_page=100&page=2");
+    expect(result).toEqual({ state: "pending", description: "running" });
+  });
+
+  it("returns undefined when the context is absent from every page", async () => {
+    respond = () => Response.json([status("ci/other", "success")]);
+    expect(await getCommitContextStatus("tok", "o/r", "abc123", "gate/verdict")).toBeUndefined();
+  });
+
+  it("stops at the page cap and returns undefined when a next link still remains", async () => {
+    respond = () => new Response(JSON.stringify([status("ci/other", "success")]), {
+      status: 200,
+      headers: {
+        link: '<https://api.github.com/repos/o/r/commits/abc123/statuses?per_page=100&page=2>; rel="next"',
+      },
+    });
+    expect(await getCommitContextStatus("tok", "o/r", "abc123", "gate/verdict")).toBeUndefined();
+    expect(calls).toHaveLength(COMMIT_STATUSES_MAX_PAGES);
+  });
+
+  it("throws GitHub's own words on a non-2xx, token never in the message", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    try {
+      await getCommitContextStatus("super-secret-token", "o/r", "abc123", "gate/verdict");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toMatch(/404/);
+      expect((err as Error).message).not.toContain("super-secret-token");
+    }
   });
 });
 

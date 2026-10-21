@@ -90,9 +90,10 @@ export interface WatchdogDeps {
   post: (repo: string, headSha: string, args: { state: "pending" | "error" | "failure"; description: string }) => Promise<void>;
   /** gate/verdict's current state on the head, read without posting (#1226): used only so an
    *  errored run that never got to post ITS OWN verdict can be reconciled without ever
-   *  clobbering a verdict some other path already landed. Undefined when there is no status
-   *  yet, or the read failed. */
-  headStatus: (repo: string, headSha: string) => Promise<{ state: string } | undefined>;
+   *  clobbering a verdict some other path already landed. `description` is the status text
+   *  (which names the posting run's id) used to tell THIS run's pending from a newer same-head
+   *  run's. Undefined when there is no status yet, or the read failed. */
+  headStatus: (repo: string, headSha: string) => Promise<{ state: string; description?: string } | undefined>;
   /** Whether the gate runner is on for a repo. A repo it is off for is never read past this check (#1148 review). */
   gated?: (repo: string) => boolean;
   /** Whether any leg of the run stored a red result. A red result is final, never rerun (#1119). */
@@ -144,13 +145,32 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
       // #1226: an "errored" run may have ended before it ever got to post its
       // OWN verdict (the exact production bug: the post throws, the step's
       // retries exhaust, the Workflow instance errors). One best-effort
-      // reconciliation post, ONLY while the head's real GitHub status is not
-      // already something terminal — never clobber a verdict some other path
-      // already landed. A failure here is logged and swallowed: the run is
-      // already dead either way, and the row is retired regardless.
+      // reconciliation post, ONLY while the head has no status or a pending
+      // that still names THIS run. Every status this system posts wraps the
+      // run id in parentheses — "running (run <id>) — N legs", "rerun after
+      // infra error (run <id>)", "(run <id>)" — so the token is matched
+      // DELIMITED, never as a prefix (run ids extend each other on the same
+      // head: <id> ⊂ <id>-p<pr> ⊂ ...-r<t>/...-e<t>). A pending naming a
+      // different run is a newer same-head run's status, never clobbered.
+      // The pre-create pendings carry no run id at all (posted before the run
+      // exists): "running (fresh gate run)" and "running (edited title/body
+      // recheck)". Those two are reconcilable — no "(run " token AND a
+      // "running (" prefix — otherwise a run that errors before its own
+      // post-pending lands leaves the head stuck forever. The third id-less
+      // pending, "queued (gate draining for deploy)", is a NEWER run's marker
+      // (posted when a run is queued during a deploy drain, without a run or a
+      // pointer move): it lacks the "running (" prefix and is never clobbered.
+      // A failure here is logged and swallowed: the run is already dead either
+      // way, and the row is retired regardless.
       if (status === "errored") {
         const current = await deps.headStatus(repo, headSha).catch(() => undefined);
-        if (current === undefined || current.state === "pending") {
+        const description = current?.state === "pending" && typeof current.description === "string"
+          ? current.description : undefined;
+        const stillThisRun = description !== undefined && description.includes(`(run ${runId})`);
+        const idlessPending = description !== undefined
+          && description.startsWith("running (")
+          && !description.includes("(run ");
+        if (current === undefined || stillThisRun || idlessPending) {
           await deps.post(repo, headSha, {
             state: "error", description: `gate: run ended without a verdict (run ${runId})`,
           }).catch((err) => console.error(`gate watchdog: reconciliation post failed for ${runId}`, err));

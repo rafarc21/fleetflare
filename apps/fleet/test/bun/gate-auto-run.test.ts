@@ -270,6 +270,18 @@ describe("startGateRun: a new head sha ends the still-live run of the sha it rep
     expect(runs.size).toBe(2);
   });
 
+  it("a terminate failure of the previous run still starts the new run without throwing (#1243 d)", async () => {
+    const { wf, runs } = fakeWorkflow({ terminateError: new Error("instance busy") });
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index);
+    expect(second.reused).toBe(false);
+    expect(second.supersededRunId).toBeUndefined();
+    expect(runs.size).toBe(2);
+    expect(runs.get(first.runId)!.status).toBe("running");
+    expect(runs.get(second.runId)!.status).toBe("running");
+  });
+
   it("a PR's runs are kept apart: another PR's run is never ended", async () => {
     const { wf, terminated } = fakeWorkflow();
     const { index } = fakeIndex();
@@ -636,6 +648,19 @@ describe("startEditedGateRun: an edit re-runs under its own -e id (#1176)", () =
     await startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
     expect(terminated).toEqual([baseId]);
     expect(runs.get(otherShaRunId)!.status).toBe("running");
+  });
+
+  it("a terminate failure of a live same-head run throws and creates no -e run (#1243 d)", async () => {
+    const { wf, runs, creates } = fakeWorkflow({ terminateError: new Error("instance busy") });
+    const baseId = await gateRunId(PR_REPO, HEAD);
+    await wf.create({ id: baseId, params: { repo: PR_REPO, pr: 7 } });
+    const { index } = fakeIndex();
+    expect(creates).toHaveLength(1);
+    await expect(
+      startEditedGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1),
+    ).rejects.toThrow("instance busy");
+    expect(creates).toHaveLength(1);
+    expect(runs.get(baseId)!.status).toBe("running");
   });
 });
 
