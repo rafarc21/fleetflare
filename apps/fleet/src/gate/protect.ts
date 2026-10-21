@@ -49,8 +49,9 @@ export interface ProtectResult {
 
 /** Ensure the repo's default branch requires gate/verdict. Idempotent: the
  *  reported `after` is the existing set plus gate/verdict (deduped). No rule
- *  means a full PUT creating one; an existing rule is only appended to, never
- *  rewritten. */
+ *  → PUT create; rule with required-status → POST contexts + PATCH strict;
+ *  rule without → PATCH the whole block; enforcing admins → DELETE
+ *  enforce_admins. */
 export async function runGateProtect(port: ProtectPort, repo: string): Promise<ProtectResult> {
   const branch = await port.getDefaultBranch(repo);
   const existing = await port.getProtection(repo, branch);

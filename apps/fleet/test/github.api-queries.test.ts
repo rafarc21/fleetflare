@@ -7,7 +7,7 @@ import {
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
   setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict, setBranchProtectionRequiredStatusChecks, disableBranchProtectionEnforceAdmins,
-  getBranchProtection,
+  getBranchProtection, findPullRequestsReferencingTask,
 } from "../src/github/api";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
 
@@ -1098,6 +1098,32 @@ describe("getBranchProtection", () => {
     expect(await getBranchProtection("tok", "o/r", "main")).toEqual({
       contexts: ["lint"], hasRequiredStatusChecks: true, enforceAdmins: false,
     });
+  });
+});
+
+describe("findPullRequestsReferencingTask", () => {
+  it("GETs the issue search with q=repo:o/r is:pr <N>, per_page/sort/order pinned", async () => {
+    respond = () => Response.json({ items: [] });
+    await findPullRequestsReferencingTask("tok", "o/r", 42);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/search/issues?q=repo%3Ao%2Fr%20is%3Apr%2042&per_page=30&sort=created&order=desc");
+  });
+
+  it("returns only integer numbers of items carrying a pull_request", async () => {
+    respond = () => Response.json({ items: [
+      { number: 7, pull_request: {} },
+      { number: 9 },
+      { number: 12, pull_request: {} },
+      { number: "13", pull_request: {} },
+    ] });
+    expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([7, 12]);
+  });
+
+  it("an empty or missing items answer is []", async () => {
+    respond = () => Response.json({});
+    expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([]);
+    respond = () => Response.json({ items: [] });
+    expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([]);
   });
 });
 

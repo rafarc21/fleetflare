@@ -1567,6 +1567,6 @@ export async function findPullRequestsReferencingTask(
     `search ${repo} PRs referencing task #${taskNumber}`,
   );
   return (raw.items ?? [])
-    .filter((i) => i.pull_request !== undefined && Number.isInteger(i.number))
+    .filter((i) => i.pull_request != null && Number.isInteger(i.number))
     .map((i) => i.number);
 }
