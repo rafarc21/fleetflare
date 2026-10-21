@@ -415,6 +415,7 @@ describe("handleBoard", () => {
           author: "websites--web-studio", createdAt: "2026-10-20T00:00:00Z", body: noPrResultEnvelopeComment() }]),
       });
       const completedGatePort = {
+        findTaskPrs: vi.fn(async () => []),
         getPullRequest: vi.fn(async () => ({ merged: true })),
         getHeadSha: vi.fn(async () => "abc123def4567890"),
         getCommitStatus: vi.fn(async () => ({ state: "success" })),
@@ -434,6 +435,54 @@ describe("handleBoard", () => {
       expect(completedGatePort.getPullRequest).not.toHaveBeenCalled();
     });
 
+    it("envelope has no PR but a merged+green PR references the task: completion proceeds", async () => {
+      authorized();
+      const api = fakeApi({
+        getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })),
+        listComments: vi.fn(async () => [{ id: 1, url: "https://github.com/o/r/issues/42#issuecomment-1",
+          author: "websites--web-studio", createdAt: "2026-10-20T00:00:00Z", body: noPrResultEnvelopeComment() }]),
+      });
+      const completedGatePort = {
+        findTaskPrs: vi.fn(async () => [77]),
+        getPullRequest: vi.fn(async () => ({ merged: true })),
+        getHeadSha: vi.fn(async () => "abc123def4567890"),
+        getCommitStatus: vi.fn(async () => ({ state: "success" })),
+      };
+      const res = await handleBoard(
+        req("/studio/board/tasks/42/state", {
+          method: "POST", body: JSON.stringify({ from: "working", to: "completed", repo: "acme-org/websites" }),
+        }),
+        gatedEnv, { api, reach, completedGatePort },
+      );
+      expect(res.status).toBe(200);
+      expect(completedGatePort.findTaskPrs).toHaveBeenCalledWith("acme-org/websites", 42);
+      expect(completedGatePort.getPullRequest).toHaveBeenCalledWith("acme-org/websites", 77);
+    });
+
+    it("envelope has no PR and no PR references the task: 409 naming no PR", async () => {
+      authorized();
+      const api = fakeApi({
+        getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })),
+        listComments: vi.fn(async () => [{ id: 1, url: "https://github.com/o/r/issues/42#issuecomment-1",
+          author: "websites--web-studio", createdAt: "2026-10-20T00:00:00Z", body: noPrResultEnvelopeComment() }]),
+      });
+      const completedGatePort = {
+        findTaskPrs: vi.fn(async () => []),
+        getPullRequest: vi.fn(async () => ({ merged: true })),
+        getHeadSha: vi.fn(async () => "abc123def4567890"),
+        getCommitStatus: vi.fn(async () => ({ state: "success" })),
+      };
+      const res = await handleBoard(
+        req("/studio/board/tasks/42/state", {
+          method: "POST", body: JSON.stringify({ from: "working", to: "completed", repo: "acme-org/websites" }),
+        }),
+        gatedEnv, { api, reach, completedGatePort },
+      );
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain("no PR");
+      expect(completedGatePort.getPullRequest).not.toHaveBeenCalled();
+    });
+
     it("refuses completion when the envelope PR is not merged, before any transition write", async () => {
       authorized();
       const api = fakeApi({
@@ -442,6 +491,7 @@ describe("handleBoard", () => {
           author: "websites--web-studio", createdAt: "2026-10-20T00:00:00Z", body: resultEnvelopeComment(77) }]),
       });
       const completedGatePort = {
+        findTaskPrs: vi.fn(async () => []),
         getPullRequest: vi.fn(async () => ({ merged: false })),
         getHeadSha: vi.fn(async () => "abc123def4567890"),
         getCommitStatus: vi.fn(async () => ({ state: "success" })),
@@ -463,6 +513,7 @@ describe("handleBoard", () => {
       authorized();
       const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })) });
       const completedGatePort = {
+        findTaskPrs: vi.fn(async () => []),
         getPullRequest: vi.fn(async () => ({ merged: false })),
         getHeadSha: vi.fn(async () => "abc123def4567890"),
         getCommitStatus: vi.fn(async () => ({ state: "success" })),
