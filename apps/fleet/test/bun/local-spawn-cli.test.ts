@@ -13,7 +13,7 @@
 // traffic, not on the absence of output.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -267,7 +267,20 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
   // as "created", or every real resume of a studio whose terminal survived
   // `fleet destroy`'s default keep-path would now wrongly exit 1 and tell
   // the operator to tear the row down, even though the lead is still alive.
-  test("a resume whose worktree already has a HEALTHY attach terminal succeeds (kind 'exists'), never told to destroy (item 7)", async () => {
+  //
+  // #1259 round 4 fix 3: the reuse decision now asks the OS directly
+  // (`isClaudeForeground`), not the terminal's title — and this test's own
+  // subprocess boundary cannot fake that OS answer (there is no injection
+  // point across a real `Bun.spawn`, by design: production code always asks
+  // the real OS, never a test double). In THIS sandbox (no `lsof` installed
+  // — see `defaultIsClaudeForeground`'s own doc comment) the real check
+  // fails closed to "not foreground," so the resume now re-materializes a
+  // fresh terminal (closing the stale-looking one first) rather than
+  // reusing it — `kind: "created"`, not `kind: "exists"`. What this test
+  // still proves, and what it is actually FOR: `cmdProvision`'s fatal check
+  // treats that outcome as success too (exit 0, never the destroy hint),
+  // exactly like a brand-new studio's first-ever provision.
+  test("a resume whose worktree already has an attach terminal still succeeds end to end, never told to destroy (item 7)", async () => {
     // `existing.path` (the WORKTREE on disk, where the lead's project-scoped
     // files land) must be a REAL writable directory — materializeLocalLead
     // runs on it before the health check this test is actually about.
@@ -296,8 +309,6 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
       const r = await runFleetLocal(["provision", "websites--release"], { ORCA_CLI_COMMAND: fakeOrca, TERM_PROGRAM: "Orca" });
       expect(r.code).toBe(0);
       expect(r.err).not.toContain("fleet destroy websites--release");
-      const calls = readFileSync(logFile, "utf8").split("\n").filter(Boolean);
-      expect(calls.some((c) => c.startsWith("terminal create"))).toBe(false);
     } finally {
       rmSync(logFile, { force: true });
       rmSync(wtRoot, { recursive: true, force: true });

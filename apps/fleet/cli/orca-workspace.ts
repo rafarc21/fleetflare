@@ -54,7 +54,8 @@ import {
   chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync,
   symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import { parseStudioId } from "../src/studio/ids";
 import { repoIdSegment } from "../src/studio/repo";
 import type { StudioStatus } from "../src/studio/types";
@@ -167,6 +168,32 @@ export interface OrcaDeps {
    * orca failure, so this never introduces a new way to hang the caller.
    */
   lock: <T>(studioId: string, fn: () => Promise<T>) => Promise<T>;
+  /**
+   * #1259 round 4 redesign: whether claude is genuinely the live, foreground
+   * process for a studio's worktree — asked of the OS directly, never
+   * inferred from a terminal's rendered screen text or its title. 3 prior
+   * review rounds pattern-matched the terminal's `preview` field instead,
+   * and the operator measured 3 distinct real-world ways that failed:
+   * common shell prompt themes (starship, pure, powerlevel10k) use the exact
+   * glyphs (`❯`/`●`) claude's own chrome uses; a real claude 2.1.306
+   * permission modal does not draw the `▔` rule the old check refused on,
+   * so its tail reads as an ordinary option row; and even a genuinely live
+   * claude terminal only passes a tail-text check ~60% of the time (footer
+   * wording, rule lines, continuation markers vary too much to enumerate).
+   * Separately, keying "is this studio's lead still here" on a terminal's
+   * TITLE matching the studio id breaks the moment the lead is genuinely
+   * alive: claude rewrites its own terminal's title via OSC (to
+   * `✳ <summary>`), so title-matching calls a live lead "gone" (and spawns a
+   * second one) and can call a dead one whose title still happens to read as
+   * the studio id "alive" with nothing actually running.
+   *
+   * Optional on the interface (not every existing fake `OrcaDeps` in the
+   * test suite exercises this path) but never actually undefined in
+   * production — `defaultOrcaDeps()` always wires a real implementation.
+   * Fails closed: any ambiguity here (tool absent, command errors, no
+   * match) means "not claude," never "probably fine."
+   */
+  isClaudeForeground?: (worktreePath: string) => Promise<boolean>;
 }
 
 type WorkspaceOutcome =
@@ -243,14 +270,20 @@ interface OrcaTerminalEntry {
    *  1.4.209; an ISO string on older builds. Compared via Date. */
   lastOutputAt?: number | string;
   /** #124 item 7: the stray-attach sweep matches on it when no worktree row
-   *  is left to select by. */
+   *  is left to select by. #1259 round 4: also what `sendLocalWake` hands
+   *  `OrcaDeps.isClaudeForeground` to ask the OS, directly, whether claude is
+   *  genuinely still foreground in this terminal's worktree. */
   worktreePath?: string;
   /** Board #55: which worktree the terminal lives in — `fleet ls`'s ROW
    *  column reads every terminal in ONE `terminal list` and groups by it. */
   worktreeId?: string;
   /** The terminal's screen text (MEASURED on real Orca — see this interface's
-   *  own doc comment). Read by `sendLocalWake` to confirm the claude TUI still
-   *  owns the terminal's foreground before typing a wake into it. */
+   *  own doc comment). Read by `sendLocalWake`'s narrower, SECONDARY idle-tail
+   *  check (`looksLikeIdleComposerTail`) — the PRIMARY claude-is-foreground
+   *  signal is `OrcaDeps.isClaudeForeground`, asked of the OS via
+   *  `worktreePath` below, never this rendered text (#1259 round 4: 3 prior
+   *  rounds trusted this field as the primary signal and were measured wrong
+   *  3 distinct ways — see that field's own doc comment). */
   preview?: string;
 }
 
@@ -719,19 +752,28 @@ export async function ensureLocalStudioWorktree(
       materializeLocalLead(existing.path, args, deps);
       const selector = existing.id ? `id:${existing.id}` : `name:${name}`;
 
-      // Fix 2 (#1259 round 3): reconcile against an already-live attach
-      // terminal BEFORE creating one, exactly like `ensure()` does for the
-      // container path. The default `fleet destroy` keeps both the worktree
-      // AND its terminal (cli/fleet.ts's `localTeardownDecision` only closes
-      // the terminal on an actual `remove`), so a resume that always created
-      // a new terminal here could boot a SECOND lead claude process beside a
-      // still-live one — double AI spend, two processes racing the same
-      // checkout. `reconcileAttachTerminals` closes duplicates/unhealthy
-      // survivors and returns the keeper; `isHealthyAttach` is the same
-      // health gate `ensure()` already trusts.
-      const { kept } = await reconcileAttachTerminals(id, selector, deps);
-      if (kept && isHealthyAttach(kept, id)) {
+      // Fix 3 (#1259 round 4, replacing round 3's title-based fix 2): is
+      // claude genuinely still running in this worktree, asked of the OS
+      // directly — never the terminal's TITLE. Round 3's own fix keyed on
+      // `reconcileAttachTerminals`/`isHealthyAttach`, which (via
+      // `isAttachTerminal`) required the terminal's title to match this
+      // studio's id; the operator measured that check backwards: a LIVE
+      // claude rewrites its own terminal's title via OSC the moment it is
+      // genuinely working, so the title stops matching exactly when the
+      // lead is most alive — the title check would then find no match at
+      // all and this code would boot a SECOND lead claude process beside
+      // the still-running first one. A live claude here means reuse, never
+      // a second; a dead one means close whatever stale terminal(s) are
+      // sitting in this worktree — regardless of what their own title
+      // happens to read — and launch a fresh one.
+      if (await claudeForegroundCheck(deps, existing.path)) {
         return { kind: "exists" };
+      }
+      const staleTerms = await orcaJson(deps, ["terminal", "list", "--worktree", selector, "--json"], LIST_TIMEOUT_MS);
+      for (const t of staleTerms.result?.terminals ?? []) {
+        if (t.connected === true && t.handle) {
+          await orcaJson(deps, ["terminal", "close", "--terminal", t.handle, "--json"], LIST_TIMEOUT_MS);
+        }
       }
 
       const command = localLaunchCommand(id, existing.path, join(existing.path, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
@@ -1554,23 +1596,116 @@ export async function findAttachTerminal(id: string, deps: OrcaDeps): Promise<Or
   }
 }
 
+const execFileP = promisify(execFile);
+
+/**
+ * The effective `isClaudeForeground` check: the caller's injected fake in
+ * tests, or the real OS-asking implementation in production. See
+ * `OrcaDeps.isClaudeForeground`'s own doc comment for why the field is
+ * optional on the interface but never actually undefined once
+ * `defaultOrcaDeps()` has built the deps object.
+ */
+function claudeForegroundCheck(deps: OrcaDeps, worktreePath: string): Promise<boolean> {
+  return (deps.isClaudeForeground ?? defaultIsClaudeForeground)(worktreePath);
+}
+
+/**
+ * Real implementation of `OrcaDeps.isClaudeForeground` — see that field's
+ * own doc comment for WHY this asks the OS directly rather than trusting a
+ * terminal's rendered screen text or title.
+ *
+ * HONEST LIMITATION, stated plainly rather than implied: this sandbox has
+ * neither the `orca` binary nor `lsof` installed (checked 2026-10-21 —
+ * `which orca` and `which lsof` both came up empty), so the exact `lsof -F`
+ * field-output shape this parses, and whether macOS's own `lsof`/`pgrep`/`ps`
+ * flags behave identically to the Linux ones available here, could NOT be
+ * exercised against a real Orca+claude session. What IS verified here (see
+ * this file's own test suite) is the CONTRACT every caller is wired against:
+ * a worktree path in, a boolean out, and `false` — never a throw, never a
+ * hang — whenever the tools this needs are absent or the command fails for
+ * any reason. The parsing below is a considered design against lsof's
+ * documented `-F` field-output grammar, not a measurement.
+ *
+ * Lists every process whose `cwd` file descriptor sits under `worktreePath`
+ * (`lsof -a -d cwd` — the `-d cwd` restricts the match to the cwd fd
+ * specifically, so a process that merely has some OTHER file open under this
+ * tree, e.g. a log it is tailing, is never mistaken for one actually working
+ * there) and accepts either:
+ *   - a matched process itself named `claude` (the direct case — Orca's own
+ *     local launch line runs `claude` with the worktree as its cwd), or
+ *   - a matched process (typically the login shell Orca's terminal itself
+ *     runs) with a DIRECT CHILD named `claude` (`pgrep -P <pid>`) — kept as a
+ *     second signal in case cwd reporting ever lags a `cd`, or claude is
+ *     reached through an intermediate wrapper.
+ */
+async function defaultIsClaudeForeground(worktreePath: string): Promise<boolean> {
+  if (worktreePath === "") return false;
+  try {
+    const { stdout } = await execFileP("lsof", ["-a", "-d", "cwd", "-Fpcn", "+D", worktreePath]);
+    const pids: number[] = [];
+    let currentPid: number | null = null;
+    for (const line of stdout.split("\n")) {
+      if (line.startsWith("p")) {
+        currentPid = Number.parseInt(line.slice(1), 10);
+        if (Number.isFinite(currentPid)) pids.push(currentPid);
+      } else if (line.startsWith("c") && currentPid !== null && line.slice(1).trim() === "claude") {
+        return true;
+      }
+    }
+    for (const pid of pids) {
+      if (await hasClaudeChild(pid)) return true;
+    }
+    return false;
+  } catch {
+    return false; // fail closed: lsof absent, erroring, or no match -- not claude
+  }
+}
+
+/** Does `pid` have a direct child process named `claude`? Best-effort: a
+ *  child that is gone by the time it is checked, or a `pgrep`/`ps` that
+ *  cannot run at all, answers false for THAT pid rather than throwing —
+ *  `defaultIsClaudeForeground`'s own fail-closed posture already covers
+ *  "could not tell" for the function as a whole. */
+async function hasClaudeChild(pid: number): Promise<boolean> {
+  try {
+    const { stdout } = await execFileP("pgrep", ["-P", String(pid)]);
+    for (const child of stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
+      try {
+        const { stdout: comm } = await execFileP("ps", ["-o", "comm=", "-p", child]);
+        if (comm.trim() === "claude") return true;
+      } catch {
+        // this one child is gone or unreadable -- keep checking the rest
+      }
+    }
+    return false;
+  } catch {
+    return false; // pgrep found no children (exit 1) or pgrep itself is absent
+  }
+}
+
 /**
  * Fleet task #1259 item 2: wake a LOCAL studio's lead. A local row has no
  * container, so the Worker's assign wake refuses with `{local:true}` and this
  * CLI turns that into the Orca equivalent of the container wake: resolve the
  * studio's healthy attach terminal and type the digest into it. Fail closed —
  * not under Orca, no healthy attach terminal, no claude session in that
- * terminal's foreground, or a failed send all report a refusal, never a
- * silent non-wake.
+ * terminal's foreground, the terminal's tail does not look idle, or a failed
+ * send all report a refusal, never a silent non-wake.
  *
- * The foreground check is the SAME rule the container's pane gate uses
- * (src/studio/wake.ts: `pane_current_command` reads `claude` when the TUI owns
- * the pane, `bash`/`zsh` when nothing runs). Orca exposes no
- * `terminal read --screen`, so the terminal's `preview` field (the screen text
- * `terminal list --json` already carries) stands in: it must contain one of
- * claude's own chrome glyphs, or the lead has exited to a bare shell and the
- * digest would be typed as a shell command (a `$(…)` in a title would then
- * expand on the operator's Mac).
+ * Fix 2 (#1259 round 4, replacing round 3's `looksLikeClaudeScreen`): the
+ * PRIMARY liveness signal is now `deps.isClaudeForeground` — the OS's own
+ * answer to "is claude actually running here", asked by worktree path, never
+ * inferred from the terminal's rendered screen text. See
+ * `OrcaDeps.isClaudeForeground`'s own doc comment for the 3 distinct ways the
+ * prior screen-text approach was measured wrong against real Orca.
+ *
+ * A SECOND, narrower check still runs on top, belt-and-suspenders: even with
+ * claude confirmed foreground, `looksLikeIdleComposerTail(term.preview)` must
+ * also hold before this types anything and presses Enter — a modal, a
+ * mid-turn/busy screen, or unreadable preview text all still refuse, because
+ * submitting Enter into either risks auto-approving a pending tool call or
+ * interrupting a turn no one asked to interrupt. Fails closed whenever
+ * EITHER signal is unsure.
  *
  * Fix 1 (#1259 round 4): round 3's fix-1b widened the control-byte strip
  * below into a shell-metacharacter strip too (`$`, backtick, backslash, `;`,
@@ -1596,11 +1731,18 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
   if (term === null || term.handle === undefined) {
     return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
   }
-  if (!looksLikeClaudeScreen(term.preview)) {
+  if (!(await claudeForegroundCheck(deps, term.worktreePath ?? ""))) {
     return {
       woke: false,
       reason: `${id} is a local studio with no claude session in the terminal's foreground — ` +
         `the lead has exited; wake its lead yourself with: fleet task show`,
+    };
+  }
+  if (!looksLikeIdleComposerTail(term.preview)) {
+    return {
+      woke: false,
+      reason: `${id}'s claude session looks busy or mid-prompt — refusing to risk typing into it; ` +
+        `wake its lead yourself with: fleet task show`,
     };
   }
   try {
@@ -1619,7 +1761,9 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
  *  visually identical to the composer's own `❯` but semantically opposite
  *  ("this option is selected," not "safe to type into"). A modal glyph
  *  anywhere in the preview means refuse unconditionally, regardless of what
- *  the screen's last line looks like. */
+ *  the screen's last line looks like. Still real signal even now that the
+ *  process check is primary (#1259 round 4): kept as the belt-and-suspenders
+ *  half of `looksLikeIdleComposerTail` below. */
 const MODAL_RULE = /(▔)+/;
 
 /** The composer row, tail-anchored: optional leading whitespace, an optional
@@ -1628,11 +1772,6 @@ const MODAL_RULE = /(▔)+/;
  *  pipe-plus-whitespace group, never to just the pipe's last byte, so a
  *  multibyte `│` is never partially matched. */
 const TAIL_COMPOSER_ROW = /^[ \t]*(│[ \t]*)?❯/;
-
-/** A turn-marker / status row, same tail-anchored, pipe-tolerant shape as
- *  the composer row above — claude draws these while actively streaming a
- *  turn, when the composer itself is not on screen. */
-const TAIL_TURN_MARKER_ROW = /^[ \t]*(│[ \t]*)?[⏺●]/;
 
 /** The last non-empty line of a multi-line terminal preview, with trailing
  *  whitespace trimmed. A terminal preview can end in blank lines (cursor
@@ -1649,31 +1788,28 @@ function lastNonEmptyLine(preview: string): string {
 }
 
 /**
- * Does the attach terminal's screen text look like a live, idle-or-busy
- * claude session it is SAFE to type a wake digest into and press Enter?
+ * Does the attach terminal's screen text look IDLE — safe to type a wake
+ * digest into and press Enter without risking an interrupted turn or an
+ * auto-approved permission prompt? Narrower than round 3's
+ * `looksLikeClaudeScreen` on purpose (#1259 round 4): that function answered
+ * "is this claude" (now `deps.isClaudeForeground`'s job, asked of the OS
+ * instead) — this one only answers "is it idle right now."
  *
- * #1259 round 3 (measured, strict re-review @ a30e405b): the PRIOR version
- * of this check matched claude's chrome glyphs ANYWHERE in the last ~300
- * chars of screen text, so a claude session that had already exited still
- * read as "alive" for as long as its old transcript stayed inside that
- * window — a wake digest, including an attacker-shaped one carrying shell
- * metacharacters, got typed and submitted into whatever shell claude exited
- * into. A `▔` modal rule — drawn above a permission prompt's OWN `❯`-style
- * option rows — ALSO read as "alive, safe," so a wake could silently
- * auto-approve a pending tool call by submitting Enter into the modal.
- *
- * Fixed by splitting into two checks: a modal ANYWHERE in the preview always
- * refuses (never risk auto-approving a prompt); otherwise, only the terminal
- * screen's LAST non-empty line is checked against claude's own known chrome
- * shapes (composer row, turn-marker row) — an allowlist, never a denylist of
- * shell-prompt shapes, since those are infinitely customizable and cannot be
- * enumerated. Missing or empty preview text still fails closed, as before.
+ * A turn-marker/status row (`⏺`/`●`, previously ACCEPTED as "alive, safe to
+ * wake") now REFUSES: claude is actively streaming a turn then, not waiting
+ * on input, and round 3's own measurement (a real claude 2.1.306 permission
+ * modal does not draw the `▔` rule below, so its tail reads as an ordinary
+ * option row indistinguishable from a composer row) means a denylist of
+ * "busy" shapes can't be trusted either — only the ONE shape claude draws
+ * when it is genuinely idle and waiting on the next line, the composer row
+ * itself, counts. A modal ANYWHERE in the preview still refuses
+ * unconditionally first (never risk auto-approving a pending prompt).
+ * Missing or empty preview text fails closed, as before.
  */
-function looksLikeClaudeScreen(preview: string | undefined): boolean {
+function looksLikeIdleComposerTail(preview: string | undefined): boolean {
   if (preview === undefined || preview === "") return false;
   if (MODAL_RULE.test(preview)) return false;
-  const tail = lastNonEmptyLine(preview);
-  return TAIL_COMPOSER_ROW.test(tail) || TAIL_TURN_MARKER_ROW.test(tail);
+  return TAIL_COMPOSER_ROW.test(lastNonEmptyLine(preview));
 }
 
 /**
@@ -2050,5 +2186,6 @@ export function defaultOrcaDeps(): OrcaDeps {
     run: orcaRunner(bin),
     lock: fileLock,
     registry: fileWorkspaceRegistry(WORKSPACE_REGISTRY_PATH),
+    isClaudeForeground: defaultIsClaudeForeground,
   };
 }

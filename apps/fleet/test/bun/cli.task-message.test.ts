@@ -137,15 +137,26 @@ describe("fleet task message — the repo travels in the body (issue #1106)", ()
 });
 
 describe("fleet task message — local assignee wakes by Orca terminal send (item 2)", () => {
-  test("a local-refusal wake is swapped for a real terminal send under Orca, printed as woke the studio", async () => {
+  // #1259 round 4 fix 2/3: `sendLocalWake`'s PRIMARY liveness signal is now
+  // `OrcaDeps.isClaudeForeground`, which asks the real OS (`lsof`) whether
+  // claude is genuinely the foreground process in the studio's worktree —
+  // never the fake `orca` binary's scripted `preview` text, and never
+  // injectable across this real `Bun.spawn` subprocess boundary (production
+  // always asks the real OS; there is no test seam here by design). In THIS
+  // sandbox (no `lsof` installed — see `defaultIsClaudeForeground`'s own
+  // doc comment) that real check fails closed, so the swap's end result is
+  // a REFUSAL, not a send. What this test still proves: the swap RAN — the
+  // printed line is `sendLocalWake`'s own CLI-side wording, never the
+  // Worker's raw local-refusal text passed through unchanged — and no
+  // `terminal send` call was ever made.
+  test("a local-refusal wake is swapped for the real Orca liveness check, printed as NO WAKE with the CLI's own reason", async () => {
     const home = tmpDir("task-message-local-home-");
     const cwd = tmpDir("task-message-local-cwd-");
-    // A fake orca binary that answers the two LIST calls sendLocalWake's
-    // foreground check makes (a healthy attach terminal whose preview carries
-    // claude chrome) and `terminal send` with `{}`, and logs every argv so the
-    // test can assert the send actually fired. TERM_PROGRAM=Orca makes
+    // A fake orca binary that answers the two LIST calls the swap makes
+    // (worktree list, terminal list) and logs every argv so the test can
+    // assert no `terminal send` was ever attempted. TERM_PROGRAM=Orca makes
     // orcaPresent true, so the full CLI-side swap (resolveLocalWake ->
-    // sendLocalWake) runs end to end.
+    // sendLocalWake) runs end to end, up to the liveness check above.
     const fakeOrca = `${home}/orca`;
     const logFile = `${home}/orca-calls.log`;
     writeFileSync(fakeOrca, [
@@ -189,21 +200,17 @@ describe("fleet task message — local assignee wakes by Orca terminal send (ite
 
     expect(code).toBe(0);
     expect(out).toContain("task #12 message posted");
-    // The full swap ran and the fake terminal send succeeded — the wake is
-    // reported as landed, never the Worker's local wording passed through.
-    expect(out).toContain("woke the studio");
+    // The swap ran — this is `sendLocalWake`'s own CLI-side refusal wording,
+    // never the Worker's raw "no container to wake" text passed through
+    // unchanged (which is what a passthrough, with `resolveLocalWake`'s
+    // call removed, would still print verbatim).
+    expect(out).toContain("NO WAKE");
+    expect(out).toContain("no claude session in the terminal's foreground");
+    expect(out).not.toContain("no container to wake");
     expect(out).not.toContain("not an Orca session");
-    // The fake orca really received a terminal send with the digest text.
+    // No terminal send was ever attempted — the liveness check refused first.
     const calls = readFileSync(logFile, "utf8").split("\n").filter(Boolean);
-    const send = calls.find((c) => c.startsWith("terminal send"));
-    expect(send).toBeDefined();
-    expect(send).toContain("--text");
-    // Fix 1 (#1259 round 4): the text that actually reaches `terminal send`
-    // is the fixed per-task-number template, never the Worker's own `digest`
-    // field (`WAKE TASK MESSAGE #12 "Some task" | ping | ...` above) — that
-    // field is never read on this path anymore.
-    expect(send).toContain("Board task #12 has a new message. Run: fleet task show 12");
-    expect(send).not.toContain("WAKE TASK MESSAGE");
+    expect(calls.some((c) => c.startsWith("terminal send"))).toBe(false);
     expect(err).not.toContain("Error:");
   });
 });
