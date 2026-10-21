@@ -849,7 +849,19 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
     expect(out.woke).toBe(false);
-    expect(out.reason).toContain("no claude session in the terminal");
+    if (!out.woke) expect(out.reason).toContain("no claude session in the terminal");
+    expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
+  });
+
+  test("a prose-only preview (bare shell prompt) refuses — no claude glyph, never prose-matched", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "zsh-5.9 % git status" }),
+      "terminal send": ok("{}"),
+    });
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out.woke).toBe(false);
+    if (!out.woke) expect(out.reason).toContain("no claude session in the terminal");
     expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
   });
 
