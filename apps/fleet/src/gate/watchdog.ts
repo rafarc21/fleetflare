@@ -146,17 +146,26 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
       // OWN verdict (the exact production bug: the post throws, the step's
       // retries exhaust, the Workflow instance errors). One best-effort
       // reconciliation post, ONLY while the head has no status or a pending
-      // that still names THIS run (every status this system posts names the
-      // run id in its description) — a pending naming a different run is a
-      // newer same-head run's status, never clobbered. A failure here is
-      // logged and swallowed: the run is already dead either way, and the
+      // that still names THIS run. Every status this system posts wraps the
+      // run id in parentheses — "running (run <id>) — N legs", "rerun after
+      // infra error (run <id>)", "(run <id>)" — so the token is matched
+      // DELIMITED, never as a prefix (run ids extend each other on the same
+      // head: <id> ⊂ <id>-p<pr> ⊂ ...-r<t>/...-e<t>). A pending naming a
+      // different run is a newer same-head run's status, never clobbered.
+      // A pre-create pending carries no run id at all (it is posted before
+      // the run exists — "running (fresh gate run)", "running (edited
+      // title/body recheck)"); with no "(run " token it is reconcilable too,
+      // otherwise a run that errors before its own post-pending lands would
+      // leave the head stuck on that id-less pending forever. A failure here
+      // is logged and swallowed: the run is already dead either way, and the
       // row is retired regardless.
       if (status === "errored") {
         const current = await deps.headStatus(repo, headSha).catch(() => undefined);
-        const stillThisRun = current?.state === "pending"
-          && typeof current.description === "string"
-          && current.description.includes(`run ${runId}`);
-        if (current === undefined || stillThisRun) {
+        const description = current?.state === "pending" && typeof current.description === "string"
+          ? current.description : undefined;
+        const stillThisRun = description !== undefined && description.includes(`(run ${runId})`);
+        const idlessPending = description !== undefined && !description.includes("(run ");
+        if (current === undefined || stillThisRun || idlessPending) {
           await deps.post(repo, headSha, {
             state: "error", description: `gate: run ended without a verdict (run ${runId})`,
           }).catch((err) => console.error(`gate watchdog: reconciliation post failed for ${runId}`, err));

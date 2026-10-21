@@ -445,6 +445,36 @@ describe("sweepStalledRuns: an errored run that never posted its own verdict is 
     expect(h.head()?.progressedAt).toBe(-1);
   });
 
+  it("a pending head whose description starts with this run id but names a longer run is a newer same-head run: no reconciliation post, still retired (#1243)", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "running (run gate-x-p7) — 2 legs" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a pre-create pending with no run id is reconciled: the one error post lands, retired (#1243)", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "running (fresh gate run)" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([{ repo: REPO, headSha: HEAD, state: "error", description: expect.stringContaining("ended without a verdict") }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a pre-create pending with no run id, edited variant, is reconciled: the one error post lands, retired (#1243)", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "running (edited title/body recheck)" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([{ repo: REPO, headSha: HEAD, state: "error", description: expect.stringContaining("ended without a verdict") }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
   it("a terminal failure head is never clobbered: no reconciliation post, still retired", async () => {
     const h = harness({ runs: { "gate-x": "errored" }, headStatus: async () => ({ state: "failure" }) });
     expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
