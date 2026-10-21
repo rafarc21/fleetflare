@@ -499,6 +499,42 @@ describe("local studio workspace — fleet task #1248", () => {
     expect(f.lines.length).toBe(1);
   });
 
+  test("an existing worktree is REUSED on resume — no worktree create, only materialize + terminal create (item 7)", async () => {
+    // The default destroy KEEPS the worktree, so a resume must materialize into
+    // the SAME on-disk path rather than `worktree create` again (name clash, or
+    // a fresh checkout while the registry stays pointed at the kept unsynced one).
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-"));
+    // basename must be one of studioFolderNames("websites--pilot") so
+    // findStudioWorktree's path-basename fallback matches it.
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      expect(f.calls.some((c) => c[0] === "worktree" && c[1] === "create")).toBe(false);
+      const term = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
+      expect(term).toBeDefined();
+      expect(term).toContain(`id:${existingId}`);
+
+      // The lead's files landed in the EXISTING path, not a fresh checkout.
+      expect(existsSync(join(existingPath, ".fleet", "working-set.md"))).toBe(true);
+      expect(existsSync(join(existingPath, ".claude", "hooks", "lead-gate.sh"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("materializes all four container hooks with the lead gate (item 1)", async () => {
     const root = mkdtempSync(join(tmpdir(), "orca-local-"));
     const worktreePath = join(root, "worktree");

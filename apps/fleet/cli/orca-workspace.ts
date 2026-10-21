@@ -700,6 +700,37 @@ export async function ensureLocalStudioWorktree(
   }
   try {
     const name = studioWorkspaceName(id);
+
+    // Fleet task #1259 item 7: a resume must REUSE the kept worktree, not
+    // `worktree create` a second one. The default destroy KEEPS the worktree
+    // (cli/fleet.ts's localTeardownDecision), so the row it built still exists
+    // on disk; creating again would either clash on the name or leave a fresh
+    // checkout beside the kept unsynced one the registry still points at.
+    // A list we cannot read falls through to the create path below, exactly
+    // as before this lookup existed.
+    let existing: OrcaWorktree | undefined;
+    try {
+      existing = findStudioWorktree(id, await fullList(deps, "worktrees", LIST_TIMEOUT_MS), deps.registry);
+    } catch {
+      existing = undefined;
+    }
+    if (existing?.path) {
+      await deps.registry.set(id, existing.id ?? "");
+      materializeLocalLead(existing.path, args, deps);
+      const selector = existing.id ? `id:${existing.id}` : `name:${name}`;
+      const command = localLaunchCommand(id, existing.path, join(existing.path, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
+      const term = await orcaJson(
+        deps,
+        ["terminal", "create", "--worktree", selector, "--title", id, "--command", command, "--json"],
+        LIST_TIMEOUT_MS,
+      );
+      const handle = term.result?.terminal?.handle;
+      if (handle) {
+        await orcaJson(deps, ["terminal", "rename", "--terminal", handle, "--title", id, "--json"], LIST_TIMEOUT_MS);
+      }
+      return { kind: "created" };
+    }
+
     const made = await orcaJson(
       deps,
       localWorktreeCreateArgs(args.localPath, args.defaultBranch, id),
