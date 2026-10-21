@@ -877,7 +877,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter"]);
   });
 
-  test("a digest carrying control bytes is cleaned before sending AND before returning", async () => {
+  test("a digest carrying control bytes AND shell metacharacters is cleaned before sending AND before returning", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
       "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
@@ -885,8 +885,98 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     });
     const out = await sendLocalWake("websites--pilot", "WAKE \x03 $(reboot) \x1b\n", f.deps);
     expect(out.woke).toBe(true);
-    expect(out.digest).toBe("WAKE  $(reboot) ");
+    expect(out.digest).toBe("WAKE  (reboot) ");
     const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
-    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE  $(reboot) ", "--enter"]);
+    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE  (reboot) ", "--enter"]);
+  });
+
+  test("a digest carrying ;|`&<> never reaches terminal send with those characters intact", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
+      "terminal send": ok("{}"),
+    });
+    const out = await sendLocalWake("websites--pilot", "WAKE ; rm -rf / | cat `id` & echo <x> y", f.deps);
+    expect(out.woke).toBe(true);
+    expect(out.digest).toBe("WAKE  rm -rf /  cat id  echo x y");
+    for (const bad of [";", "|", "`", "&", "<", ">", "$", "\\"]) {
+      expect(out.digest).not.toContain(bad);
+    }
+    const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+    expect(send?.[5]).toBe("WAKE  rm -rf /  cat id  echo x y");
+  });
+
+  // Fix 1a (#1259 round 3): the gate must look only at the terminal's TAIL
+  // (the current screen state), never at claude chrome left over from a
+  // just-exited session still sitting inside the preview's earlier lines.
+  describe("the liveness gate reads only the screen's current tail (#1259 round 3)", () => {
+    test("claude chrome earlier in the preview, but a bare shell prompt as the actual last line, refuses", async () => {
+      // MEASURED shape: claude runs a turn, operator ctrl-c ctrl-c's out to a
+      // bare shell, but the exited session's own chrome (`❯`, `⏺`) is still
+      // inside the ~300-char preview window.
+      const preview = [
+        "❯ Reply with…",
+        "⏺ ok",
+        "✻ Worked for 2s…",
+        "Resume this session with:",
+        "claude --resume 1234-uuid",
+        "➜  repo git:(main) ",
+      ].join("\n");
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview }),
+        "terminal send": ok("{}"),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("no claude session in the terminal");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
+    });
+
+    test("a genuine composer row as the preview's last line wakes", async () => {
+      const preview = ["stale ❯ chrome from a prior turn", "❯ some draft text"].join("\n");
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview }),
+        "terminal send": ok("{}"),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(true);
+    });
+
+    test("a genuine turn-marker row as the preview's last line wakes", async () => {
+      const preview = ["some earlier output", "⏺ thinking…"].join("\n");
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview }),
+        "terminal send": ok("{}"),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(true);
+    });
+
+    test("a `▔` modal rule anywhere in the preview refuses, even with a composer-shaped last line", async () => {
+      const preview = ["▔▔▔▔▔▔▔▔▔▔▔▔", "❯ 1. Yes", "❯ some draft text"].join("\n");
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview }),
+        "terminal send": ok("{}"),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("no claude session in the terminal");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
+    });
+
+    test("trailing blank padding does not hide a real composer row behind it", async () => {
+      const preview = ["❯ some draft text", "", "   ", ""].join("\n");
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview }),
+        "terminal send": ok("{}"),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(true);
+    });
   });
 });

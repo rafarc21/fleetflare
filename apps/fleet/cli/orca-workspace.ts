@@ -1555,6 +1555,15 @@ export async function findAttachTerminal(id: string, deps: OrcaDeps): Promise<Or
  * claude's own chrome glyphs, or the lead has exited to a bare shell and the
  * digest would be typed as a shell command (a `$(…)` in a title would then
  * expand on the operator's Mac).
+ *
+ * Fix 1b (#1259 round 3, defense in depth alongside the tail-only gate
+ * below): the digest is also stripped of the shell metacharacters that
+ * matter if it ever DOES land in an open shell despite the gate — `$`,
+ * backtick, backslash, `;`, `|`, `&`, `<`, `>` — same plain character-class
+ * strip already used for control bytes, just a wider class. A `#`-prefix
+ * comment trick was considered and rejected: stock interactive zsh does not
+ * have `interactivecomments` on by default, so a leading `#` is not reliably
+ * inert against the exact shell this bug was measured against.
  */
 export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps): Promise<AssignWakeReport> {
   if (!orcaPresent(deps)) {
@@ -1564,7 +1573,7 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
         `Wake it yourself with: fleet task show`,
     };
   }
-  const clean = digest.replace(/[\x00-\x1f\x7f]/g, "");
+  const clean = digest.replace(/[\x00-\x1f\x7f]/g, "").replace(/[$`\\;|&<>]/g, "");
   const term = await findAttachTerminal(id, deps);
   if (term === null || term.handle === undefined) {
     return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
@@ -1587,17 +1596,66 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
   }
 }
 
+/** Claude's own select-modal rule, drawn as a run of `▔` box-drawing glyphs
+ *  above the modal's option rows. Those option rows are ALSO `❯`-prefixed —
+ *  visually identical to the composer's own `❯` but semantically opposite
+ *  ("this option is selected," not "safe to type into"). A modal glyph
+ *  anywhere in the preview means refuse unconditionally, regardless of what
+ *  the screen's last line looks like. */
+const MODAL_RULE = /(▔)+/;
+
+/** The composer row, tail-anchored: optional leading whitespace, an optional
+ *  box-drawing `│` (with its own optional trailing whitespace) then `❯`.
+ *  Mirrors wake.ts's `COMPOSER_ROW` discipline — the `?` binds to the WHOLE
+ *  pipe-plus-whitespace group, never to just the pipe's last byte, so a
+ *  multibyte `│` is never partially matched. */
+const TAIL_COMPOSER_ROW = /^[ \t]*(│[ \t]*)?❯/;
+
+/** A turn-marker / status row, same tail-anchored, pipe-tolerant shape as
+ *  the composer row above — claude draws these while actively streaming a
+ *  turn, when the composer itself is not on screen. */
+const TAIL_TURN_MARKER_ROW = /^[ \t]*(│[ \t]*)?[⏺●]/;
+
+/** The last non-empty line of a multi-line terminal preview, with trailing
+ *  whitespace trimmed. A terminal preview can end in blank lines (cursor
+ *  position padding, a trailing newline) that would otherwise hide the real
+ *  last line of content from a tail-only check. Returns "" when every line
+ *  is empty. */
+function lastNonEmptyLine(preview: string): string {
+  const lines = preview.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trimEnd();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return "";
+}
+
 /**
- * Does the attach terminal's screen text look like a live claude session?
- * LOOSE and anchored on claude-specific chrome glyphs only — the composer's
- * `❯`, the turn markers `⏺`/`●`, and the box-drawing `▔` rule claude draws for
- * its select modals (the same glyph discipline as wake.ts's `COMPOSER_ROW` /
- * `SURVEY_HEADER_ROW_LEAD`) — never a plain prose substring. Missing or empty
- * preview text fails closed: a screen we cannot read is not "clean".
+ * Does the attach terminal's screen text look like a live, idle-or-busy
+ * claude session it is SAFE to type a wake digest into and press Enter?
+ *
+ * #1259 round 3 (measured, strict re-review @ a30e405b): the PRIOR version
+ * of this check matched claude's chrome glyphs ANYWHERE in the last ~300
+ * chars of screen text, so a claude session that had already exited still
+ * read as "alive" for as long as its old transcript stayed inside that
+ * window — a wake digest, including an attacker-shaped one carrying shell
+ * metacharacters, got typed and submitted into whatever shell claude exited
+ * into. A `▔` modal rule — drawn above a permission prompt's OWN `❯`-style
+ * option rows — ALSO read as "alive, safe," so a wake could silently
+ * auto-approve a pending tool call by submitting Enter into the modal.
+ *
+ * Fixed by splitting into two checks: a modal ANYWHERE in the preview always
+ * refuses (never risk auto-approving a prompt); otherwise, only the terminal
+ * screen's LAST non-empty line is checked against claude's own known chrome
+ * shapes (composer row, turn-marker row) — an allowlist, never a denylist of
+ * shell-prompt shapes, since those are infinitely customizable and cannot be
+ * enumerated. Missing or empty preview text still fails closed, as before.
  */
 function looksLikeClaudeScreen(preview: string | undefined): boolean {
   if (preview === undefined || preview === "") return false;
-  return /[❯⏺●▔]/.test(preview);
+  if (MODAL_RULE.test(preview)) return false;
+  const tail = lastNonEmptyLine(preview);
+  return TAIL_COMPOSER_ROW.test(tail) || TAIL_TURN_MARKER_ROW.test(tail);
 }
 
 /**
