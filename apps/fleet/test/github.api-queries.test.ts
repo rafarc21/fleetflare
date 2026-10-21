@@ -1058,13 +1058,6 @@ describe("branch protection create/update split (#1247)", () => {
     expect(calls[0].body).toEqual({ strict: false });
   });
 
-  it("setBranchProtectionRequiredStatusChecks PATCHes the whole required_status_checks sub-resource", async () => {
-    await setBranchProtectionRequiredStatusChecks("tok", "o/r", "main", false, ["gate/verdict"]);
-    expect(calls[0].method).toBe("PATCH");
-    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/main/protection/required_status_checks");
-    expect(calls[0].body).toEqual({ strict: false, contexts: ["gate/verdict"] });
-  });
-
   it("disableBranchProtectionEnforceAdmins DELETEs the enforce_admins sub-resource", async () => {
     await disableBranchProtectionEnforceAdmins("tok", "o/r", "main");
     expect(calls[0].method).toBe("DELETE");
@@ -1101,6 +1094,34 @@ describe("getBranchProtection", () => {
   });
 });
 
+describe("setBranchProtectionRequiredStatusChecks (#1254 GraphQL)", () => {
+  let queue: Response[];
+  beforeEach(() => { queue = []; respond = () => queue.shift()!; });
+
+  it("turns required status checks on via GraphQL updateBranchProtectionRule (REST POST/PATCH both 404 without the block)", async () => {
+    queue.push(Response.json({ data: { repository: { ref: { branchProtectionRule: { id: "BPR_1" } } } } }));
+    queue.push(Response.json({ data: { updateBranchProtectionRule: { branchProtectionRule: { id: "BPR_1" } } } }));
+    await setBranchProtectionRequiredStatusChecks("tok", "o/r", "main", false, ["gate/verdict"]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("https://api.github.com/graphql");
+    expect(calls[0].body.query).toContain("ref(qualifiedName:$branch){branchProtectionRule{id}}");
+    expect(calls[0].body.variables).toEqual({ owner: "o", repo: "r", branch: "refs/heads/main" });
+    expect(calls[1].method).toBe("POST");
+    expect(calls[1].url).toBe("https://api.github.com/graphql");
+    expect(calls[1].body.query).toContain("updateBranchProtectionRule");
+    expect(calls[1].body.query).toContain("requiresStatusChecks:true");
+    expect(calls[1].body.query).toContain("requiredStatusCheckContexts:$contexts");
+    expect(calls[1].body.query).toContain("requiresStrictStatusChecks:$strict");
+    expect(calls[1].body.variables).toEqual({ id: "BPR_1", contexts: ["gate/verdict"], strict: false });
+  });
+
+  it("throws when the branch's ref names no protection rule (no id to mutate)", async () => {
+    queue.push(Response.json({ data: { repository: { ref: null } } }));
+    await expect(setBranchProtectionRequiredStatusChecks("tok", "o/r", "main", false, ["gate/verdict"])).rejects.toThrow(/no rule id/);
+  });
+});
+
 describe("findPullRequestsReferencingTask", () => {
   it("GETs the issue search with q=repo:o/r is:pr <N>, per_page/sort/order pinned", async () => {
     respond = () => Response.json({ items: [] });
@@ -1109,14 +1130,29 @@ describe("findPullRequestsReferencingTask", () => {
     expect(calls[0].url).toBe("https://api.github.com/search/issues?q=repo%3Ao%2Fr%20is%3Apr%2042&per_page=30&sort=created&order=desc");
   });
 
-  it("returns only integer numbers of items carrying a pull_request", async () => {
+  it("returns only PR numbers that reference #N in title or body (Refs #N, (#N))", async () => {
     respond = () => Response.json({ items: [
-      { number: 7, pull_request: {} },
-      { number: 9 },
-      { number: 12, pull_request: {} },
-      { number: "13", pull_request: {} },
+      { number: 7, pull_request: {}, title: "fix gate", body: "Refs #42" },
+      { number: 9, title: "issue, not a PR" },
+      { number: 12, pull_request: {}, title: "(#42) patch protect" },
+      { number: 13, pull_request: {}, title: "x", body: "Fixes #43" },
+      { number: "14", pull_request: {}, title: "y", body: "Refs #42" },
     ] });
     expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([7, 12]);
+  });
+
+  it("drops an unrelated merged PR that mentions bare N with no # (gate-bypass regression)", async () => {
+    respond = () => Response.json({ items: [
+      { number: 1130, pull_request: {}, title: "gate runner", body: "258 passed tests" },
+    ] });
+    expect(await findPullRequestsReferencingTask("tok", "o/r", 258)).toEqual([]);
+  });
+
+  it("#N\\b: #420 does not match task #42 (word boundary)", async () => {
+    respond = () => Response.json({ items: [
+      { number: 99, pull_request: {}, title: "x", body: "Refs #420" },
+    ] });
+    expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([]);
   });
 
   it("an empty or missing items answer is []", async () => {

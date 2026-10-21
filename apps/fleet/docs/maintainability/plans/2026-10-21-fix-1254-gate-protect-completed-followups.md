@@ -24,11 +24,11 @@ guard: a fallback PR must still be merged AND green on its head.
 
 1. github/api.ts: `getBranchProtection` -> `BranchProtectionState`
    {contexts, hasRequiredStatusChecks, enforceAdmins}; new
-   `setBranchProtectionRequiredStatusChecks` (PATCH) and
+   `setBranchProtectionRequiredStatusChecks` (GraphQL updateBranchProtectionRule) and
    `disableBranchProtectionEnforceAdmins` (DELETE); new
    `findPullRequestsReferencingTask` (search).
 2. gate/protect.ts: widen `ProtectPort` with the two new methods; runGateProtect
-   PATCHes when hasRequiredStatusChecks is false and disables enforce_admins
+   turns the block on via GraphQL when hasRequiredStatusChecks is false and disables enforce_admins
    when true.
 3. board/completed-gate.ts: add `findTaskPrs` to the port; new
    `fallbackTaskPr` returns the first candidate PR that clears the existing

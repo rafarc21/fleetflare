@@ -7,8 +7,10 @@
 // The create/update split is load-bearing: a full PUT replaces the WHOLE rule,
 // so it must run only when no rule exists yet. Once a rule exists, the verb
 // appends the one context and re-pins strict. If the rule has no
-// required_status_checks block, the contexts POST would 404, so we PATCH that
-// whole block. We also turn off enforce_admins so the gate is not bypassable.
+// required_status_checks block, the contexts POST and the REST PATCH both 404,
+// so we turn the block on via GraphQL (touching only those fields).
+// enforce_admins is false per the #1247 spec — that LETS admins bypass, it is
+// the spec, not a safeguard.
 // We never issue a PUT that would wipe an operator's reviews/restrictions/admin
 // settings.
 import { GATE_STATUS_CONTEXT } from "./status-post";
@@ -31,9 +33,9 @@ export interface ProtectPort {
   addRequiredContexts: (repo: string, branch: string, contexts: string[]) => Promise<void>;
   /** PATCH strict on an existing rule — touches nothing else. */
   setStrict: (repo: string, branch: string, strict: boolean) => Promise<void>;
-  /** PATCH the whole required_status_checks block (strict + contexts) — the
-   *  fallback for a rule with no required-status block, where the contexts
-   *  POST would 404. */
+  /** Turn required status checks ON (strict + contexts) — the fallback for a
+   *  rule with no required-status block, where the REST contexts POST and
+   *  PATCH both 404. Backed by GraphQL updateBranchProtectionRule. */
   setRequiredStatusChecks: (repo: string, branch: string, strict: boolean, contexts: string[]) => Promise<void>;
   /** DELETE the enforce_admins sub-resource — turn admin enforcement off. */
   disableEnforceAdmins: (repo: string, branch: string) => Promise<void>;

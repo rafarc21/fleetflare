@@ -445,16 +445,30 @@ export async function setBranchProtectionStrict(
   );
 }
 
-/** PATCH the whole required_status_checks sub-resource of an existing rule
- *  (strict + contexts together) — the fallback for a rule that has no
- *  required-status-check block, where the contexts POST would 404. */
+/** Turn required status checks ON for an existing rule that lacks the block —
+ *  via GraphQL `updateBranchProtectionRule`, which sets only those fields and
+ *  never rewrites the rest of the rule. The REST contexts POST and the REST
+ *  PATCH both 404 ("Required status checks not enabled") when the block is
+ *  absent, so REST cannot create it; the mutation can. Resolves the rule's
+ *  node id from the branch's ref first (one GraphQL call), then mutates (a
+ *  second). */
 export async function setBranchProtectionRequiredStatusChecks(
   token: string, repo: string, branch: string, strict: boolean, contexts: string[],
 ): Promise<void> {
-  await ghRequest(
-    token,
-    `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`,
-    { method: "PATCH", body: JSON.stringify({ strict, contexts }) },
+  const [owner, name] = repo.split("/");
+  const qualified = `refs/heads/${branch}`;
+  const idQuery = `query($owner:String!,$repo:String!,$branch:String!){repository(owner:$owner,name:$repo){ref(qualifiedName:$branch){branchProtectionRule{id}}}}`;
+  const resolved = await ghGraphQL<{ repository?: { ref?: { branchProtectionRule?: { id?: string } | null } | null } | null }>(
+    token, idQuery, { owner, repo: name, branch: qualified },
+    `resolve ${repo}@${branch} branch protection rule`,
+  );
+  const id = resolved.repository?.ref?.branchProtectionRule?.id;
+  if (typeof id !== "string") {
+    throw new Error(`resolve ${repo}@${branch} branch protection rule failed: no rule id`);
+  }
+  const mutation = `mutation($id:ID!,$contexts:[String!]!,$strict:Boolean!){updateBranchProtectionRule(input:{branchProtectionRuleId:$id,requiresStatusChecks:true,requiredStatusCheckContexts:$contexts,requiresStrictStatusChecks:$strict}){branchProtectionRule{id}}}`;
+  await ghGraphQL<{ updateBranchProtectionRule?: { branchProtectionRule?: { id?: string } } }>(
+    token, mutation, { id, contexts, strict },
     `set ${repo} branch protection required status checks`,
   );
 }
@@ -1552,21 +1566,24 @@ export async function getBranchSha(token: string, repo: string, branch: string):
 }
 
 /** PR numbers referencing a task, newest first, via GitHub's issue search. A
- *  bare number matches the PR title ("(#N)", this fleet's own convention), body
- *  ("Refs #N") and comments. `head:` cannot express "task number in branch
- *  name" (it is prefix-only), so title/body/comment references are the match
- *  channel. */
+ *  BARE number is a hazard: it matches ANY word that happens to equal N (e.g.
+ *  task #258 completing on a PR whose body says "258 passed tests"), so the
+ *  search is only a broad net here. Each hit is post-filtered to the ones that
+ *  actually REFERENCE the task with a `#N` word-boundary token in title or body
+ *  ("Refs #N", "(#N)", "#N") — the search result ships title+body but not the
+ *  head ref, so `#N` is the reference filter. */
 export async function findPullRequestsReferencingTask(
   token: string, repo: string, taskNumber: number,
 ): Promise<number[]> {
   const q = `repo:${repo} is:pr ${taskNumber}`;
-  const raw = await ghJson<{ items?: { number: number; pull_request?: unknown }[] }>(
+  const raw = await ghJson<{ items?: { number: number; pull_request?: unknown; title?: string | null; body?: string | null }[] }>(
     token,
     `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=30&sort=created&order=desc`,
     { method: "GET", headers: GH_HEADERS_GET(token) },
     `search ${repo} PRs referencing task #${taskNumber}`,
   );
+  const ref = new RegExp(`#${taskNumber}\\b`);
   return (raw.items ?? [])
-    .filter((i) => i.pull_request != null && Number.isInteger(i.number))
+    .filter((i) => i.pull_request != null && Number.isInteger(i.number) && ref.test(`${i.title ?? ""}\n${i.body ?? ""}`))
     .map((i) => i.number);
 }
