@@ -605,7 +605,7 @@ export async function handleStudio(
       ...(members !== undefined ? { members } : {}),
       ...(studioEnv ? { skills: studioEnv.STUDIO_SKILLS } : {}),
       leadType: status.leadType,
-      completionGate: bringupEnv.STUDIO_COMPLETION_GATE !== "",
+      completionGate: studioEnv !== null && studioEnv.STUDIO_COMPLETION_GATE !== "",
     });
   }
 
