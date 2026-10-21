@@ -1814,8 +1814,12 @@ export async function spawnLocalStudio(
   // targets — a `--path /other/clone` whose origin is a different repo would
   // build a studio for `<target>` out of somebody else's checkout, silently.
   const cloneSlug = await resolveCloneOriginSlug(gitRun, resolvedPath);
-  if (cloneSlug !== null && cloneSlug.toLowerCase() !== r.slug.toLowerCase()) {
-    console.error(`${opts.cmd}: the clone at ${resolvedPath} has origin ${cloneSlug}, not ${r.slug} — ` +
+  // Fail closed: a null slug (no GitHub origin, e.g. a gitlab remote) must
+  // refuse, not skip — a local studio has to be built from the repo it
+  // targets, and an unverifiable clone origin is a silent-wrong-target.
+  if (cloneSlug === null || cloneSlug.toLowerCase() !== r.slug.toLowerCase()) {
+    const originDesc = cloneSlug === null ? "no GitHub origin" : `origin ${cloneSlug}`;
+    console.error(`${opts.cmd}: the clone at ${resolvedPath} has ${originDesc}, not ${r.slug} — ` +
       "a local studio must be built from the repo it targets; pass --path to the right clone");
     process.exit(1);
   }
