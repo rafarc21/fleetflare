@@ -1566,7 +1566,7 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
   }
   const clean = digest.replace(/[\x00-\x1f\x7f]/g, "");
   const term = await findAttachTerminal(id, deps);
-  if (term === null) {
+  if (term === null || term.handle === undefined) {
     return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
   }
   if (!looksLikeClaudeScreen(term.preview)) {
