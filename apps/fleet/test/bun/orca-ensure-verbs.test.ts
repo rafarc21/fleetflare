@@ -38,6 +38,13 @@ import {
 import type { StudioStatus } from "../../src/studio/types";
 import { ORCA_ENV, ok, terminals } from "./helpers/orca-fixtures";
 
+// item 5: `localSettingsPath` is a NEW export. bun's ESM makes a missing
+// named export a hard module-link error (not `undefined`), which would kill
+// every test in this file while the export is still absent (red). A dynamic
+// import survives the link: it yields `undefined` now (red -> calling it
+// throws) and the real function once the export lands (green).
+const { localSettingsPath } = await import("../../cli/orca-workspace");
+
 // ---------------------------------------------------------------------------
 // Fakes. `run` records every argv it was handed, which is how the "makes NO
 // orca call" and "no second create" tests assert absence rather than outcome.
@@ -636,6 +643,77 @@ describe("local lead files are excluded from git (B3)", () => {
     expect(() => appendLocalExcludeLines("/nonexistent", { log: (l) => lines.push(l) }, run)).not.toThrow();
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("could not exclude");
+  });
+});
+
+describe("tracked .claude/settings.json -> settings.local.json (item 5)", () => {
+  // A real temp git worktree, so `git ls-files --error-unmatch` really runs.
+  function makeWorktree() {
+    const root = mkdtempSync(join(tmpdir(), "orca-tracked-settings-"));
+    const main = join(root, "main");
+    const wt = join(root, "wt");
+    mkdirSync(main);
+    execFileSync("git", ["init", "-q"], { cwd: main });
+    execFileSync("git", ["config", "user.email", "x@y"], { cwd: main });
+    execFileSync("git", ["config", "user.name", "x"], { cwd: main });
+    execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: main });
+    execFileSync("git", ["worktree", "add", "-q", wt, "-b", "wt"], { cwd: main });
+    return { root, main, wt };
+  }
+
+  test("localSettingsPath returns settings.local.json when .claude/settings.json is tracked", () => {
+    const { root, wt } = makeWorktree();
+    try {
+      mkdirSync(join(wt, ".claude"), { recursive: true });
+      writeFileSync(join(wt, ".claude", "settings.json"), "{}\n");
+      execFileSync("git", ["-C", wt, "add", ".claude/settings.json"]);
+      execFileSync("git", ["-C", wt, "commit", "-q", "-m", "track settings"]);
+      expect(localSettingsPath(wt)).toBe(join(wt, ".claude", "settings.local.json"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("localSettingsPath returns settings.json when nothing is tracked", () => {
+    const { root, wt } = makeWorktree();
+    try {
+      expect(localSettingsPath(wt)).toBe(join(wt, ".claude", "settings.json"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("materialize writes hooks to settings.local.json, leaves the tracked settings.json bytes untouched, and excludes it", async () => {
+    const { root, wt } = makeWorktree();
+    try {
+      mkdirSync(join(wt, ".claude"), { recursive: true });
+      writeFileSync(join(wt, ".claude", "settings.json"), '{"some":"tracked"}\n');
+      execFileSync("git", ["-C", wt, "add", ".claude/settings.json"]);
+      execFileSync("git", ["-C", wt, "commit", "-q", "-m", "track settings"]);
+
+      const f = fake({
+        "worktree create": ok(JSON.stringify({
+          ok: true,
+          result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: wt } },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      // The tracked file's bytes are byte-identical — never clobbered.
+      expect(readFileSync(join(wt, ".claude", "settings.json"), "utf8")).toBe('{"some":"tracked"}\n');
+      // The hooks landed in settings.local.json instead.
+      const local = JSON.parse(readFileSync(join(wt, ".claude", "settings.local.json"), "utf8"));
+      expect(JSON.stringify(local.hooks ?? {})).toContain("lead-gate.sh");
+      // And it is excluded from git.
+      const ignored = execFileSync("git", ["-C", wt, "check-ignore", ".claude/settings.local.json"], { encoding: "utf8" }).trim();
+      expect(ignored).toBe(".claude/settings.local.json");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
