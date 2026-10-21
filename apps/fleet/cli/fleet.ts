@@ -2045,7 +2045,12 @@ async function cmdProvision(
       ...(typeof body.skills === "string" ? { skills: body.skills.split(",") } : {}),
       ...(body.completionGate !== undefined ? { completionGate: body.completionGate } : {}),
     });
-    if (outcome.kind !== "created") {
+    // Fix 2 (#1259 round 3): `ensureLocalStudioWorktree`'s resume-reuse branch
+    // now also answers `{ kind: "exists" }` when a healthy attach terminal
+    // already lived in the kept worktree (reconciled instead of duplicated) —
+    // that is success too, the SAME as "created"; only "skipped"/"failed"
+    // mean the lead never materialized.
+    if (outcome.kind !== "created" && outcome.kind !== "exists") {
       const why = outcome.kind === "skipped" || outcome.kind === "failed" ? outcome.why : outcome.kind;
       console.error(`fleet provision: ${studio.id} has no local lead — the Orca worktree did not materialize (${why})`);
       console.error(`  tear the registered row down with: fleet destroy ${studio.id}`);
