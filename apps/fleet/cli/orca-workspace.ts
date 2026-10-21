@@ -1572,14 +1572,16 @@ export async function findAttachTerminal(id: string, deps: OrcaDeps): Promise<Or
  * digest would be typed as a shell command (a `$(…)` in a title would then
  * expand on the operator's Mac).
  *
- * Fix 1b (#1259 round 3, defense in depth alongside the tail-only gate
- * below): the digest is also stripped of the shell metacharacters that
- * matter if it ever DOES land in an open shell despite the gate — `$`,
- * backtick, backslash, `;`, `|`, `&`, `<`, `>` — same plain character-class
- * strip already used for control bytes, just a wider class. A `#`-prefix
- * comment trick was considered and rejected: stock interactive zsh does not
- * have `interactivecomments` on by default, so a leading `#` is not reliably
- * inert against the exact shell this bug was measured against.
+ * Fix 1 (#1259 round 4): round 3's fix-1b widened the control-byte strip
+ * below into a shell-metacharacter strip too (`$`, backtick, backslash, `;`,
+ * `|`, `&`, `<`, `>`), as defense-in-depth against an untrusted `digest`. That
+ * strip is gone now — not because the threat stopped mattering, but because
+ * the threat itself is gone BY CONSTRUCTION: `resolveLocalWake` (below) no
+ * longer ever reads the Worker's `report.digest` field, so no caller of this
+ * function on any production path can hand it attacker-shaped text in the
+ * first place; see `resolveLocalWake`'s own comment. The older, narrower
+ * control-byte strip stays — it was never specific to that threat and costs
+ * nothing to keep.
  */
 export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps): Promise<AssignWakeReport> {
   if (!orcaPresent(deps)) {
@@ -1589,7 +1591,7 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
         `Wake it yourself with: fleet task show`,
     };
   }
-  const clean = digest.replace(/[\x00-\x1f\x7f]/g, "").replace(/[$`\\;|&<>]/g, "");
+  const clean = digest.replace(/[\x00-\x1f\x7f]/g, "");
   const term = await findAttachTerminal(id, deps);
   if (term === null || term.handle === undefined) {
     return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
@@ -1679,12 +1681,32 @@ function looksLikeClaudeScreen(preview: string | undefined): boolean {
  * Orca terminal send that actually wakes the local lead. Everything else
  * passes through untouched, so a container studio's report is byte-identical
  * to before.
+ *
+ * Fix 1 (#1259 round 4): 3 prior review rounds built the text typed into the
+ * terminal from the Worker's own `report.digest` field, which itself carries
+ * board content (a task title, a `--why`) the Worker never fully controls —
+ * round 3's own "strip these shell metacharacters" patch was chasing that
+ * hole, and still missed a zsh glob-qualifier payload that needs none of the
+ * stripped characters at all. The actual fix is upstream of any stripping:
+ * this function never reads `report.digest` anymore, at all — it builds ONE
+ * FIXED template from `taskNumber` alone, which it validates as a plain
+ * positive integer before using it. No interpolated title, no interpolated
+ * body, no interpolated anything board-sourced ever reaches the terminal —
+ * the template has nothing in it a GitHub issue could have influenced except
+ * the number itself, and that number is range-checked, not merely typed.
+ * An invalid number (never expected from a real caller — see this file's own
+ * 4 call sites, each one already holding the task's own `number` field) still
+ * refuses rather than throws, matching every other refusal shape here.
  */
 export async function resolveLocalWake(
-  report: AssignWakeReport | undefined, studioId: string | null, deps: OrcaDeps,
+  report: AssignWakeReport | undefined, studioId: string | null, taskNumber: number, deps: OrcaDeps,
 ): Promise<AssignWakeReport | undefined> {
-  if (report && !report.woke && report.local === true && studioId !== null && report.digest !== undefined) {
-    return sendLocalWake(studioId, report.digest, deps);
+  if (report && !report.woke && report.local === true && studioId !== null) {
+    if (!Number.isInteger(taskNumber) || taskNumber <= 0) {
+      return { woke: false, reason: `invalid task number ${taskNumber} — no wake was sent` };
+    }
+    const digest = `Board task #${taskNumber} has a new message. Run: fleet task show ${taskNumber}`;
+    return sendLocalWake(studioId, digest, deps);
   }
   return report;
 }

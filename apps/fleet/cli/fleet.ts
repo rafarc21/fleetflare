@@ -2301,7 +2301,7 @@ function repoQuery(slug: string | null): string {
 type AssignedTask = BoardTask & { wake?: AssignWakeReport; pathWarnings?: string[] };
 
 async function reportAssignWake(task: AssignedTask): Promise<void> {
-  const line = formatAssignWake(await resolveLocalWake(task.wake, task.assignee, defaultOrcaDeps()));
+  const line = formatAssignWake(await resolveLocalWake(task.wake, task.assignee, task.number, defaultOrcaDeps()));
   if (line !== null) console.log(line);
 }
 
@@ -2595,7 +2595,7 @@ async function cmdTaskMessage(creds: Credentials, number: number, text: string):
     body: JSON.stringify({ text, ...(detected.slug ? { repo: detected.slug } : {}) }),
   })) as { comment: { url: string }; assignee: string; wake: AssignWakeReport };
   console.log(`task #${number} message posted: ${result.comment.url}`);
-  const wake = formatAssignWake(await resolveLocalWake(result.wake, result.assignee, defaultOrcaDeps()));
+  const wake = formatAssignWake(await resolveLocalWake(result.wake, result.assignee, number, defaultOrcaDeps()));
   if (wake !== null) console.log(wake);
 }
 

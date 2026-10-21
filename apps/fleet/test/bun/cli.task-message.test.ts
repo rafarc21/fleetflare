@@ -198,7 +198,12 @@ describe("fleet task message — local assignee wakes by Orca terminal send (ite
     const send = calls.find((c) => c.startsWith("terminal send"));
     expect(send).toBeDefined();
     expect(send).toContain("--text");
-    expect(send).toContain("WAKE TASK MESSAGE #12");
+    // Fix 1 (#1259 round 4): the text that actually reaches `terminal send`
+    // is the fixed per-task-number template, never the Worker's own `digest`
+    // field (`WAKE TASK MESSAGE #12 "Some task" | ping | ...` above) — that
+    // field is never read on this path anymore.
+    expect(send).toContain("Board task #12 has a new message. Run: fleet task show 12");
+    expect(send).not.toContain("WAKE TASK MESSAGE");
     expect(err).not.toContain("Error:");
   });
 });

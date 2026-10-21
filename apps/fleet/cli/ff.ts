@@ -281,7 +281,7 @@ export async function fileTask(
   // filed BEFORE the spawn, deliberately — see this function's own header),
   // and the refusal saying so is exactly right: the spawn below is what gives
   // that lead its first turn, carrying this brief in its system prompt.
-  const wake = formatAssignWake(await resolveLocalWake(filed.wake, filed.assignee, defaultOrcaDeps()));
+  const wake = formatAssignWake(await resolveLocalWake(filed.wake, filed.assignee, filed.number, defaultOrcaDeps()));
   if (wake !== null) say(`  ${wake}`);
   // Board issue #112 / #70 ask 8: one advisory line per path-claim overlap.
   for (const w of filed.pathWarnings ?? []) say(`  ${w}`);
@@ -318,7 +318,7 @@ export async function adoptTask(
   // adoption points at, and says whether it landed. Present on every
   // successful adoption now, including one that changes nothing on the
   // board itself (#158's same-studio nudge) — the wake fires either way.
-  const wake = formatAssignWake(await resolveLocalWake(adopted.wake, adopted.assignee, defaultOrcaDeps()));
+  const wake = formatAssignWake(await resolveLocalWake(adopted.wake, adopted.assignee, adopted.number, defaultOrcaDeps()));
   if (wake !== null) say(`  ${wake}`);
   return adopted.number;
 }

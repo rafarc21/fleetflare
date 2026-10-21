@@ -895,18 +895,67 @@ describe("local studio wake via orca terminal send (item 2)", () => {
   test("resolveLocalWake passes a non-local report through untouched", async () => {
     const f = fake({});
     const report = { woke: false as const, reason: "STOPPED" };
-    expect(await resolveLocalWake(report, "x", f.deps)).toBe(report);
+    expect(await resolveLocalWake(report, "x", 1, f.deps)).toBe(report);
   });
 
-  test("resolveLocalWake swaps a local refusal for the terminal send", async () => {
+  // Fix 1 (#1259 round 4): resolveLocalWake no longer trusts `report.digest` —
+  // it builds ONE fixed template from the task NUMBER alone, validated as a
+  // plain positive integer. See the describe block below ("the wake payload
+  // is a fixed template") for the injection-proof this change exists for.
+  test("resolveLocalWake swaps a local refusal for the terminal send, carrying the fixed per-task-number template", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
       "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ check on task" }),
       "terminal send": ok("{}"),
     });
-    const report = { woke: false as const, reason: "LOCAL", local: true as const, digest: "WAKE #1" };
-    const out = await resolveLocalWake(report, "websites--pilot", f.deps);
-    expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+    const report = { woke: false as const, reason: "LOCAL", local: true as const };
+    const out = await resolveLocalWake(report, "websites--pilot", 42, f.deps);
+    expect(out).toEqual({ woke: true, digest: "Board task #42 has a new message. Run: fleet task show 42" });
+  });
+
+  describe("the wake payload is a fixed template, never attacker-influenced board content (#1259 round 4 fix 1)", () => {
+    test("an attacker-shaped report.digest (shell command substitution) never reaches terminal send — it is never even read", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
+        "terminal send": ok("{}"),
+      });
+      const report = { woke: false as const, reason: "LOCAL", local: true as const, digest: "$(touch PWNED)" };
+      const out = await resolveLocalWake(report, "websites--pilot", 7, f.deps);
+      expect(out).toEqual({ woke: true, digest: "Board task #7 has a new message. Run: fleet task show 7" });
+      const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+      expect(send?.[5]).not.toContain("PWNED");
+      expect(send?.[5]).not.toContain("touch");
+      expect(send?.[5]).toBe("Board task #7 has a new message. Run: fleet task show 7");
+    });
+
+    test("an attacker-shaped report.digest (zsh glob qualifier, no shell metacharacters needed) never reaches terminal send either", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
+        "terminal send": ok("{}"),
+      });
+      const report = {
+        woke: false as const, reason: "LOCAL", local: true as const,
+        digest: "x\" *(e:'touch PWNED':) \"",
+      };
+      const out = await resolveLocalWake(report, "websites--pilot", 9, f.deps);
+      expect(out).toEqual({ woke: true, digest: "Board task #9 has a new message. Run: fleet task show 9" });
+      const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+      expect(send?.[5]).not.toContain("PWNED");
+      expect(send?.[5]).not.toContain("*(e:");
+    });
+
+    test("refuses, fail closed, when the task number is not a positive integer — no orca call at all", async () => {
+      const f = fake({});
+      const report = { woke: false as const, reason: "LOCAL", local: true as const };
+      for (const bad of [0, -1, 1.5, Number.NaN]) {
+        const out = await resolveLocalWake(report, "websites--pilot", bad, f.deps);
+        expect(out?.woke).toBe(false);
+        if (out && !out.woke) expect(out.reason).toContain(`invalid task number ${bad}`);
+      }
+      expect(f.calls).toEqual([]);
+    });
   });
 
   test("a healthy attach terminal with no readable preview refuses, fail-closed, and never sends", async () => {
@@ -945,7 +994,13 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter"]);
   });
 
-  test("a digest carrying control bytes AND shell metacharacters is cleaned before sending AND before returning", async () => {
+  // Fix 1 (#1259 round 4): fix-1b's shell-metachar strip (`$`, backtick,
+  // backslash, `;`, `|`, `&`, `<`, `>`) is gone from `sendLocalWake` itself —
+  // it was defense-in-depth for an untrusted `digest`, and `resolveLocalWake`
+  // no longer ever passes one through (see the describe block below). The
+  // older, broader control-byte strip stays: it is not tied to that specific
+  // threat and costs nothing to keep.
+  test("a digest carrying control bytes is cleaned before sending AND before returning, shell metacharacters pass through untouched", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
       "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
@@ -953,25 +1008,9 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     });
     const out = await sendLocalWake("websites--pilot", "WAKE \x03 $(reboot) \x1b\n", f.deps);
     expect(out.woke).toBe(true);
-    expect(out.digest).toBe("WAKE  (reboot) ");
+    expect(out.digest).toBe("WAKE  $(reboot) ");
     const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
-    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE  (reboot) ", "--enter"]);
-  });
-
-  test("a digest carrying ;|`&<> never reaches terminal send with those characters intact", async () => {
-    const f = fake({
-      "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
-      "terminal send": ok("{}"),
-    });
-    const out = await sendLocalWake("websites--pilot", "WAKE ; rm -rf / | cat `id` & echo <x> y", f.deps);
-    expect(out.woke).toBe(true);
-    expect(out.digest).toBe("WAKE  rm -rf /  cat id  echo x y");
-    for (const bad of [";", "|", "`", "&", "<", ">", "$", "\\"]) {
-      expect(out.digest).not.toContain(bad);
-    }
-    const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
-    expect(send?.[5]).toBe("WAKE  rm -rf /  cat id  echo x y");
+    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE  $(reboot) ", "--enter"]);
   });
 
   // Fix 1a (#1259 round 3): the gate must look only at the terminal's TAIL
