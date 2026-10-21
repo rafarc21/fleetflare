@@ -231,6 +231,36 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
     }
   }, 40_000);
 
+  // Fix 4 mutant 1 (#1259 round 3): a mutant that weakens the origin check to
+  // `cloneSlug === null` alone (dropping the slug-equality half) would accept
+  // ANY valid GitHub origin, not just the repo the studio is bound to. The
+  // gitlab test above only proves the null-origin half; this proves the
+  // other half — a clone with a VALID, but WRONG, GitHub origin must still
+  // refuse.
+  test("a local row whose clone has a VALID but WRONG GitHub origin still refuses (item 7)", async () => {
+    const wrongRepo = mkdtempSync(join(tmpdir(), "local-provision-wrong-origin-"));
+    const fakeOrca = join(home, "orca-provision-wrong");
+    writeFileSync(fakeOrca, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeOrca, 0o755);
+    provisionLocalPath = wrongRepo;
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: wrongRepo });
+      // A real, resolvable GitHub origin — just not acme/faux, the repo
+      // the stub binds "websites--release" to.
+      execFileSync("git", ["remote", "add", "origin", "https://github.com/other-org/other-repo.git"], { cwd: wrongRepo });
+      execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: wrongRepo });
+
+      const r = await runFleetLocal(["provision", "websites--release"], { ORCA_CLI_COMMAND: fakeOrca });
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("other-org/other-repo");
+      expect(r.err).toContain("not acme/faux");
+      expect(r.err).not.toContain("no GitHub origin");
+    } finally {
+      provisionLocalPath = undefined;
+      rmSync(wrongRepo, { recursive: true, force: true });
+    }
+  }, 40_000);
+
   // Fix 2 (#1259 round 3) widened ensureLocalStudioWorktree's resume-reuse
   // branch to return `{ kind: "exists" }` when a healthy attach terminal is
   // already live — cmdProvision's own fatal check must treat that the SAME
