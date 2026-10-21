@@ -139,3 +139,35 @@ describe("ff --local — no orca binary (T1b)", () => {
     expect(r.err).not.toContain("lead runs in the Orca terminal");
   }, 40_000);
 });
+
+describe("fleet spawn --local — clone with no GitHub origin refuses (item 4)", () => {
+  test("exits non-zero and never posts /studio/local/spawn when the clone origin is gitlab", async () => {
+    const gitlabRepo = mkdtempSync(join(tmpdir(), "local-spawn-gitlab-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: gitlabRepo });
+      execFileSync("git", ["remote", "add", "origin", "https://gitlab.com/acme/faux.git"], { cwd: gitlabRepo });
+      // A resolvable default branch, so the command reaches the ORIGIN check
+      // rather than refusing earlier on an unresolved default branch.
+      execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: gitlabRepo });
+
+      const before = traffic.filter((t) => t.path === "/studio/local/spawn").length;
+      const proc = Bun.spawn({
+        cmd: [process.execPath, FLEET, "spawn", "pilot", "--local", "--path", gitlabRepo],
+        cwd: repo,
+        env: { PATH: process.env.PATH!, HOME: home, TERM_PROGRAM: "not-orca" },
+        stdin: "ignore", stdout: "pipe", stderr: "pipe",
+      });
+      const killer = setTimeout(() => proc.kill("SIGKILL"), 20_000);
+      const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+      const code = await proc.exited;
+      clearTimeout(killer);
+
+      expect(code).toBe(1);
+      expect(err).toContain("no GitHub origin");
+      expect(traffic.filter((t) => t.path === "/studio/local/spawn").length).toBe(before);
+      expect(out).toBe("");
+    } finally {
+      rmSync(gitlabRepo, { recursive: true, force: true });
+    }
+  }, 40_000);
+});
