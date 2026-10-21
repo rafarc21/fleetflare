@@ -326,10 +326,6 @@ describe("local studio workspace — fleet task #1248", () => {
   // Real Orca reports `path` on the `worktree create` result (MEASURED — see
   // orca-workspace.ts's OrcaEnvelope comment), and the local path's
   // materialization step needs it to know where the lead's files land.
-  const LOCAL_CREATED = ok(JSON.stringify({
-    ok: true,
-    result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: "/fake/orca/studio-websites-pilot" } },
-  }));
 
   test("localWorktreeCreateArgs emits the exact worktree create argv", () => {
     expect(localWorktreeCreateArgs("/abs/clone", "main", "websites--pilot")).toEqual([
@@ -407,36 +403,49 @@ describe("local studio workspace — fleet task #1248", () => {
   });
 
   test("creates the worktree, materializes the working set, and launches claude via terminal create", async () => {
-    const f = fake({
-      "worktree create": LOCAL_CREATED,
-      "terminal create": TERM_CREATED,
-    });
-    const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
-      localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
-    });
-    expect(outcome.kind).toBe("created");
+    // A writable temp worktree path, not the hardcoded /fake/orca/... : the
+    // real materializeLocalLead mkdir/write into it must succeed on the
+    // non-root GH runner (the root gate containers can write /fake/orca, the
+    // runner cannot — the exact EACCES that made this test red on main).
+    const root = mkdtempSync(join(tmpdir(), "orca-local-"));
+    const worktreePath = join(root, "worktree");
+    try {
+      const f = fake({
+        "worktree create": ok(JSON.stringify({
+          ok: true,
+          result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: worktreePath } },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
 
-    const create = f.calls.find((c) => c[0] === "worktree" && c[1] === "create");
-    expect(create).toBeDefined();
-    expect(create).toContain("--repo");
-    expect(create).toContain("path:/abs/clone");
-    expect(create).toContain("--base-branch");
-    expect(create).toContain("origin/main");
-    expect(create).toContain("--agent");
-    expect(create).toContain("claude");
-    expect(create).toContain("studio-websites--pilot");
+      const create = f.calls.find((c) => c[0] === "worktree" && c[1] === "create");
+      expect(create).toBeDefined();
+      expect(create).toContain("--repo");
+      expect(create).toContain("path:/abs/clone");
+      expect(create).toContain("--base-branch");
+      expect(create).toContain("origin/main");
+      expect(create).toContain("--agent");
+      expect(create).toContain("claude");
+      expect(create).toContain("studio-websites--pilot");
 
-    const term = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
-    expect(term).toBeDefined();
-    expect(term).toContain("websites--pilot");
-    const cmd = term![term!.indexOf("--command") + 1];
-    expect(cmd).toContain("--append-system-prompt");
-    expect(cmd).toContain("$(cat");
+      const term = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
+      expect(term).toBeDefined();
+      expect(term).toContain("websites--pilot");
+      const cmd = term![term!.indexOf("--command") + 1];
+      expect(cmd).toContain("--append-system-prompt");
+      expect(cmd).toContain("$(cat");
 
-    // The prompt and settings landed on the worktree path (the fixture's
-    // worktree path), never in ~/.claude.
-    const path = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
-    expect(path).toBeDefined();
+      // The prompt and settings landed on the worktree path (the fixture's
+      // worktree path), never in ~/.claude.
+      const path = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
+      expect(path).toBeDefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("materializes the lead gate with IS_MAESTRO baked to False (a local studio is never maestro)", async () => {
