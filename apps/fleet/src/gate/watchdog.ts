@@ -90,9 +90,10 @@ export interface WatchdogDeps {
   post: (repo: string, headSha: string, args: { state: "pending" | "error" | "failure"; description: string }) => Promise<void>;
   /** gate/verdict's current state on the head, read without posting (#1226): used only so an
    *  errored run that never got to post ITS OWN verdict can be reconciled without ever
-   *  clobbering a verdict some other path already landed. Undefined when there is no status
-   *  yet, or the read failed. */
-  headStatus: (repo: string, headSha: string) => Promise<{ state: string } | undefined>;
+   *  clobbering a verdict some other path already landed. `description` is the status text
+   *  (which names the posting run's id) used to tell THIS run's pending from a newer same-head
+   *  run's. Undefined when there is no status yet, or the read failed. */
+  headStatus: (repo: string, headSha: string) => Promise<{ state: string; description?: string } | undefined>;
   /** Whether the gate runner is on for a repo. A repo it is off for is never read past this check (#1148 review). */
   gated?: (repo: string) => boolean;
   /** Whether any leg of the run stored a red result. A red result is final, never rerun (#1119). */
@@ -144,13 +145,18 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
       // #1226: an "errored" run may have ended before it ever got to post its
       // OWN verdict (the exact production bug: the post throws, the step's
       // retries exhaust, the Workflow instance errors). One best-effort
-      // reconciliation post, ONLY while the head's real GitHub status is not
-      // already something terminal — never clobber a verdict some other path
-      // already landed. A failure here is logged and swallowed: the run is
-      // already dead either way, and the row is retired regardless.
+      // reconciliation post, ONLY while the head has no status or a pending
+      // that still names THIS run (every status this system posts names the
+      // run id in its description) — a pending naming a different run is a
+      // newer same-head run's status, never clobbered. A failure here is
+      // logged and swallowed: the run is already dead either way, and the
+      // row is retired regardless.
       if (status === "errored") {
         const current = await deps.headStatus(repo, headSha).catch(() => undefined);
-        if (current === undefined || current.state === "pending") {
+        const stillThisRun = current?.state === "pending"
+          && typeof current.description === "string"
+          && current.description.includes(`run ${runId}`);
+        if (current === undefined || stillThisRun) {
           await deps.post(repo, headSha, {
             state: "error", description: `gate: run ended without a verdict (run ${runId})`,
           }).catch((err) => console.error(`gate watchdog: reconciliation post failed for ${runId}`, err));
