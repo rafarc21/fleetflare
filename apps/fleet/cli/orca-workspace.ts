@@ -852,7 +852,7 @@ function materializeLocalLead(worktreePath: string, args: LocalStudioArgs, deps:
   }
   writeFileSync(hookDest, hookBytes.replace(placeholder, "IS_MAESTRO = False"));
 
-  const settingsPath = join(claudeDir, "settings.json");
+  const settingsPath = localSettingsPath(worktreePath);
   let cfg: Record<string, unknown>;
   try {
     cfg = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
@@ -896,7 +896,7 @@ function materializeLocalLead(worktreePath: string, args: LocalStudioArgs, deps:
     `[ -x "$S" ] || { echo "${name} hook absent or not executable -- refusing (${why})" >&2; exit 2; }; ` +
     `exec "$S"`;
 
-  const hooksSettingsPath = join(claudeDir, "settings.json");
+  const hooksSettingsPath = localSettingsPath(worktreePath);
   let hooksCfg: Record<string, unknown>;
   try {
     hooksCfg = JSON.parse(readFileSync(hooksSettingsPath, "utf8")) as Record<string, unknown>;
@@ -956,7 +956,7 @@ export interface LocalExcludeRun {
   (args: string[], cwd: string): { code: number | null; stdout: string; stderr: string };
 }
 
-export const LOCAL_EXCLUDE_LINES = [".fleet/", ".claude/settings.json", ".claude/hooks/", ".claude/agents/", ".claude/skills/"];
+export const LOCAL_EXCLUDE_LINES = [".fleet/", ".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/", ".claude/agents/", ".claude/skills/"];
 
 export function appendLocalExcludeLines(worktreePath: string, deps: Pick<OrcaDeps, "log">, run: LocalExcludeRun = defaultLocalExcludeRun): void {
   try {
@@ -972,6 +972,23 @@ export function appendLocalExcludeLines(worktreePath: string, deps: Pick<OrcaDep
     // a boot must never fail because this write could not land.
     deps.log(`could not exclude the lead's files from git (${errText(err)})`);
   }
+}
+
+/**
+ * Where the lead's project-scoped hooks config lands. `.git/info/exclude`
+ * only hides UNTRACKED files, so a repo that COMMITS its own
+ * `.claude/settings.json` would still show our writes as a dirty diff a
+ * member's `git add -A` could commit. In that case write to
+ * `.claude/settings.local.json` instead — Claude Code merges settings.json <
+ * settings.local.json < --settings, so the hooks land identically without
+ * touching the tracked file. The `git ls-files --error-unmatch` probe decides;
+ * any failure (not a git repo, a read error) falls back to settings.json,
+ * the pre-item-5 path — the gate still arms either way, since claude reads
+ * both files.
+ */
+export function localSettingsPath(worktreePath: string, run: LocalExcludeRun = defaultLocalExcludeRun): string {
+  const probe = run(["ls-files", "--error-unmatch", "--", ".claude/settings.json"], worktreePath);
+  return probe.code === 0 ? join(worktreePath, ".claude", "settings.local.json") : join(worktreePath, ".claude", "settings.json");
 }
 
 function defaultLocalExcludeRun(args: string[], cwd: string): { code: number | null; stdout: string; stderr: string } {
