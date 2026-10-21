@@ -2074,7 +2074,7 @@ async function cmdProvision(
     // that is success too, the SAME as "created"; only "skipped"/"failed"
     // mean the lead never materialized.
     if (outcome.kind !== "created" && outcome.kind !== "exists") {
-      const why = outcome.kind === "skipped" || outcome.kind === "failed" ? outcome.why : outcome.kind;
+      const why = outcome.why;
       console.error(`fleet provision: ${studio.id} has no local lead — the Orca worktree did not materialize (${why})`);
       console.error(`  tear the registered row down with: fleet destroy ${studio.id}`);
       process.exit(1);
