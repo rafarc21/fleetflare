@@ -2554,9 +2554,9 @@ async function cmdTaskMessage(creds: Credentials, number: number, text: string):
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, ...(detected.slug ? { repo: detected.slug } : {}) }),
-  })) as { comment: { url: string }; wake: AssignWakeReport };
+  })) as { comment: { url: string }; assignee: string; wake: AssignWakeReport };
   console.log(`task #${number} message posted: ${result.comment.url}`);
-  const wake = formatAssignWake(result.wake);
+  const wake = formatAssignWake(await resolveLocalWake(result.wake, result.assignee, defaultOrcaDeps()));
   if (wake !== null) console.log(wake);
 }
 

@@ -1423,17 +1423,20 @@ export async function handleStudio(
     const localRow = await getStudioRow(env, id.full);
     if (localRow?.host === "local") {
       if (localRow.state !== "stopped") {
-        // host === "local" is already proven above, so refuseLocalRow can
-        // never return null here — assert it away.
-        return (await refuseLocalRow(env, id.full, "provision"))!;
+        return new Response(
+          `"${id.full}" is a local studio — it has no container, so provision is container-only. ` +
+          "Tear it down with: fleet destroy " + id.full,
+          { status: 409 },
+        );
       }
-      const body = (await req.json().catch(() => ({}))) as Partial<ProvisionConfig>;
-      // The row already binds a repo; resolveWorkRepo verifies the bound slug
-      // (never a caller-supplied one). existingRows is read once and reused for
-      // both the cap check and the segment claim, same as the cloud path below.
+      // The row already binds a repo; a resume re-materializes from that same
+      // repo (the row's own localPath), so only the BOUND slug is resolved —
+      // `requested` is pinned undefined, so a caller body cannot rebind a
+      // resume to another repo. existingRows is read once and reused for the
+      // segment claim.
       const existingRows = await listStudios(env);
       const repo = await resolveWorkRepo(repoDeps(reach), {
-        requested: (body as { repo?: unknown }).repo,
+        requested: undefined,
         boundSlug: existingRows.find((r) => r.id === id.full)?.repoSlug,
         defaultSlug: env.AGENT_REPO, rows: existingRows, idRepo: id.repo,
       });

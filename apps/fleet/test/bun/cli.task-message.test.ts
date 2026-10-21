@@ -10,6 +10,7 @@
 // credentials name the stand-in, and a cwd with no `.git`, so the request
 // carries no repo query and the test never depends on this checkout's remote.
 import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, writeFileSync } from "node:fs";
 import { writeCredentials } from "./helpers/credentials";
 import { cleanupTempDirs, FLEET, tmpDir } from "./helpers/fleet-cli";
 
@@ -132,5 +133,48 @@ describe("fleet task message — the repo travels in the body (issue #1106)", ()
 
     expect(r.code).toBe(0);
     expect(seen[0]!.body).toEqual({ text: "hi", repo: "acme-org/beta" });
+  });
+});
+
+describe("fleet task message — local assignee wakes by Orca terminal send (item 2)", () => {
+  test("a local-refusal wake is swapped for the CLI-side send, printed as NO WAKE, exits 0", async () => {
+    const home = tmpDir("task-message-local-home-");
+    const cwd = tmpDir("task-message-local-cwd-");
+    // A fake orca binary on PATH so the CLI-side swap (resolveLocalWake ->
+    // sendLocalWake) actually runs; TERM_PROGRAM is unset so orcaPresent is
+    // false and sendLocalWake reports "not an Orca session" — proving the swap
+    // fired rather than the Worker's manual wording passing through untouched.
+    const fakeOrca = `${home}/orca`;
+    writeFileSync(fakeOrca, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeOrca, 0o755);
+    const { server } = startMessageStandIn(() => Response.json({
+      comment: { id: 9, url: "https://github.com/o/r/issues/12#issuecomment-9" },
+      assignee: "websites--web-studio",
+      wake: {
+        woke: false,
+        reason: "websites--web-studio is a local studio — no container to wake. Wake its lead by Orca terminal send from the operator's machine.",
+        local: true,
+        digest: "WAKE TASK MESSAGE #12 \"Some task\" | ping | read: fleet task show 12",
+      },
+    }));
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const proc = Bun.spawn({
+      cmd: [process.execPath, FLEET, "task", "message", "12", "ping"],
+      cwd,
+      env: { PATH: process.env.PATH!, HOME: home, ORCA_CLI_COMMAND: fakeOrca },
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    const [out, err, code] = await Promise.all([
+      new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+    ]);
+    server.stop(true);
+
+    expect(code).toBe(0);
+    expect(out).toContain("task #12 message posted");
+    expect(out).toContain("NO WAKE");
+    // The CLI-side sendLocalWake ran and reported its own refusal wording —
+    // this proves the swap happened, not the Worker's manual wording passthrough.
+    expect(out).toContain("not an Orca session");
   });
 });

@@ -473,4 +473,28 @@ describe("POST /studio/:id/provision — stopped local row re-materializes (item
     expect(row?.state).toBe("running");
     expect(row?.host).toBe("local");
   });
+
+  it("a caller-supplied repo cannot rebind the resume — the bound repo wins", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, {
+      id: "websites--release", state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: "operator", spawnTokenHash: null,
+      repoSlug: REPO_SLUG, host: "local", localPath: "/tmp/websites",
+    });
+
+    const res = await handleStudio(
+      new Request("https://x/studio/websites--release/provision", {
+        method: "POST",
+        body: JSON.stringify({ repo: "other-org/websites" }),
+        headers: { "Cf-Access-Jwt-Assertion": "test-jwt" },
+      }),
+      containerThrowingEnv(), fakeFetchFile(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as StudioStatus & { prompt: string };
+    // The prompt still resolves the ROW's bound repo (REPO_SLUG's role md says
+    // "You are release. Merge carefully."), not the caller's other-org repo.
+    expect(body.prompt).toContain("You are release. Merge carefully.");
+  });
 });
