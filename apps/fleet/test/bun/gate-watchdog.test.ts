@@ -482,6 +482,13 @@ describe("sweepStalledRuns: an errored run that never posted its own verdict is 
     expect(h.head()?.progressedAt).toBe(-1);
   });
 
+  it("a terminal error head is never clobbered: no reconciliation post, still retired", async () => {
+    const h = harness({ runs: { "gate-x": "errored" }, headStatus: async () => ({ state: "error" }) });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
   it("a pending head naming this run id with a -r suffix is a newer same-head rerun: no reconciliation post, still retired", async () => {
     const h = harness({
       runs: { "gate-x": "errored" },
