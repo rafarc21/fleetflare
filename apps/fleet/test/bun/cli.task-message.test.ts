@@ -10,7 +10,7 @@
 // credentials name the stand-in, and a cwd with no `.git`, so the request
 // carries no repo query and the test never depends on this checkout's remote.
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { writeCredentials } from "./helpers/credentials";
 import { cleanupTempDirs, FLEET, tmpDir } from "./helpers/fleet-cli";
 
@@ -137,15 +137,32 @@ describe("fleet task message — the repo travels in the body (issue #1106)", ()
 });
 
 describe("fleet task message — local assignee wakes by Orca terminal send (item 2)", () => {
-  test("a local-refusal wake is swapped for the CLI-side send, printed as NO WAKE, exits 0", async () => {
+  test("a local-refusal wake is swapped for a real terminal send under Orca, printed as woke the studio", async () => {
     const home = tmpDir("task-message-local-home-");
     const cwd = tmpDir("task-message-local-cwd-");
-    // A fake orca binary on PATH so the CLI-side swap (resolveLocalWake ->
-    // sendLocalWake) actually runs; TERM_PROGRAM is unset so orcaPresent is
-    // false and sendLocalWake reports "not an Orca session" — proving the swap
-    // fired rather than the Worker's manual wording passing through untouched.
+    // A fake orca binary that answers the two LIST calls sendLocalWake's
+    // foreground check makes (a healthy attach terminal whose preview carries
+    // claude chrome) and `terminal send` with `{}`, and logs every argv so the
+    // test can assert the send actually fired. TERM_PROGRAM=Orca makes
+    // orcaPresent true, so the full CLI-side swap (resolveLocalWake ->
+    // sendLocalWake) runs end to end.
     const fakeOrca = `${home}/orca`;
-    writeFileSync(fakeOrca, "#!/bin/sh\nexit 0\n");
+    const logFile = `${home}/orca-calls.log`;
+    writeFileSync(fakeOrca, [
+      "#!/bin/sh",
+      `echo "$@" >> "${logFile}"`,
+      "case \"$1:$2\" in",
+      "  worktree:list)",
+      "    echo '{\"ok\":true,\"result\":{\"worktrees\":[{\"id\":\"repo-websites::/w/studio-websites-web-studio\",\"displayName\":\"studio-websites--web-studio\",\"path\":\"/fake/orca/studio-websites-web-studio\"}]}}'",
+      "    ;;",
+      "  terminal:list)",
+      "    echo '{\"ok\":true,\"result\":{\"terminals\":[{\"handle\":\"term_0\",\"title\":\"fleet\",\"connected\":true,\"worktreeId\":\"repo-websites::/w/studio-websites-web-studio\",\"preview\":\"❯ ready\"}]}}'",
+      "    ;;",
+      "  *)",
+      "    echo '{}'",
+      "    ;;",
+      "esac",
+    ].join("\n"));
     chmodSync(fakeOrca, 0o755);
     const { server } = startMessageStandIn(() => Response.json({
       comment: { id: 9, url: "https://github.com/o/r/issues/12#issuecomment-9" },
@@ -162,7 +179,7 @@ describe("fleet task message — local assignee wakes by Orca terminal send (ite
     const proc = Bun.spawn({
       cmd: [process.execPath, FLEET, "task", "message", "12", "ping"],
       cwd,
-      env: { PATH: process.env.PATH!, HOME: home, ORCA_CLI_COMMAND: fakeOrca },
+      env: { PATH: process.env.PATH!, HOME: home, ORCA_CLI_COMMAND: fakeOrca, TERM_PROGRAM: "Orca" },
       stdin: "ignore", stdout: "pipe", stderr: "pipe",
     });
     const [out, err, code] = await Promise.all([
@@ -172,9 +189,16 @@ describe("fleet task message — local assignee wakes by Orca terminal send (ite
 
     expect(code).toBe(0);
     expect(out).toContain("task #12 message posted");
-    expect(out).toContain("NO WAKE");
-    // The CLI-side sendLocalWake ran and reported its own refusal wording —
-    // this proves the swap happened, not the Worker's manual wording passthrough.
-    expect(out).toContain("not an Orca session");
+    // The full swap ran and the fake terminal send succeeded — the wake is
+    // reported as landed, never the Worker's local wording passed through.
+    expect(out).toContain("woke the studio");
+    expect(out).not.toContain("not an Orca session");
+    // The fake orca really received a terminal send with the digest text.
+    const calls = readFileSync(logFile, "utf8").split("\n").filter(Boolean);
+    const send = calls.find((c) => c.startsWith("terminal send"));
+    expect(send).toBeDefined();
+    expect(send).toContain("--text");
+    expect(send).toContain("WAKE TASK MESSAGE #12");
+    expect(err).not.toContain("Error:");
   });
 });
