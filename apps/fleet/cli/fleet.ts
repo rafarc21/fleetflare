@@ -2024,6 +2024,17 @@ async function cmdProvision(
       console.error("fleet provision: could not resolve the default branch of the local clone — cannot re-materialize the worktree");
       process.exit(1);
     }
+    // Same origin rule as the spawn path: the clone the row names must be the
+    // repo the studio is bound to, or a resume re-materializes the lead out of
+    // somebody else's checkout (or a non-GitHub clone whose origin cannot be
+    // verified at all).
+    const cloneSlug = await resolveCloneOriginSlug(gitRun, localPath);
+    const bound = (studio.repoSlug ?? "").toLowerCase();
+    if (cloneSlug === null || cloneSlug.toLowerCase() !== bound) {
+      const originDesc = cloneSlug === null ? "no GitHub origin" : `origin ${cloneSlug}`;
+      console.error(`fleet provision: the clone at ${localPath} has ${originDesc}, not ${studio.repoSlug} — a local studio must be built from the repo it targets; pass --path to the right clone`);
+      process.exit(1);
+    }
     const outcome = await ensureLocalStudioWorktree(studio.id, defaultOrcaDeps(), {
       localPath,
       defaultBranch,

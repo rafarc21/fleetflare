@@ -24,6 +24,9 @@ const traffic: { method: string; path: string; body: unknown }[] = [];
 let server: ReturnType<typeof Bun.serve>;
 let home: string;
 let repo: string;
+// The local row the stub answers POST /studio/websites--release/provision
+// with. `localPath` is swapped by the gitlab-origin test before it runs.
+let provisionLocalPath: string | undefined;
 
 // The spawn row the stub answers POST /studio/local/spawn with — the three
 // fields parseStudioStatus demands (id/state/error) plus repoSlug, and the
@@ -49,7 +52,7 @@ beforeAll(() => {
         return Response.json({
           id: "websites--release", state: "running", error: null, repoSlug: "acme/faux",
           tailscaleHost: null, lastRefresh: null,
-          host: "local", localPath: repo,
+          host: "local", localPath: provisionLocalPath ?? repo,
           prompt: "You are release. Merge carefully.", allowedTools: "Bash(git *) Edit",
           effort: "",
         });
@@ -192,5 +195,29 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
     const r = await runFleetLocal(["provision", "websites--release"]);
     expect(r.code).toBe(1);
     expect(r.err).toContain("fleet destroy websites--release");
+  }, 40_000);
+
+  test("a local row whose clone has a non-GitHub origin refuses before any worktree materialization (item 7)", async () => {
+    // The stub's local response points localPath at a gitlab clone. The local
+    // branch must refuse (exit 1, "no GitHub origin") BEFORE ensureLocalStudioWorktree
+    // runs — with a fake orca binary present, a bug that skipped the origin
+    // check would reach the worktree materialization instead.
+    const gitlabRepo = mkdtempSync(join(tmpdir(), "local-provision-gitlab-"));
+    const fakeOrca = join(home, "orca-provision");
+    writeFileSync(fakeOrca, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeOrca, 0o755);
+    provisionLocalPath = gitlabRepo;
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: gitlabRepo });
+      execFileSync("git", ["remote", "add", "origin", "https://gitlab.com/acme/faux.git"], { cwd: gitlabRepo });
+      execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: gitlabRepo });
+
+      const r = await runFleetLocal(["provision", "websites--release"], { ORCA_CLI_COMMAND: fakeOrca });
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("no GitHub origin");
+    } finally {
+      provisionLocalPath = undefined;
+      rmSync(gitlabRepo, { recursive: true, force: true });
+    }
   }, 40_000);
 });
