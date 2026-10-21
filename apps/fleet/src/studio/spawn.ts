@@ -512,6 +512,9 @@ export async function runResume(deps: ResumeDeps, parent: SpawnParent, body: unk
   const rows = await deps.listStudios();
   const row = rows.find((r) => r.id === target.full);
   if (!row) return new Response(`no studio ${target.full} — resume never creates one; spawn it`, { status: 404 });
+  if (row.host === "local") {
+    return new Response(`${target.full} is a local studio — it has no container, so resume is container-only. Re-materialize it with: fleet provision ${target.full}`, { status: 409 });
+  }
   if (row.state !== "stopped") {
     return new Response(`${target.full} is ${row.state}, not stopped — resume only starts a stopped studio`, { status: 409 });
   }
