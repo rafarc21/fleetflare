@@ -6,7 +6,7 @@ import {
   listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES, listOpenPulls, OPEN_PULLS_MAX_PAGES,
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
-  setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict,
+  setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict, setBranchProtectionRequiredStatusChecks, disableBranchProtectionEnforceAdmins,
   getBranchProtection,
 } from "../src/github/api";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
@@ -1057,6 +1057,19 @@ describe("branch protection create/update split (#1247)", () => {
     expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/main/protection/required_status_checks");
     expect(calls[0].body).toEqual({ strict: false });
   });
+
+  it("setBranchProtectionRequiredStatusChecks PATCHes the whole required_status_checks sub-resource", async () => {
+    await setBranchProtectionRequiredStatusChecks("tok", "o/r", "main", false, ["gate/verdict"]);
+    expect(calls[0].method).toBe("PATCH");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/main/protection/required_status_checks");
+    expect(calls[0].body).toEqual({ strict: false, contexts: ["gate/verdict"] });
+  });
+
+  it("disableBranchProtectionEnforceAdmins DELETEs the enforce_admins sub-resource", async () => {
+    await disableBranchProtectionEnforceAdmins("tok", "o/r", "main");
+    expect(calls[0].method).toBe("DELETE");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/main/protection/enforce_admins");
+  });
 });
 
 describe("getBranchProtection", () => {
@@ -1066,14 +1079,25 @@ describe("getBranchProtection", () => {
     expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/main/protection");
   });
 
-  it("a rule with no required_status_checks reads as an empty context list", async () => {
-    respond = () => Response.json({ enforce_admins: true });
-    expect(await getBranchProtection("tok", "o/r", "main")).toEqual({ contexts: [] });
+  it("a rule with no required_status_checks reads as empty contexts, hasRequiredStatusChecks false", async () => {
+    respond = () => Response.json({ enforce_admins: { enabled: true } });
+    expect(await getBranchProtection("tok", "o/r", "main")).toEqual({
+      contexts: [], hasRequiredStatusChecks: false, enforceAdmins: true,
+    });
   });
 
-  it("reads the required status contexts off the rule", async () => {
+  it("reads contexts and flags required status checks present, enforce_admins defaulting false", async () => {
     respond = () => Response.json({ required_status_checks: { contexts: ["lint", "gate/verdict"] } });
-    expect(await getBranchProtection("tok", "o/r", "main")).toEqual({ contexts: ["lint", "gate/verdict"] });
+    expect(await getBranchProtection("tok", "o/r", "main")).toEqual({
+      contexts: ["lint", "gate/verdict"], hasRequiredStatusChecks: true, enforceAdmins: false,
+    });
+  });
+
+  it("reads enforce_admins.enabled=false alongside contexts", async () => {
+    respond = () => Response.json({ required_status_checks: { contexts: ["lint"] }, enforce_admins: { enabled: false } });
+    expect(await getBranchProtection("tok", "o/r", "main")).toEqual({
+      contexts: ["lint"], hasRequiredStatusChecks: true, enforceAdmins: false,
+    });
   });
 });
 
