@@ -535,6 +535,74 @@ describe("local studio workspace — fleet task #1248", () => {
     }
   });
 
+  // Fix 2 (#1259 round 3): the resume-reuse branch above must reconcile
+  // against an already-live attach terminal, exactly like ensure() already
+  // does, instead of ALWAYS creating a second one — a resumed worktree whose
+  // attach terminal survived `fleet destroy`'s default keep-path must not
+  // boot a second lead claude process beside the live one.
+  test("a resume with a HEALTHY attach terminal already live reuses it — no terminal create, kind 'exists' (item 7)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-healthy-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries({
+          handle: "term_live", title: "websites--pilot", connected: true, orphaned: false, writable: true,
+        }),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("exists");
+
+      expect(f.calls.some((c) => c[0] === "worktree" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+
+      // Lead files still land in the kept worktree even on the reuse path —
+      // a resumed worktree may have a stale working-set.md from before.
+      expect(existsSync(join(existingPath, ".fleet", "working-set.md"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a resume with an UNHEALTHY (orphaned) attach terminal closes it and creates a fresh one (item 7)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-unhealthy-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries({
+          handle: "term_dead", title: "websites--pilot", connected: true, orphaned: true,
+        }),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      const close = f.calls.find((c) => c[0] === "terminal" && c[1] === "close");
+      expect(close).toEqual(["terminal", "close", "--terminal", "term_dead", "--json"]);
+      const create = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
+      expect(create).toBeDefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("materializes all four container hooks with the lead gate (item 1)", async () => {
     const root = mkdtempSync(join(tmpdir(), "orca-local-"));
     const worktreePath = join(root, "worktree");

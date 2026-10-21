@@ -718,6 +718,22 @@ export async function ensureLocalStudioWorktree(
       await deps.registry.set(id, existing.id ?? "");
       materializeLocalLead(existing.path, args, deps);
       const selector = existing.id ? `id:${existing.id}` : `name:${name}`;
+
+      // Fix 2 (#1259 round 3): reconcile against an already-live attach
+      // terminal BEFORE creating one, exactly like `ensure()` does for the
+      // container path. The default `fleet destroy` keeps both the worktree
+      // AND its terminal (cli/fleet.ts's `localTeardownDecision` only closes
+      // the terminal on an actual `remove`), so a resume that always created
+      // a new terminal here could boot a SECOND lead claude process beside a
+      // still-live one — double AI spend, two processes racing the same
+      // checkout. `reconcileAttachTerminals` closes duplicates/unhealthy
+      // survivors and returns the keeper; `isHealthyAttach` is the same
+      // health gate `ensure()` already trusts.
+      const { kept } = await reconcileAttachTerminals(id, selector, deps);
+      if (kept && isHealthyAttach(kept, id)) {
+        return { kind: "exists" };
+      }
+
       const command = localLaunchCommand(id, existing.path, join(existing.path, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
       const term = await orcaJson(
         deps,
