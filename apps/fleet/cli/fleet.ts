@@ -1993,7 +1993,8 @@ async function cmdProvision(
     console.error(repairFailureLine("provision", res.status, await res.text()));
     process.exit(1);
   }
-  const studio = parseStudioStatus(await res.json());
+  const body = (await res.json()) as LocalSpawnResponse;
+  const studio = parseStudioStatus(body);
   if (studio === null) {
     console.error("fleet provision: answered 200 but the body was not a studio row");
     process.exit(1);
@@ -2002,6 +2003,46 @@ async function cmdProvision(
   // Issue #305: stderr, like reportRepo — stdout stays the table.
   const provisionAccount = formatAccountResolution("fleet provision", studio);
   if (provisionAccount !== null) console.error(provisionAccount);
+  // Fleet task #1259 item 7: a local row answers a local-spawn-shaped body —
+  // the stopped local studio the operator is resuming. Re-materialize its Orca
+  // worktree from the row's own localPath instead of opening a cloud sidebar row.
+  if (studio.host === "local") {
+    const localPath = body.localPath;
+    if (typeof localPath !== "string" || localPath === "") {
+      console.error("fleet provision: the local row answered without a localPath — cannot re-materialize the worktree");
+      process.exit(1);
+    }
+    const prompt = body.prompt ?? "";
+    const allowedTools = body.allowedTools ?? "";
+    if (prompt === "" || allowedTools === "") {
+      console.error("fleet provision: the local row answered without prompt/allowedTools — cannot launch the lead");
+      process.exit(1);
+    }
+    const gitRun = defaultGitRun();
+    const defaultBranch = await resolveDefaultBranch(gitRun, localPath);
+    if (defaultBranch === null) {
+      console.error("fleet provision: could not resolve the default branch of the local clone — cannot re-materialize the worktree");
+      process.exit(1);
+    }
+    const outcome = await ensureLocalStudioWorktree(studio.id, defaultOrcaDeps(), {
+      localPath,
+      defaultBranch,
+      prompt,
+      allowedTools,
+      ...(body.effort !== undefined ? { effort: body.effort } : {}),
+      ...(body.members !== undefined ? { members: body.members } : {}),
+      ...(typeof body.skills === "string" ? { skills: body.skills.split(",") } : {}),
+      ...(body.completionGate !== undefined ? { completionGate: body.completionGate } : {}),
+    });
+    if (outcome.kind !== "created") {
+      const why = outcome.kind === "skipped" || outcome.kind === "failed" ? outcome.why : outcome.kind;
+      console.error(`fleet provision: ${studio.id} has no local lead — the Orca worktree did not materialize (${why})`);
+      console.error(`  tear the registered row down with: fleet destroy ${studio.id}`);
+      process.exit(1);
+    }
+    // A local studio's Orca terminal IS its lead; there is no cloud sidebar row.
+    return;
+  }
   // Same rule as `fleet spawn`: this path also leaves a studio running, so it
   // also owes that studio a visible row in Orca's sidebar. Idempotent, so a
   // studio that already has one is not given a second.

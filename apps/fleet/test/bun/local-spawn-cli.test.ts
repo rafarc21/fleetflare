@@ -45,6 +45,15 @@ beforeAll(() => {
       if (url.pathname === "/studio/local/spawn" && req.method === "POST") {
         return Response.json(SPAWNED);
       }
+      if (url.pathname === "/studio/websites--release/provision" && req.method === "POST") {
+        return Response.json({
+          id: "websites--release", state: "running", error: null, repoSlug: "acme/faux",
+          tailscaleHost: null, lastRefresh: null,
+          host: "local", localPath: repo,
+          prompt: "You are release. Merge carefully.", allowedTools: "Bash(git *) Edit",
+          effort: "",
+        });
+      }
       return new Response("not found", { status: 404 });
     },
   });
@@ -169,5 +178,19 @@ describe("fleet spawn --local — clone with no GitHub origin refuses (item 4)",
     } finally {
       rmSync(gitlabRepo, { recursive: true, force: true });
     }
+  }, 40_000);
+});
+
+describe("fleet provision — stopped local row re-materializes (item 7)", () => {
+  test("detects the local row and re-materializes instead of treating it as a cloud row", async () => {
+    // Bodyless provision: the cwd repo (acme/faux) disagrees with the id's
+    // repo segment (websites), so cmdProvision sends {} and the stub answers a
+    // local-shaped bring-up response. No orca binary + TERM_PROGRAM=not-orca
+    // means ensureLocalStudioWorktree returns skipped, so the local branch must
+    // exit non-zero naming fleet destroy — proving it fired (the cloud path
+    // would have printed the row and exited 0).
+    const r = await runFleetLocal(["provision", "websites--release"]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("fleet destroy websites--release");
   }, 40_000);
 });

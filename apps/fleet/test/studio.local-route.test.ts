@@ -447,3 +447,30 @@ describe("container-only verbs refuse a host:\"local\" row (T2)", () => {
     expect(text).toContain("fleet destroy");
   });
 });
+
+describe("POST /studio/:id/provision — stopped local row re-materializes (item 7)", () => {
+  it("a stopped host:\"local\" row resumes via the local bring-up response, never a DO call", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, {
+      id: "websites--release", state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: "operator", spawnTokenHash: null,
+      repoSlug: REPO_SLUG, host: "local", localPath: "/tmp/websites",
+    });
+
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--release/provision"), containerThrowingEnv(), fakeFetchFile(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as StudioStatus & { prompt: string; allowedTools: string; localPath?: string | null };
+    expect(body.state).toBe("running");
+    expect(body.host).toBe("local");
+    expect(body.localPath).toBe("/tmp/websites");
+    expect(body.allowedTools).toBe("Bash(git *) Edit");
+    expect(body.prompt).toContain("You are release. Merge carefully.");
+
+    const row = (await listStudios(env)).find((s) => s.id === "websites--release");
+    expect(row?.state).toBe("running");
+    expect(row?.host).toBe("local");
+  });
+});
