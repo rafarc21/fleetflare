@@ -85,7 +85,7 @@ describe("fileTask swaps a local-refusal wake for the real Orca send, never the 
     process.env.TERM_PROGRAM = "Orca";
     process.env.ORCA_CLI_COMMAND = fakeOrcaFor(studioId, "studio-acme--pilot", worktreeId);
 
-    globalThis.fetch = (async () => Response.json({
+    globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) => Response.json({
       number: 42,
       url: "https://github.com/o/r/issues/42",
       assignee: studioId,
@@ -119,7 +119,7 @@ describe("adoptTask swaps a local-refusal wake for the real Orca send, never the
     process.env.TERM_PROGRAM = "Orca";
     process.env.ORCA_CLI_COMMAND = fakeOrcaFor(studioId, "studio-acme--release", worktreeId);
 
-    globalThis.fetch = (async () => Response.json({
+    globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) => Response.json({
       number: 43,
       url: "https://github.com/o/r/issues/43",
       title: "fix the thing",
