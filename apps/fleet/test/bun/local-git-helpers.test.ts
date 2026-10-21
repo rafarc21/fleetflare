@@ -123,11 +123,12 @@ describe("local teardown decision (B1)", () => {
     expect(await gitIsDirty(runner({ "-C /p status --porcelain": { code: 128, stdout: "" } }), "/p")).toBe(true);
   });
 
-  test("gitAheadCount reads rev-list --count @{u}.. and 0s on a missing upstream", async () => {
+  test("gitAheadCount reads rev-list --count @{u}.. and nulls on a missing upstream", async () => {
     expect(await gitAheadCount(runner({ "-C /p rev-list --count @{u}..": { code: 0, stdout: "3\n" } }), "/p")).toBe(3);
-    // No upstream (non-zero exit) reads as 0 — nothing is "ahead of" a
-    // missing upstream; the dirty check is what still protects the tree.
-    expect(await gitAheadCount(runner({ "-C /p rev-list --count @{u}..": { code: 128, stdout: "" } }), "/p")).toBe(0);
+    expect(await gitAheadCount(runner({ "-C /p rev-list --count @{u}..": { code: 0, stdout: "0\n" } }), "/p")).toBe(0);
+    // No upstream (non-zero exit) reads as null — unknown, so the teardown
+    // must treat it as unsynced and keep the tree.
+    expect(await gitAheadCount(runner({ "-C /p rev-list --count @{u}..": { code: 128, stdout: "" } }), "/p")).toBeNull();
   });
 });
 
@@ -163,6 +164,13 @@ describe("localWorktreeRemoval (B1 fix round)", () => {
     const clean = runner({ "-C /wt status --porcelain": { code: 0, stdout: "" }, "-C /wt rev-list --count @{u}..": { code: 0, stdout: "0\n" } });
     const r = await localWorktreeRemoval({ host: "local", localPath: "/clone" }, FORCED, { run: clean, resolveWorktreePath: resolve("/wt") }, "id");
     expect(r).toEqual({ remove: true, note: "clean and fully pushed — removing" });
+  });
+
+  test("local + no upstream -> keep as unsynced, even with force+discard", async () => {
+    const noUpstream = runner({ "-C /wt status --porcelain": { code: 0, stdout: "" }, "-C /wt rev-list --count @{u}..": { code: 128, stdout: "" } });
+    const r = await localWorktreeRemoval({ host: "local", localPath: "/clone" }, FORCED, { run: noUpstream, resolveWorktreePath: resolve("/wt") }, "id");
+    expect(r.remove).toBe(false);
+    expect(r.note).toContain("upstream");
   });
 
   test("local + unresolvable worktree path -> keep with the could-not-resolve note", async () => {
