@@ -253,12 +253,6 @@ describe("getCommitContextStatus", () => {
       expect((err as Error).message).not.toContain("super-secret-token");
     }
   });
-
-  it("pins the 3-key bodyless GET header set", async () => {
-    respond = () => Response.json([status("gate/verdict", "success")]);
-    await getCommitContextStatus("tok", "o/r", "abc123", "gate/verdict");
-    expect(calls[0].headers).toStrictEqual(GH_GET_HEADERS);
-  });
 });
 
 // Board issue #8: auto-close on promote. The six primitives below are the

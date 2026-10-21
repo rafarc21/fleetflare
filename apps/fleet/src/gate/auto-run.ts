@@ -193,9 +193,9 @@ async function recordRun(
   const previous = await index.latest(input.repo, input.pr);
   await index.record(input.repo, input.pr, { headSha: input.headSha, runId, progressedAt: now() });
   if (previous === null || previous.runId === runId) return { runId, reused: false };
-  // #1243: a failed terminate of the PREVIOUS sha's run does not leave two live
-  // runs of the SAME head, so the new run still starts — but the leak is logged
-  // loudly and no superseded run is reported (#1082 semantics, made visible).
+  // #1243: a failed terminate here never leaves two live runs of the SAME head
+  // (a same-head live run was already reused or ended before recordRun); the new
+  // run still starts, the leak is logged, and no superseded run is reported (#1082).
   let superseded: boolean;
   try {
     superseded = await endIfLive(wf, previous.runId);
