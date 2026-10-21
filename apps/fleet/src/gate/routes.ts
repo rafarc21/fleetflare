@@ -9,7 +9,7 @@
 import type { Env } from "../env";
 import { getPullRequestHeadSha } from "../github/api";
 import {
-  getDefaultBranch, getBranchProtection, setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict,
+  getDefaultBranch, getBranchProtection, setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict, setBranchProtectionRequiredStatusChecks, disableBranchProtectionEnforceAdmins,
 } from "../github/api";
 import { redactSecrets } from "../studio/redact";
 import { runGateProtect, type ProtectPort } from "./protect";
@@ -50,6 +50,8 @@ export function realProtectPort(env: Env): ProtectPort {
     createProtection: async (repo, branch, contexts) => setBranchProtectionRule(await mint(repo), repo, branch, contexts),
     addRequiredContexts: async (repo, branch, contexts) => addBranchProtectionContexts(await mint(repo), repo, branch, contexts),
     setStrict: async (repo, branch, strict) => setBranchProtectionStrict(await mint(repo), repo, branch, strict),
+    setRequiredStatusChecks: async (repo, branch, strict, contexts) => setBranchProtectionRequiredStatusChecks(await mint(repo), repo, branch, strict, contexts),
+    disableEnforceAdmins: async (repo, branch) => disableBranchProtectionEnforceAdmins(await mint(repo), repo, branch),
   };
 }
 

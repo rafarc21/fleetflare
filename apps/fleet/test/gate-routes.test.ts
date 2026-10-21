@@ -538,10 +538,12 @@ describe("POST /studio/gate/protect (#1247)", () => {
     const calls: Array<{ method: string; repo: string; branch?: string; contexts?: string[]; strict?: boolean }> = [];
     const protect: ProtectPort = {
       getDefaultBranch: async (repo) => { calls.push({ method: "getDefaultBranch", repo }); return "main"; },
-      getProtection: async (repo, branch) => { calls.push({ method: "getProtection", repo, branch }); return { contexts: ["lint"] }; },
+      getProtection: async (repo, branch) => { calls.push({ method: "getProtection", repo, branch }); return { contexts: ["lint"], hasRequiredStatusChecks: true, enforceAdmins: false }; },
       createProtection: async (repo, branch, contexts) => { calls.push({ method: "createProtection", repo, branch, contexts }); },
       addRequiredContexts: async (repo, branch, contexts) => { calls.push({ method: "addRequiredContexts", repo, branch, contexts }); },
       setStrict: async (repo, branch, strict) => { calls.push({ method: "setStrict", repo, branch, strict }); },
+      setRequiredStatusChecks: async (repo, branch, strict, contexts) => { calls.push({ method: "setRequiredStatusChecks", repo, branch, strict, contexts }); },
+      disableEnforceAdmins: async (repo, branch) => { calls.push({ method: "disableEnforceAdmins", repo, branch }); },
     };
     const req = new Request("https://worker/studio/gate/protect", {
       method: "POST", body: JSON.stringify({ repo: "acme/websites" }),
@@ -579,10 +581,12 @@ describe("POST /studio/gate/protect (#1247)", () => {
     const env = fakeEnv();
     const protect: ProtectPort = {
       getDefaultBranch: async () => { throw new Error("read acme/x failed (404): Not Found"); },
-      getProtection: async () => ({ contexts: [] }),
+      getProtection: async () => ({ contexts: [], hasRequiredStatusChecks: true, enforceAdmins: false }),
       createProtection: async () => {},
       addRequiredContexts: async () => {},
       setStrict: async () => {},
+      setRequiredStatusChecks: async () => {},
+      disableEnforceAdmins: async () => {},
     };
     const req = new Request("https://worker/studio/gate/protect", {
       method: "POST", body: JSON.stringify({ repo: "acme/x" }),
@@ -596,10 +600,12 @@ describe("POST /studio/gate/protect (#1247)", () => {
     const env = fakeEnv();
     const protect: ProtectPort = {
       getDefaultBranch: async () => { throw new Error("read acme/x failed (403): Forbidden"); },
-      getProtection: async () => ({ contexts: [] }),
+      getProtection: async () => ({ contexts: [], hasRequiredStatusChecks: true, enforceAdmins: false }),
       createProtection: async () => {},
       addRequiredContexts: async () => {},
       setStrict: async () => {},
+      setRequiredStatusChecks: async () => {},
+      disableEnforceAdmins: async () => {},
     };
     const req = new Request("https://worker/studio/gate/protect", {
       method: "POST", body: JSON.stringify({ repo: "acme/x" }),
