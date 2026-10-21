@@ -248,6 +248,10 @@ interface OrcaTerminalEntry {
   /** Board #55: which worktree the terminal lives in — `fleet ls`'s ROW
    *  column reads every terminal in ONE `terminal list` and groups by it. */
   worktreeId?: string;
+  /** The terminal's screen text (MEASURED on real Orca — see this interface's
+   *  own doc comment). Read by `sendLocalWake` to confirm the claude TUI still
+   *  owns the terminal's foreground before typing a wake into it. */
+  preview?: string;
 }
 
 interface OrcaEnvelope {
@@ -1479,6 +1483,14 @@ export async function readStudioRows(studios: StudioStatus[], deps: OrcaDeps): P
  * call, ever — only the two LIST calls above.
  */
 export async function findAttachHandle(id: string, deps: OrcaDeps): Promise<string | null> {
+  return (await findAttachTerminal(id, deps))?.handle ?? null;
+}
+
+/** The ranked attach terminal for a studio — `findAttachHandle`, but returning
+ *  the whole entry so a caller can also read the terminal's screen (`preview`).
+ *  Same "never fails its caller" posture: null when Orca is absent, the studio
+ *  has no worktree, no healthy attach terminal exists, or any orca call fails. */
+export async function findAttachTerminal(id: string, deps: OrcaDeps): Promise<OrcaTerminalEntry | null> {
   if (!orcaPresent(deps)) return null;
   try {
     const [worktrees, terms] = await Promise.all([
@@ -1488,7 +1500,7 @@ export async function findAttachHandle(id: string, deps: OrcaDeps): Promise<stri
     if (!worktree?.id) return null;
     const candidates = terms.filter((t) => t.worktreeId === worktree.id && isHealthyAttach(t, id));
     if (candidates.length === 0) return null;
-    return rankAttachTerminals(candidates, id)[0]?.handle ?? null;
+    return rankAttachTerminals(candidates, id)[0] ?? null;
   } catch (err) {
     deps.log(`${id}: attach handle lookup failed — ${errText(err)}`);
     return null;
@@ -1500,8 +1512,18 @@ export async function findAttachHandle(id: string, deps: OrcaDeps): Promise<stri
  * container, so the Worker's assign wake refuses with `{local:true}` and this
  * CLI turns that into the Orca equivalent of the container wake: resolve the
  * studio's healthy attach terminal and type the digest into it. Fail closed —
- * not under Orca, no healthy attach terminal, or a failed send all report a
- * refusal, never a silent non-wake.
+ * not under Orca, no healthy attach terminal, no claude session in that
+ * terminal's foreground, or a failed send all report a refusal, never a
+ * silent non-wake.
+ *
+ * The foreground check is the SAME rule the container's pane gate uses
+ * (src/studio/wake.ts: `pane_current_command` reads `claude` when the TUI owns
+ * the pane, `bash`/`zsh` when nothing runs). Orca exposes no
+ * `terminal read --screen`, so the terminal's `preview` field (the screen text
+ * `terminal list --json` already carries) stands in: it must contain one of
+ * claude's own chrome glyphs, or the lead has exited to a bare shell and the
+ * digest would be typed as a shell command (a `$(…)` in a title would then
+ * expand on the operator's Mac).
  */
 export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps): Promise<AssignWakeReport> {
   if (!orcaPresent(deps)) {
@@ -1511,19 +1533,40 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
         `Wake it yourself with: fleet task show`,
     };
   }
-  const handle = await findAttachHandle(id, deps);
-  if (handle === null) {
+  const clean = digest.replace(/[\x00-\x1f\x7f]/g, "");
+  const term = await findAttachTerminal(id, deps);
+  if (term === null) {
     return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
   }
+  if (!looksLikeClaudeScreen(term.preview)) {
+    return {
+      woke: false,
+      reason: `${id} is a local studio with no claude session in the terminal's foreground — ` +
+        `the lead has exited; wake its lead yourself with: fleet task show`,
+    };
+  }
   try {
-    const res = await deps.run(["terminal", "send", "--terminal", handle, "--text", digest, "--enter"], LIST_TIMEOUT_MS);
+    const res = await deps.run(["terminal", "send", "--terminal", term.handle, "--text", clean, "--enter"], LIST_TIMEOUT_MS);
     if (res.timedOut || !res.ok) {
       return { woke: false, reason: `terminal send failed: ${(res.stderr || res.stdout).trim().slice(0, 200)}` };
     }
-    return { woke: true, digest };
+    return { woke: true, digest: clean };
   } catch (err) {
     return { woke: false, reason: errText(err) };
   }
+}
+
+/**
+ * Does the attach terminal's screen text look like a live claude session?
+ * LOOSE and anchored on claude-specific chrome glyphs only — the composer's
+ * `❯`, the turn markers `⏺`/`●`, and the box-drawing `▔` rule claude draws for
+ * its select modals (the same glyph discipline as wake.ts's `COMPOSER_ROW` /
+ * `SURVEY_HEADER_ROW_LEAD`) — never a plain prose substring. Missing or empty
+ * preview text fails closed: a screen we cannot read is not "clean".
+ */
+function looksLikeClaudeScreen(preview: string | undefined): boolean {
+  if (preview === undefined || preview === "") return false;
+  return /[❯⏺●▔]/.test(preview);
 }
 
 /**

@@ -142,6 +142,7 @@ function terminalEntries(...entries: {
   lastOutputAt?: string | number;
   worktreeId?: string;
   worktreePath?: string;
+  preview?: string;
 }[]): OrcaResult {
   return ok(JSON.stringify({ ok: true, result: { terminals: entries } }));
 }
@@ -754,7 +755,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
   test("sendLocalWake types the digest into the healthy attach terminal", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID }),
+      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ check on task" }),
       "terminal send": ok("{}"),
     });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
@@ -785,11 +786,48 @@ describe("local studio wake via orca terminal send (item 2)", () => {
   test("resolveLocalWake swaps a local refusal for the terminal send", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID }),
+      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ check on task" }),
       "terminal send": ok("{}"),
     });
     const report = { woke: false as const, reason: "LOCAL", local: true as const, digest: "WAKE #1" };
     const out = await resolveLocalWake(report, "websites--pilot", f.deps);
     expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+  });
+
+  test("a healthy attach terminal with no readable preview refuses, fail-closed, and never sends", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID }),
+      "terminal send": ok("{}"),
+    });
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out.woke).toBe(false);
+    expect(out.reason).toContain("no claude session in the terminal");
+    expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
+  });
+
+  test("a healthy attach terminal showing claude chrome wakes and sends the cleaned digest", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "⏺ done" }),
+      "terminal send": ok("{}"),
+    });
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out.woke).toBe(true);
+    const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter"]);
+  });
+
+  test("a digest carrying control bytes is cleaned before sending AND before returning", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
+      "terminal send": ok("{}"),
+    });
+    const out = await sendLocalWake("websites--pilot", "WAKE \x03 $(reboot) \x1b\n", f.deps);
+    expect(out.woke).toBe(true);
+    expect(out.digest).toBe("WAKE  $(reboot) ");
+    const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE  $(reboot) ", "--enter"]);
   });
 });
