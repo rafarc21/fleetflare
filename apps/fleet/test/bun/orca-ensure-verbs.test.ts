@@ -16,7 +16,7 @@
 // orca-registry-teardown.test.ts, and the registry, locks, and ROW column live
 // in orca-registry-rows.test.ts.
 import { test, describe, expect } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -339,7 +339,7 @@ describe("local studio workspace — fleet task #1248", () => {
   });
 
   test("localLaunchCommand quotes the prompt-by-file and carries allowedTools/effort", () => {
-    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *) Edit Write", "max");
+    const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *) Edit Write", "max");
     // The prompt rides by FILE — the launch line stays a few hundred bytes
     // whatever the brief's size, and the pane shell expands "$(cat ...)" into
     // one argv element (studio-bringup.sh's own issue #6 technique).
@@ -349,7 +349,7 @@ describe("local studio workspace — fleet task #1248", () => {
   });
 
   test("localLaunchCommand quotes the INNER prompt path so a path with a space survives", () => {
-    const cmd = localLaunchCommand("websites--pilot", "/w with space/.fleet/working-set.md", "Bash(git *)", "");
+    const cmd = localLaunchCommand("websites--pilot", "/w with space", "/w with space/.fleet/working-set.md", "Bash(git *)", "");
     // The inner path must be quoted too: the pane shell reads the file path
     // between the two quotes inside "$(cat ...)", or a space breaks the
     // launch line.
@@ -357,7 +357,7 @@ describe("local studio workspace — fleet task #1248", () => {
   });
 
   test("localLaunchCommand never passes --dangerously-skip-permissions (a Mac lead keeps prompts on)", () => {
-    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
     expect(cmd).not.toContain("--dangerously-skip-permissions");
   });
 
@@ -366,13 +366,13 @@ describe("local studio workspace — fleet task #1248", () => {
     // (`[ -n "${STUDIO_ID:-}" ] || exit 0`) would exit 0 before any gate
     // logic. The prefix is the arming switch: claude — and every hook
     // subprocess it spawns — inherits STUDIO_ID, and the gate goes active.
-    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "");
-    expect(cmd.startsWith("STUDIO_ID=websites--pilot claude")).toBe(true);
+    const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    expect(cmd.startsWith('STUDIO_ID=websites--pilot FLEET_WORKSPACE="/w" claude')).toBe(true);
     expect(cmd).not.toContain("--dangerously-skip-permissions");
   });
 
   test("localLaunchCommand omits --effort when the role carries none", () => {
-    expect(localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "")).not.toContain("--effort");
+    expect(localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "")).not.toContain("--effort");
   });
 
   test("localLeadGateHookCommand is the fail-closed PreToolUse command, matcher .*", () => {
@@ -485,6 +485,76 @@ describe("local studio workspace — fleet task #1248", () => {
     });
     expect(outcome.kind).toBe("failed");
     expect(f.lines.length).toBe(1);
+  });
+
+  test("materializes all four container hooks with the lead gate (item 1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-local-"));
+    const worktreePath = join(root, "worktree");
+    try {
+      const f = fake({
+        "worktree create": ok(JSON.stringify({
+          ok: true,
+          result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: worktreePath } },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+        completionGate: true,
+      });
+      expect(outcome.kind).toBe("created");
+
+      // All five hook scripts copied from gates/ and executable.
+      for (const h of ["lead-gate", "session-reemit", "install-marker", "activity-heartbeat", "completion-gate"]) {
+        const p = join(worktreePath, ".claude", "hooks", `${h}.sh`);
+        expect(existsSync(p)).toBe(true);
+      }
+
+      // settings.json carries every event entry.
+      const cfg = JSON.parse(readFileSync(join(worktreePath, ".claude", "settings.json"), "utf8"));
+      const hookText = (evt: string) => JSON.stringify((cfg.hooks ?? {})[evt] ?? []);
+      expect(hookText("PreToolUse")).toContain("lead-gate.sh");
+      expect(hookText("SessionStart")).toContain("session-reemit.sh");
+      expect(hookText("SessionStart")).toContain("activity-heartbeat.sh");
+      expect(hookText("PostToolUse")).toContain("install-marker.sh");
+      expect(hookText("UserPromptSubmit")).toContain("activity-heartbeat.sh");
+      expect(hookText("Stop")).toContain("activity-heartbeat.sh");
+      expect(hookText("Notification")).toContain("activity-heartbeat.sh");
+      expect(hookText("Stop")).toContain("completion-gate.sh");
+      // completion-gate is FAIL-CLOSED: exit 2 on missing script.
+      expect(hookText("Stop")).toContain("exit 2");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("no completion-gate when completionGate is false: hook and Stop entry both absent (item 1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-local-"));
+    const worktreePath = join(root, "worktree");
+    try {
+      const f = fake({
+        "worktree create": ok(JSON.stringify({
+          ok: true,
+          result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: worktreePath } },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+        completionGate: false,
+      });
+      expect(outcome.kind).toBe("created");
+      expect(existsSync(join(worktreePath, ".claude", "hooks", "completion-gate.sh"))).toBe(false);
+      const cfg = JSON.parse(readFileSync(join(worktreePath, ".claude", "settings.json"), "utf8"));
+      expect(JSON.stringify((cfg.hooks ?? {}).Stop ?? [])).not.toContain("completion-gate.sh");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("launch command arms FLEET_WORKSPACE so hooks find the worktree, not /workspace (item 1)", () => {
+    const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    expect(cmd.startsWith('STUDIO_ID=websites--pilot FLEET_WORKSPACE="/w" claude')).toBe(true);
   });
 });
 
