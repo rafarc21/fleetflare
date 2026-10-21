@@ -78,10 +78,11 @@ export function d1WatchdogIndex(db: D1Database): WatchdogIndex {
 }
 
 /** #1191/#1214: the pending-status post a fresh run puts up before it is created,
- *  so GitHub never sees the head without a pending gate/verdict. #1226: postGateStatus
- *  now throws on a failed post (no step.do/Workflow retry wraps this call site — it
- *  runs before the Workflow instance even exists) — caught and logged here, same as
- *  before: a pending post must never block the run that follows it. */
+ *  so GitHub never sees the head without a pending gate/verdict. One best-effort
+ *  attempt: failure is logged and swallowed HERE ONLY — this site runs before the
+ *  Workflow instance exists, and the run's own post-pending step (#1226, fail-closed)
+ *  retries 5x and errors the run if the status truly cannot land, so this pre-create
+ *  post must never block or crash the auto-run. */
 function pendingPost(env: Env, description: string) {
   return async (repo: string, headSha: string): Promise<void> => {
     await postGateStatus(realStatusPort(env), repo, headSha, { state: "pending", description }).catch((err: unknown) => {

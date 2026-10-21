@@ -252,7 +252,8 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // and aggregateVerdict reads results in configured leg order either way.
     // The run has a leg plan, so say it is running before any leg starts (#1088).
     // A reattach starts no instance and never reaches here, so it posts nothing.
-    // A failed POST is reported to the log only and never blocks the run.
+    // Fail-closed since #1226: postGateStatus throws, this step retries 5x, and
+    // exhausted retries error the run rather than leaving an unconfirmed head.
     await step.do("post-pending", STATUS_POST_STEP_CONFIG, async () =>
       postGateStatus(this.statusPort(), repo, resolved.headSha, pendingStatusArgs(event.instanceId, legs.length)));
 
