@@ -152,19 +152,24 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
       // DELIMITED, never as a prefix (run ids extend each other on the same
       // head: <id> ⊂ <id>-p<pr> ⊂ ...-r<t>/...-e<t>). A pending naming a
       // different run is a newer same-head run's status, never clobbered.
-      // A pre-create pending carries no run id at all (it is posted before
-      // the run exists — "running (fresh gate run)", "running (edited
-      // title/body recheck)"); with no "(run " token it is reconcilable too,
-      // otherwise a run that errors before its own post-pending lands would
-      // leave the head stuck on that id-less pending forever. A failure here
-      // is logged and swallowed: the run is already dead either way, and the
-      // row is retired regardless.
+      // The pre-create pendings carry no run id at all (posted before the run
+      // exists): "running (fresh gate run)" and "running (edited title/body
+      // recheck)". Those two are reconcilable — no "(run " token AND a
+      // "running (" prefix — otherwise a run that errors before its own
+      // post-pending lands leaves the head stuck forever. The third id-less
+      // pending, "queued (gate draining for deploy)", is a NEWER run's marker
+      // (posted when a run is queued during a deploy drain, without a run or a
+      // pointer move): it lacks the "running (" prefix and is never clobbered.
+      // A failure here is logged and swallowed: the run is already dead either
+      // way, and the row is retired regardless.
       if (status === "errored") {
         const current = await deps.headStatus(repo, headSha).catch(() => undefined);
         const description = current?.state === "pending" && typeof current.description === "string"
           ? current.description : undefined;
         const stillThisRun = description !== undefined && description.includes(`(run ${runId})`);
-        const idlessPending = description !== undefined && !description.includes("(run ");
+        const idlessPending = description !== undefined
+          && description.startsWith("running (")
+          && !description.includes("(run ");
         if (current === undefined || stillThisRun || idlessPending) {
           await deps.post(repo, headSha, {
             state: "error", description: `gate: run ended without a verdict (run ${runId})`,

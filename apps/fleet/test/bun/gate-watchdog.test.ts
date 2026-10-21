@@ -481,4 +481,34 @@ describe("sweepStalledRuns: an errored run that never posted its own verdict is 
     expect(h.posts).toEqual([]);
     expect(h.head()?.progressedAt).toBe(-1);
   });
+
+  it("a pending head naming this run id with a -r suffix is a newer same-head rerun: no reconciliation post, still retired", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "running (run gate-x-p7-r3) — 2 legs" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a rerun-status head naming THIS run is reconciled: the one error post lands, retired", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "rerun after infra error (run gate-x)" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([{ repo: REPO, headSha: HEAD, state: "error", description: expect.stringContaining("ended without a verdict") }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a queued drain marker is a newer run's status, never clobbered: no reconciliation post, still retired", async () => {
+    const h = harness({
+      runs: { "gate-x": "errored" },
+      headStatus: async () => ({ state: "pending", description: "queued (gate draining for deploy)" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
 });
