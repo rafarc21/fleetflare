@@ -301,7 +301,7 @@ export async function fileTask(
  * the verb that CAN move it. Taking a task off another studio silently, from a
  * two-letter command, is the drift class this whole board exists to prevent.
  */
-async function adoptTask(
+export async function adoptTask(
   creds: Credentials, repoSlug: string | null, studioId: string, number: number,
 ): Promise<number> {
   const res = await fetch(boardUrl(creds, `/tasks/${number}/adopt`), {
