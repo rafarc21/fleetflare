@@ -52,8 +52,8 @@ export interface ProtectResult {
 /** Ensure the repo's default branch requires gate/verdict. Idempotent: the
  *  reported `after` is the existing set plus gate/verdict (deduped). No rule
  *  → PUT create; rule with required-status → POST contexts + PATCH strict;
- *  rule without → PATCH the whole block; enforcing admins → DELETE
- *  enforce_admins. */
+ *  rule without → enable required status checks via GraphQL; enforcing
+ *  admins → DELETE enforce_admins. */
 export async function runGateProtect(port: ProtectPort, repo: string): Promise<ProtectResult> {
   const branch = await port.getDefaultBranch(repo);
   const existing = await port.getProtection(repo, branch);
@@ -66,8 +66,8 @@ export async function runGateProtect(port: ProtectPort, repo: string): Promise<P
       await port.addRequiredContexts(repo, branch, [GATE_STATUS_CONTEXT]);
       await port.setStrict(repo, branch, false);
     } else {
-      // No required-status block: the contexts POST would 404, so PATCH the
-      // whole block (strict + the union of contexts) instead.
+      // No required-status block: the contexts POST and the REST PATCH both
+      // 404, so enable the block (strict + the union of contexts) via GraphQL.
       await port.setRequiredStatusChecks(repo, branch, false, after);
     }
     if (existing.enforceAdmins) {
