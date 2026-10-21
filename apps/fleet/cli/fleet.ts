@@ -2032,7 +2032,30 @@ async function cmdProvision(
     const bound = (studio.repoSlug ?? "").toLowerCase();
     if (cloneSlug === null || cloneSlug.toLowerCase() !== bound) {
       const originDesc = cloneSlug === null ? "no GitHub origin" : `origin ${cloneSlug}`;
-      console.error(`fleet provision: the clone at ${localPath} has ${originDesc}, not ${studio.repoSlug} — a local studio must be built from the repo it targets; pass --path to the right clone`);
+      // Fix 3 (#1259 round 3): `fleet provision` takes no `--path` flag at
+      // all — that flag belongs to `fleet spawn --local --path <abs>`, the
+      // ORIGINAL bring-up, not this resume. The real remedy here is fixing
+      // the clone's own git remote, or respawning fresh from the right one.
+      console.error(`fleet provision: the clone at ${localPath} has ${originDesc}, not ${studio.repoSlug} — a local studio must be built from the repo it targets; fix the clone's origin (git -C ${localPath} remote set-url origin <url>) or destroy this row and fleet spawn --local --path <the right clone>`);
+      // The POST just above (routes.ts's provision branch) already flipped
+      // this row's state to "running" (local-spawn.ts's localRowStatus)
+      // before this check could ever run — the bound repoSlug this check
+      // needs only arrives IN that POST's own response, so the origin check
+      // cannot run any earlier. Left alone, this refusal would leave a
+      // "running" row with no lead process behind it. Flip it back with the
+      // SAME /destroy route a local row's own teardown already uses — the
+      // local branch of that route is a synchronous D1 flip, no container,
+      // no task-gate checks, so one best-effort POST is enough; a failed
+      // flip still exits 1 below, same as before this fix (the operator can
+      // always `fleet destroy` by hand).
+      try {
+        await fetch(studioUrl(creds, id, destroyPath(false, false)), {
+          method: "POST",
+          headers: accessHeaders(creds),
+        });
+      } catch {
+        // best-effort — see comment above.
+      }
       process.exit(1);
     }
     const outcome = await ensureLocalStudioWorktree(studio.id, defaultOrcaDeps(), {

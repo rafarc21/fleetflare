@@ -215,6 +215,16 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
       const r = await runFleetLocal(["provision", "websites--release"], { ORCA_CLI_COMMAND: fakeOrca });
       expect(r.code).toBe(1);
       expect(r.err).toContain("no GitHub origin");
+      // Fix 3 (#1259 round 3): `fleet provision` takes no `--path` flag — the
+      // old message's hint was bogus.
+      expect(r.err).not.toContain("pass --path");
+      // The POST already flipped this row to "running" before this refusal
+      // could run (the bound repoSlug it needs only arrives IN that POST's
+      // response) — the refusal must flip it back with the SAME /destroy
+      // route a local row's own teardown uses, or the row sits stuck
+      // "running" with no lead process behind it.
+      const destroyCalls = traffic.filter((t) => t.method === "POST" && t.path === "/studio/websites--release/destroy");
+      expect(destroyCalls.length).toBe(1);
     } finally {
       provisionLocalPath = undefined;
       rmSync(gitlabRepo, { recursive: true, force: true });
