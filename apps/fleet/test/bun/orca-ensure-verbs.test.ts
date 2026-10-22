@@ -373,7 +373,7 @@ describe("local studio workspace — fleet task #1248", () => {
     expect(cmd).not.toContain("--dangerously-skip-permissions");
   });
 
-  test("localLaunchCommand arms the gate with a STUDIO_ID=<id> env-assignment prefix, right after the tty capture", () => {
+  test("localLaunchCommand arms the gate with a STUDIO_ID=<id> env-assignment prefix", () => {
     // On the Mac STUDIO_ID is never set, so lead-gate.sh's own first line
     // (`[ -n "${STUDIO_ID:-}" ] || exit 0`) would exit 0 before any gate
     // logic. The prefix is the arming switch: claude — and every hook
@@ -383,14 +383,15 @@ describe("local studio workspace — fleet task #1248", () => {
     expect(cmd).not.toContain("--dangerously-skip-permissions");
   });
 
-  // #1259 round 5 fix 1: `tty` runs BEFORE claude, writing the pane's own
-  // controlling tty to `.fleet/lead.tty` — a later, separate `fleet` process
-  // reads that file to know exactly which tty the lead occupies (fix 2's
-  // `defaultIsClaudeForeground`), never guessing from the terminal's title or
-  // screen text again.
-  test("localLaunchCommand captures its own tty to .fleet/lead.tty before claude starts", () => {
+  // #1259 round 6: round 5's own `tty > ".../.fleet/lead.tty"` capture
+  // prefix is REMOVED, not kept — liveness no longer asks the OS anything at
+  // all (see `isIdleClaudeTerminal`). The line now starts with the
+  // STUDIO_ID arming switch directly, nothing before it.
+  test("localLaunchCommand no longer captures a tty — the line starts with the STUDIO_ID arming switch directly", () => {
     const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
-    expect(cmd.startsWith('tty > "/w/.fleet/lead.tty" 2>/dev/null; STUDIO_ID=websites--pilot')).toBe(true);
+    expect(cmd.startsWith("STUDIO_ID=websites--pilot")).toBe(true);
+    expect(cmd).not.toContain("tty >");
+    expect(cmd).not.toContain("lead.tty");
   });
 
   test("localLaunchCommand omits --effort when the role carries none", () => {
@@ -465,6 +466,11 @@ describe("local studio workspace — fleet task #1248", () => {
       // worktree path), never in ~/.claude.
       const path = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
       expect(path).toBeDefined();
+
+      // #1259 round 6 step 1: the brand-new terminal's handle is pinned
+      // the moment it exists, so a later wake/resume call finds it by exact
+      // handle instead of re-discovering it by ranking.
+      expect(readFileSync(join(worktreePath, ".fleet", "lead.handle"), "utf8").trim()).toBe("term_new");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -303,6 +303,17 @@ interface OrcaTerminalEntry {
    *  accept a real permission modal's tail as "safe"; see `sendLocalWake`'s
    *  own doc comment). */
   preview?: string;
+  /** Which agent CLI Orca itself currently tracks as this terminal's live
+   *  foreground program — "claude" when claude genuinely owns it, something
+   *  else or absent otherwise. Orca's OWN tracking, never inferred from
+   *  screen text or a mutable OSC-rewritten title (#1259 rounds 3-5 both
+   *  failed trying to infer this ourselves). */
+  agentIdentity?: string | null;
+  /** Non-null when Orca's tracked agent is BLOCKED waiting on something (a
+   *  permission prompt, a modal) — null/undefined means genuinely idle and
+   *  safe to type into. Required alongside `agentIdentity === "claude"`
+   *  before this file ever sends a keystroke (#1259 round 6). */
+  agentWait?: unknown;
 }
 
 interface OrcaEnvelope {
@@ -675,16 +686,13 @@ export function localWorktreeCreateArgs(localPath: string, defaultBranch: string
  *  starve members too) is the structural guard against the lead implementing,
  *  and the operator is present to approve the members' writes.
  *
- *  #1259 round 5 fix 1: the line now opens with `tty > ".../.fleet/lead.tty"`
- *  BEFORE claude ever starts — captures the pane's own controlling tty to a
- *  file a LATER, separate `fleet` process can read, so liveness (fix 2,
- *  `defaultIsClaudeForeground`) never has to guess which Orca terminal holds
- *  the lead from its title or screen text again. `.fleet/` already exists by
- *  the time this line runs (`materializeLocalLead` writes `working-set.md`
- *  there first), so no mkdir is needed inline; `2>/dev/null` swallows the one
- *  case `tty` itself can fail (no controlling tty at all, e.g. piped input) —
- *  a missing lead.tty file is exactly `readLeadTty`'s own "can't tell, fail
- *  closed" case, never a crashed launch line. */
+ *  #1259 round 6: round 5's own `tty > ".../.fleet/lead.tty"` capture prefix
+ *  is REMOVED, not kept alongside the new mechanism — liveness no longer
+ *  asks the OS anything at all (see `isIdleClaudeTerminal`'s own doc
+ *  comment). The studio's lead terminal is now identified by the Orca
+ *  `handle` persisted at `.fleet/lead.handle` (`writeLeadHandle`, called by
+ *  `ensureLocalStudioWorktree` right after `terminal create` returns it) —
+ *  not by anything captured from inside the launched shell itself. */
 export function localLaunchCommand(id: string, worktreePath: string, promptFilePath: string, allowedTools: string, effort: string): string {
   const args = [
     "claude",
@@ -696,7 +704,7 @@ export function localLaunchCommand(id: string, worktreePath: string, promptFileP
   ];
   if (effort !== "") args.push("--effort", effort);
   // FLEET_WORKSPACE points session-reemit/completion-gate at the worktree's .fleet/, not the container /workspace default.
-  return `tty > "${worktreePath}/.fleet/lead.tty" 2>/dev/null; STUDIO_ID=${id} FLEET_WORKSPACE="${worktreePath}" ${args.join(" ")}`;
+  return `STUDIO_ID=${id} FLEET_WORKSPACE="${worktreePath}" ${args.join(" ")}`;
 }
 
 /**
@@ -859,6 +867,10 @@ export async function ensureLocalStudioWorktree(
     const handle = term.result?.terminal?.handle;
     if (handle) {
       await orcaJson(deps, ["terminal", "rename", "--terminal", handle, "--title", id, "--json"], LIST_TIMEOUT_MS);
+      // #1259 round 6 step 1: pin this brand-new studio's terminal handle
+      // the moment it exists — the first write `.fleet/lead.handle` ever
+      // gets, so every later wake/resume call finds it by exact handle.
+      writeLeadHandle(worktreePath, handle);
     }
     return { kind: "created" };
   } catch (err) {
@@ -1633,6 +1645,141 @@ export async function findAttachTerminal(id: string, deps: OrcaDeps): Promise<Or
     return rankAttachTerminals(candidates, id)[0] ?? null;
   } catch (err) {
     deps.log(`${id}: attach handle lookup failed — ${errText(err)}`);
+    return null;
+  }
+}
+
+/**
+ * #1259 round 6: the ONE gate every send/close decision in this file now
+ * checks before touching a terminal — Orca's own tracked agent identity and
+ * wait-state, never our own OS-level or screen-text guess. Replaces rounds
+ * 3-5 entirely (title/preview pattern-matching, then a tty-captured `ps`
+ * walk below, `defaultIsClaudeForeground`) — see
+ * `OrcaTerminalEntry.agentIdentity`/`agentWait`'s own doc comments for why
+ * each of those was measured wrong. Not yet wired into any caller in THIS
+ * commit — `sendLocalWake` and `ensureLocalStudioWorktree`'s resume branch
+ * migrate onto it in their own, later commits; the OS-level mechanism below
+ * stays live (and in use) until both have.
+ *
+ * `agentWait == null` (loose equality, deliberate) matches BOTH `null` and
+ * `undefined` — the operator's own exact wording ("agentWait==null") for
+ * what counts as "not blocked."
+ *
+ * HONEST LIMITATION: whether a real Orca installation's `terminal list
+ * --json` actually populates `agentIdentity`/`agentWait` the way described
+ * is not something this sandbox (no Orca here) can independently confirm —
+ * trusted as the operator's own measured ground truth, same posture as
+ * every other "MEASURED" field on `OrcaTerminalEntry`.
+ */
+export function isIdleClaudeTerminal(t: { agentIdentity?: string | null; agentWait?: unknown }): boolean {
+  return t.agentIdentity === "claude" && t.agentWait == null;
+}
+
+/** #1259 round 6 step 1: the handle this file persisted for studio `id`'s
+ *  lead terminal, read from `<worktreePath>/.fleet/lead.handle` — one line,
+ *  a plain text file, the same convention round 5's `lead.tty` used. Never
+ *  throws: absent, empty, or unreadable all read as null — a studio
+ *  provisioned before this mechanism existed, or one whose `writeLeadHandle`
+ *  call below failed. Both read as "not yet pinned," which
+ *  `findPinnedLeadTerminal` turns into its own one-time fallback discovery
+ *  (never "dead" — unlike round 5's `readLeadTty`, there is no liveness
+ *  claim encoded in this file's mere absence). */
+export function readLeadHandle(worktreePath: string): string | null {
+  try {
+    const content = readFileSync(join(worktreePath, ".fleet", "lead.handle"), "utf8");
+    const handle = content.trim();
+    return handle === "" ? null : handle;
+  } catch {
+    return null;
+  }
+}
+
+/** Persists the handle `ensureLocalStudioWorktree` just created or
+ *  discovered for studio `id`'s lead terminal — every LATER wake/resume call
+ *  reads it back via `readLeadHandle` instead of re-discovering it by
+ *  ranking worktree-matched candidates (#1259 round 6 finding 1: ranking
+ *  among candidates, even once, is exactly how round 5 picked an unrelated
+ *  operator shell first — real list order put it ahead of the actual lead).
+ *  `.fleet/` already exists by the time this is first called
+ *  (`materializeLocalLead` writes `working-set.md` there first), but mkdir
+ *  defensively anyway for the fallback-discovery backfill path, which may
+ *  run before that. Best-effort, never throws: a failed write costs the
+ *  NEXT call a fallback discovery, never this call's own result — same
+ *  posture as every other write in this file that is not the fail-closed
+ *  lead gate itself. */
+export function writeLeadHandle(worktreePath: string, handle: string): void {
+  try {
+    const fleetDir = join(worktreePath, ".fleet");
+    mkdirSync(fleetDir, { recursive: true });
+    writeFileSync(join(fleetDir, "lead.handle"), handle);
+  } catch {
+    // Best-effort — see this function's own doc comment.
+  }
+}
+
+/**
+ * #1259 round 6 step 1: the studio's PINNED lead terminal, found by the
+ * EXACT handle persisted at `.fleet/lead.handle` — never by re-ranking
+ * worktree-matched candidates when the precise handle is already known.
+ * Round 5's own bug was exactly this: `sendLocalWake`/resume both asked
+ * "is SOMETHING claude alive somewhere in this worktree" and then acted on
+ * whichever terminal `rankAttachTerminals` picked FIRST among candidates
+ * sharing that worktree, with no check that THAT SPECIFIC terminal backed
+ * the verified signal — real list order put an operator's own unrelated
+ * shell first, and wake typed into it.
+ *
+ * The ranked discovery below survives as a FALLBACK ONLY, for a studio
+ * provisioned before this mechanism existed (no `.fleet/lead.handle` at
+ * all) or whose pinned terminal Orca has since reaped (the handle file
+ * names a terminal `terminal list` no longer reports). On a fallback hit,
+ * immediately backfills `.fleet/lead.handle` with the discovered handle, so
+ * every SUBSEQUENT call for this studio uses the precise path from then on
+ * — a pre-PR studio self-heals onto the new mechanism instead of staying on
+ * best-effort discovery forever.
+ *
+ * Never fails its caller: null when Orca is absent, the studio has no
+ * worktree, or no terminal at all can be resolved (pinned or fallback) —
+ * same posture as every other lookup here.
+ */
+export async function findPinnedLeadTerminal(id: string, deps: OrcaDeps): Promise<OrcaTerminalEntry | null> {
+  if (!orcaPresent(deps)) return null;
+  try {
+    const worktrees = await fullList(deps, "worktrees", ROW_TIMEOUT_MS);
+    const worktree = findStudioWorktree(id, worktrees, deps.registry);
+    if (!worktree) return null;
+    const selector = worktree.id ? `id:${worktree.id}` : `name:${studioWorkspaceName(id)}`;
+    const listed = await orcaJson(deps, ["terminal", "list", "--worktree", selector, "--json"], ROW_TIMEOUT_MS);
+    const terms = listed.result?.terminals ?? [];
+
+    const handle = worktree.path ? readLeadHandle(worktree.path) : null;
+    if (handle !== null) {
+      const pinned = terms.find((t) => t.handle === handle);
+      if (pinned) return pinned;
+      // The handle file is stale — the terminal it named is gone (reaped by
+      // Orca, or this studio's lead was torn down and recreated by hand).
+      // Fall through to discovery below and overwrite it.
+    }
+    const candidates = terms.filter((t) => t.connected === true);
+    if (candidates.length === 0) return null;
+    const discovered = rankAttachTerminals(candidates, id)[0] ?? null;
+    if (discovered?.handle && worktree.path) writeLeadHandle(worktree.path, discovered.handle);
+    return discovered;
+  } catch (err) {
+    deps.log(`${id}: pinned lead terminal lookup failed — ${errText(err)}`);
+    return null;
+  }
+}
+
+/** #1259 round 6: `sendLocalWake`'s own verify-then-commit confirm step —
+ *  re-reads ONE terminal by its EXACT handle, never a re-ranked guess among
+ *  worktree-matched candidates (the same precise-handle discipline Step 1
+ *  established for finding it in the first place). Null on any failure, or
+ *  when Orca no longer reports a terminal at that handle at all. */
+async function findTerminalByHandle(deps: OrcaDeps, handle: string): Promise<OrcaTerminalEntry | null> {
+  try {
+    const terms = await fullList(deps, "terminals", ROW_TIMEOUT_MS);
+    return terms.find((t) => t.handle === handle) ?? null;
+  } catch {
     return null;
   }
 }
