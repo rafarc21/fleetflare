@@ -278,6 +278,52 @@ function localProvisionDeps(env: Env, fetchFile: BlueprintFetch): ProvisionDeps 
 }
 
 /**
+ * Fleet task #1259 item 7: the shared local bring-up response. The local-spawn
+ * route and the provision route's local-resume branch both need to resolve the
+ * bring-up env over the same real ProvisionDeps and attach it to the response
+ * (prompt/allowedTools/effort/members/skills/leadType/completionGate) so the
+ * CLI can launch the lead with the exact prompt/tools/effort a container would
+ * get. Extracted from the local-spawn route's tail so the two call sites read
+ * identically — a local studio has no container, so this response IS its
+ * provision answer.
+ */
+async function localBringupResponse(
+  env: Env, fetchFile: BlueprintFetch, cfg: ProvisionConfig,
+  workRepoSlug: string, status: StudioStatus,
+): Promise<Response> {
+  let bringupEnv: Awaited<ReturnType<typeof resolveBringupEnv>>["bringupEnv"];
+  try {
+    ({ bringupEnv } = await resolveBringupEnv(
+      localProvisionDeps(env, fetchFile), cfg, env.AGENT_REPO, workRepoSlug, status.leadType,
+    ));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`studio ${status.id} local bring-up env failed`, err);
+    await recordStudio(env, { ...status, state: "stopped" });
+    return new Response(`local spawn failed resolving the bring-up env: ${message}`, { status: 500 });
+  }
+  const studioEnv = "STUDIO_NAME" in bringupEnv && bringupEnv.STUDIO_NAME !== "" ? bringupEnv : null;
+  const members = studioEnv
+    ? (() => {
+        const bundle = JSON.parse(base64DecodeUtf8(studioEnv.STUDIO_MEMBERS_B64 || "e30=")) as Record<string, string>;
+        const decoded: Record<string, string> = {};
+        for (const [filename, b64] of Object.entries(bundle)) decoded[filename] = base64DecodeUtf8(b64);
+        return decoded;
+      })()
+    : undefined;
+  return Response.json({
+    ...status,
+    prompt: base64DecodeUtf8(bringupEnv.ROLE_PROMPT_B64),
+    allowedTools: bringupEnv.ROLE_ALLOWED_TOOLS,
+    effort: bringupEnv.ROLE_EFFORT,
+    ...(members !== undefined ? { members } : {}),
+    ...(studioEnv ? { skills: studioEnv.STUDIO_SKILLS } : {}),
+    leadType: status.leadType,
+    completionGate: studioEnv !== null && studioEnv.STUDIO_COMPLETION_GATE !== "",
+  });
+}
+
+/**
  * P4a-2: the board read every entry point that builds a studio shares — "is
  * task #n assigned to the studio I am about to build, and what does its brief
  * say?". ONE resolver, so the ownership rule cannot be enforced differently at
@@ -568,44 +614,7 @@ export async function handleStudio(
         ? { leadType: (body as { leadType: "claude" | "glm" }).leadType }
         : {}),
     };
-    let bringupEnv: Awaited<ReturnType<typeof resolveBringupEnv>>["bringupEnv"];
-    try {
-      ({ bringupEnv } = await resolveBringupEnv(
-        localProvisionDeps(env, fetchFile), cfg, env.AGENT_REPO, parent.repoSlug ?? env.AGENT_REPO,
-        status.leadType,
-      ));
-    } catch (err) {
-      // T1a: runSpawn already wrote the running local row. resolveBringupEnv
-      // failing here means the CLI can never launch a lead — flip the row to
-      // stopped so nothing is left claiming a running local studio with no
-      // lead, and name the failure rather than leaving the orphan.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`studio ${status.id} local bring-up env failed`, err);
-      await recordStudio(env, { ...status, state: "stopped" });
-      return new Response(`local spawn failed resolving the bring-up env: ${message}`, { status: 500 });
-    }
-    const studioEnv = "STUDIO_NAME" in bringupEnv && bringupEnv.STUDIO_NAME !== "" ? bringupEnv : null;
-    const members = studioEnv
-      ? (() => {
-        // studioBringupEnv ships members as b64(JSON: {filename: b64(raw)}):
-        // the OUTER bundle is decoded here, but each inner member body is
-        // STILL base64. The CLI writes them verbatim to .claude/agents/, so
-        // every inner value must be decoded too — never sent as its base64.
-        const bundle = JSON.parse(base64DecodeUtf8(studioEnv.STUDIO_MEMBERS_B64 || "e30=")) as Record<string, string>;
-        const decoded: Record<string, string> = {};
-        for (const [filename, b64] of Object.entries(bundle)) decoded[filename] = base64DecodeUtf8(b64);
-        return decoded;
-      })()
-      : undefined;
-    return Response.json({
-      ...status,
-      prompt: base64DecodeUtf8(bringupEnv.ROLE_PROMPT_B64),
-      allowedTools: bringupEnv.ROLE_ALLOWED_TOOLS,
-      effort: bringupEnv.ROLE_EFFORT,
-      ...(members !== undefined ? { members } : {}),
-      ...(studioEnv ? { skills: studioEnv.STUDIO_SKILLS } : {}),
-      leadType: status.leadType,
-    });
+    return localBringupResponse(env, fetchFile, cfg, parent.repoSlug ?? env.AGENT_REPO, status);
   }
 
   /**
@@ -1166,6 +1175,8 @@ export async function handleStudio(
   const stub = await getStudioStub(env, id.full);
 
   if (action === "status" && req.method === "GET") {
+    const refused = await refuseLocalRow(env, id.full, "status");
+    if (refused) return refused;
     return Response.json(burnView(await stub.getStatusDetail()));
   }
   /**
@@ -1196,6 +1207,8 @@ export async function handleStudio(
    * a reason reaches stored status.
    */
   if (action === "provisioned" && req.method === "GET") {
+    const refused = await refuseLocalRow(env, id.full, "provisioned");
+    if (refused) return refused;
     try {
       const verdict = await stub.checkProvisioned(id.repo);
       return Response.json(
@@ -1281,6 +1294,8 @@ export async function handleStudio(
    * checkout/markers-only studio: not an error, nothing to report.
    */
   if (action === "rescue" && req.method === "POST") {
+    const refused = await refuseLocalRow(env, id.full, "rescue");
+    if (refused) return refused;
     let result: Awaited<ReturnType<typeof stub.rescueNow>>;
     try {
       result = await stub.rescueNow();
@@ -1315,6 +1330,8 @@ export async function handleStudio(
    * override).
    */
   if (action === "clear-session-guard" && req.method === "POST") {
+    const refused = await refuseLocalRow(env, id.full, "clear-session-guard");
+    if (refused) return refused;
     try {
       return Response.json(await stub.clearSessionGuard());
     } catch (err) {
@@ -1353,6 +1370,8 @@ export async function handleStudio(
    * rides along regardless, for free.
    */
   if (action === "inspect" && req.method === "GET") {
+    const refused = await refuseLocalRow(env, id.full, "inspect");
+    if (refused) return refused;
     const linesParam = Number(url.searchParams.get("lines"));
     const tailLines = Number.isFinite(linesParam) && linesParam > 0 ? linesParam : undefined;
     // Board #91: `runInspect` is total, but the RPC to reach it is not — a
@@ -1397,11 +1416,44 @@ export async function handleStudio(
     });
   }
   if (action === "provision" && req.method === "POST") {
-    // Fleet task #1248 (T2): a local studio has no container — every
-    // container-only verb must refuse before RPCing the DO, the same guard the
-    // destroy branch carries. `fleet destroy` is the teardown for a local row.
-    const refused = await refuseLocalRow(env, id.full, "provision");
-    if (refused) return refused;
+    // Fleet task #1259 item 7: a STOPPED host:"local" row is resumable — the
+    // operator's `fleet provision <id>` re-materializes the Orca worktree +
+    // launch command rather than dispatching to a container DO (which a local
+    // studio never had). Read the row once; only a running local row refuses.
+    const localRow = await getStudioRow(env, id.full);
+    if (localRow?.host === "local") {
+      if (localRow.state !== "stopped") {
+        return new Response(
+          `"${id.full}" is a local studio — it has no container, so provision is container-only. ` +
+          "Tear it down with: fleet destroy " + id.full,
+          { status: 409 },
+        );
+      }
+      // The row already binds a repo; a resume re-materializes from that same
+      // repo (the row's own localPath), so only the BOUND slug is resolved —
+      // `requested` is pinned undefined, so a caller body cannot rebind a
+      // resume to another repo. existingRows is read once and reused for the
+      // segment claim.
+      const existingRows = await listStudios(env);
+      const repo = await resolveWorkRepo(repoDeps(reach), {
+        requested: undefined,
+        boundSlug: existingRows.find((r) => r.id === id.full)?.repoSlug,
+        defaultSlug: env.AGENT_REPO, rows: existingRows, idRepo: id.repo,
+      });
+      if (!repo.ok) return new Response(repo.message, { status: repo.status });
+      const cfg: ProvisionConfig = {
+        repo: id.repo, role: id.role,
+        ...(id.instance === 1 ? {} : { instance: id.instance }),
+        spawnedBy: localRow.spawnedBy ?? OPERATOR_ID,
+        repoSlug: repo.slug,
+        host: "local",
+        localPath: localRow.localPath ?? undefined,
+        ...(localRow.leadType !== undefined ? { leadType: localRow.leadType } : {}),
+      };
+      const status = localRowStatus(id.full, cfg);
+      await recordStudio(env, status);
+      return localBringupResponse(env, fetchFile, cfg, repo.slug, status);
+    }
     const body = (await req.json().catch(() => ({}))) as Partial<ProvisionConfig>;
     // Task 11: an explicit override for which blueprint ref to pull the
     // role file + org.json from — validated when the caller supplies one,
@@ -1535,6 +1587,8 @@ export async function handleStudio(
    * itself failing: then nothing answered about the container at all.
    */
   if (action === "wake" && req.method === "POST") {
+    const refused = await refuseLocalRow(env, id.full, "wake");
+    if (refused) return refused;
     let prompt: unknown;
     try {
       const parsed: unknown = await req.json();
@@ -1704,6 +1758,8 @@ export async function handleStudio(
     // method, and pinning the path here keeps that test independent of
     // whatever the public URL looks like. The Upgrade header must survive the
     // rewrite or the DO answers 426 — asserted in test/studio.ws.test.ts.
+    const refused = await refuseLocalRow(env, id.full, "ws/terminal");
+    if (refused) return refused;
     return stub.fetch(new Request(`https://studio${TERMINAL_PATH}`, { headers: req.headers }));
   }
   if (action === "terminal" && req.method === "GET") {
@@ -1713,6 +1769,8 @@ export async function handleStudio(
     // consistency with the rest of this handler is free. No DO round trip:
     // the page is a static, pre-bundled artifact (page.ts) with just the
     // studio id substituted in, so it never touches `stub`.
+    const refused = await refuseLocalRow(env, id.full, "terminal");
+    if (refused) return refused;
     return new Response(renderTerminalPage(id.full), {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
@@ -1723,6 +1781,8 @@ export async function handleStudio(
     // check costs nothing to do first. The Content-Length check is the fast
     // path for size: an honest oversized upload is rejected off the header
     // alone, no read at all.
+    const refused = await refuseLocalRow(env, id.full, "paste");
+    if (refused) return refused;
     const contentType = req.headers.get("Content-Type") ?? "";
     if (!PASTE_MIME_EXT[contentType]) return new Response("unsupported content type", { status: 415 });
 

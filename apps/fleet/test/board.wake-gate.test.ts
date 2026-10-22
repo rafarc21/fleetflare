@@ -11,6 +11,7 @@ const DIGEST = "WAKE SOMETHING #1";
 const REFUSE: WakeRefusals = {
   unregistered: "UNREGISTERED",
   stopped: "STOPPED",
+  local: "LOCAL",
   repoMismatch: (repoSlug) => `MISMATCH ${repoSlug}`,
 };
 
@@ -76,5 +77,11 @@ describe("wakeStudioFor", () => {
     expect(await gate(refused)).toEqual({ woke: false, reason: "refused: pane busy" });
     const silent = deps({ wake: vi.fn(async () => ({ ok: false })) });
     expect(await gate(silent)).toEqual({ woke: false, reason: "wake failed for an unstated reason" });
+  });
+
+  it("local row → local refusal with the digest, and NO container RPC", async () => {
+    const d = deps({ studioState: vi.fn(async () => ({ state: "running", repoSlug: REPO, host: "local" as const })) });
+    expect(await gate(d)).toEqual({ woke: false, reason: "LOCAL", local: true, digest: DIGEST });
+    expect(d.wake).not.toHaveBeenCalled();
   });
 });

@@ -49,7 +49,7 @@ export function taskMessageDigest(task: { number: number; title: string }, text:
  */
 export async function sendTaskMessage(
   api: BoardApi, deps: AssignWakeDeps, repo: string, number: number, raw: unknown, senderId: string,
-): Promise<BoardResult<{ comment: { id: number; url: string }; wake: AssignWakeReport }>> {
+): Promise<BoardResult<{ comment: { id: number; url: string }; assignee: string; wake: AssignWakeReport }>> {
   const body = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
   const text = typeof body.text === "string" ? body.text.trim() : "";
   if (text === "") {
@@ -95,7 +95,8 @@ export async function sendTaskMessage(
         "because starting its container costs money silently.",
       repoMismatch: (repoSlug) => `${assignees[0]} is provisioned for ${repoSlug}, not ${repo} — the message on task ` +
         `#${number} is posted, but a lead for another repo cannot see it.`,
+      local: `${assignees[0]} is a local studio — no container to wake. Wake its lead by Orca terminal send from the operator's machine.`,
     },
   });
-  return { ok: true, value: { comment, wake } };
+  return { ok: true, value: { comment, assignee: assignees[0], wake } };
 }

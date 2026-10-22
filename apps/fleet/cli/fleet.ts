@@ -82,6 +82,7 @@ import { formatMemoryTable, MEMORY_LEGEND, type MemoryFileRow } from "./memory-f
 import {
   openStudioRow, closeStudioRow, reconcileStudioWorkspaces, planStudioWorkspaces, defaultOrcaDeps,
   studioWorkspaceTitle, readStudioRows, findAttachHandle, ensureLocalStudioWorktree, resolveStudioWorktreePath,
+  resolveLocalWake,
   type OrcaDeps, type TabsReport, type TabsPlanEntry,
 } from "./orca-workspace";
 import type { StudioStatus } from "../src/studio/types";
@@ -1640,16 +1641,16 @@ export async function gitIsDirty(run: GitRun, path: string): Promise<boolean> {
 }
 
 /** `git -C <path> rev-list --count @{u}..` — how many commits are unpushed.
- *  A non-zero exit (no upstream configured, no remote, shallow clone) reads
- *  as NOT ahead (0): with no upstream to compare against, nothing can be said
- *  to be "ahead of" it, and "nothing to lose relative to a missing upstream"
- *  is the documented choice — the dirty check above is what still protects
- *  any local work. */
-export async function gitAheadCount(run: GitRun, path: string): Promise<number> {
+ *  `null` on a non-zero exit (no upstream configured, no remote, shallow
+ *  clone): with no upstream to compare against, the count cannot be proven,
+ *  so the caller must treat it as UNSYNCED and keep the tree — the dirty
+ *  check is not the only thing standing between a local destroy and unpushed
+ *  work. Fail closed, never "0 ahead". */
+export async function gitAheadCount(run: GitRun, path: string): Promise<number | null> {
   const { code, stdout } = await run(["-C", path, "rev-list", "--count", "@{u}.."]);
-  if (code !== 0) return 0;
+  if (code !== 0) return null;
   const n = Number(stdout.trim());
-  return Number.isInteger(n) && n >= 0 ? n : 0;
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 /** The destroy decision's injectable seam: WHICH path the dirty/ahead git
@@ -1677,10 +1678,18 @@ export async function localWorktreeRemoval(
   const path = await deps.resolveWorktreePath(id);
   if (path === null) return { remove: false, note: "worktree path could not be resolved — kept" };
   const [dirty, ahead] = await Promise.all([gitIsDirty(deps.run, path), gitAheadCount(deps.run, path)]);
-  const decision = localTeardownDecision(flags, dirty, ahead > 0);
-  return decision.action === "remove"
-    ? { remove: true, note: decision.note }
-    : { remove: false, note: decision.note };
+  // `null` = no upstream: the tree's commits are unsynced by definition, and
+  // a local destroy must never remove work it cannot recreate. Folding it
+  // into `unsynced` makes the decision keep the tree; the note below names
+  // the no-upstream cause rather than the "unpushed commits" wording that
+  // would wrongly imply there is an upstream to push to.
+  const unsynced = ahead === null || ahead > 0;
+  const decision = localTeardownDecision(flags, dirty, unsynced);
+  if (decision.action === "remove") return { remove: true, note: decision.note };
+  if (ahead === null && !dirty && flags.force && flags.discardUnsynced && !flags.park) {
+    return { remove: false, note: "kept — the worktree has no upstream, so its commits are unsynced; --discard-unsynced never removes unpushed work" };
+  }
+  return { remove: false, note: decision.note };
 }
 
 /** `git rev-parse --show-toplevel` — the local clone's absolute path, used
@@ -1753,6 +1762,7 @@ interface LocalSpawnResponse extends StudioStatus {
   members?: Record<string, string>;
   skills?: string;
   leadType?: "claude" | "glm";
+  completionGate?: boolean;
 }
 
 /**
@@ -1806,8 +1816,12 @@ export async function spawnLocalStudio(
   // targets — a `--path /other/clone` whose origin is a different repo would
   // build a studio for `<target>` out of somebody else's checkout, silently.
   const cloneSlug = await resolveCloneOriginSlug(gitRun, resolvedPath);
-  if (cloneSlug !== null && cloneSlug.toLowerCase() !== r.slug.toLowerCase()) {
-    console.error(`${opts.cmd}: the clone at ${resolvedPath} has origin ${cloneSlug}, not ${r.slug} — ` +
+  // Fail closed: a null slug (no GitHub origin, e.g. a gitlab remote) must
+  // refuse, not skip — a local studio has to be built from the repo it
+  // targets, and an unverifiable clone origin is a silent-wrong-target.
+  if (cloneSlug === null || cloneSlug.toLowerCase() !== r.slug.toLowerCase()) {
+    const originDesc = cloneSlug === null ? "no GitHub origin" : `origin ${cloneSlug}`;
+    console.error(`${opts.cmd}: the clone at ${resolvedPath} has ${originDesc}, not ${r.slug} — ` +
       "a local studio must be built from the repo it targets; pass --path to the right clone");
     process.exit(1);
   }
@@ -1864,6 +1878,7 @@ export async function spawnLocalStudio(
     ...(body.effort !== undefined ? { effort: body.effort } : {}),
     ...(body.members !== undefined ? { members: body.members } : {}),
     ...(typeof body.skills === "string" ? { skills: body.skills.split(",") } : {}),
+    ...(body.completionGate !== undefined ? { completionGate: body.completionGate } : {}),
   });
   if (outcome.kind !== "created") {
     // `why` rides the two outcomes ensureLocalStudioWorktree can actually
@@ -1892,6 +1907,39 @@ async function cmdLocalSpawn(
     cmd: "fleet spawn",
     attach: async () => {},
   });
+}
+
+/**
+ * #1259 round 4 fix 4: `cmdProvision`'s local-resume branch POSTs once to
+ * `/provision`, and that POST — routes.ts's own provision branch — already
+ * flips the row's state to "running" (local-spawn.ts's `localRowStatus`)
+ * before any of the checks that follow can run: their own data (localPath,
+ * prompt/allowedTools, the clone's default branch, the materialized
+ * worktree's outcome) only arrives IN that POST's response or afterward, so
+ * none of them could ever run earlier. Every refusal past that point must
+ * flip the row back to stopped itself — best-effort, through the SAME
+ * `/destroy` route a local row's own teardown already uses (a synchronous
+ * D1 flip for a `host:"local"` row, confirmed no container/task-gate
+ * checks run for it — see routes.ts's destroy branch) — or the row is left
+ * reading "running" with no lead behind it, and routes.ts's own `/provision`
+ * then refuses the operator's very next retry with a 409 ("not stopped").
+ *
+ * `res.ok` is checked and reported distinctly (round 3 left this
+ * unchecked): a flip-back that itself failed must say so, never be
+ * silently assumed to have worked.
+ */
+async function flipLocalRowToStopped(creds: Credentials, id: string): Promise<void> {
+  try {
+    const res = await fetch(studioUrl(creds, id, destroyPath(false, false)), {
+      method: "POST",
+      headers: accessHeaders(creds),
+    });
+    if (!res.ok) {
+      console.error(`fleet provision: ${id} could not be flipped back to stopped (${res.status}) — the row may still read "running" with no lead behind it`);
+    }
+  } catch (err) {
+    console.error(`fleet provision: ${id} could not be flipped back to stopped — ${errText(err)}`);
+  }
 }
 
 /**
@@ -1978,8 +2026,22 @@ async function cmdProvision(
     console.error(repairFailureLine("provision", res.status, await res.text()));
     process.exit(1);
   }
-  const studio = parseStudioStatus(await res.json());
+  const body = (await res.json()) as LocalSpawnResponse;
+  const studio = parseStudioStatus(body);
   if (studio === null) {
+    // #1259 round 5 minor fix: `host` read directly off the still-unvalidated
+    // body — the same trust level `body.localPath`/`body.prompt` already get
+    // a few lines below once `studio` exists. A `host: "local"` answer tells
+    // us flipping back IS safe (routes.ts's own synchronous D1 flip for a
+    // local row runs no container/task-gate checks either way), even though
+    // the row otherwise failed `parseStudioStatus`'s own id/state/error
+    // checks. Any OTHER value (absent, a real cloud host, or `body` not even
+    // an object) stays exactly as round 4 left it — NOT flipped back here,
+    // because calling `/destroy` before `host` is known risks a real
+    // cloud-container teardown if the row turns out non-local.
+    if (typeof body === "object" && body !== null && (body as LocalSpawnResponse).host === "local") {
+      await flipLocalRowToStopped(creds, id);
+    }
     console.error("fleet provision: answered 200 but the body was not a studio row");
     process.exit(1);
   }
@@ -1987,6 +2049,90 @@ async function cmdProvision(
   // Issue #305: stderr, like reportRepo — stdout stays the table.
   const provisionAccount = formatAccountResolution("fleet provision", studio);
   if (provisionAccount !== null) console.error(provisionAccount);
+  // Fleet task #1259 item 7: a local row answers a local-spawn-shaped body —
+  // the stopped local studio the operator is resuming. Re-materialize its Orca
+  // worktree from the row's own localPath instead of opening a cloud sidebar row.
+  if (studio.host === "local") {
+    const localPath = body.localPath;
+    if (typeof localPath !== "string" || localPath === "") {
+      console.error("fleet provision: the local row answered without a localPath — cannot re-materialize the worktree");
+      await flipLocalRowToStopped(creds, id);
+      process.exit(1);
+    }
+    const prompt = body.prompt ?? "";
+    const allowedTools = body.allowedTools ?? "";
+    if (prompt === "" || allowedTools === "") {
+      console.error("fleet provision: the local row answered without prompt/allowedTools — cannot launch the lead");
+      await flipLocalRowToStopped(creds, id);
+      process.exit(1);
+    }
+    const gitRun = defaultGitRun();
+    const defaultBranch = await resolveDefaultBranch(gitRun, localPath);
+    if (defaultBranch === null) {
+      console.error("fleet provision: could not resolve the default branch of the local clone — cannot re-materialize the worktree");
+      await flipLocalRowToStopped(creds, id);
+      process.exit(1);
+    }
+    // Same origin rule as the spawn path: the clone the row names must be the
+    // repo the studio is bound to, or a resume re-materializes the lead out of
+    // somebody else's checkout (or a non-GitHub clone whose origin cannot be
+    // verified at all).
+    const cloneSlug = await resolveCloneOriginSlug(gitRun, localPath);
+    const bound = (studio.repoSlug ?? "").toLowerCase();
+    if (cloneSlug === null || cloneSlug.toLowerCase() !== bound) {
+      const originDesc = cloneSlug === null ? "no GitHub origin" : `origin ${cloneSlug}`;
+      // Fix 3 (#1259 round 3): `fleet provision` takes no `--path` flag at
+      // all — that flag belongs to `fleet spawn --local --path <abs>`, the
+      // ORIGINAL bring-up, not this resume. The real remedy here is fixing
+      // the clone's own git remote, THEN re-running provision.
+      //
+      // #1259 round 4 fix 4: the hint used to end "...or destroy this row
+      // and fleet spawn --local --path <the right clone>" — a dead end,
+      // since `fleet destroy`'s default KEEPS the row (round 3's own
+      // finding), so a respawn with the SAME id would 409 "studio exists"
+      // (src/studio/spawn.ts). The flip-back below is exactly what makes
+      // "fix the origin, then re-run fleet provision" the REAL remedy:
+      // routes.ts's own `/provision` only resumes a `stopped` local row.
+      console.error(`fleet provision: the clone at ${localPath} has ${originDesc}, not ${studio.repoSlug} — a local studio must be built from the repo it targets; fix the clone's origin (git -C ${localPath} remote set-url origin <url>), then re-run: fleet provision ${id}`);
+      await flipLocalRowToStopped(creds, id);
+      process.exit(1);
+    }
+    const outcome = await ensureLocalStudioWorktree(studio.id, defaultOrcaDeps(), {
+      localPath,
+      defaultBranch,
+      prompt,
+      allowedTools,
+      ...(body.effort !== undefined ? { effort: body.effort } : {}),
+      ...(body.members !== undefined ? { members: body.members } : {}),
+      ...(typeof body.skills === "string" ? { skills: body.skills.split(",") } : {}),
+      ...(body.completionGate !== undefined ? { completionGate: body.completionGate } : {}),
+    });
+    // Fix 2 (#1259 round 3): `ensureLocalStudioWorktree`'s resume-reuse branch
+    // now also answers `{ kind: "exists" }` when a healthy attach terminal
+    // already lived in the kept worktree (reconciled instead of duplicated) —
+    // that is success too, the SAME as "created"; only "skipped"/"failed"
+    // mean the lead never materialized.
+    if (outcome.kind !== "created" && outcome.kind !== "exists") {
+      const why = outcome.why;
+      console.error(`fleet provision: ${studio.id} has no local lead — the Orca worktree did not materialize (${why})`);
+      // #1259 round 5 minor fix: "skipped" means `ensureLocalStudioWorktree`
+      // ran no orca call at all (not under Orca) — nothing about the row
+      // itself is broken, and the flip-back right below already returns it
+      // to "stopped" so a retry works. "Tear the registered row down" was
+      // stale advice here (round 4's own fix already made the SAME call for
+      // the origin-mismatch exit above): the real remedy is simply running
+      // under Orca and re-provisioning, never destroying anything.
+      if (outcome.kind === "skipped") {
+        console.error(`  run under Orca, then re-run: fleet provision ${studio.id}`);
+      } else {
+        console.error(`  tear the registered row down with: fleet destroy ${studio.id}`);
+      }
+      await flipLocalRowToStopped(creds, id);
+      process.exit(1);
+    }
+    // A local studio's Orca terminal IS its lead; there is no cloud sidebar row.
+    return;
+  }
   // Same rule as `fleet spawn`: this path also leaves a studio running, so it
   // also owes that studio a visible row in Orca's sidebar. Idempotent, so a
   // studio that already has one is not given a second.
@@ -2205,8 +2351,8 @@ function repoQuery(slug: string | null): string {
  *  given work and never heard about it is the whole of that issue. */
 type AssignedTask = BoardTask & { wake?: AssignWakeReport; pathWarnings?: string[] };
 
-function reportAssignWake(task: AssignedTask): void {
-  const line = formatAssignWake(task.wake);
+async function reportAssignWake(task: AssignedTask): Promise<void> {
+  const line = formatAssignWake(await resolveLocalWake(task.wake, task.assignee, task.number, defaultOrcaDeps()));
   if (line !== null) console.log(line);
 }
 
@@ -2298,7 +2444,7 @@ async function cmdTaskNew(
   }
   const task = (await res.json()) as AssignedTask;
   console.log(formatTaskTable([task]));
-  reportAssignWake(task);
+  await reportAssignWake(task);
   reportPathWarnings(task);
   if (brief.readRepos && task.assignee !== null) reportReadRepos("fleet task new", task.assignee, brief.readRepos);
   // Issue #113 ask 9: --provision boots or heals the assigned studio in the
@@ -2379,7 +2525,7 @@ async function cmdTaskAssign(
     }),
   })) as AssignedTask;
   console.log(formatTaskTable([task]));
-  reportAssignWake(task);
+  await reportAssignWake(task);
   if (readRepos && task.assignee !== null) reportReadRepos("fleet task assign", task.assignee, readRepos);
 }
 
@@ -2498,9 +2644,9 @@ async function cmdTaskMessage(creds: Credentials, number: number, text: string):
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, ...(detected.slug ? { repo: detected.slug } : {}) }),
-  })) as { comment: { url: string }; wake: AssignWakeReport };
+  })) as { comment: { url: string }; assignee: string; wake: AssignWakeReport };
   console.log(`task #${number} message posted: ${result.comment.url}`);
-  const wake = formatAssignWake(result.wake);
+  const wake = formatAssignWake(await resolveLocalWake(result.wake, result.assignee, number, defaultOrcaDeps()));
   if (wake !== null) console.log(wake);
 }
 

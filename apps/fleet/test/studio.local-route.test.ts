@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { env } from "cloudflare:test";
 import * as authModule from "../src/studio/auth";
 import { handleStudio } from "../src/studio/routes";
+import { runResume, type ResumeDeps, type SpawnParent } from "../src/studio/spawn";
 import { recordStudio, listStudios } from "../src/studio/registry";
 import { fakeBlueprintFiles } from "./helpers/blueprint-fixture";
 import { decodeRolePrompt } from "./helpers/routes-studio-harness";
@@ -337,5 +338,225 @@ describe("container-only verbs refuse a host:\"local\" row (T2)", () => {
     const text = await res.text();
     expect(text).toContain("container");
     expect(text).toContain("fleet destroy");
+  });
+
+  it("status refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/status", "GET"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("provisioned refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/provisioned", "GET"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("rescue refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/rescue"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("inspect refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/inspect", "GET"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("wake refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/wake"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("ws/terminal refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/ws/terminal", "GET"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("terminal refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/terminal", "GET"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("paste refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/paste"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+
+  it("clear-session-guard refuses without a DO call, naming fleet destroy", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, localRow("websites--web-studio"));
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--web-studio/clear-session-guard"), containerThrowingEnv(),
+    );
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("container");
+    expect(text).toContain("fleet destroy");
+  });
+});
+
+describe("POST /studio/:id/provision — stopped local row re-materializes (item 7)", () => {
+  it("a stopped host:\"local\" row resumes via the local bring-up response, never a DO call", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, {
+      id: "websites--release", state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: "operator", spawnTokenHash: null,
+      repoSlug: REPO_SLUG, host: "local", localPath: "/tmp/websites",
+    });
+
+    const res = await handleStudio(
+      authorizedReq("/studio/websites--release/provision"), containerThrowingEnv(), fakeFetchFile(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as StudioStatus & { prompt: string; allowedTools: string; localPath?: string | null };
+    expect(body.state).toBe("running");
+    expect(body.host).toBe("local");
+    expect(body.localPath).toBe("/tmp/websites");
+    expect(body.allowedTools).toBe("Bash(git *) Edit");
+    expect(body.prompt).toContain("You are release. Merge carefully.");
+
+    const row = (await listStudios(env)).find((s) => s.id === "websites--release");
+    expect(row?.state).toBe("running");
+    expect(row?.host).toBe("local");
+  });
+
+  it("a caller-supplied repo cannot rebind the resume — the bound repo wins", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    await recordStudio(env, {
+      id: "websites--release", state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: "operator", spawnTokenHash: null,
+      repoSlug: REPO_SLUG, host: "local", localPath: "/tmp/websites",
+    });
+
+    const res = await handleStudio(
+      new Request("https://x/studio/websites--release/provision", {
+        method: "POST",
+        body: JSON.stringify({ repo: "other-org/websites" }),
+        headers: { "Cf-Access-Jwt-Assertion": "test-jwt" },
+      }),
+      containerThrowingEnv(), fakeFetchFile(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as StudioStatus & { prompt: string };
+    // The prompt still resolves the ROW's bound repo (REPO_SLUG's role md says
+    // "You are release. Merge carefully."), not the caller's other-org repo.
+    expect(body.prompt).toContain("You are release. Merge carefully.");
+  });
+});
+
+// Issue #59: `resume: true` on /fleet/spawn starts a STOPPED studio. A local
+// row has NO container, so a machine resume must refuse and name the local
+// path (fleet provision), never reach the claim or a container DO.
+describe("runResume — a local row is container-only (item 7)", () => {
+  const MAESTRO: SpawnParent = { id: "websites--maestro", repo: "websites", role: "maestro", repoSlug: REPO_SLUG };
+
+  function localResumeDeps(rows: StudioStatus[]): { deps: ResumeDeps; provisioned: number; claimed: number } {
+    let provisionCount = 0;
+    let claimCount = 0;
+    const deps: ResumeDeps = {
+      listStudios: async () => rows,
+      fetchPolicy: async () => ({
+        org: { edges: { maestro: ["release"] }, gates: {} },
+        roles: ["maestro", "release", "pilot", "scratch", "cto"],
+      }),
+      provisionChild: async () => {
+        provisionCount += 1;
+        return rows[0]!;
+      },
+      resolveBrief: async () => ({ ok: false, status: 500, message: "unused" }),
+      notifyMaestro: async () => {},
+      assignModel: async () => {},
+      maxStudios: 100,
+      claimStudioId: async () => null,
+      claimStopped: async () => {
+        claimCount += 1;
+        return async () => {};
+      },
+      now: () => new Date("2026-09-29T12:00:00.000Z"),
+    };
+    return { deps, get provisioned() { return provisionCount; }, get claimed() { return claimCount; } };
+  }
+
+  const localStoppedRow = (id = "websites--release"): StudioStatus => ({
+    id, state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
+    lastRefreshError: null, burn: null, spawnedBy: "operator", spawnTokenHash: null,
+    repoSlug: REPO_SLUG, host: "local", localPath: "/tmp/websites",
+    parked: true, stoppedAt: "2026-09-01T00:00:00.000Z",
+  });
+
+  it("a local stopped row 409s the resume and never claims or provisions", async () => {
+    const h = localResumeDeps([localStoppedRow()]);
+    const res = await runResume(h.deps, MAESTRO, { role: "release" });
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain("local studio");
+    expect(text).toContain("fleet provision");
+    expect(h.provisioned).toBe(0);
+    expect(h.claimed).toBe(0);
+  });
+
+  it("a non-local stopped row still resumes", async () => {
+    const nonLocal = { ...localStoppedRow(), host: undefined };
+    const h = localResumeDeps([nonLocal]);
+    const res = await runResume(h.deps, MAESTRO, { role: "release" });
+    expect(res.status).toBe(200);
+    expect(h.provisioned).toBe(1);
+    expect(h.claimed).toBe(1);
   });
 });

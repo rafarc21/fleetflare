@@ -229,6 +229,7 @@ export async function wakeOnComment(
       unregistered: `${studioId} is not in the fleet registry — nothing to wake for the comment on task #${task.number}.`,
       stopped: `${studioId} is stopped — no wake was sent for the comment on task #${task.number}, ` +
         "because starting its container costs money silently.",
+      local: `${studioId} is a local studio — no container to wake. Wake its lead by Orca terminal send from the operator's machine.`,
       repoMismatch: (repoSlug) => `${studioId} is provisioned for ${repoSlug}, not ${task.repo} — a comment on a ` +
         "task from a different repo would wake a lead that cannot see it. This task's assignee looks stale or hand-edited.",
     },

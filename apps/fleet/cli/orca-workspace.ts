@@ -59,6 +59,7 @@ import { parseStudioId } from "../src/studio/ids";
 import { repoIdSegment } from "../src/studio/repo";
 import type { StudioStatus } from "../src/studio/types";
 import type { BoardTask } from "../src/board/types";
+import type { AssignWakeReport } from "../src/board/assign-wake";
 import { salvageContext, type SalvageOutcome, type SalvageDestination } from "./context-salvage";
 import { attachTitleState, ATTACH_STALE_MS } from "./attach-liveness";
 import { errText } from "./diag";
@@ -71,6 +72,15 @@ import { errText } from "./diag";
 // bring-up.
 
 const LIST_TIMEOUT_MS = 10_000;
+// #1259 round 9 minor: `sendLocalWake`'s `terminal send --wait-submit 5` call
+// alone — never `LIST_TIMEOUT_MS` itself, which every other call in this file
+// shares. Orca's own wait budget for `--wait-submit <seconds>` is `<seconds>
+// + 10s` (the operator's own measured number), so `5` here means Orca itself
+// may wait up to 15s before giving up. `LIST_TIMEOUT_MS` (10s) killed the CLI
+// mid-observation on a slow host, misreporting a real-but-slow send as
+// "timed out" rather than ever letting Orca reach its own verdict. 20s
+// leaves comfortable headroom above Orca's 15s budget.
+const SEND_WAIT_SUBMIT_TIMEOUT_MS = 20_000;
 // #124: `fleet ls` decorates a read with its ROW column — a slow Orca costs
 // "-", never seconds of the operator's listing.
 const ROW_TIMEOUT_MS = 3_000;
@@ -247,6 +257,26 @@ interface OrcaTerminalEntry {
   /** Board #55: which worktree the terminal lives in — `fleet ls`'s ROW
    *  column reads every terminal in ONE `terminal list` and groups by it. */
   worktreeId?: string;
+  /** The terminal's screen text (MEASURED on real Orca — see this interface's
+   *  own doc comment). #1259 rounds 3-5 each tried to infer claude-liveness
+   *  from THIS field (pattern-matching glyphs, then a tail-shape check) and
+   *  were measured wrong every time — see `agentIdentity`/`agentWait` below
+   *  for the field this file now trusts instead. `sendLocalWake` still reads
+   *  this one, but only AFTER typing into the terminal, to confirm its own
+   *  text actually landed in the composer before ever committing Enter —
+   *  never as a liveness gate before typing at all. */
+  preview?: string;
+  /** Which agent CLI Orca itself currently tracks as this terminal's live
+   *  foreground program — "claude" when claude genuinely owns it, something
+   *  else or absent otherwise. Orca's OWN tracking, never inferred from
+   *  screen text or a mutable OSC-rewritten title (#1259 rounds 3-5 both
+   *  failed trying to infer this ourselves). */
+  agentIdentity?: string | null;
+  /** Non-null when Orca's tracked agent is BLOCKED waiting on something (a
+   *  permission prompt, a modal) — null/undefined means genuinely idle and
+   *  safe to type into. Required alongside `agentIdentity === "claude"`
+   *  before this file ever sends a keystroke (#1259 round 6). */
+  agentWait?: unknown;
 }
 
 interface OrcaEnvelope {
@@ -267,7 +297,30 @@ interface OrcaEnvelope {
     // to know where the lead's project-scoped files land, without a second
     // `worktree list` round trip.
     worktree?: { id?: string; displayName?: string; path?: string };
-    terminal?: { handle?: string; title?: string };
+    // #1259 round 7 fix 3: `agentIdentity`/`agentWait` are carried here too —
+    // `terminal show`'s own envelope, read by `readTerminalDetail` below.
+    // `terminal create`'s envelope never populates them (a just-created
+    // terminal has no tracked agent yet), so they stay optional.
+    terminal?: { handle?: string; title?: string; agentIdentity?: string | null; agentWait?: unknown };
+    // #1259 round 9 fix B2': real Orca 1.4.232's `terminal send --wait-submit
+    // --json` receipt, CONFIRMED against the installed CLI's own handler
+    // source (`Orca.app/.../out/cli/handlers/terminal-send.js`) — it is
+    // `result.send.{accepted, prompt.stages[]}`, never `result.submission.
+    // status` (round 7/8's own unconfirmed guess, which never exists on real
+    // Orca). `prompt.observation === "permission"` when blocked on a prompt.
+    //
+    // #1259 round 9 AMEND (real-Orca measurement, 4 trials on 21b9ff10):
+    // `stages` gains `"turn_started"` once Orca observes the turn actually
+    // start, but that observation is MEASURED FLAKY — it showed up only 1/4
+    // trials even though all 4/4 turns genuinely ran (confirmed by hand with
+    // `fleet task show` after each trial). A busy lead returns
+    // `["input_accepted"]` only and just queues the message for later;
+    // `stages` also stays at just `["input_accepted"]` on a genuine
+    // timeout/stall, same shape. So `"input_accepted"` in `stages` is the
+    // reliable success signal this file gates on; `"turn_started"` is
+    // surfaced for info only, never as a gate — see `sendLocalWake`'s own
+    // receipt check below.
+    send?: { accepted?: boolean; prompt?: { stages?: string[]; observation?: string } };
   };
 }
 
@@ -617,8 +670,16 @@ export function localWorktreeCreateArgs(localPath: string, defaultBranch: string
  *  operator's own Mac, not a Firecracker microVM, so permission prompts stay
  *  on — the lead-gate PreToolUse hook (not --disallowedTools, which would
  *  starve members too) is the structural guard against the lead implementing,
- *  and the operator is present to approve the members' writes. */
-export function localLaunchCommand(id: string, promptFilePath: string, allowedTools: string, effort: string): string {
+ *  and the operator is present to approve the members' writes.
+ *
+ *  #1259 round 6: round 5's own `tty > ".../.fleet/lead.tty"` capture prefix
+ *  is REMOVED, not kept alongside the new mechanism — liveness no longer
+ *  asks the OS anything at all (see `isIdleClaudeTerminal`'s own doc
+ *  comment). The studio's lead terminal is now identified by the Orca
+ *  `handle` persisted at `.fleet/lead.handle` (`writeLeadHandle`, called by
+ *  `ensureLocalStudioWorktree` right after `terminal create` returns it) —
+ *  not by anything captured from inside the launched shell itself. */
+export function localLaunchCommand(id: string, worktreePath: string, promptFilePath: string, allowedTools: string, effort: string): string {
   const args = [
     "claude",
     // The inner path is quoted too: a worktree path with a space must survive
@@ -628,7 +689,8 @@ export function localLaunchCommand(id: string, promptFilePath: string, allowedTo
     "--allowedTools", `"${allowedTools}"`,
   ];
   if (effort !== "") args.push("--effort", effort);
-  return `STUDIO_ID=${id} ${args.join(" ")}`;
+  // FLEET_WORKSPACE points session-reemit/completion-gate at the worktree's .fleet/, not the container /workspace default.
+  return `STUDIO_ID=${id} FLEET_WORKSPACE="${worktreePath}" ${args.join(" ")}`;
 }
 
 /**
@@ -664,6 +726,9 @@ export interface LocalStudioArgs {
   members?: Record<string, string>;
   /** Skill names to symlink into the worktree's `.claude/skills`. */
   skills?: string[];
+  /** Tier-0 completion gate: install the completion-gate Stop hook when the
+   *  roster writes code (writesCode on the members). */
+  completionGate?: boolean;
 }
 
 /**
@@ -691,6 +756,88 @@ export async function ensureLocalStudioWorktree(
   }
   try {
     const name = studioWorkspaceName(id);
+
+    // Fleet task #1259 item 7: a resume must REUSE the kept worktree, not
+    // `worktree create` a second one. The default destroy KEEPS the worktree
+    // (cli/fleet.ts's localTeardownDecision), so the row it built still exists
+    // on disk; creating again would either clash on the name or leave a fresh
+    // checkout beside the kept unsynced one the registry still points at.
+    // A list we cannot read falls through to the create path below, exactly
+    // as before this lookup existed.
+    let existing: OrcaWorktree | undefined;
+    try {
+      existing = findStudioWorktree(id, await fullList(deps, "worktrees", LIST_TIMEOUT_MS), deps.registry);
+    } catch {
+      existing = undefined;
+    }
+    if (existing?.path) {
+      await deps.registry.set(id, existing.id ?? "");
+      materializeLocalLead(existing.path, args, deps);
+      const selector = existing.id ? `id:${existing.id}` : `name:${name}`;
+
+      // #1259 round 6 step 4: the reuse-vs-create decision is now Orca's OWN
+      // tracked agent state on the EXACT pinned terminal — `findPinnedLeadTerminal`
+      // reads `.fleet/lead.handle` first (never a fresh re-ranked guess when
+      // the precise handle is already known), falling back to identity-
+      // filtered discovery (and backfilling the handle file) only for a
+      // studio provisioned before this mechanism existed. Replaces round
+      // 4/5's OS-level `ps` walk entirely.
+      //
+      // #1259 round 7 fix 2: the decision reads ONLY `agentIdentity`, never
+      // `agentWait` — the operator's own finding 3: `agentWait` is absent
+      // from `terminal list --json` in every measured state (62 real rows);
+      // it only exists on the per-terminal `terminal show` call (see
+      // `sendLocalWake`'s own gate, which genuinely needs it). If a future
+      // list schema ever DID carry it, deciding resume on it would risk
+      // closing a LIVE lead merely blocked on its own permission prompt —
+      // data loss. ANY `agentIdentity === "claude"` means a live lead is
+      // there, full stop, never closed regardless of wait state.
+      // #1259 round 8 fix B1: `"ambiguous"` (zero-or-null used to be
+      // indistinguishable from this — see `findPinnedLeadTerminal`'s own
+      // comment) must REFUSE, never fall through to create: closing nothing
+      // is safe (we don't know which, if any, is dead), but creating a
+      // fresh terminal here would spawn a SECOND lead beside whichever live
+      // one is among the ambiguous candidates. Throwing routes through this
+      // function's own try/catch, the same failure path every other orca
+      // refusal here already uses.
+      const lookup = await findPinnedLeadTerminal(id, deps);
+      if (lookup.status === "ambiguous") {
+        throw new Error(
+          `${id}: ${lookup.count} candidate claude terminals found with no usable pin -- ` +
+          `refusing to guess which is the real lead; resolve manually`,
+        );
+      }
+      if (lookup.status === "found" && lookup.terminal.agentIdentity === "claude") {
+        return { kind: "exists" };
+      }
+      // Not claude (confirmed exited, or something else entirely), or no
+      // terminal could be resolved at all ("none"): close ONLY the one
+      // specific terminal just found, by its own handle — never iterate and
+      // close every connected terminal in the worktree the way round 5 did
+      // (that closed an operator's own unrelated shell whenever round 5's
+      // own liveness check misfired). "none" means nothing to close.
+      if (lookup.status === "found" && lookup.terminal.handle) {
+        await orcaJson(deps, ["terminal", "close", "--terminal", lookup.terminal.handle, "--json"], LIST_TIMEOUT_MS);
+      }
+
+      const command = localLaunchCommand(id, existing.path, join(existing.path, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
+      const term = await orcaJson(
+        deps,
+        ["terminal", "create", "--worktree", selector, "--title", id, "--command", command, "--json"],
+        LIST_TIMEOUT_MS,
+      );
+      const handle = term.result?.terminal?.handle;
+      if (handle) {
+        await orcaJson(deps, ["terminal", "rename", "--terminal", handle, "--title", id, "--json"], LIST_TIMEOUT_MS);
+        // #1259 round 6 step 1: pin the FRESH terminal's own handle the
+        // moment it exists, overwriting whatever stale handle was there —
+        // every later wake/resume call for this studio now finds this exact
+        // terminal, never a re-ranked guess.
+        writeLeadHandle(existing.path, handle);
+      }
+      return { kind: "created" };
+    }
+
     const made = await orcaJson(
       deps,
       localWorktreeCreateArgs(args.localPath, args.defaultBranch, id),
@@ -711,7 +858,7 @@ export async function ensureLocalStudioWorktree(
 
     materializeLocalLead(worktreePath, args, deps);
 
-    const command = localLaunchCommand(id, join(worktreePath, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
+    const command = localLaunchCommand(id, worktreePath, join(worktreePath, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
     const term = await orcaJson(
       deps,
       ["terminal", "create", "--worktree", selector, "--title", id, "--command", command, "--json"],
@@ -720,6 +867,10 @@ export async function ensureLocalStudioWorktree(
     const handle = term.result?.terminal?.handle;
     if (handle) {
       await orcaJson(deps, ["terminal", "rename", "--terminal", handle, "--title", id, "--json"], LIST_TIMEOUT_MS);
+      // #1259 round 6 step 1: pin this brand-new studio's terminal handle
+      // the moment it exists — the first write `.fleet/lead.handle` ever
+      // gets, so every later wake/resume call finds it by exact handle.
+      writeLeadHandle(worktreePath, handle);
     }
     return { kind: "created" };
   } catch (err) {
@@ -848,7 +999,7 @@ function materializeLocalLead(worktreePath: string, args: LocalStudioArgs, deps:
   }
   writeFileSync(hookDest, hookBytes.replace(placeholder, "IS_MAESTRO = False"));
 
-  const settingsPath = join(claudeDir, "settings.json");
+  const settingsPath = localSettingsPath(worktreePath);
   let cfg: Record<string, unknown>;
   try {
     cfg = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
@@ -864,6 +1015,67 @@ function materializeLocalLead(worktreePath: string, args: LocalStudioArgs, deps:
   // (the members/skills blocks above may have skipped) must still land.
   mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(settingsPath, JSON.stringify(merged, null, 2));
+
+  // Item 1 (#1259): the container installs four more hooks than the local
+  // path did. Copy each from gates/ (single source of truth, same as the
+  // lead gate), chmod 0755, then merge its settings.json entry. The three
+  // observability hooks fail OPEN (warn + skip on a missing source); the
+  // completion gate fails CLOSED when completionGate is set — a code-writing
+  // studio with no verification gate must not boot (Tier 0).
+  const copyHook = (name: string, failClosed: boolean): string | null => {
+    const src = join(import.meta.dir, "..", "..", "..", "gates", `${name}.sh`);
+    if (!existsSync(src)) {
+      if (failClosed) {
+        throw new Error(`${name} source ${src} missing — refusing to materialize a lead with no verification gate (Tier 0)`);
+      }
+      deps.log(`declared hook "${name}" has no source at ${src} — studio boots without it`);
+      return null;
+    }
+    const dest = join(hooksDir, `${name}.sh`);
+    copyFileSync(src, dest);
+    chmodSync(dest, 0o755);
+    return dest;
+  };
+  const failOpenCmd = (name: string) =>
+    `S="$CLAUDE_PROJECT_DIR/.claude/hooks/${name}.sh"; [ -x "$S" ] && exec "$S"; exit 0`;
+  const failClosedCmd = (name: string, why: string) =>
+    `S="$CLAUDE_PROJECT_DIR/.claude/hooks/${name}.sh"; ` +
+    `[ -x "$S" ] || { echo "${name} hook absent or not executable -- refusing (${why})" >&2; exit 2; }; ` +
+    `exec "$S"`;
+
+  const hooksSettingsPath = localSettingsPath(worktreePath);
+  let hooksCfg: Record<string, unknown>;
+  try {
+    hooksCfg = JSON.parse(readFileSync(hooksSettingsPath, "utf8")) as Record<string, unknown>;
+    if (typeof hooksCfg !== "object" || hooksCfg === null || Array.isArray(hooksCfg)) hooksCfg = {};
+  } catch {
+    hooksCfg = {};
+  }
+  const hooksMap = (hooksCfg.hooks ?? {}) as Record<string, unknown>;
+  const eventArr = (evt: string): unknown[] => {
+    if (!Array.isArray(hooksMap[evt])) hooksMap[evt] = [];
+    return hooksMap[evt] as unknown[];
+  };
+  const addHookEntry = (evt: string, command: string, matcher?: string) => {
+    const entry = { ...(matcher !== undefined ? { matcher } : {}), hooks: [{ type: "command", command }] };
+    const arr = eventArr(evt);
+    const name = command.match(/([a-z-]+)\.sh/)?.[1] ?? command;
+    const filtered = arr.filter((e) => !JSON.stringify(e).includes(`${name}.sh`));
+    filtered.push(entry);
+    hooksMap[evt] = filtered;
+  };
+
+  if (copyHook("session-reemit", false)) addHookEntry("SessionStart", failOpenCmd("session-reemit"));
+  if (copyHook("install-marker", false)) addHookEntry("PostToolUse", failOpenCmd("install-marker"), ".*");
+  if (copyHook("activity-heartbeat", false)) {
+    for (const evt of ["SessionStart", "UserPromptSubmit", "Stop", "Notification"]) {
+      addHookEntry(evt, failOpenCmd("activity-heartbeat"));
+    }
+  }
+  if (args.completionGate) {
+    if (copyHook("completion-gate", true)) addHookEntry("Stop", failClosedCmd("completion-gate", "Tier 0"));
+  }
+  writeFileSync(hooksSettingsPath, JSON.stringify({ ...hooksCfg, hooks: hooksMap }, null, 2));
 
   // Fleet task #1248 review BLOCKER B3: everything written above lives INSIDE
   // the worktree and is committable — a member `git add -A` would commit the
@@ -891,7 +1103,7 @@ export interface LocalExcludeRun {
   (args: string[], cwd: string): { code: number | null; stdout: string; stderr: string };
 }
 
-export const LOCAL_EXCLUDE_LINES = [".fleet/", ".claude/settings.json", ".claude/hooks/", ".claude/agents/", ".claude/skills/"];
+export const LOCAL_EXCLUDE_LINES = [".fleet/", ".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/", ".claude/agents/", ".claude/skills/"];
 
 export function appendLocalExcludeLines(worktreePath: string, deps: Pick<OrcaDeps, "log">, run: LocalExcludeRun = defaultLocalExcludeRun): void {
   try {
@@ -907,6 +1119,23 @@ export function appendLocalExcludeLines(worktreePath: string, deps: Pick<OrcaDep
     // a boot must never fail because this write could not land.
     deps.log(`could not exclude the lead's files from git (${errText(err)})`);
   }
+}
+
+/**
+ * Where the lead's project-scoped hooks config lands. `.git/info/exclude`
+ * only hides UNTRACKED files, so a repo that COMMITS its own
+ * `.claude/settings.json` would still show our writes as a dirty diff a
+ * member's `git add -A` could commit. In that case write to
+ * `.claude/settings.local.json` instead — Claude Code merges settings.json <
+ * settings.local.json < --settings, so the hooks land identically without
+ * touching the tracked file. The `git ls-files --error-unmatch` probe decides;
+ * any failure (not a git repo, a read error) falls back to settings.json,
+ * the pre-item-5 path — the gate still arms either way, since claude reads
+ * both files.
+ */
+export function localSettingsPath(worktreePath: string, run: LocalExcludeRun = defaultLocalExcludeRun): string {
+  const probe = run(["ls-files", "--error-unmatch", "--", ".claude/settings.json"], worktreePath);
+  return probe.code === 0 ? join(worktreePath, ".claude", "settings.local.json") : join(worktreePath, ".claude", "settings.json");
 }
 
 function defaultLocalExcludeRun(args: string[], cwd: string): { code: number | null; stdout: string; stderr: string } {
@@ -1396,6 +1625,14 @@ export async function readStudioRows(studios: StudioStatus[], deps: OrcaDeps): P
  * call, ever — only the two LIST calls above.
  */
 export async function findAttachHandle(id: string, deps: OrcaDeps): Promise<string | null> {
+  return (await findAttachTerminal(id, deps))?.handle ?? null;
+}
+
+/** The ranked attach terminal for a studio — `findAttachHandle`, but returning
+ *  the whole entry so a caller can also read the terminal's screen (`preview`).
+ *  Same "never fails its caller" posture: null when Orca is absent, the studio
+ *  has no worktree, no healthy attach terminal exists, or any orca call fails. */
+export async function findAttachTerminal(id: string, deps: OrcaDeps): Promise<OrcaTerminalEntry | null> {
   if (!orcaPresent(deps)) return null;
   try {
     const [worktrees, terms] = await Promise.all([
@@ -1405,11 +1642,365 @@ export async function findAttachHandle(id: string, deps: OrcaDeps): Promise<stri
     if (!worktree?.id) return null;
     const candidates = terms.filter((t) => t.worktreeId === worktree.id && isHealthyAttach(t, id));
     if (candidates.length === 0) return null;
-    return rankAttachTerminals(candidates, id)[0]?.handle ?? null;
+    return rankAttachTerminals(candidates, id)[0] ?? null;
   } catch (err) {
     deps.log(`${id}: attach handle lookup failed — ${errText(err)}`);
     return null;
   }
+}
+
+/**
+ * #1259 round 6: the ONE gate every send/close decision in this file now
+ * checks before touching a terminal — Orca's own tracked agent identity and
+ * wait-state, never our own OS-level or screen-text guess. Replaces rounds
+ * 3-5 entirely (title/preview pattern-matching, then a tty-captured `ps`
+ * walk) — see `OrcaTerminalEntry.agentIdentity`/`agentWait`'s own doc
+ * comments for why each of those was measured wrong. Used by both
+ * `sendLocalWake` and `ensureLocalStudioWorktree`'s resume branch.
+ *
+ * `agentWait == null` (loose equality, deliberate) matches BOTH `null` and
+ * `undefined` — the operator's own exact wording ("agentWait==null") for
+ * what counts as "not blocked."
+ *
+ * HONEST LIMITATION: whether a real Orca installation's `terminal list
+ * --json` actually populates `agentIdentity`/`agentWait` the way described
+ * is not something this sandbox (no Orca here) can independently confirm —
+ * trusted as the operator's own measured ground truth, same posture as
+ * every other "MEASURED" field on `OrcaTerminalEntry`.
+ */
+export function isIdleClaudeTerminal(t: { agentIdentity?: string | null; agentWait?: unknown }): boolean {
+  return t.agentIdentity === "claude" && t.agentWait == null;
+}
+
+/** #1259 round 6 step 1: the handle this file persisted for studio `id`'s
+ *  lead terminal, read from `<worktreePath>/.fleet/lead.handle` — one line,
+ *  a plain text file, the same convention round 5's `lead.tty` used. Never
+ *  throws: absent, empty, or unreadable all read as null — a studio
+ *  provisioned before this mechanism existed, or one whose `writeLeadHandle`
+ *  call below failed. Both read as "not yet pinned," which
+ *  `findPinnedLeadTerminal` turns into its own one-time fallback discovery
+ *  (never "dead" — unlike round 5's `readLeadTty`, there is no liveness
+ *  claim encoded in this file's mere absence). */
+export function readLeadHandle(worktreePath: string): string | null {
+  try {
+    const content = readFileSync(join(worktreePath, ".fleet", "lead.handle"), "utf8");
+    const handle = content.trim();
+    return handle === "" ? null : handle;
+  } catch {
+    return null;
+  }
+}
+
+/** Persists the handle `ensureLocalStudioWorktree` just created or
+ *  discovered for studio `id`'s lead terminal — every LATER wake/resume call
+ *  reads it back via `readLeadHandle` instead of re-discovering it by
+ *  ranking worktree-matched candidates (#1259 round 6 finding 1: ranking
+ *  among candidates, even once, is exactly how round 5 picked an unrelated
+ *  operator shell first — real list order put it ahead of the actual lead).
+ *  `.fleet/` already exists by the time this is first called
+ *  (`materializeLocalLead` writes `working-set.md` there first), but mkdir
+ *  defensively anyway for the fallback-discovery backfill path, which may
+ *  run before that. Best-effort, never throws: a failed write costs the
+ *  NEXT call a fallback discovery, never this call's own result — same
+ *  posture as every other write in this file that is not the fail-closed
+ *  lead gate itself. */
+export function writeLeadHandle(worktreePath: string, handle: string): void {
+  try {
+    const fleetDir = join(worktreePath, ".fleet");
+    mkdirSync(fleetDir, { recursive: true });
+    writeFileSync(join(fleetDir, "lead.handle"), handle);
+  } catch {
+    // Best-effort — see this function's own doc comment.
+  }
+}
+
+/**
+ * #1259 round 6 step 1: the studio's PINNED lead terminal, found by the
+ * EXACT handle persisted at `.fleet/lead.handle` — never by re-ranking
+ * worktree-matched candidates when the precise handle is already known.
+ * Round 5's own bug was exactly this: `sendLocalWake`/resume both asked
+ * "is SOMETHING claude alive somewhere in this worktree" and then acted on
+ * whichever terminal `rankAttachTerminals` picked FIRST among candidates
+ * sharing that worktree, with no check that THAT SPECIFIC terminal backed
+ * the verified signal — real list order put an operator's own unrelated
+ * shell first, and wake typed into it.
+ *
+ * The identity-filtered discovery below survives as a FALLBACK ONLY, for a
+ * studio provisioned before this mechanism existed (no `.fleet/lead.handle`
+ * at all) or whose pinned terminal Orca has since reaped (the handle file
+ * names a terminal `terminal list` no longer reports). On a fallback hit,
+ * immediately backfills `.fleet/lead.handle` with the discovered handle, so
+ * every SUBSEQUENT call for this studio uses the precise path from then on
+ * — a pre-PR studio self-heals onto the new mechanism instead of staying on
+ * best-effort discovery forever.
+ *
+ * #1259 round 7 fix 1: the fallback's own candidate filter is
+ * `agentIdentity === "claude"`, never `connected === true` — connectedness
+ * says nothing about IDENTITY, and ranking among `connected` candidates by
+ * list order (`rankAttachTerminals`, round 6's own fallback) is exactly the
+ * bug this fix removes: the operator's own measurement (finding 2) found a
+ * real list `[operator zsh, live lead]` with no pin — list order put the
+ * zsh first, the old fallback picked it, `ensureLocalStudioWorktree`'s
+ * resume branch closed it (an operator's own live shell, gone) and spawned
+ * a SECOND lead, pinning THAT one — leaving the real live lead running
+ * forever, unpinned, vulnerable to the exact same wrong pick next time.
+ * The decision rule is exact-one-or-refuse: EXACTLY one claude-identified
+ * candidate is used (and its handle backfills the pin, same as before);
+ * ZERO or TWO-OR-MORE is an unresolvable ambiguity — nothing picked, no pin
+ * written. Once pinned, every later call trusts `.fleet/lead.handle`
+ * exactly, so a wrong guess here would be permanent until corrected by
+ * hand; refusing to guess is the only safe default.
+ *
+ * #1259 round 8 fix B1: ZERO and TWO-OR-MORE candidates used to collapse
+ * onto the SAME `null` return, so a caller could not tell "nothing to close,
+ * safe to create" apart from "something IS alive here, just not identifiable
+ * — do not touch it." The operator's own measurement: no pin, a real list
+ * `[live lead, 2nd claude-titled terminal]` read as `null` either way, and
+ * resume's old code fell through to `terminal create` on BOTH — spawning a
+ * second lead beside the live one. The return is now a 3-state discriminated
+ * union so every caller can refuse the ambiguous case outright instead of
+ * silently treating it like the zero case.
+ *
+ * Never fails its caller: `"none"` when Orca is absent, the studio has no
+ * worktree, or no terminal at all can be resolved (pinned or fallback) —
+ * same posture as every other lookup here.
+ */
+export type PinnedLeadLookup =
+  | { status: "found"; terminal: OrcaTerminalEntry }
+  | { status: "none" }
+  | { status: "ambiguous"; count: number };
+
+export async function findPinnedLeadTerminal(id: string, deps: OrcaDeps): Promise<PinnedLeadLookup> {
+  if (!orcaPresent(deps)) return { status: "none" };
+  try {
+    const worktrees = await fullList(deps, "worktrees", ROW_TIMEOUT_MS);
+    const worktree = findStudioWorktree(id, worktrees, deps.registry);
+    if (!worktree) return { status: "none" };
+    const selector = worktree.id ? `id:${worktree.id}` : `name:${studioWorkspaceName(id)}`;
+    const listed = await orcaJson(deps, ["terminal", "list", "--worktree", selector, "--json"], ROW_TIMEOUT_MS);
+    const terms = listed.result?.terminals ?? [];
+
+    const handle = worktree.path ? readLeadHandle(worktree.path) : null;
+    if (handle !== null) {
+      const pinned = terms.find((t) => t.handle === handle);
+      if (pinned) return { status: "found", terminal: pinned };
+      // The handle file is stale — the terminal it named is gone (reaped by
+      // Orca, or this studio's lead was torn down and recreated by hand).
+      // Fall through to discovery below and overwrite it.
+    }
+    const candidates = terms.filter((t) => t.agentIdentity === "claude");
+    if (candidates.length === 0) return { status: "none" };
+    if (candidates.length > 1) return { status: "ambiguous", count: candidates.length };
+    const discovered = candidates[0]!;
+    if (discovered.handle && worktree.path) writeLeadHandle(worktree.path, discovered.handle);
+    return { status: "found", terminal: discovered };
+  } catch (err) {
+    deps.log(`${id}: pinned lead terminal lookup failed — ${errText(err)}`);
+    return { status: "none" };
+  }
+}
+
+/** #1259 round 7 fix 3: `agentWait` is absent from `terminal list --json` in
+ *  every measured state (62 real rows) -- it only lives on the per-terminal
+ *  `terminal show` call, where it reads null except during an actual
+ *  permission wait. Wake's own idle gate (unlike resume's identity-only
+ *  gate, Fix 2) needs genuine idle confirmation, so it reads this instead
+ *  of the list entry's own (always-absent) field. Null on any failure, or
+ *  when Orca no longer reports a terminal at that handle at all. */
+async function readTerminalDetail(deps: OrcaDeps, handle: string): Promise<{ agentIdentity?: string | null; agentWait?: unknown } | null> {
+  try {
+    const shown = await orcaJson(deps, ["terminal", "show", "--terminal", handle, "--json"], LIST_TIMEOUT_MS);
+    return shown.result?.terminal ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fleet task #1259 item 2: wake a LOCAL studio's lead. A local row has no
+ * container, so the Worker's assign wake refuses with `{local:true}` and this
+ * CLI turns that into the Orca equivalent of the container wake: resolve the
+ * studio's PINNED lead terminal and type the digest into it. Fail closed —
+ * not under Orca, no terminal can be resolved at all, Orca's own tracked
+ * agent is not an idle claude session, or a failed send all report a
+ * refusal, never a silent non-wake.
+ *
+ * #1259 round 6: the terminal lookup is `findPinnedLeadTerminal` — the exact
+ * handle this file persisted at `.fleet/lead.handle` when the terminal was
+ * created, never a freshly re-ranked guess among worktree-matched
+ * candidates (round 5's own bug: real list order put an operator's own
+ * unrelated shell first, and this function typed into IT). #1259 round 7
+ * fix 3: the liveness gate reads `terminal show` on that EXACT handle —
+ * Orca's own tracked `agentIdentity`/`agentWait`, never an OS-level `ps`
+ * walk (round 5) or screen-text pattern match (rounds 3-4), both measured
+ * wrong independent of the terminal-selection bug above.
+ *
+ * #1259 round 7 fix 4: the send itself is ONE `terminal send` call carrying
+ * `--enter --wait-submit <seconds>`, trusting Orca's OWN submission
+ * acknowledgment. Round 5/6's own 2-phase verify-then-commit protocol (type
+ * without `--enter`, re-read the preview by exact handle, require the LAST
+ * non-empty preview line to contain the FULL digest, only then a separate
+ * `--enter`) never succeeded on real Orca — the operator's own 4/4 measured
+ * real-Orca attempts: the composer wraps long text across multiple visual
+ * lines, so the digest was NEVER found whole on any single "last line,"
+ * even on a fully successful type, stranding the digest half-typed every
+ * time. `--wait-submit` replaces that self-built confirmation with Orca's
+ * own acknowledgment of the submission instead.
+ *
+ * Fix 1 (#1259 round 4): round 3's fix-1b widened the control-byte strip
+ * below into a shell-metacharacter strip too (`$`, backtick, backslash, `;`,
+ * `|`, `&`, `<`, `>`), as defense-in-depth against an untrusted `digest`. That
+ * strip is gone now — not because the threat stopped mattering, but because
+ * the threat itself is gone BY CONSTRUCTION: `resolveLocalWake` (below) no
+ * longer ever reads the Worker's `report.digest` field, so no caller of this
+ * function on any production path can hand it attacker-shaped text in the
+ * first place; see `resolveLocalWake`'s own comment. The older, narrower
+ * control-byte strip stays — it was never specific to that threat and costs
+ * nothing to keep.
+ */
+export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps): Promise<AssignWakeReport> {
+  if (!orcaPresent(deps)) {
+    return {
+      woke: false,
+      reason: `${id} is a local studio but this is not an Orca session — no wake was sent. ` +
+        `Wake it yourself with: fleet task show`,
+    };
+  }
+  const clean = digest.replace(/[\x00-\x1f\x7f]/g, "");
+  // #1259 round 8 fix B1: `"ambiguous"` gets its own refusal wording —
+  // conflating it with `"none"`'s "no healthy terminal" message would hide
+  // that a live lead almost certainly IS there, just not identifiable.
+  const lookup = await findPinnedLeadTerminal(id, deps);
+  if (lookup.status === "ambiguous") {
+    return {
+      woke: false,
+      reason: `${id} is a local studio with ${lookup.count} candidate claude terminals and no reliable pin — refusing to guess which to wake`,
+    };
+  }
+  if (lookup.status === "none") {
+    return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
+  }
+  const term = lookup.terminal;
+  if (term.handle === undefined) {
+    return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
+  }
+  // #1259 round 7 fix 3: the gate reads `terminal show`, never the `terminal
+  // list` entry's own (always-absent) `agentWait` field — see
+  // `readTerminalDetail`'s own doc comment. Strict `=== null` on
+  // `agentWait` (not the loose `== null` resume's identity-only gate uses):
+  // the operator's own exact wording, since `terminal show`'s field is
+  // expected to reliably be either null or a real value, never absent.
+  const detail = await readTerminalDetail(deps, term.handle);
+  if (detail === null || detail.agentIdentity !== "claude" || detail.agentWait !== null) {
+    return {
+      woke: false,
+      reason: `${id} is a local studio whose Orca terminal is not an idle claude session ` +
+        `(agentIdentity=${detail?.agentIdentity ?? "none"}${detail !== null && detail.agentWait !== null ? ", agentWait set" : ""}) — ` +
+        `the lead may have exited or is waiting on a prompt; wake its lead yourself with: fleet task show`,
+    };
+  }
+  try {
+    // #1259 round 7 fix 4: ONE call, carrying `--enter --wait-submit
+    // <seconds>` instead of re-reading screen text ourselves. The prior
+    // 2-phase verify-then-commit protocol (type without `--enter`, re-read
+    // this terminal's preview, require the LAST non-empty line to contain
+    // the FULL digest, only then a separate `--enter` call) never succeeded
+    // on real Orca: the composer wraps long text across multiple visual
+    // lines, so the digest was NEVER found whole on any single "last line,"
+    // even on a fully successful type — 4/4 real measured attempts stranded
+    // the digest half-typed.
+    // `5` (seconds) is a judgment call, not a real-Orca measurement — no
+    // Orca in this sandbox to time a real submit against — chosen to leave
+    // headroom inside this call's own `SEND_WAIT_SUBMIT_TIMEOUT_MS` (20s,
+    // round 9 minor fix, see that constant's own comment) for normal
+    // round-trip overhead on top of the flag's own wait budget.
+    //
+    // #1259 round 8 fix B2: round 7's own comment above overclaimed
+    // "trusting Orca's own submission acknowledgment" while never actually
+    // reading one — the call carried no `--json` and the code only checked
+    // the raw process exit (`res.ok`/`timedOut`). Orca's own `--wait-submit`
+    // help text says a timeout "returns the queued/input-accepted receipt"
+    // instead of failing the call — accepted-into-the-composer is NOT the
+    // same as genuinely submitted, so `res.ok === true` alone is not proof
+    // of anything. `--json` + `orcaJson` (this file's own established
+    // pattern for every other parsed Orca call) reads the actual receipt.
+    //
+    // #1259 round 9 fix B2': round 8's own key path above (`result.
+    // submission.status === "turn_started"`) was still wrong — that field
+    // never exists on real Orca, so every real wake read `status=none` and
+    // reported `woke:false`, regressing round 7's own 4/4 measured real-Orca
+    // successes to 0/N. Corrected to the CLI-source-confirmed shape, but
+    // that first-pass correction OVER-required `send.prompt.stages`
+    // including `"turn_started"` as part of the gate.
+    //
+    // #1259 round 9 AMEND (real-Orca measurement, 4 trials on 21b9ff10):
+    // the `turn_started` requirement above is wrong — real-Orca data shows
+    // `turn_started` is FLAKY (1/4 trials) even though all 4/4 turns
+    // genuinely ran (confirmed by hand with `fleet task show` after each
+    // trial); a busy lead returns `["input_accepted"]` only and the message
+    // queues and runs later. The corrected, looser gate: genuine submission
+    // requires ONLY `send.accepted === true` AND `send.prompt.stages`
+    // including `"input_accepted"` — that covers queued, input-accepted,
+    // and permission-blocked receipts alike (all of which still set
+    // `accepted: true` and reach `input_accepted`). `turn_started`, when
+    // present, is surfaced as `turnStarted` for info only — it is NEVER
+    // part of the gate condition. Only a genuinely unaccepted receipt (or
+    // one that never reaches `input_accepted`, or a parse failure/missing
+    // envelope) counts as `woke:false`.
+    const envelope = await orcaJson(
+      deps,
+      ["terminal", "send", "--terminal", term.handle, "--text", clean, "--enter", "--wait-submit", "5", "--json"],
+      SEND_WAIT_SUBMIT_TIMEOUT_MS,
+    );
+    const accepted = envelope.result?.send?.accepted === true;
+    const inputAccepted = envelope.result?.send?.prompt?.stages?.includes("input_accepted") === true;
+    const turnStarted = envelope.result?.send?.prompt?.stages?.includes("turn_started") === true;
+    if (!accepted || !inputAccepted) {
+      return { woke: false, reason: "terminal send not accepted, submit not observed (never queued)" };
+    }
+    return { woke: true, digest: clean, turnStarted };
+  } catch (err) {
+    // orcaJson's own thrown message already names the failed command (e.g.
+    // "orca terminal send failed: ..." / "... timed out after 10s") — prefix
+    // it with "terminal send failed" so callers matching that substring
+    // (pre-existing behavior) keep working for either failure shape.
+    return { woke: false, reason: `terminal send failed: ${errText(err)}` };
+  }
+}
+
+/**
+ * The CLI half of item 2: swap a `{local:true}` assign-wake refusal for the
+ * Orca terminal send that actually wakes the local lead. Everything else
+ * passes through untouched, so a container studio's report is byte-identical
+ * to before.
+ *
+ * Fix 1 (#1259 round 4): 3 prior review rounds built the text typed into the
+ * terminal from the Worker's own `report.digest` field, which itself carries
+ * board content (a task title, a `--why`) the Worker never fully controls —
+ * round 3's own "strip these shell metacharacters" patch was chasing that
+ * hole, and still missed a zsh glob-qualifier payload that needs none of the
+ * stripped characters at all. The actual fix is upstream of any stripping:
+ * this function never reads `report.digest` anymore, at all — it builds ONE
+ * FIXED template from `taskNumber` alone, which it validates as a plain
+ * positive integer before using it. No interpolated title, no interpolated
+ * body, no interpolated anything board-sourced ever reaches the terminal —
+ * the template has nothing in it a GitHub issue could have influenced except
+ * the number itself, and that number is range-checked, not merely typed.
+ * An invalid number (never expected from a real caller — see this file's own
+ * 4 call sites, each one already holding the task's own `number` field) still
+ * refuses rather than throws, matching every other refusal shape here.
+ */
+export async function resolveLocalWake(
+  report: AssignWakeReport | undefined, studioId: string | null, taskNumber: number, deps: OrcaDeps,
+): Promise<AssignWakeReport | undefined> {
+  if (report && !report.woke && report.local === true && studioId !== null) {
+    if (!Number.isSafeInteger(taskNumber) || taskNumber <= 0) {
+      return { woke: false, reason: `invalid task number ${taskNumber} — no wake was sent` };
+    }
+    const digest = `Board task #${taskNumber} has a new message. Run: fleet task show ${taskNumber}`;
+    return sendLocalWake(studioId, digest, deps);
+  }
+  return report;
 }
 
 // ---------------------------------------------------------------------------

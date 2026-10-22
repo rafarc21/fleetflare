@@ -11,6 +11,7 @@ import { sameRepoSlug } from "../github/wake-events";
 export interface WakeRefusals {
   unregistered: string;
   stopped: string;
+  local: string;
   repoMismatch: (repoSlug: string) => string;
 }
 
@@ -29,7 +30,7 @@ export interface WakeRefusals {
 export async function wakeStudioFor(
   deps: AssignWakeDeps, studioId: string, gate: { repo: string; digest: string; refuse: WakeRefusals },
 ): Promise<AssignWakeReport> {
-  let studio: { state: string; repoSlug: string | null } | null;
+  let studio: { state: string; repoSlug: string | null; host?: "local" } | null;
   try {
     studio = await deps.studioState(studioId);
   } catch (err) {
@@ -43,6 +44,16 @@ export async function wakeStudioFor(
       const suffix = match === "unknown" ? " (canonical-name lookup failed — refusing the wake to be safe)" : "";
       return { woke: false, reason: `${gate.refuse.repoMismatch(studio.repoSlug)}${suffix}` };
     }
+  }
+
+  // Fleet task #1259 item 2: a local row has no container, so the RPC below
+  // would refuse "never provisioned". Refuse here with a LOCAL marker the CLI
+  // turns into an Orca terminal send, carrying the digest so the CLI types the
+  // exact prompt. Placed AFTER the repo check: a local studio recorded against
+  // the wrong repo must still refuse on mismatch, not wake a lead that cannot
+  // see the task.
+  if (studio.host === "local") {
+    return { woke: false, reason: gate.refuse.local, local: true, digest: gate.digest };
   }
 
   let outcome: WakeOutcome;

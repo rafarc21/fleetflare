@@ -16,7 +16,7 @@
 // orca-registry-teardown.test.ts, and the registry, locks, and ROW column live
 // in orca-registry-rows.test.ts.
 import { test, describe, expect } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -32,11 +32,25 @@ import {
   appendLocalExcludeLines,
   LOCAL_EXCLUDE_LINES,
   resolveStudioWorktreePath,
+  writeLeadHandle,
+  readLeadHandle,
+  findPinnedLeadTerminal,
   type OrcaDeps,
   type OrcaResult,
 } from "../../cli/orca-workspace";
 import type { StudioStatus } from "../../src/studio/types";
 import { ORCA_ENV, ok, terminals } from "./helpers/orca-fixtures";
+
+// item 5: `localSettingsPath` is a NEW export. bun's ESM makes a missing
+// named export a hard module-link error (not `undefined`), which would kill
+// every test in this file while the export is still absent (red). A dynamic
+// import survives the link: it yields `undefined` now (red -> calling it
+// throws) and the real function once the export lands (green).
+const { localSettingsPath } = await import("../../cli/orca-workspace");
+
+// item 2: same dynamic-import trick for the new local-wake exports — red
+// survives the module link, green gets the real functions.
+const { sendLocalWake, resolveLocalWake } = await import("../../cli/orca-workspace");
 
 // ---------------------------------------------------------------------------
 // Fakes. `run` records every argv it was handed, which is how the "makes NO
@@ -131,9 +145,20 @@ function terminalEntries(...entries: {
   lastOutputAt?: string | number;
   worktreeId?: string;
   worktreePath?: string;
+  preview?: string;
+  // #1259 round 6: Orca's own tracked agent state — see
+  // `isIdleClaudeTerminal`'s own doc comment in cli/orca-workspace.ts.
+  agentIdentity?: string | null;
+  agentWait?: unknown;
 }[]): OrcaResult {
   return ok(JSON.stringify({ ok: true, result: { terminals: entries } }));
 }
+
+/** #1259 round 6: an idle-claude terminal's own two fields, spread onto a
+ *  `terminalEntries(...)` fixture — the ONE idiom this file uses everywhere
+ *  a test needs "Orca reports this terminal as a live, idle claude session"
+ *  (replacing round 5's injected `isClaudeForeground` fake entirely). */
+const IDLE_CLAUDE = { agentIdentity: "claude", agentWait: null } as const;
 
 const TERM_CREATED = ok(JSON.stringify({
   ok: true,
@@ -339,7 +364,7 @@ describe("local studio workspace — fleet task #1248", () => {
   });
 
   test("localLaunchCommand quotes the prompt-by-file and carries allowedTools/effort", () => {
-    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *) Edit Write", "max");
+    const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *) Edit Write", "max");
     // The prompt rides by FILE — the launch line stays a few hundred bytes
     // whatever the brief's size, and the pane shell expands "$(cat ...)" into
     // one argv element (studio-bringup.sh's own issue #6 technique).
@@ -349,7 +374,7 @@ describe("local studio workspace — fleet task #1248", () => {
   });
 
   test("localLaunchCommand quotes the INNER prompt path so a path with a space survives", () => {
-    const cmd = localLaunchCommand("websites--pilot", "/w with space/.fleet/working-set.md", "Bash(git *)", "");
+    const cmd = localLaunchCommand("websites--pilot", "/w with space", "/w with space/.fleet/working-set.md", "Bash(git *)", "");
     // The inner path must be quoted too: the pane shell reads the file path
     // between the two quotes inside "$(cat ...)", or a space breaks the
     // launch line.
@@ -357,7 +382,7 @@ describe("local studio workspace — fleet task #1248", () => {
   });
 
   test("localLaunchCommand never passes --dangerously-skip-permissions (a Mac lead keeps prompts on)", () => {
-    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
     expect(cmd).not.toContain("--dangerously-skip-permissions");
   });
 
@@ -366,13 +391,24 @@ describe("local studio workspace — fleet task #1248", () => {
     // (`[ -n "${STUDIO_ID:-}" ] || exit 0`) would exit 0 before any gate
     // logic. The prefix is the arming switch: claude — and every hook
     // subprocess it spawns — inherits STUDIO_ID, and the gate goes active.
-    const cmd = localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "");
-    expect(cmd.startsWith("STUDIO_ID=websites--pilot claude")).toBe(true);
+    const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    expect(cmd).toContain('STUDIO_ID=websites--pilot FLEET_WORKSPACE="/w" claude');
     expect(cmd).not.toContain("--dangerously-skip-permissions");
   });
 
+  // #1259 round 6: round 5's own `tty > ".../.fleet/lead.tty"` capture
+  // prefix is REMOVED, not kept — liveness no longer asks the OS anything at
+  // all (see `isIdleClaudeTerminal`). The line now starts with the
+  // STUDIO_ID arming switch directly, nothing before it.
+  test("localLaunchCommand no longer captures a tty — the line starts with the STUDIO_ID arming switch directly", () => {
+    const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    expect(cmd.startsWith("STUDIO_ID=websites--pilot")).toBe(true);
+    expect(cmd).not.toContain("tty >");
+    expect(cmd).not.toContain("lead.tty");
+  });
+
   test("localLaunchCommand omits --effort when the role carries none", () => {
-    expect(localLaunchCommand("websites--pilot", "/w/.fleet/working-set.md", "Bash(git *)", "")).not.toContain("--effort");
+    expect(localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "")).not.toContain("--effort");
   });
 
   test("localLeadGateHookCommand is the fail-closed PreToolUse command, matcher .*", () => {
@@ -443,6 +479,11 @@ describe("local studio workspace — fleet task #1248", () => {
       // worktree path), never in ~/.claude.
       const path = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
       expect(path).toBeDefined();
+
+      // #1259 round 6 step 1: the brand-new terminal's handle is pinned
+      // the moment it exists, so a later wake/resume call finds it by exact
+      // handle instead of re-discovering it by ranking.
+      expect(readFileSync(join(worktreePath, ".fleet", "lead.handle"), "utf8").trim()).toBe("term_new");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -485,6 +526,527 @@ describe("local studio workspace — fleet task #1248", () => {
     });
     expect(outcome.kind).toBe("failed");
     expect(f.lines.length).toBe(1);
+  });
+
+  test("an existing worktree is REUSED on resume — no worktree create, only materialize + terminal create (item 7)", async () => {
+    // The default destroy KEEPS the worktree, so a resume must materialize into
+    // the SAME on-disk path rather than `worktree create` again (name clash, or
+    // a fresh checkout while the registry stays pointed at the kept unsynced one).
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-"));
+    // basename must be one of studioFolderNames("websites--pilot") so
+    // findStudioWorktree's path-basename fallback matches it.
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      expect(f.calls.some((c) => c[0] === "worktree" && c[1] === "create")).toBe(false);
+      const term = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
+      expect(term).toBeDefined();
+      expect(term).toContain(`id:${existingId}`);
+
+      // The lead's files landed in the EXISTING path, not a fresh checkout.
+      expect(existsSync(join(existingPath, ".fleet", "working-set.md"))).toBe(true);
+      expect(existsSync(join(existingPath, ".claude", "hooks", "lead-gate.sh"))).toBe(true);
+      // #1259 round 6: the fresh terminal's handle is pinned for every later
+      // wake/resume call.
+      expect(readFileSync(join(existingPath, ".fleet", "lead.handle"), "utf8").trim()).toBe("term_new");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // #1259 round 6 step 4: the resume-reuse branch above decides reuse-vs-create
+  // from `isIdleClaudeTerminal` on the EXACT pinned terminal — Orca's own
+  // tracked agent state, never an OS-level `ps` walk (round 5) or the
+  // terminal's title (round 3's own fix, measured backwards: a LIVE claude
+  // rewrites its own terminal's title via OSC, so title-matching called a
+  // genuinely live lead "gone").
+  test("a resume with a live claude process reuses it — no terminal create, kind 'exists' (item 7, #1259 round 6 step 4)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-healthy-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries({
+          handle: "term_live", title: "websites--pilot", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE,
+        }),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("exists");
+
+      expect(f.calls.some((c) => c[0] === "worktree" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+
+      // Lead files still land in the kept worktree even on the reuse path —
+      // a resumed worktree may have a stale working-set.md from before.
+      expect(existsSync(join(existingPath, ".fleet", "working-set.md"))).toBe(true);
+      // #1259 round 6 step 1: no `.fleet/lead.handle` existed yet (a studio
+      // provisioned before this mechanism) — the one-time fallback discovery
+      // backfills it with the terminal it found, so every LATER call uses
+      // the exact handle instead of discovering again.
+      expect(readFileSync(join(existingPath, ".fleet", "lead.handle"), "utf8").trim()).toBe("term_live");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // #1259 round 7 fix 2: resume's own decision reads ONLY `agentIdentity`,
+  // never `agentWait` — the operator's own finding 3: `agentWait` is absent
+  // from `terminal list --json` in every measured state (62 real rows), so
+  // a future list schema that DID carry it must never make resume close a
+  // live-but-waiting lead (blocked on its own permission prompt is still
+  // alive). This terminal carries a non-null `agentWait` right alongside
+  // `agentIdentity: "claude"` on the SAME pinned entry — resume must still
+  // read "exists," proving the decision no longer depends on wait-state at
+  // all, not even when the field is present.
+  test("resume treats ANY claude identity as existing, even with a non-null agentWait on the SAME pinned entry (#1259 round 7 fix 2)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-waiting-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    writeLeadHandle(existingPath, "term_waiting");
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries({
+          handle: "term_waiting", title: "websites--pilot", connected: true, orphaned: false, writable: true,
+          agentIdentity: "claude", agentWait: "permission",
+        }),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("exists");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // #1259 round 6 finding 1, the exact bug this round exists to fix: round
+  // 5's wake/resume both ranked worktree-matched candidates and acted on
+  // whichever one came out first — real list order put an operator's own
+  // unrelated shell ahead of the actual lead. This test pins
+  // `.fleet/lead.handle` to the SECOND entry (the real lead) while the
+  // FIRST entry (an operator's own shell, which `rankAttachTerminals` would
+  // pick first on list-order alone) is idle-claude-shaped too, so a
+  // ranking-based lookup would pick the WRONG one; only reading the exact
+  // handle gets this right.
+  test("resume honors the exact pinned handle, never a re-ranked guess — even when a DIFFERENT terminal would rank first (#1259 round 6 finding 1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-pinned-handle-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    writeLeadHandle(existingPath, "term_real_lead");
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries(
+          // Lists FIRST — would win a rank-only lookup, but is NOT the
+          // pinned handle, so must never be chosen or touched.
+          { handle: "term_operator_shell", title: "websites--pilot", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE },
+          { handle: "term_real_lead", title: "websites--pilot", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE },
+        ),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("exists");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // The exact case the title-based check got backwards: the terminal's own
+  // title has drifted away from the studio id entirely (claude's own OSC
+  // rewrite, e.g. to `✳ fix the login bug`) — the process check must not
+  // care, since it never reads the title at all.
+  test("a resume reuses a live claude process even when the terminal's title does NOT match the studio id (simulated OSC rewrite)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-osc-title-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries({
+          handle: "term_live", title: "✳ fix the login bug", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE,
+        }),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("exists");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // #1259 round 7 fix 1: round 6's fallback used to rank ANY `connected`
+  // terminal and close whichever one came out first, even with no
+  // `agentIdentity` at all on it. That ranking-by-list-order IS the bug Fix 1
+  // removes: with no `agentIdentity:"claude"` candidate anywhere, the
+  // fallback now returns null (never a guess), so nothing is identified to
+  // close — a studio resumes by creating a fresh terminal, leaving whatever
+  // unidentified terminal was there alone, rather than risk closing the wrong
+  // one.
+  test("a resume with no agentIdentity:claude candidate at all closes nothing, still creates a fresh terminal (item 7, #1259 round 7 fix 1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-unhealthy-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries({
+          handle: "term_dead", title: "websites--pilot", connected: true, orphaned: false, writable: true,
+        }),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+      const create = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
+      expect(create).toBeDefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // #1259 round 7 fix 1: two candidates, neither carrying
+  // `agentIdentity:"claude"` — ambiguous either way old `rankAttachTerminals`
+  // picked the first one (list order) and closed it, which was exactly how
+  // the operator's own regression (finding 2) closed an operator's own shell.
+  // The fallback now refuses to guess among ANY zero-or-many-claude set, so
+  // neither is closed.
+  test("a resume with no agentIdentity:claude candidate among several closes neither, never guesses which one to close (#1259 round 7 fix 1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-two-terms-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries(
+          { handle: "term_stale_lead", title: "websites--pilot", connected: true, orphaned: false, writable: true },
+          { handle: "term_operator_shell", title: "zsh", connected: true, orphaned: false, writable: true },
+        ),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // #1259 round 8 fix B1: the operator's own measurement — no pin, a list
+  // `[live lead, 2nd claude-titled terminal]` — made the OLD code's "no
+  // usable candidate" and "two candidates, can't tell which" cases both
+  // collapse onto the same `null`, so resume fell through to `terminal
+  // create` and spawned a SECOND lead beside the live one. `findPinnedLeadTerminal`
+  // now tells these apart (`"none"` vs `"ambiguous"`); resume must REFUSE on
+  // ambiguous — no close (nothing is known to be dead), no create (a second
+  // lead would duplicate the real one), outcome `failed`.
+  test("resume with no pin and >=2 claude-identified terminals refuses: no create, no close, outcome failed (#1259 round 8 fix B1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-ambiguous-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries(
+          { handle: "term_live_lead", title: "fleet", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE },
+          { handle: "term_second_claude", title: "fleet", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE },
+        ),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("failed");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // #1259 round 8 fix B3: mutants surviving all 21 orca-related bun files
+  // (`if (pinned)` -> always-true, `if (pinned?.handle)` -> always-false)
+  // mean no existing test positively asserted the close call for a dead
+  // pinned lead. A pinned-by-exact-handle entry with `agentIdentity: null`
+  // (the lead process exited) must be closed BY THAT EXACT HANDLE, a
+  // replacement created, and the new handle re-pinned — overwriting the
+  // dead one.
+  test("resume closes a dead pinned lead by its exact handle, creates a replacement, and re-pins (#1259 round 8 fix B3)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-dead-pin-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    writeLeadHandle(existingPath, "term_dead_lead");
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries({
+          handle: "term_dead_lead", title: "fleet", connected: true, orphaned: false, writable: true,
+          agentIdentity: null,
+        }),
+        "terminal close": ok("{}"),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      const close = f.calls.find((c) => c[0] === "terminal" && c[1] === "close");
+      expect(close).toBeDefined();
+      expect(close).toContain("term_dead_lead");
+
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(true);
+      // The replacement's handle overwrote the dead one.
+      expect(readFileSync(join(existingPath, ".fleet", "lead.handle"), "utf8").trim()).toBe("term_new");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("materializes all four container hooks with the lead gate (item 1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-local-"));
+    const worktreePath = join(root, "worktree");
+    try {
+      const f = fake({
+        "worktree create": ok(JSON.stringify({
+          ok: true,
+          result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: worktreePath } },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+        completionGate: true,
+      });
+      expect(outcome.kind).toBe("created");
+
+      // All five hook scripts copied from gates/ and executable.
+      for (const h of ["lead-gate", "session-reemit", "install-marker", "activity-heartbeat", "completion-gate"]) {
+        const p = join(worktreePath, ".claude", "hooks", `${h}.sh`);
+        expect(existsSync(p)).toBe(true);
+      }
+
+      // settings.json carries every event entry.
+      const cfg = JSON.parse(readFileSync(join(worktreePath, ".claude", "settings.json"), "utf8"));
+      const hookText = (evt: string) => JSON.stringify((cfg.hooks ?? {})[evt] ?? []);
+      expect(hookText("PreToolUse")).toContain("lead-gate.sh");
+      expect(hookText("SessionStart")).toContain("session-reemit.sh");
+      expect(hookText("SessionStart")).toContain("activity-heartbeat.sh");
+      expect(hookText("PostToolUse")).toContain("install-marker.sh");
+      expect(hookText("UserPromptSubmit")).toContain("activity-heartbeat.sh");
+      expect(hookText("Stop")).toContain("activity-heartbeat.sh");
+      expect(hookText("Notification")).toContain("activity-heartbeat.sh");
+      expect(hookText("Stop")).toContain("completion-gate.sh");
+      // completion-gate is FAIL-CLOSED: exit 2 on missing script.
+      expect(hookText("Stop")).toContain("exit 2");
+
+      // Every hook command resolves its script by $CLAUDE_PROJECT_DIR (claude's
+      // stable project-root pointer), never $PWD (a lead that cd's would break
+      // $PWD and the gate would refuse every call) — the SAME anchor
+      // localLeadGateHookCommand builds.
+      expect(localLeadGateHookCommand()).toContain("$CLAUDE_PROJECT_DIR/.claude/hooks/lead-gate.sh");
+      expect(localLeadGateHookCommand()).not.toContain("$PWD");
+      for (const evt of ["PreToolUse", "SessionStart", "PostToolUse", "UserPromptSubmit", "Stop", "Notification"]) {
+        expect(hookText(evt)).toContain("$CLAUDE_PROJECT_DIR/.claude/hooks/");
+        expect(hookText(evt)).not.toContain("$PWD");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("no completion-gate when completionGate is false: hook and Stop entry both absent (item 1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-local-"));
+    const worktreePath = join(root, "worktree");
+    try {
+      const f = fake({
+        "worktree create": ok(JSON.stringify({
+          ok: true,
+          result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: worktreePath } },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+        completionGate: false,
+      });
+      expect(outcome.kind).toBe("created");
+      expect(existsSync(join(worktreePath, ".claude", "hooks", "completion-gate.sh"))).toBe(false);
+      const cfg = JSON.parse(readFileSync(join(worktreePath, ".claude", "settings.json"), "utf8"));
+      expect(JSON.stringify((cfg.hooks ?? {}).Stop ?? [])).not.toContain("completion-gate.sh");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("launch command arms FLEET_WORKSPACE so hooks find the worktree, not /workspace (item 1)", () => {
+    const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    expect(cmd).toContain('STUDIO_ID=websites--pilot FLEET_WORKSPACE="/w" claude');
+  });
+});
+
+// #1259 round 7 fix 1: findPinnedLeadTerminal's FALLBACK branch (no pin, or a
+// stale one) used to rank `connected` candidates by list order and silently
+// pick #1 — the operator's own measured regression (finding 2): a resume
+// with no pin and a list `[operator zsh, live lead]` picked the zsh, closed
+// it, spawned a SECOND lead, and PINNED THE NEW ONE, leaving the real live
+// lead running forever, unpinned. The fallback now filters candidates by
+// `agentIdentity === "claude"` (never `connected`, which says nothing about
+// identity) and only ever acts on EXACTLY one such candidate — zero or two+
+// is an unresolvable ambiguity, so it refuses (null, no pin written) rather
+// than guess among them the way `rankAttachTerminals` did.
+describe("findPinnedLeadTerminal fallback discovery — identity-filtered, exact-one-or-refuse (#1259 round 7 fix 1)", () => {
+  const WID = "repo-websites::/w/studio-websites-pilot";
+
+  function fallbackRoot(): { root: string; worktreePath: string } {
+    const root = mkdtempSync(join(tmpdir(), "orca-fallback-"));
+    const worktreePath = join(root, "studio-websites-pilot");
+    mkdirSync(worktreePath, { recursive: true });
+    return { root, worktreePath };
+  }
+
+  function fallbackFake(worktreePath: string, entries: Parameters<typeof terminalEntries>[0][]): Fake {
+    return fake({
+      "worktree list": ok(JSON.stringify({
+        ok: true,
+        result: { worktrees: [{ id: WID, displayName: "studio-websites--pilot", path: worktreePath }] },
+      })),
+      "terminal list": terminalEntries(...entries),
+    });
+  }
+
+  test("(a) exactly one agentIdentity:claude candidate among non-claude ones is found and pinned, in either list order", async () => {
+    const zsh = { handle: "term_zsh", title: "zsh", connected: true, worktreeId: WID };
+    const lead = { handle: "term_lead", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE };
+    for (const entries of [[zsh, lead], [lead, zsh]]) {
+      const { root, worktreePath } = fallbackRoot();
+      try {
+        const f = fallbackFake(worktreePath, entries);
+        const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
+        expect(found.status).toBe("found");
+        expect(found.status === "found" ? found.terminal.handle : undefined).toBe("term_lead");
+        expect(readLeadHandle(worktreePath)).toBe("term_lead");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("(b) zero agentIdentity:claude candidates returns null and writes no pin at all", async () => {
+    const { root, worktreePath } = fallbackRoot();
+    try {
+      const f = fallbackFake(worktreePath, [
+        { handle: "term_zsh", title: "zsh", connected: true, worktreeId: WID },
+      ]);
+      const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
+      expect(found).toEqual({ status: "none" });
+      expect(readLeadHandle(worktreePath)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // #1259 round 8 fix B1: "ambiguous" is now its own status, distinct from
+  // "none" — a caller must be able to tell "nothing claude-shaped here,
+  // safe to create" apart from "something IS alive, just not identifiable,
+  // do not touch it."
+  test("(c) two agentIdentity:claude candidates is ambiguous -- status 'ambiguous' with the count, writes no pin, picks neither", async () => {
+    const { root, worktreePath } = fallbackRoot();
+    try {
+      const f = fallbackFake(worktreePath, [
+        { handle: "term_a", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE },
+        { handle: "term_b", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE },
+      ]);
+      const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
+      expect(found).toEqual({ status: "ambiguous", count: 2 });
+      expect(readLeadHandle(worktreePath)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("(d) the operator's exact regression: [operator zsh, live lead], no pin -- pins the live lead, never the zsh, in EITHER list order", async () => {
+    const zsh = { handle: "term_operator_zsh", title: "zsh", connected: true, worktreeId: WID, agentIdentity: null };
+    const lead = { handle: "term_live_lead", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE };
+    for (const entries of [[zsh, lead], [lead, zsh]]) {
+      const { root, worktreePath } = fallbackRoot();
+      try {
+        const f = fallbackFake(worktreePath, entries);
+        const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
+        expect(found.status).toBe("found");
+        expect(found.status === "found" ? found.terminal.handle : undefined).toBe("term_live_lead");
+        expect(readLeadHandle(worktreePath)).toBe("term_live_lead");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
   });
 });
 
@@ -569,6 +1131,77 @@ describe("local lead files are excluded from git (B3)", () => {
   });
 });
 
+describe("tracked .claude/settings.json -> settings.local.json (item 5)", () => {
+  // A real temp git worktree, so `git ls-files --error-unmatch` really runs.
+  function makeWorktree() {
+    const root = mkdtempSync(join(tmpdir(), "orca-tracked-settings-"));
+    const main = join(root, "main");
+    const wt = join(root, "wt");
+    mkdirSync(main);
+    execFileSync("git", ["init", "-q"], { cwd: main });
+    execFileSync("git", ["config", "user.email", "x@y"], { cwd: main });
+    execFileSync("git", ["config", "user.name", "x"], { cwd: main });
+    execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: main });
+    execFileSync("git", ["worktree", "add", "-q", wt, "-b", "wt"], { cwd: main });
+    return { root, main, wt };
+  }
+
+  test("localSettingsPath returns settings.local.json when .claude/settings.json is tracked", () => {
+    const { root, wt } = makeWorktree();
+    try {
+      mkdirSync(join(wt, ".claude"), { recursive: true });
+      writeFileSync(join(wt, ".claude", "settings.json"), "{}\n");
+      execFileSync("git", ["-C", wt, "add", ".claude/settings.json"]);
+      execFileSync("git", ["-C", wt, "commit", "-q", "-m", "track settings"]);
+      expect(localSettingsPath(wt)).toBe(join(wt, ".claude", "settings.local.json"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("localSettingsPath returns settings.json when nothing is tracked", () => {
+    const { root, wt } = makeWorktree();
+    try {
+      expect(localSettingsPath(wt)).toBe(join(wt, ".claude", "settings.json"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("materialize writes hooks to settings.local.json, leaves the tracked settings.json bytes untouched, and excludes it", async () => {
+    const { root, wt } = makeWorktree();
+    try {
+      mkdirSync(join(wt, ".claude"), { recursive: true });
+      writeFileSync(join(wt, ".claude", "settings.json"), '{"some":"tracked"}\n');
+      execFileSync("git", ["-C", wt, "add", ".claude/settings.json"]);
+      execFileSync("git", ["-C", wt, "commit", "-q", "-m", "track settings"]);
+
+      const f = fake({
+        "worktree create": ok(JSON.stringify({
+          ok: true,
+          result: { worktree: { id: "repo-websites::/w/studio-websites--pilot", displayName: "studio-websites--pilot", path: wt } },
+        })),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      // The tracked file's bytes are byte-identical — never clobbered.
+      expect(readFileSync(join(wt, ".claude", "settings.json"), "utf8")).toBe('{"some":"tracked"}\n');
+      // The hooks landed in settings.local.json instead.
+      const local = JSON.parse(readFileSync(join(wt, ".claude", "settings.local.json"), "utf8"));
+      expect(JSON.stringify(local.hooks ?? {})).toContain("lead-gate.sh");
+      // And it is excluded from git.
+      const ignored = execFileSync("git", ["-C", wt, "check-ignore", ".claude/settings.local.json"], { encoding: "utf8" }).trim();
+      expect(ignored).toBe(".claude/settings.local.json");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Fleet task #1248 review BLOCKER B1 (fix round): resolveStudioWorktreePath —
 // the ORCA worktree's own on-disk path for a local studio's destroy decision.
@@ -593,5 +1226,457 @@ describe("resolveStudioWorktreePath (B1 fix round)", () => {
   test("null when the worktree list has no row for the studio", async () => {
     const f = fake({ "worktree list": worktrees("staging") });
     expect(await resolveStudioWorktreePath("websites--pilot", f.deps)).toBeNull();
+  });
+});
+
+describe("local studio wake via orca terminal send (item 2)", () => {
+  const WID = "repo-websites::/w/studio-websites--pilot";
+
+  /** Orca's `terminal show --terminal <handle> --json` envelope — #1259
+   *  round 7 fix 3's own gate data source, read fresh right before any
+   *  typing. `detail: null` simulates the call failing or reporting no
+   *  terminal at all. */
+  function terminalShow(detail: { agentIdentity?: string | null; agentWait?: unknown } | null): OrcaResult {
+    return ok(JSON.stringify({ ok: true, result: { terminal: detail } }));
+  }
+
+  /** The one `terminal list` answer `findPinnedLeadTerminal` reads to find
+   *  the lead's handle — #1259 round 7 fix 4 removes the SECOND, post-type
+   *  re-read entirely (see the describe block below), so one plain entry is
+   *  all any wake test needs now. Needs `agentIdentity:"claude"` for
+   *  `findPinnedLeadTerminal`'s own fallback discovery (#1259 round 7 fix 1)
+   *  to find it at all when no pin is already written. */
+  function oneTerminal(): OrcaResult {
+    return terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE });
+  }
+
+  // #1259 round 9 fix B2': real Orca 1.4.232's own receipt shape, read from
+  // the installed CLI's own handler source
+  // (`Orca.app/.../out/cli/handlers/terminal-send.js`) — `result.send.
+  // accepted` plus `result.send.prompt.stages[]`, NOT the round-7/8
+  // `result.submission.status` guess (which never exists on real Orca and
+  // made every real wake report `woke:false`, 0/N against round 7's own 4/4).
+  //
+  // #1259 round 9 AMEND (real-Orca measurement, 4 trials on 21b9ff10):
+  // `"turn_started"` only showed up in the receipt 1/4 times even though ALL
+  // 4 turns genuinely ran (confirmed by hand with `fleet task show` after
+  // each trial) — a busy lead returns `["input_accepted"]` only and just
+  // queues the message for later. So `turn_started` is FLAKY, not a gate:
+  // `"input_accepted"` alone is the reliable success signal; `turn_started`,
+  // when present, is informational only (see `turnStarted` below).
+  function sendSubmitted(): OrcaResult {
+    return ok(JSON.stringify({
+      ok: true,
+      result: { send: { accepted: true, prompt: { stages: ["input_accepted", "turn_started"] } } },
+    }));
+  }
+  /** The receipt a busy lead (or a timeout/stall) produces — accepted into
+   *  the composer and queued, but the turn hasn't started yet. #1259 round 9
+   *  AMEND: real-Orca measurement shows this is a genuine success case too
+   *  (3/4 of real trials looked exactly like this, yet all 4/4 turns ran) —
+   *  no longer the failure case the pre-amendment round 9 fix treated it as. */
+  function sendQueuedOnly(): OrcaResult {
+    return ok(JSON.stringify({
+      ok: true,
+      result: { send: { accepted: true, prompt: { stages: ["input_accepted"] } } },
+    }));
+  }
+  /** Blocked on a permission prompt — `accepted` can still be true (the text
+   *  landed in the composer), but `prompt.observation` reports the block and
+   *  `stages` never reaches `"turn_started"` either. #1259 round 9 AMEND: the
+   *  operator's own rule ("busy lead also returns [input_accepted]; message
+   *  queues and runs later") reads a permission-blocked lead as just another
+   *  kind of busy — `accepted:true` plus `"input_accepted"` in `stages` is
+   *  still a genuine success, same as `sendQueuedOnly` above. */
+  function sendBlockedOnPermission(): OrcaResult {
+    return ok(JSON.stringify({
+      ok: true,
+      result: { send: { accepted: true, prompt: { stages: ["input_accepted"], observation: "permission" } } },
+    }));
+  }
+  /** Never accepted into the composer at all — the one real failure case
+   *  left under the amended rule. */
+  function sendNotAccepted(): OrcaResult {
+    return ok(JSON.stringify({
+      ok: true,
+      result: { send: { accepted: false, prompt: { stages: [] } } },
+    }));
+  }
+
+  test("sendLocalWake types the digest and submits it in ONE terminal send call, with --wait-submit (#1259 round 7 fix 4)", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": oneTerminal(),
+      "terminal show": terminalShow(IDLE_CLAUDE),
+      "terminal send": sendSubmitted(),
+    });
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: true });
+    const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
+    expect(sends).toEqual([
+      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter", "--wait-submit", "5", "--json"],
+    ]);
+  });
+
+  // #1259 round 5's own measured gap, still true under round 6's mechanism:
+  // a live local lead rewrites its own terminal's title via OSC
+  // (`✳ <summary>`), never matching the studio id or any #153 attach-title
+  // form. `sendLocalWake`'s own terminal lookup must still find it: Orca's
+  // own tracked agent state, title irrelevant.
+  test("sendLocalWake finds and types into a terminal whose title is claude's own OSC rewrite, not the studio id", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": terminalEntries({
+        handle: "term_0", title: "✳ fix the login bug", connected: true, worktreeId: WID, ...IDLE_CLAUDE,
+      }),
+      "terminal show": terminalShow(IDLE_CLAUDE),
+      "terminal send": sendSubmitted(),
+    });
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: true });
+    const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
+    expect(sends).toEqual([
+      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter", "--wait-submit", "5", "--json"],
+    ]);
+  });
+
+  // #1259 round 8: with TWO claude-identified terminals in the worktree, an
+  // exact-handle pin naming the SECOND one must still win — the pin is
+  // read and matched BEFORE the fallback's identity-filtered discovery (and
+  // its own count) is ever consulted, so a pin resolves unambiguously
+  // regardless of how many other claude-shaped candidates are also present.
+  test("wake with 2 claude terminals, pin naming the 2nd, sends to the pinned handle (#1259 round 8)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-wake-pinned-"));
+    const worktreePath = join(root, "studio-websites-pilot");
+    mkdirSync(worktreePath, { recursive: true });
+    writeLeadHandle(worktreePath, "term_b");
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: WID, displayName: "studio-websites--pilot", path: worktreePath }] },
+        })),
+        "terminal list": terminalEntries(
+          { handle: "term_a", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE },
+          { handle: "term_b", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE },
+        ),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendSubmitted(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: true });
+      const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+      expect(send).toContain("term_b");
+      expect(send).not.toContain("term_a");
+      expect(f.calls).toContainEqual(["terminal", "show", "--terminal", "term_b", "--json"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("sendLocalWake refuses when there is no healthy attach terminal", async () => {
+    const f = fake({ "worktree list": worktrees("studio-websites--pilot"), "terminal list": terminals(false) });
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out.woke).toBe(false);
+  });
+
+  test("sendLocalWake refuses outside an Orca session", async () => {
+    const f = fake({});
+    f.deps.env = {};
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out.woke).toBe(false);
+  });
+
+  test("resolveLocalWake passes a non-local report through untouched", async () => {
+    const f = fake({});
+    const report = { woke: false as const, reason: "STOPPED" };
+    expect(await resolveLocalWake(report, "x", 1, f.deps)).toBe(report);
+  });
+
+  // Fix 1 (#1259 round 4): resolveLocalWake no longer trusts `report.digest` —
+  // it builds ONE fixed template from the task NUMBER alone, validated as a
+  // plain positive integer. See the describe block below ("the wake payload
+  // is a fixed template") for the injection-proof this change exists for.
+  test("resolveLocalWake swaps a local refusal for the terminal send, carrying the fixed per-task-number template", async () => {
+    const digest = "Board task #42 has a new message. Run: fleet task show 42";
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": oneTerminal(),
+      "terminal show": terminalShow(IDLE_CLAUDE),
+      "terminal send": sendSubmitted(),
+    });
+    const report = { woke: false as const, reason: "LOCAL", local: true as const };
+    const out = await resolveLocalWake(report, "websites--pilot", 42, f.deps);
+    expect(out).toEqual({ woke: true, digest, turnStarted: true });
+  });
+
+  describe("the wake payload is a fixed template, never attacker-influenced board content (#1259 round 4 fix 1)", () => {
+    test("an attacker-shaped report.digest (shell command substitution) never reaches terminal send — it is never even read", async () => {
+      const digest = "Board task #7 has a new message. Run: fleet task show 7";
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendSubmitted(),
+      });
+      const report = { woke: false as const, reason: "LOCAL", local: true as const, digest: "$(touch PWNED)" };
+      const out = await resolveLocalWake(report, "websites--pilot", 7, f.deps);
+      expect(out).toEqual({ woke: true, digest, turnStarted: true });
+      const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+      expect(send?.[5]).not.toContain("PWNED");
+      expect(send?.[5]).not.toContain("touch");
+      expect(send?.[5]).toBe(digest);
+    });
+
+    test("an attacker-shaped report.digest (zsh glob qualifier, no shell metacharacters needed) never reaches terminal send either", async () => {
+      const digest = "Board task #9 has a new message. Run: fleet task show 9";
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendSubmitted(),
+      });
+      const report = {
+        woke: false as const, reason: "LOCAL", local: true as const,
+        digest: "x\" *(e:'touch PWNED':) \"",
+      };
+      const out = await resolveLocalWake(report, "websites--pilot", 9, f.deps);
+      expect(out).toEqual({ woke: true, digest, turnStarted: true });
+      const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+      expect(send?.[5]).not.toContain("PWNED");
+      expect(send?.[5]).not.toContain("*(e:");
+    });
+
+    // 1e21: `Number.isInteger(1e21)` is TRUE (it has no fractional part) even
+    // though it is nowhere near a real task number — `Number.isSafeInteger`
+    // is the correct check (minor fix, #1259 round 5), rejecting it and
+    // every other value outside the safe integer range, never producing a
+    // nonsensical `#1e+21` in the fixed wake template.
+    test("refuses, fail closed, when the task number is not a positive integer — no orca call at all", async () => {
+      const f = fake({});
+      const report = { woke: false as const, reason: "LOCAL", local: true as const };
+      for (const bad of [0, -1, 1.5, Number.NaN, 1e21]) {
+        const out = await resolveLocalWake(report, "websites--pilot", bad, f.deps);
+        expect(out?.woke).toBe(false);
+        if (out && !out.woke) expect(out.reason).toContain(`invalid task number ${bad}`);
+      }
+      expect(f.calls).toEqual([]);
+    });
+  });
+
+  // #1259 round 7 fix 3: the PRIMARY liveness gate now reads `terminal show
+  // --terminal <handle> --json`, never the `terminal list` entry's own
+  // `agentWait` — MEASURED absent from `terminal list --json` in every
+  // state (62 real rows); it only lives on `terminal show`, where it reads
+  // null except during an actual permission wait. Gates BEFORE any typing
+  // happens at all.
+  describe("the terminal-show gate — Orca's own authoritative idle state, read fresh before any typing (#1259 round 7 fix 3)", () => {
+    test("reads the gate via `terminal show --terminal <handle> --json`, and proceeds to type when it reports idle", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": () => Promise.resolve(terminalEntries({
+          handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ WAKE #1", ...IDLE_CLAUDE,
+        })),
+        "terminal show": terminalShow({ agentIdentity: "claude", agentWait: null }),
+        "terminal send": sendSubmitted(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(true);
+      expect(f.calls).toContainEqual(["terminal", "show", "--terminal", "term_0", "--json"]);
+    });
+
+    // The operator's own exact wording: agentWait===null (strict), unlike
+    // resume's own `agentWait==null` loose read (#1259 round 6) — `terminal
+    // show`'s field is expected to reliably be either null or a real value,
+    // never absent, unlike `list`'s entries.
+    test("refuses when terminal show reports a non-null agentWait (blocked on a permission prompt) — never attempts to type", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": () => Promise.resolve(terminalEntries({
+          handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready", ...IDLE_CLAUDE,
+        })),
+        "terminal show": terminalShow({ agentIdentity: "claude", agentWait: "permission" }),
+        "terminal send": ok("{}"),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("not an idle claude session");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
+    });
+
+    test("refuses when terminal show reports the terminal is no longer claude (process exited) — never attempts to type", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": () => Promise.resolve(terminalEntries({
+          handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready", ...IDLE_CLAUDE,
+        })),
+        "terminal show": terminalShow({ agentIdentity: null, agentWait: null }),
+        "terminal send": ok("{}"),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("not an idle claude session");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
+    });
+  });
+
+  // #1259 round 7 fix 4: the old 2-phase verify-then-commit send (type
+  // without `--enter`, re-read the preview by exact handle, require the
+  // LAST non-empty preview line to contain the FULL digest, only then send
+  // a separate `--enter`) never succeeded on real Orca — the operator's own
+  // 4/4 measured real-Orca attempts: the composer wraps long text across
+  // multiple visual lines, so the digest was NEVER found whole on any
+  // single "last line," even on a fully successful type, stranding the
+  // digest half-typed every time. Replaced with ONE `terminal send` call
+  // carrying `--enter --wait-submit <seconds>`, trusting Orca's OWN
+  // submission acknowledgment instead of re-reading screen text ourselves —
+  // no second `terminal list`/`terminal show` call after the send, ever.
+  describe("single-call send with --wait-submit, trusting Orca's own submission acknowledgment (#1259 round 7 fix 4)", () => {
+    test("the send call carries --enter and --wait-submit with a positive value; success yields woke:true with no re-read after the send", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendSubmitted(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: true });
+
+      const sendIdx = f.calls.findIndex((c) => c[0] === "terminal" && c[1] === "send");
+      expect(sendIdx).toBeGreaterThanOrEqual(0);
+      const send = f.calls[sendIdx]!;
+      expect(send).toContain("--enter");
+      const waitIdx = send.indexOf("--wait-submit");
+      expect(waitIdx).toBeGreaterThan(-1);
+      expect(Number(send[waitIdx + 1])).toBeGreaterThan(0);
+
+      // No `terminal list`/`terminal show` call happened AFTER the send —
+      // the single `list` (lookup) and single `show` (gate) calls both
+      // precede it, never follow it.
+      const afterSend = f.calls.slice(sendIdx + 1);
+      expect(afterSend.some((c) => c[0] === "terminal" && (c[1] === "list" || c[1] === "show"))).toBe(false);
+    });
+
+    test("a failed terminal send refuses, surfacing orca's own stderr", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": { ok: false, stdout: "", stderr: "orca wedged", timedOut: false },
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("terminal send failed");
+      // Only ONE `terminal list` call — the lookup; no re-read ever ran.
+      expect(f.calls.filter((c) => c[0] === "terminal" && c[1] === "list").length).toBe(1);
+    });
+
+    test("a timed-out terminal send refuses the same way", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": { ok: false, stdout: "", stderr: "", timedOut: true },
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("terminal send failed");
+    });
+
+    // #1259 round 8 fix B2: `--enter --wait-submit` ACCEPTED-NOT-SUBMITTED is
+    // a real outcome `--wait-submit`'s own help text documents (timeout
+    // returns "the queued/input-accepted receipt"). The send call must carry
+    // `--json` so the receipt can be parsed at all. #1259 round 9 AMEND:
+    // `turn_started` present (as here) is still success, but is now info-
+    // only -- the gate is `accepted && input_accepted`; this fixture also
+    // asserts `turnStarted:true` is surfaced on the report.
+    test("the send carries --json and reports woke:true, turnStarted:true, once the receipt shows input_accepted plus turn_started (#1259 round 8 fix B2)", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendSubmitted(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: true });
+      const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+      expect(send).toContain("--json");
+    });
+
+    // #1259 round 9 AMEND (real-Orca measurement, 4 trials on 21b9ff10): the
+    // PRIOR round's own rule required `turn_started` and treated this exact
+    // receipt shape as a failure ("submit not observed"). Real data proved
+    // that wrong -- `turn_started` showed up 1/4 times even though all 4/4
+    // turns genuinely ran; a busy lead returns exactly this `[input_accepted]`
+    // -only shape and the message just queues and runs later. This is now a
+    // SUCCESS case: `woke:true`, `turnStarted:false` (informational only).
+    // This test must go RED against the pre-amendment code (which still
+    // requires turn_started) before the fix, proving the regression the
+    // operator's new data found.
+    test("a receipt showing only input_accepted, no turn_started, reports woke:true with turnStarted:false -- a busy lead queues, not a failure (#1259 round 9 AMEND)", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendQueuedOnly(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: false });
+    });
+
+    // #1259 round 9 AMEND: the operator's own literal rule ("woke:true when
+    // accepted && stages includes input_accepted... anything else ->
+    // woke:false") carves out no exception for a permission-blocked receipt,
+    // and the operator's own reasoning ("busy lead also returns
+    // [input_accepted]; message queues and runs later") reads a permission
+    // prompt as just another kind of busy -- fleet's job is confirming the
+    // keystrokes were accepted into Orca's queue, not guaranteeing instant
+    // delivery. So this is now ALSO a success case, flipped from the prior
+    // round's woke:false.
+    test("a receipt blocked on a permission prompt (accepted, input_accepted, no turn_started) reports woke:true -- queued is still a wake (#1259 round 9 AMEND)", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendBlockedOnPermission(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: false });
+    });
+
+    // The one real failure case left under the amended rule: never accepted
+    // into the composer at all, so `input_accepted` was never observed.
+    test("a receipt showing accepted:false reports woke:false -- never accepted, submit not observed (#1259 round 9 AMEND)", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendNotAccepted(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("submit not observed");
+    });
+  });
+
+  // Fix 1 (#1259 round 4): fix-1b's shell-metachar strip (`$`, backtick,
+  // backslash, `;`, `|`, `&`, `<`, `>`) is gone from `sendLocalWake` itself —
+  // it was defense-in-depth for an untrusted `digest`, and `resolveLocalWake`
+  // no longer ever passes one through (see the describe block above). The
+  // older, broader control-byte strip stays: it is not tied to that specific
+  // threat and costs nothing to keep.
+  test("a digest carrying control bytes is cleaned before sending AND before returning, shell metacharacters pass through untouched", async () => {
+    const cleaned = "WAKE  $(reboot)";
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": oneTerminal(),
+      "terminal show": terminalShow(IDLE_CLAUDE),
+      "terminal send": sendSubmitted(),
+    });
+    const out = await sendLocalWake("websites--pilot", "WAKE \x03 $(reboot)\x1b", f.deps);
+    expect(out.woke).toBe(true);
+    expect(out.digest).toBe(cleaned);
+    const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", cleaned, "--enter", "--wait-submit", "5", "--json"]);
   });
 });
