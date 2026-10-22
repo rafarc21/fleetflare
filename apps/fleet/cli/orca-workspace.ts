@@ -307,9 +307,19 @@ interface OrcaEnvelope {
     // source (`Orca.app/.../out/cli/handlers/terminal-send.js`) — it is
     // `result.send.{accepted, prompt.stages[]}`, never `result.submission.
     // status` (round 7/8's own unconfirmed guess, which never exists on real
-    // Orca). `stages` gains `"turn_started"` once Orca observes the turn
-    // actually start; stays at just `["input_accepted"]` on timeout/stall;
-    // `prompt.observation === "permission"` when blocked on a prompt.
+    // Orca). `prompt.observation === "permission"` when blocked on a prompt.
+    //
+    // #1259 round 9 AMEND (real-Orca measurement, 4 trials on 21b9ff10):
+    // `stages` gains `"turn_started"` once Orca observes the turn actually
+    // start, but that observation is MEASURED FLAKY — it showed up only 1/4
+    // trials even though all 4/4 turns genuinely ran (confirmed by hand with
+    // `fleet task show` after each trial). A busy lead returns
+    // `["input_accepted"]` only and just queues the message for later;
+    // `stages` also stays at just `["input_accepted"]` on a genuine
+    // timeout/stall, same shape. So `"input_accepted"` in `stages` is the
+    // reliable success signal this file gates on; `"turn_started"` is
+    // surfaced for info only, never as a gate — see `sendLocalWake`'s own
+    // receipt check below.
     send?: { accepted?: boolean; prompt?: { stages?: string[]; observation?: string } };
   };
 }
@@ -1919,27 +1929,36 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
     // submission.status === "turn_started"`) was still wrong — that field
     // never exists on real Orca, so every real wake read `status=none` and
     // reported `woke:false`, regressing round 7's own 4/4 measured real-Orca
-    // successes to 0/N. Corrected to the CLI-source-confirmed shape:
-    // genuine submission requires BOTH `send.accepted === true` AND
-    // `send.prompt.stages` including `"turn_started"` — accepted alone
-    // (queued, input-accepted, or blocked on a permission prompt, all of
-    // which still set `accepted: true`) never counts as genuine submission,
-    // and neither does a parse failure or an envelope missing the field
-    // entirely.
+    // successes to 0/N. Corrected to the CLI-source-confirmed shape, but
+    // that first-pass correction OVER-required `send.prompt.stages`
+    // including `"turn_started"` as part of the gate.
+    //
+    // #1259 round 9 AMEND (real-Orca measurement, 4 trials on 21b9ff10):
+    // the `turn_started` requirement above is wrong — real-Orca data shows
+    // `turn_started` is FLAKY (1/4 trials) even though all 4/4 turns
+    // genuinely ran (confirmed by hand with `fleet task show` after each
+    // trial); a busy lead returns `["input_accepted"]` only and the message
+    // queues and runs later. The corrected, looser gate: genuine submission
+    // requires ONLY `send.accepted === true` AND `send.prompt.stages`
+    // including `"input_accepted"` — that covers queued, input-accepted,
+    // and permission-blocked receipts alike (all of which still set
+    // `accepted: true` and reach `input_accepted`). `turn_started`, when
+    // present, is surfaced as `turnStarted` for info only — it is NEVER
+    // part of the gate condition. Only a genuinely unaccepted receipt (or
+    // one that never reaches `input_accepted`, or a parse failure/missing
+    // envelope) counts as `woke:false`.
     const envelope = await orcaJson(
       deps,
       ["terminal", "send", "--terminal", term.handle, "--text", clean, "--enter", "--wait-submit", "5", "--json"],
       SEND_WAIT_SUBMIT_TIMEOUT_MS,
     );
     const accepted = envelope.result?.send?.accepted === true;
+    const inputAccepted = envelope.result?.send?.prompt?.stages?.includes("input_accepted") === true;
     const turnStarted = envelope.result?.send?.prompt?.stages?.includes("turn_started") === true;
-    if (!accepted || !turnStarted) {
-      const reason = !accepted
-        ? "terminal send not accepted, submit not observed (never queued)"
-        : "terminal send queued, submit not observed (turn never started)";
-      return { woke: false, reason };
+    if (!accepted || !inputAccepted) {
+      return { woke: false, reason: "terminal send not accepted, submit not observed (never queued)" };
     }
-    return { woke: true, digest: clean };
+    return { woke: true, digest: clean, turnStarted };
   } catch (err) {
     // orcaJson's own thrown message already names the failed command (e.g.
     // "orca terminal send failed: ..." / "... timed out after 10s") — prefix

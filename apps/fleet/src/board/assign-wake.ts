@@ -82,7 +82,12 @@ export interface AssignWakeDeps {
  *  response rather than only logged: "nothing happened" is precisely the
  *  failure this issue is about, and a silent non-wake would reproduce it. */
 export type AssignWakeReport =
-  | { woke: true; digest: string }
+  // `turnStarted` (#1259 round 9 AMEND) is additive-only, informational: real
+  // Orca measurement shows it's a flaky signal (1/4 real trials even when
+  // the wake fully succeeded 4/4) so it is never required for `woke: true`
+  // above — see `sendLocalWake` (apps/fleet/cli/orca-workspace.ts) for the
+  // gate that actually computes it.
+  | { woke: true; digest: string; turnStarted?: boolean }
   | { woke: false; reason: string; local?: true; digest?: string };
 
 /**

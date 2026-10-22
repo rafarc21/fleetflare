@@ -1256,16 +1256,25 @@ describe("local studio wake via orca terminal send (item 2)", () => {
   // accepted` plus `result.send.prompt.stages[]`, NOT the round-7/8
   // `result.submission.status` guess (which never exists on real Orca and
   // made every real wake report `woke:false`, 0/N against round 7's own 4/4).
-  // `stages` gains `"turn_started"` once Orca observes the turn actually
-  // start; stays at just `["input_accepted"]` on timeout/stall.
+  //
+  // #1259 round 9 AMEND (real-Orca measurement, 4 trials on 21b9ff10):
+  // `"turn_started"` only showed up in the receipt 1/4 times even though ALL
+  // 4 turns genuinely ran (confirmed by hand with `fleet task show` after
+  // each trial) — a busy lead returns `["input_accepted"]` only and just
+  // queues the message for later. So `turn_started` is FLAKY, not a gate:
+  // `"input_accepted"` alone is the reliable success signal; `turn_started`,
+  // when present, is informational only (see `turnStarted` below).
   function sendSubmitted(): OrcaResult {
     return ok(JSON.stringify({
       ok: true,
       result: { send: { accepted: true, prompt: { stages: ["input_accepted", "turn_started"] } } },
     }));
   }
-  /** The receipt a timeout/stall produces — accepted into the composer, but
-   *  the turn never observed starting. */
+  /** The receipt a busy lead (or a timeout/stall) produces — accepted into
+   *  the composer and queued, but the turn hasn't started yet. #1259 round 9
+   *  AMEND: real-Orca measurement shows this is a genuine success case too
+   *  (3/4 of real trials looked exactly like this, yet all 4/4 turns ran) —
+   *  no longer the failure case the pre-amendment round 9 fix treated it as. */
   function sendQueuedOnly(): OrcaResult {
     return ok(JSON.stringify({
       ok: true,
@@ -1274,11 +1283,23 @@ describe("local studio wake via orca terminal send (item 2)", () => {
   }
   /** Blocked on a permission prompt — `accepted` can still be true (the text
    *  landed in the composer), but `prompt.observation` reports the block and
-   *  `stages` never reaches `"turn_started"` either. */
+   *  `stages` never reaches `"turn_started"` either. #1259 round 9 AMEND: the
+   *  operator's own rule ("busy lead also returns [input_accepted]; message
+   *  queues and runs later") reads a permission-blocked lead as just another
+   *  kind of busy — `accepted:true` plus `"input_accepted"` in `stages` is
+   *  still a genuine success, same as `sendQueuedOnly` above. */
   function sendBlockedOnPermission(): OrcaResult {
     return ok(JSON.stringify({
       ok: true,
       result: { send: { accepted: true, prompt: { stages: ["input_accepted"], observation: "permission" } } },
+    }));
+  }
+  /** Never accepted into the composer at all — the one real failure case
+   *  left under the amended rule. */
+  function sendNotAccepted(): OrcaResult {
+    return ok(JSON.stringify({
+      ok: true,
+      result: { send: { accepted: false, prompt: { stages: [] } } },
     }));
   }
 
@@ -1290,7 +1311,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       "terminal send": sendSubmitted(),
     });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-    expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+    expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: true });
     const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
     expect(sends).toEqual([
       ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter", "--wait-submit", "5", "--json"],
@@ -1312,7 +1333,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       "terminal send": sendSubmitted(),
     });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-    expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+    expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: true });
     const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
     expect(sends).toEqual([
       ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter", "--wait-submit", "5", "--json"],
@@ -1343,7 +1364,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "terminal send": sendSubmitted(),
       });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+      expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: true });
       const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
       expect(send).toContain("term_b");
       expect(send).not.toContain("term_a");
@@ -1386,7 +1407,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     });
     const report = { woke: false as const, reason: "LOCAL", local: true as const };
     const out = await resolveLocalWake(report, "websites--pilot", 42, f.deps);
-    expect(out).toEqual({ woke: true, digest });
+    expect(out).toEqual({ woke: true, digest, turnStarted: true });
   });
 
   describe("the wake payload is a fixed template, never attacker-influenced board content (#1259 round 4 fix 1)", () => {
@@ -1400,7 +1421,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       });
       const report = { woke: false as const, reason: "LOCAL", local: true as const, digest: "$(touch PWNED)" };
       const out = await resolveLocalWake(report, "websites--pilot", 7, f.deps);
-      expect(out).toEqual({ woke: true, digest });
+      expect(out).toEqual({ woke: true, digest, turnStarted: true });
       const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
       expect(send?.[5]).not.toContain("PWNED");
       expect(send?.[5]).not.toContain("touch");
@@ -1420,7 +1441,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         digest: "x\" *(e:'touch PWNED':) \"",
       };
       const out = await resolveLocalWake(report, "websites--pilot", 9, f.deps);
-      expect(out).toEqual({ woke: true, digest });
+      expect(out).toEqual({ woke: true, digest, turnStarted: true });
       const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
       expect(send?.[5]).not.toContain("PWNED");
       expect(send?.[5]).not.toContain("*(e:");
@@ -1519,7 +1540,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "terminal send": sendSubmitted(),
       });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+      expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: true });
 
       const sendIdx = f.calls.findIndex((c) => c[0] === "terminal" && c[1] === "send");
       expect(sendIdx).toBeGreaterThanOrEqual(0);
@@ -1564,10 +1585,12 @@ describe("local studio wake via orca terminal send (item 2)", () => {
 
     // #1259 round 8 fix B2: `--enter --wait-submit` ACCEPTED-NOT-SUBMITTED is
     // a real outcome `--wait-submit`'s own help text documents (timeout
-    // returns "the queued/input-accepted receipt"), never equivalent to a
-    // genuine submission. The send call must carry `--json` so the receipt
-    // can be parsed at all.
-    test("the send carries --json and reports woke:true only once the receipt shows genuine submission (turn_started) (#1259 round 8 fix B2)", async () => {
+    // returns "the queued/input-accepted receipt"). The send call must carry
+    // `--json` so the receipt can be parsed at all. #1259 round 9 AMEND:
+    // `turn_started` present (as here) is still success, but is now info-
+    // only -- the gate is `accepted && input_accepted`; this fixture also
+    // asserts `turnStarted:true` is surfaced on the report.
+    test("the send carries --json and reports woke:true, turnStarted:true, once the receipt shows input_accepted plus turn_started (#1259 round 8 fix B2)", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": oneTerminal(),
@@ -1575,16 +1598,22 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "terminal send": sendSubmitted(),
       });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+      expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: true });
       const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
       expect(send).toContain("--json");
     });
 
-    // The exact gap the operator's own review named: accepted-into-the-
-    // composer is NOT the same as genuinely submitted. A receipt that only
-    // ever reports "queued"/"input accepted" (never `turn_started`) must
-    // refuse, not report success.
-    test("a receipt showing only queued/input-accepted, never turn_started, reports woke:false -- submit was never observed (#1259 round 8 fix B2)", async () => {
+    // #1259 round 9 AMEND (real-Orca measurement, 4 trials on 21b9ff10): the
+    // PRIOR round's own rule required `turn_started` and treated this exact
+    // receipt shape as a failure ("submit not observed"). Real data proved
+    // that wrong -- `turn_started` showed up 1/4 times even though all 4/4
+    // turns genuinely ran; a busy lead returns exactly this `[input_accepted]`
+    // -only shape and the message just queues and runs later. This is now a
+    // SUCCESS case: `woke:true`, `turnStarted:false` (informational only).
+    // This test must go RED against the pre-amendment code (which still
+    // requires turn_started) before the fix, proving the regression the
+    // operator's new data found.
+    test("a receipt showing only input_accepted, no turn_started, reports woke:true with turnStarted:false -- a busy lead queues, not a failure (#1259 round 9 AMEND)", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": oneTerminal(),
@@ -1592,23 +1621,37 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "terminal send": sendQueuedOnly(),
       });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out.woke).toBe(false);
-      if (!out.woke) expect(out.reason).toContain("submit not observed");
+      expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: false });
     });
 
-    // #1259 round 9 fix B2': `result.submission.status` never exists on real
-    // Orca — real Orca's receipt is `result.send.{accepted,prompt.stages[]}`
-    // (confirmed against the installed CLI's own handler source). A receipt
-    // blocked on a permission prompt still has `accepted: true` (the text
-    // landed in the composer) but never reaches `"turn_started"` either —
-    // must refuse the same as any other not-yet-submitted receipt, never
-    // report `woke:true` just because `accepted` was true.
-    test("a receipt blocked on a permission prompt (accepted but turn never started) reports woke:false, not woke:true (#1259 round 9 fix B2')", async () => {
+    // #1259 round 9 AMEND: the operator's own literal rule ("woke:true when
+    // accepted && stages includes input_accepted... anything else ->
+    // woke:false") carves out no exception for a permission-blocked receipt,
+    // and the operator's own reasoning ("busy lead also returns
+    // [input_accepted]; message queues and runs later") reads a permission
+    // prompt as just another kind of busy -- fleet's job is confirming the
+    // keystrokes were accepted into Orca's queue, not guaranteeing instant
+    // delivery. So this is now ALSO a success case, flipped from the prior
+    // round's woke:false.
+    test("a receipt blocked on a permission prompt (accepted, input_accepted, no turn_started) reports woke:true -- queued is still a wake (#1259 round 9 AMEND)", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": oneTerminal(),
         "terminal show": terminalShow(IDLE_CLAUDE),
         "terminal send": sendBlockedOnPermission(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out).toEqual({ woke: true, digest: "WAKE #1", turnStarted: false });
+    });
+
+    // The one real failure case left under the amended rule: never accepted
+    // into the composer at all, so `input_accepted` was never observed.
+    test("a receipt showing accepted:false reports woke:false -- never accepted, submit not observed (#1259 round 9 AMEND)", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendNotAccepted(),
       });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(false);
