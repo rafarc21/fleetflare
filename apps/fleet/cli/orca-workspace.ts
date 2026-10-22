@@ -1701,6 +1701,48 @@ async function defaultIsClaudeForeground(worktreePath: string): Promise<boolean>
 }
 
 /**
+ * #1259 round 5 fix 3: the LOCAL wake's own terminal lookup — a studio's
+ * worktree's best-ranked CONNECTED terminal, period, never gated on title the
+ * way `findAttachTerminal`/`isHealthyAttach` are. Deliberately a SEPARATE
+ * function rather than a relaxed `findAttachTerminal` itself: that function
+ * is also `findAttachHandle`'s (board #220, `fleet attach --print-handle`)
+ * own lookup, and ITS title gate is correct and load-bearing there — an
+ * operator's own plain shell opened in a studio's worktree must still read
+ * `title !== "fleet"` and be excluded (see
+ * test/bun/orca-registry-rows.test.ts's own "no attach terminal" case,
+ * title `"zsh"`), a guarantee this relaxation must not quietly remove from
+ * every OTHER caller of that shared lookup.
+ *
+ * The relaxation itself is real and measured: a genuinely live local lead
+ * rewrites its OWN Orca terminal's title via OSC the moment it starts
+ * working (`✳ <summary>`) — never matching the studio id, never one of the
+ * #153 attach-title forms `isAttachTitle` recognizes (those are written by
+ * the CONTAINER path's `fleet attach <id>` wrapper process, which a local
+ * studio's terminal never runs — Orca's terminal there runs `claude` itself,
+ * directly). Measured 0/13 real live local claude terminals were found by
+ * the title-gated lookup; this one asks only "is it connected, and is it in
+ * this studio's worktree" — the worktree is already single-purpose by this
+ * file's own design (see this file's header), so `connected` here is a much
+ * narrower claim than it would be anywhere titles still matter.
+ */
+async function findLocalAttachTerminal(id: string, deps: OrcaDeps): Promise<OrcaTerminalEntry | null> {
+  if (!orcaPresent(deps)) return null;
+  try {
+    const [worktrees, terms] = await Promise.all([
+      fullList(deps, "worktrees", ROW_TIMEOUT_MS), fullList(deps, "terminals", ROW_TIMEOUT_MS),
+    ]);
+    const worktree = findStudioWorktree(id, worktrees, deps.registry);
+    if (!worktree?.id) return null;
+    const candidates = terms.filter((t) => t.connected === true && t.worktreeId === worktree.id);
+    if (candidates.length === 0) return null;
+    return rankAttachTerminals(candidates, id)[0] ?? null;
+  } catch (err) {
+    deps.log(`${id}: local attach terminal lookup failed — ${errText(err)}`);
+    return null;
+  }
+}
+
+/**
  * Fleet task #1259 item 2: wake a LOCAL studio's lead. A local row has no
  * container, so the Worker's assign wake refuses with `{local:true}` and this
  * CLI turns that into the Orca equivalent of the container wake: resolve the
@@ -1744,7 +1786,7 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
     };
   }
   const clean = digest.replace(/[\x00-\x1f\x7f]/g, "");
-  const term = await findAttachTerminal(id, deps);
+  const term = await findLocalAttachTerminal(id, deps);
   if (term === null || term.handle === undefined) {
     return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
   }

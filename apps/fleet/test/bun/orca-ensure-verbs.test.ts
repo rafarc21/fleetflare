@@ -930,6 +930,24 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter"]);
   });
 
+  // #1259 round 5 fix 3: the measured gap — a live local lead rewrites its
+  // own terminal's title via OSC (`✳ <summary>`), never matching the studio
+  // id or any #153 attach-title form. `sendLocalWake`'s own terminal lookup
+  // must still find it: connected + worktreeId match, title irrelevant.
+  test("sendLocalWake finds and types into a terminal whose title is claude's own OSC rewrite, not the studio id (#1259 round 5 fix 3)", async () => {
+    const f = fake({
+      "worktree list": worktrees("studio-websites--pilot"),
+      "terminal list": terminalEntries({
+        handle: "term_0", title: "✳ fix the login bug", connected: true, worktreeId: WID, preview: "❯ ready",
+      }),
+      "terminal send": ok("{}"),
+    }, { isClaudeForeground: async () => true });
+    const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+    expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+    const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter"]);
+  });
+
   test("sendLocalWake refuses when there is no healthy attach terminal", async () => {
     const f = fake({ "worktree list": worktrees("studio-websites--pilot"), "terminal list": terminals(false) });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
