@@ -1302,6 +1302,40 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     ]);
   });
 
+  // #1259 round 8: with TWO claude-identified terminals in the worktree, an
+  // exact-handle pin naming the SECOND one must still win — the pin is
+  // read and matched BEFORE the fallback's identity-filtered discovery (and
+  // its own count) is ever consulted, so a pin resolves unambiguously
+  // regardless of how many other claude-shaped candidates are also present.
+  test("wake with 2 claude terminals, pin naming the 2nd, sends to the pinned handle (#1259 round 8)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-wake-pinned-"));
+    const worktreePath = join(root, "studio-websites-pilot");
+    mkdirSync(worktreePath, { recursive: true });
+    writeLeadHandle(worktreePath, "term_b");
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: WID, displayName: "studio-websites--pilot", path: worktreePath }] },
+        })),
+        "terminal list": terminalEntries(
+          { handle: "term_a", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE },
+          { handle: "term_b", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE },
+        ),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendSubmitted(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+      const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+      expect(send).toContain("term_b");
+      expect(send).not.toContain("term_a");
+      expect(f.calls).toContainEqual(["terminal", "show", "--terminal", "term_b", "--json"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("sendLocalWake refuses when there is no healthy attach terminal", async () => {
     const f = fake({ "worktree list": worktrees("studio-websites--pilot"), "terminal list": terminals(false) });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
