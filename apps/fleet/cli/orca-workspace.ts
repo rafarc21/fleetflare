@@ -764,19 +764,32 @@ export async function ensureLocalStudioWorktree(
       // closing a LIVE lead merely blocked on its own permission prompt —
       // data loss. ANY `agentIdentity === "claude"` means a live lead is
       // there, full stop, never closed regardless of wait state.
-      const pinned = await findPinnedLeadTerminal(id, deps);
-      if (pinned && pinned.agentIdentity === "claude") {
+      // #1259 round 8 fix B1: `"ambiguous"` (zero-or-null used to be
+      // indistinguishable from this — see `findPinnedLeadTerminal`'s own
+      // comment) must REFUSE, never fall through to create: closing nothing
+      // is safe (we don't know which, if any, is dead), but creating a
+      // fresh terminal here would spawn a SECOND lead beside whichever live
+      // one is among the ambiguous candidates. Throwing routes through this
+      // function's own try/catch, the same failure path every other orca
+      // refusal here already uses.
+      const lookup = await findPinnedLeadTerminal(id, deps);
+      if (lookup.status === "ambiguous") {
+        throw new Error(
+          `${id}: ${lookup.count} candidate claude terminals found with no usable pin -- ` +
+          `refusing to guess which is the real lead; resolve manually`,
+        );
+      }
+      if (lookup.status === "found" && lookup.terminal.agentIdentity === "claude") {
         return { kind: "exists" };
       }
       // Not claude (confirmed exited, or something else entirely), or no
-      // terminal could be resolved at all: close ONLY the one specific
-      // terminal just found, by its own handle — never iterate and close
-      // every connected terminal in the worktree the way round 5 did (that
-      // closed an operator's own unrelated shell whenever round 5's own
-      // liveness check misfired). No terminal resolved at all means nothing
-      // to close.
-      if (pinned?.handle) {
-        await orcaJson(deps, ["terminal", "close", "--terminal", pinned.handle, "--json"], LIST_TIMEOUT_MS);
+      // terminal could be resolved at all ("none"): close ONLY the one
+      // specific terminal just found, by its own handle — never iterate and
+      // close every connected terminal in the worktree the way round 5 did
+      // (that closed an operator's own unrelated shell whenever round 5's
+      // own liveness check misfired). "none" means nothing to close.
+      if (lookup.status === "found" && lookup.terminal.handle) {
+        await orcaJson(deps, ["terminal", "close", "--terminal", lookup.terminal.handle, "--json"], LIST_TIMEOUT_MS);
       }
 
       const command = localLaunchCommand(id, existing.path, join(existing.path, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
@@ -1703,23 +1716,38 @@ export function writeLeadHandle(worktreePath: string, handle: string): void {
  * resume branch closed it (an operator's own live shell, gone) and spawned
  * a SECOND lead, pinning THAT one — leaving the real live lead running
  * forever, unpinned, vulnerable to the exact same wrong pick next time.
- * The decision rule is now exact-one-or-refuse: EXACTLY one
- * claude-identified candidate is used (and its handle backfills the pin,
- * same as before); ZERO or TWO-OR-MORE is an unresolvable ambiguity — null,
- * no pin written, nothing picked. Once pinned, every later call trusts
- * `.fleet/lead.handle` exactly, so a wrong guess here would be permanent
- * until corrected by hand; refusing to guess is the only safe default.
+ * The decision rule is exact-one-or-refuse: EXACTLY one claude-identified
+ * candidate is used (and its handle backfills the pin, same as before);
+ * ZERO or TWO-OR-MORE is an unresolvable ambiguity — nothing picked, no pin
+ * written. Once pinned, every later call trusts `.fleet/lead.handle`
+ * exactly, so a wrong guess here would be permanent until corrected by
+ * hand; refusing to guess is the only safe default.
  *
- * Never fails its caller: null when Orca is absent, the studio has no
+ * #1259 round 8 fix B1: ZERO and TWO-OR-MORE candidates used to collapse
+ * onto the SAME `null` return, so a caller could not tell "nothing to close,
+ * safe to create" apart from "something IS alive here, just not identifiable
+ * — do not touch it." The operator's own measurement: no pin, a real list
+ * `[live lead, 2nd claude-titled terminal]` read as `null` either way, and
+ * resume's old code fell through to `terminal create` on BOTH — spawning a
+ * second lead beside the live one. The return is now a 3-state discriminated
+ * union so every caller can refuse the ambiguous case outright instead of
+ * silently treating it like the zero case.
+ *
+ * Never fails its caller: `"none"` when Orca is absent, the studio has no
  * worktree, or no terminal at all can be resolved (pinned or fallback) —
  * same posture as every other lookup here.
  */
-export async function findPinnedLeadTerminal(id: string, deps: OrcaDeps): Promise<OrcaTerminalEntry | null> {
-  if (!orcaPresent(deps)) return null;
+export type PinnedLeadLookup =
+  | { status: "found"; terminal: OrcaTerminalEntry }
+  | { status: "none" }
+  | { status: "ambiguous"; count: number };
+
+export async function findPinnedLeadTerminal(id: string, deps: OrcaDeps): Promise<PinnedLeadLookup> {
+  if (!orcaPresent(deps)) return { status: "none" };
   try {
     const worktrees = await fullList(deps, "worktrees", ROW_TIMEOUT_MS);
     const worktree = findStudioWorktree(id, worktrees, deps.registry);
-    if (!worktree) return null;
+    if (!worktree) return { status: "none" };
     const selector = worktree.id ? `id:${worktree.id}` : `name:${studioWorkspaceName(id)}`;
     const listed = await orcaJson(deps, ["terminal", "list", "--worktree", selector, "--json"], ROW_TIMEOUT_MS);
     const terms = listed.result?.terminals ?? [];
@@ -1727,19 +1755,20 @@ export async function findPinnedLeadTerminal(id: string, deps: OrcaDeps): Promis
     const handle = worktree.path ? readLeadHandle(worktree.path) : null;
     if (handle !== null) {
       const pinned = terms.find((t) => t.handle === handle);
-      if (pinned) return pinned;
+      if (pinned) return { status: "found", terminal: pinned };
       // The handle file is stale — the terminal it named is gone (reaped by
       // Orca, or this studio's lead was torn down and recreated by hand).
       // Fall through to discovery below and overwrite it.
     }
     const candidates = terms.filter((t) => t.agentIdentity === "claude");
-    if (candidates.length !== 1) return null;
-    const discovered = candidates[0];
+    if (candidates.length === 0) return { status: "none" };
+    if (candidates.length > 1) return { status: "ambiguous", count: candidates.length };
+    const discovered = candidates[0]!;
     if (discovered.handle && worktree.path) writeLeadHandle(worktree.path, discovered.handle);
-    return discovered;
+    return { status: "found", terminal: discovered };
   } catch (err) {
     deps.log(`${id}: pinned lead terminal lookup failed — ${errText(err)}`);
-    return null;
+    return { status: "none" };
   }
 }
 
@@ -1810,8 +1839,21 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
     };
   }
   const clean = digest.replace(/[\x00-\x1f\x7f]/g, "");
-  const term = await findPinnedLeadTerminal(id, deps);
-  if (term === null || term.handle === undefined) {
+  // #1259 round 8 fix B1: `"ambiguous"` gets its own refusal wording —
+  // conflating it with `"none"`'s "no healthy terminal" message would hide
+  // that a live lead almost certainly IS there, just not identifiable.
+  const lookup = await findPinnedLeadTerminal(id, deps);
+  if (lookup.status === "ambiguous") {
+    return {
+      woke: false,
+      reason: `${id} is a local studio with ${lookup.count} candidate claude terminals and no reliable pin — refusing to guess which to wake`,
+    };
+  }
+  if (lookup.status === "none") {
+    return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
+  }
+  const term = lookup.terminal;
+  if (term.handle === undefined) {
     return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
   }
   // #1259 round 7 fix 3: the gate reads `terminal show`, never the `terminal

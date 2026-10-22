@@ -791,6 +791,42 @@ describe("local studio workspace — fleet task #1248", () => {
     }
   });
 
+  // #1259 round 8 fix B1: the operator's own measurement — no pin, a list
+  // `[live lead, 2nd claude-titled terminal]` — made the OLD code's "no
+  // usable candidate" and "two candidates, can't tell which" cases both
+  // collapse onto the same `null`, so resume fell through to `terminal
+  // create` and spawned a SECOND lead beside the live one. `findPinnedLeadTerminal`
+  // now tells these apart (`"none"` vs `"ambiguous"`); resume must REFUSE on
+  // ambiguous — no close (nothing is known to be dead), no create (a second
+  // lead would duplicate the real one), outcome `failed`.
+  test("resume with no pin and >=2 claude-identified terminals refuses: no create, no close, outcome failed (#1259 round 8 fix B1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-ambiguous-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries(
+          { handle: "term_live_lead", title: "fleet", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE },
+          { handle: "term_second_claude", title: "fleet", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE },
+        ),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("failed");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("materializes all four container hooks with the lead gate (item 1)", async () => {
     const root = mkdtempSync(join(tmpdir(), "orca-local-"));
     const worktreePath = join(root, "worktree");
@@ -911,7 +947,8 @@ describe("findPinnedLeadTerminal fallback discovery — identity-filtered, exact
       try {
         const f = fallbackFake(worktreePath, entries);
         const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
-        expect(found?.handle).toBe("term_lead");
+        expect(found.status).toBe("found");
+        expect(found.status === "found" ? found.terminal.handle : undefined).toBe("term_lead");
         expect(readLeadHandle(worktreePath)).toBe("term_lead");
       } finally {
         rmSync(root, { recursive: true, force: true });
@@ -926,14 +963,18 @@ describe("findPinnedLeadTerminal fallback discovery — identity-filtered, exact
         { handle: "term_zsh", title: "zsh", connected: true, worktreeId: WID },
       ]);
       const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
-      expect(found).toBeNull();
+      expect(found).toEqual({ status: "none" });
       expect(readLeadHandle(worktreePath)).toBeNull();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  test("(c) two agentIdentity:claude candidates is ambiguous -- returns null, writes no pin, picks neither", async () => {
+  // #1259 round 8 fix B1: "ambiguous" is now its own status, distinct from
+  // "none" — a caller must be able to tell "nothing claude-shaped here,
+  // safe to create" apart from "something IS alive, just not identifiable,
+  // do not touch it."
+  test("(c) two agentIdentity:claude candidates is ambiguous -- status 'ambiguous' with the count, writes no pin, picks neither", async () => {
     const { root, worktreePath } = fallbackRoot();
     try {
       const f = fallbackFake(worktreePath, [
@@ -941,7 +982,7 @@ describe("findPinnedLeadTerminal fallback discovery — identity-filtered, exact
         { handle: "term_b", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE },
       ]);
       const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
-      expect(found).toBeNull();
+      expect(found).toEqual({ status: "ambiguous", count: 2 });
       expect(readLeadHandle(worktreePath)).toBeNull();
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -956,7 +997,8 @@ describe("findPinnedLeadTerminal fallback discovery — identity-filtered, exact
       try {
         const f = fallbackFake(worktreePath, entries);
         const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
-        expect(found?.handle).toBe("term_live_lead");
+        expect(found.status).toBe("found");
+        expect(found.status === "found" ? found.terminal.handle : undefined).toBe("term_live_lead");
         expect(readLeadHandle(worktreePath)).toBe("term_live_lead");
       } finally {
         rmSync(root, { recursive: true, force: true });
