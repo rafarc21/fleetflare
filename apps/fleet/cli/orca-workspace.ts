@@ -54,6 +54,7 @@ import {
   chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync,
   symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { parseStudioId } from "../src/studio/ids";
@@ -192,6 +193,18 @@ export interface OrcaDeps {
    * production — `defaultOrcaDeps()` always wires a real implementation.
    * Fails closed: any ambiguity here (tool absent, command errors, no
    * match) means "not claude," never "probably fine."
+   *
+   * #1259 round 5: round 4's own real implementation (`lsof -a -d cwd +D
+   * <worktreePath>`) was ALSO measured wrong, independent of the screen-text
+   * problem above — a real repo's directory walk took 7-16s with no timeout,
+   * and `lsof`'s own non-zero exit on "some files under this tree have no
+   * matching process" (true of almost every file in a normal repo) was
+   * caught by the one try/catch and read as "not claude" even when a live
+   * session's cwd DID match. See `defaultIsClaudeForeground`'s own doc
+   * comment for round 5's replacement: a tty captured at launch (`fix 1`,
+   * `localLaunchCommand`), resolved to its foreground process group's own
+   * name via two bounded `ps` calls — no directory walk, no title, no
+   * screen text.
    */
   isClaudeForeground?: (worktreePath: string) => Promise<boolean>;
 }
@@ -655,7 +668,18 @@ export function localWorktreeCreateArgs(localPath: string, defaultBranch: string
  *  operator's own Mac, not a Firecracker microVM, so permission prompts stay
  *  on — the lead-gate PreToolUse hook (not --disallowedTools, which would
  *  starve members too) is the structural guard against the lead implementing,
- *  and the operator is present to approve the members' writes. */
+ *  and the operator is present to approve the members' writes.
+ *
+ *  #1259 round 5 fix 1: the line now opens with `tty > ".../.fleet/lead.tty"`
+ *  BEFORE claude ever starts — captures the pane's own controlling tty to a
+ *  file a LATER, separate `fleet` process can read, so liveness (fix 2,
+ *  `defaultIsClaudeForeground`) never has to guess which Orca terminal holds
+ *  the lead from its title or screen text again. `.fleet/` already exists by
+ *  the time this line runs (`materializeLocalLead` writes `working-set.md`
+ *  there first), so no mkdir is needed inline; `2>/dev/null` swallows the one
+ *  case `tty` itself can fail (no controlling tty at all, e.g. piped input) —
+ *  a missing lead.tty file is exactly `readLeadTty`'s own "can't tell, fail
+ *  closed" case, never a crashed launch line. */
 export function localLaunchCommand(id: string, worktreePath: string, promptFilePath: string, allowedTools: string, effort: string): string {
   const args = [
     "claude",
@@ -667,7 +691,7 @@ export function localLaunchCommand(id: string, worktreePath: string, promptFileP
   ];
   if (effort !== "") args.push("--effort", effort);
   // FLEET_WORKSPACE points session-reemit/completion-gate at the worktree's .fleet/, not the container /workspace default.
-  return `STUDIO_ID=${id} FLEET_WORKSPACE="${worktreePath}" ${args.join(" ")}`;
+  return `tty > "${worktreePath}/.fleet/lead.tty" 2>/dev/null; STUDIO_ID=${id} FLEET_WORKSPACE="${worktreePath}" ${args.join(" ")}`;
 }
 
 /**
@@ -1609,77 +1633,70 @@ function claudeForegroundCheck(deps: OrcaDeps, worktreePath: string): Promise<bo
   return (deps.isClaudeForeground ?? defaultIsClaudeForeground)(worktreePath);
 }
 
-/**
- * Real implementation of `OrcaDeps.isClaudeForeground` — see that field's
- * own doc comment for WHY this asks the OS directly rather than trusting a
- * terminal's rendered screen text or title.
- *
- * HONEST LIMITATION, stated plainly rather than implied: this sandbox has
- * neither the `orca` binary nor `lsof` installed (checked 2026-10-21 —
- * `which orca` and `which lsof` both came up empty), so the exact `lsof -F`
- * field-output shape this parses, and whether macOS's own `lsof`/`pgrep`/`ps`
- * flags behave identically to the Linux ones available here, could NOT be
- * exercised against a real Orca+claude session. What IS verified here (see
- * this file's own test suite) is the CONTRACT every caller is wired against:
- * a worktree path in, a boolean out, and `false` — never a throw, never a
- * hang — whenever the tools this needs are absent or the command fails for
- * any reason. The parsing below is a considered design against lsof's
- * documented `-F` field-output grammar, not a measurement.
- *
- * Lists every process whose `cwd` file descriptor sits under `worktreePath`
- * (`lsof -a -d cwd` — the `-d cwd` restricts the match to the cwd fd
- * specifically, so a process that merely has some OTHER file open under this
- * tree, e.g. a log it is tailing, is never mistaken for one actually working
- * there) and accepts either:
- *   - a matched process itself named `claude` (the direct case — Orca's own
- *     local launch line runs `claude` with the worktree as its cwd), or
- *   - a matched process (typically the login shell Orca's terminal itself
- *     runs) with a DIRECT CHILD named `claude` (`pgrep -P <pid>`) — kept as a
- *     second signal in case cwd reporting ever lags a `cd`, or claude is
- *     reached through an intermediate wrapper.
- */
-async function defaultIsClaudeForeground(worktreePath: string): Promise<boolean> {
-  if (worktreePath === "") return false;
+/** A few seconds — generous for a `ps` call (which never does real I/O
+ *  against the worktree, unlike the old `lsof +D` walk this replaces) but
+ *  bounded all the same ("timeout every exec" — the operator's own fix
+ *  recipe). A wedged/missing `ps` costs this delay once, never a hung
+ *  wake/resume call. */
+const PS_TIMEOUT_MS = 5_000;
+
+/** The tty `localLaunchCommand` captured for this worktree's lead, or null
+ *  when the file is absent, empty, or unreadable — never a throw. Absence is
+ *  expected for any worktree whose lead predates this capture (round 5) or
+ *  whose `tty` call itself failed (no controlling tty at all); both read as
+ *  "can't tell," which `defaultIsClaudeForeground` turns into `false`, the
+ *  same fail-closed posture as every other signal in this file. */
+async function readLeadTty(worktreePath: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileP("lsof", ["-a", "-d", "cwd", "-Fpcn", "+D", worktreePath]);
-    const pids: number[] = [];
-    let currentPid: number | null = null;
-    for (const line of stdout.split("\n")) {
-      if (line.startsWith("p")) {
-        currentPid = Number.parseInt(line.slice(1), 10);
-        if (Number.isFinite(currentPid)) pids.push(currentPid);
-      } else if (line.startsWith("c") && currentPid !== null && line.slice(1).trim() === "claude") {
-        return true;
-      }
-    }
-    for (const pid of pids) {
-      if (await hasClaudeChild(pid)) return true;
-    }
-    return false;
+    const content = await readFile(join(worktreePath, ".fleet", "lead.tty"), "utf8");
+    const tty = content.trim();
+    return tty === "" ? null : tty;
   } catch {
-    return false; // fail closed: lsof absent, erroring, or no match -- not claude
+    return null;
   }
 }
 
-/** Does `pid` have a direct child process named `claude`? Best-effort: a
- *  child that is gone by the time it is checked, or a `pgrep`/`ps` that
- *  cannot run at all, answers false for THAT pid rather than throwing —
- *  `defaultIsClaudeForeground`'s own fail-closed posture already covers
- *  "could not tell" for the function as a whole. */
-async function hasClaudeChild(pid: number): Promise<boolean> {
+/**
+ * Real implementation of `OrcaDeps.isClaudeForeground` — see that field's
+ * own doc comment for WHY this asks the OS directly rather than trusting a
+ * terminal's rendered screen text or title, and for round 4's lsof-based
+ * predecessor (replaced entirely, not patched — see that round's own
+ * measured failures).
+ *
+ * #1259 round 5, the operator's own measured fix recipe: `localLaunchCommand`
+ * writes the lead's own controlling tty to `.fleet/lead.tty` BEFORE claude
+ * starts (fix 1). Liveness is then purely `ps -o tpgid= -t <tty>` (the pty's
+ * current foreground process GROUP) followed by `ps -o comm= -p <tpgid>`
+ * (that group's own process name) — no title, no screen text, no `lsof`
+ * directory walk at all.
+ *
+ * MEASURED in this sandbox (tmux + a real file literally named `claude`,
+ * same technique test/bun/pane-probe-lead-scope.test.ts's own
+ * `installFakeClaude` uses and for the identical reason — see this file's
+ * sibling real-process test): `ps -t <tty>` answers with ONE ROW PER PROCESS
+ * still attached to that controlling tty (the foreground leader AND any of
+ * its own children that share it, e.g. claude's own backgrounded work), every
+ * row carrying the SAME tpgid value — tpgid names one process GROUP, not a
+ * single process. Only the FIRST line is read below; feeding the raw
+ * multi-line string straight to `ps -p` as one argument throws ("process ID
+ * list syntax error"), which the catch below would otherwise misread as
+ * "dead" even with a genuinely live lead. Also measured: `exec -a claude
+ * <bin>` only renames argv[0], never the kernel's own `comm` field (what `ps
+ * -o comm=` reads here) — a real file named `claude` is required to prove
+ * this at all, exactly the same lesson pane-probe-lead-scope.test.ts's own
+ * header already documents for `pgrep -x`.
+ */
+async function defaultIsClaudeForeground(worktreePath: string): Promise<boolean> {
+  const tty = await readLeadTty(worktreePath);
+  if (tty === null) return false;
   try {
-    const { stdout } = await execFileP("pgrep", ["-P", String(pid)]);
-    for (const child of stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
-      try {
-        const { stdout: comm } = await execFileP("ps", ["-o", "comm=", "-p", child]);
-        if (comm.trim() === "claude") return true;
-      } catch {
-        // this one child is gone or unreadable -- keep checking the rest
-      }
-    }
-    return false;
+    const { stdout: tpgidOut } = await execFileP("ps", ["-o", "tpgid=", "-t", tty], { timeout: PS_TIMEOUT_MS });
+    const tpgid = tpgidOut.split("\n")[0]?.trim() ?? "";
+    if (tpgid === "") return false;
+    const { stdout: commOut } = await execFileP("ps", ["-o", "comm=", "-p", tpgid], { timeout: PS_TIMEOUT_MS });
+    return commOut.split("\n")[0]?.trim() === "claude";
   } catch {
-    return false; // pgrep found no children (exit 1) or pgrep itself is absent
+    return false; // fail closed: ps missing/erroring/timing out, no tty, anything ambiguous -- not claude
   }
 }
 

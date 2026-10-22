@@ -373,14 +373,24 @@ describe("local studio workspace — fleet task #1248", () => {
     expect(cmd).not.toContain("--dangerously-skip-permissions");
   });
 
-  test("localLaunchCommand arms the gate with a STUDIO_ID=<id> env-assignment prefix", () => {
+  test("localLaunchCommand arms the gate with a STUDIO_ID=<id> env-assignment prefix, right after the tty capture", () => {
     // On the Mac STUDIO_ID is never set, so lead-gate.sh's own first line
     // (`[ -n "${STUDIO_ID:-}" ] || exit 0`) would exit 0 before any gate
     // logic. The prefix is the arming switch: claude — and every hook
     // subprocess it spawns — inherits STUDIO_ID, and the gate goes active.
     const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
-    expect(cmd.startsWith('STUDIO_ID=websites--pilot FLEET_WORKSPACE="/w" claude')).toBe(true);
+    expect(cmd).toContain('STUDIO_ID=websites--pilot FLEET_WORKSPACE="/w" claude');
     expect(cmd).not.toContain("--dangerously-skip-permissions");
+  });
+
+  // #1259 round 5 fix 1: `tty` runs BEFORE claude, writing the pane's own
+  // controlling tty to `.fleet/lead.tty` — a later, separate `fleet` process
+  // reads that file to know exactly which tty the lead occupies (fix 2's
+  // `defaultIsClaudeForeground`), never guessing from the terminal's title or
+  // screen text again.
+  test("localLaunchCommand captures its own tty to .fleet/lead.tty before claude starts", () => {
+    const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
+    expect(cmd.startsWith('tty > "/w/.fleet/lead.tty" 2>/dev/null; STUDIO_ID=websites--pilot')).toBe(true);
   });
 
   test("localLaunchCommand omits --effort when the role carries none", () => {
@@ -722,7 +732,7 @@ describe("local studio workspace — fleet task #1248", () => {
 
   test("launch command arms FLEET_WORKSPACE so hooks find the worktree, not /workspace (item 1)", () => {
     const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
-    expect(cmd.startsWith('STUDIO_ID=websites--pilot FLEET_WORKSPACE="/w" claude')).toBe(true);
+    expect(cmd).toContain('STUDIO_ID=websites--pilot FLEET_WORKSPACE="/w" claude');
   });
 });
 

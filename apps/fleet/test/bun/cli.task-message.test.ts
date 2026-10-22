@@ -137,17 +137,18 @@ describe("fleet task message — the repo travels in the body (issue #1106)", ()
 });
 
 describe("fleet task message — local assignee wakes by Orca terminal send (item 2)", () => {
-  // #1259 round 4 fix 2/3: `sendLocalWake`'s PRIMARY liveness signal is now
-  // `OrcaDeps.isClaudeForeground`, which asks the real OS (`lsof`) whether
-  // claude is genuinely the foreground process in the studio's worktree —
-  // never the fake `orca` binary's scripted `preview` text, and never
-  // injectable across this real `Bun.spawn` subprocess boundary (production
-  // always asks the real OS; there is no test seam here by design). In THIS
-  // sandbox (no `lsof` installed — see `defaultIsClaudeForeground`'s own
-  // doc comment) that real check fails closed, so the swap's end result is
-  // a REFUSAL, not a send. What this test still proves: the swap RAN — the
-  // printed line is `sendLocalWake`'s own CLI-side wording, never the
-  // Worker's raw local-refusal text passed through unchanged — and no
+  // #1259 round 5: `sendLocalWake`'s PRIMARY liveness signal is now
+  // `OrcaDeps.isClaudeForeground`, which asks the real OS (tty -> `ps` -> `ps`
+  // — see `defaultIsClaudeForeground`'s own doc comment) whether claude is
+  // genuinely the foreground process in the studio's worktree — never the
+  // fake `orca` binary's scripted `preview` text, and never injectable across
+  // this real `Bun.spawn` subprocess boundary (production always asks the
+  // real OS; there is no test seam here by design). The fake worktree path
+  // below has no `.fleet/lead.tty` file (nothing ever wrote one), so
+  // `readLeadTty` reads null and the real check fails closed — the swap's end
+  // result is a REFUSAL, not a send. What this test still proves: the swap
+  // RAN — the printed line is `sendLocalWake`'s own CLI-side wording, never
+  // the Worker's raw local-refusal text passed through unchanged — and no
   // `terminal send` call was ever made.
   test("a local-refusal wake is swapped for the real Orca liveness check, printed as NO WAKE with the CLI's own reason", async () => {
     const home = tmpDir("task-message-local-home-");
