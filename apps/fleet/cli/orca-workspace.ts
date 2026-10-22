@@ -72,6 +72,15 @@ import { errText } from "./diag";
 // bring-up.
 
 const LIST_TIMEOUT_MS = 10_000;
+// #1259 round 9 minor: `sendLocalWake`'s `terminal send --wait-submit 5` call
+// alone — never `LIST_TIMEOUT_MS` itself, which every other call in this file
+// shares. Orca's own wait budget for `--wait-submit <seconds>` is `<seconds>
+// + 10s` (the operator's own measured number), so `5` here means Orca itself
+// may wait up to 15s before giving up. `LIST_TIMEOUT_MS` (10s) killed the CLI
+// mid-observation on a slow host, misreporting a real-but-slow send as
+// "timed out" rather than ever letting Orca reach its own verdict. 20s
+// leaves comfortable headroom above Orca's 15s budget.
+const SEND_WAIT_SUBMIT_TIMEOUT_MS = 20_000;
 // #124: `fleet ls` decorates a read with its ROW column — a slow Orca costs
 // "-", never seconds of the operator's listing.
 const ROW_TIMEOUT_MS = 3_000;
@@ -1892,8 +1901,9 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
     // the digest half-typed.
     // `5` (seconds) is a judgment call, not a real-Orca measurement — no
     // Orca in this sandbox to time a real submit against — chosen to leave
-    // headroom inside `LIST_TIMEOUT_MS` (10s) for normal round-trip
-    // overhead on top of the flag's own wait budget.
+    // headroom inside this call's own `SEND_WAIT_SUBMIT_TIMEOUT_MS` (20s,
+    // round 9 minor fix, see that constant's own comment) for normal
+    // round-trip overhead on top of the flag's own wait budget.
     //
     // #1259 round 8 fix B2: round 7's own comment above overclaimed
     // "trusting Orca's own submission acknowledgment" while never actually
@@ -1919,7 +1929,7 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
     const envelope = await orcaJson(
       deps,
       ["terminal", "send", "--terminal", term.handle, "--text", clean, "--enter", "--wait-submit", "5", "--json"],
-      LIST_TIMEOUT_MS,
+      SEND_WAIT_SUBMIT_TIMEOUT_MS,
     );
     const accepted = envelope.result?.send?.accepted === true;
     const turnStarted = envelope.result?.send?.prompt?.stages?.includes("turn_started") === true;
