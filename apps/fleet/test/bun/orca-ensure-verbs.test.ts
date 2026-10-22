@@ -32,6 +32,7 @@ import {
   appendLocalExcludeLines,
   LOCAL_EXCLUDE_LINES,
   resolveStudioWorktreePath,
+  writeLeadHandle,
   type OrcaDeps,
   type OrcaResult,
 } from "../../cli/orca-workspace";
@@ -542,7 +543,7 @@ describe("local studio workspace — fleet task #1248", () => {
           result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
         })),
         "terminal create": TERM_CREATED,
-      }, { isClaudeForeground: async () => false });
+      });
       const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
         localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
       });
@@ -556,19 +557,21 @@ describe("local studio workspace — fleet task #1248", () => {
       // The lead's files landed in the EXISTING path, not a fresh checkout.
       expect(existsSync(join(existingPath, ".fleet", "working-set.md"))).toBe(true);
       expect(existsSync(join(existingPath, ".claude", "hooks", "lead-gate.sh"))).toBe(true);
+      // #1259 round 6: the fresh terminal's handle is pinned for every later
+      // wake/resume call.
+      expect(readFileSync(join(existingPath, ".fleet", "lead.handle"), "utf8").trim()).toBe("term_new");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  // Fix 3 (#1259 round 4, replacing round 3's title-based fix): the
-  // resume-reuse branch above decides reuse-vs-create from the SAME
-  // `isClaudeForeground` the wake gate uses — asked of the OS by worktree
-  // path, never inferred from the terminal's title. Round 3's own fix
-  // (reconcileAttachTerminals/isHealthyAttach, keyed on `title === id`) was
-  // measured backwards: a LIVE claude rewrites its own terminal's title via
-  // OSC, so title-matching called a genuinely live lead "gone."
-  test("a resume with a live claude process reuses it — no terminal create, kind 'exists' (item 7, #1259 round 4 fix 3)", async () => {
+  // #1259 round 6 step 4: the resume-reuse branch above decides reuse-vs-create
+  // from `isIdleClaudeTerminal` on the EXACT pinned terminal — Orca's own
+  // tracked agent state, never an OS-level `ps` walk (round 5) or the
+  // terminal's title (round 3's own fix, measured backwards: a LIVE claude
+  // rewrites its own terminal's title via OSC, so title-matching called a
+  // genuinely live lead "gone").
+  test("a resume with a live claude process reuses it — no terminal create, kind 'exists' (item 7, #1259 round 6 step 4)", async () => {
     const root = mkdtempSync(join(tmpdir(), "orca-reuse-healthy-"));
     const existingPath = join(root, "studio-websites-pilot");
     mkdirSync(existingPath, { recursive: true });
@@ -580,14 +583,9 @@ describe("local studio workspace — fleet task #1248", () => {
           result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
         })),
         "terminal list": terminalEntries({
-          handle: "term_live", title: "websites--pilot", connected: true, orphaned: false, writable: true,
+          handle: "term_live", title: "websites--pilot", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE,
         }),
         "terminal create": TERM_CREATED,
-      }, {
-        isClaudeForeground: async (wt) => {
-          expect(wt).toBe(existingPath); // the ORCA worktree path, never the clone
-          return true;
-        },
       });
       const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
         localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
@@ -601,6 +599,51 @@ describe("local studio workspace — fleet task #1248", () => {
       // Lead files still land in the kept worktree even on the reuse path —
       // a resumed worktree may have a stale working-set.md from before.
       expect(existsSync(join(existingPath, ".fleet", "working-set.md"))).toBe(true);
+      // #1259 round 6 step 1: no `.fleet/lead.handle` existed yet (a studio
+      // provisioned before this mechanism) — the one-time fallback discovery
+      // backfills it with the terminal it found, so every LATER call uses
+      // the exact handle instead of discovering again.
+      expect(readFileSync(join(existingPath, ".fleet", "lead.handle"), "utf8").trim()).toBe("term_live");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // #1259 round 6 finding 1, the exact bug this round exists to fix: round
+  // 5's wake/resume both ranked worktree-matched candidates and acted on
+  // whichever one came out first — real list order put an operator's own
+  // unrelated shell ahead of the actual lead. This test pins
+  // `.fleet/lead.handle` to the SECOND entry (the real lead) while the
+  // FIRST entry (an operator's own shell, which `rankAttachTerminals` would
+  // pick first on list-order alone) is idle-claude-shaped too, so a
+  // ranking-based lookup would pick the WRONG one; only reading the exact
+  // handle gets this right.
+  test("resume honors the exact pinned handle, never a re-ranked guess — even when a DIFFERENT terminal would rank first (#1259 round 6 finding 1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-pinned-handle-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    writeLeadHandle(existingPath, "term_real_lead");
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries(
+          // Lists FIRST — would win a rank-only lookup, but is NOT the
+          // pinned handle, so must never be chosen or touched.
+          { handle: "term_operator_shell", title: "websites--pilot", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE },
+          { handle: "term_real_lead", title: "websites--pilot", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE },
+        ),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("exists");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -622,10 +665,10 @@ describe("local studio workspace — fleet task #1248", () => {
           result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
         })),
         "terminal list": terminalEntries({
-          handle: "term_live", title: "✳ fix the login bug", connected: true, orphaned: false, writable: true,
+          handle: "term_live", title: "✳ fix the login bug", connected: true, orphaned: false, writable: true, ...IDLE_CLAUDE,
         }),
         "terminal create": TERM_CREATED,
-      }, { isClaudeForeground: async () => true });
+      });
       const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
         localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
       });
@@ -640,7 +683,7 @@ describe("local studio workspace — fleet task #1248", () => {
   // The other half: a DEAD claude whose leftover terminal's title still
   // happens to match the studio id exactly — the shape round 3's own check
   // would have accepted as "healthy" — must still be closed and replaced.
-  test("a resume with no live claude process closes the stale terminal and creates a fresh one, even with a title that would have matched the old check (item 7, #1259 round 4 fix 3)", async () => {
+  test("a resume with no live claude process closes the stale terminal and creates a fresh one, even with a title that would have matched the old check (item 7, #1259 round 6 step 4)", async () => {
     const root = mkdtempSync(join(tmpdir(), "orca-reuse-unhealthy-"));
     const existingPath = join(root, "studio-websites-pilot");
     mkdirSync(existingPath, { recursive: true });
@@ -655,7 +698,7 @@ describe("local studio workspace — fleet task #1248", () => {
           handle: "term_dead", title: "websites--pilot", connected: true, orphaned: false, writable: true,
         }),
         "terminal create": TERM_CREATED,
-      }, { isClaudeForeground: async () => false });
+      });
       const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
         localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
       });
@@ -671,16 +714,13 @@ describe("local studio workspace — fleet task #1248", () => {
   });
 
   // #1259 round 5 fix 4: round 4's own fix above closed EVERY connected
-  // terminal in the worktree once dead was decided — harmless when round 4's
-  // own liveness check worked, catastrophic once it was measured to always
-  // read "dead" (lsof's real-world failure mode): every resume closed every
-  // terminal in the worktree, including one the operator opened by hand for
-  // unrelated work in that same worktree. Two connected terminals here, one
-  // shaped like fleet's own prior attach (title "websites--pilot", first in
-  // list order) and one shaped like an operator's own manual shell (title
-  // "zsh", second) — only the FIRST (ranked best — same rank tie-break as
-  // `rankAttachTerminals`'s own "ties keep the oldest" rule) may be closed.
-  test("a resume with no live claude process closes only the best-ranked stale terminal, never every connected terminal in the worktree (#1259 round 5 fix 4)", async () => {
+  // terminal in the worktree once dead was decided. Two connected terminals
+  // here, one shaped like fleet's own prior attach (title "websites--pilot",
+  // first in list order) and one shaped like an operator's own manual shell
+  // (title "zsh", second) — only the FIRST (ranked best — same rank
+  // tie-break as `rankAttachTerminals`'s own "ties keep the oldest" rule)
+  // may be closed.
+  test("a resume with no live claude process closes only the best-ranked stale terminal, never every connected terminal in the worktree (#1259 round 6 step 4)", async () => {
     const root = mkdtempSync(join(tmpdir(), "orca-reuse-two-terms-"));
     const existingPath = join(root, "studio-websites-pilot");
     mkdirSync(existingPath, { recursive: true });
@@ -696,7 +736,7 @@ describe("local studio workspace — fleet task #1248", () => {
           { handle: "term_operator_shell", title: "zsh", connected: true, orphaned: false, writable: true },
         ),
         "terminal create": TERM_CREATED,
-      }, { isClaudeForeground: async () => false });
+      });
       const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
         localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
       });

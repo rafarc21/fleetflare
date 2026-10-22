@@ -54,9 +54,7 @@ import {
   chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync,
   symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { execFile, spawnSync } from "node:child_process";
-import { promisify } from "node:util";
+import { spawnSync } from "node:child_process";
 import { parseStudioId } from "../src/studio/ids";
 import { repoIdSegment } from "../src/studio/repo";
 import type { StudioStatus } from "../src/studio/types";
@@ -169,44 +167,6 @@ export interface OrcaDeps {
    * orca failure, so this never introduces a new way to hang the caller.
    */
   lock: <T>(studioId: string, fn: () => Promise<T>) => Promise<T>;
-  /**
-   * #1259 round 4 redesign: whether claude is genuinely the live, foreground
-   * process for a studio's worktree — asked of the OS directly, never
-   * inferred from a terminal's rendered screen text or its title. 3 prior
-   * review rounds pattern-matched the terminal's `preview` field instead,
-   * and the operator measured 3 distinct real-world ways that failed:
-   * common shell prompt themes (starship, pure, powerlevel10k) use the exact
-   * glyphs (`❯`/`●`) claude's own chrome uses; a real claude 2.1.306
-   * permission modal does not draw the `▔` rule the old check refused on,
-   * so its tail reads as an ordinary option row; and even a genuinely live
-   * claude terminal only passes a tail-text check ~60% of the time (footer
-   * wording, rule lines, continuation markers vary too much to enumerate).
-   * Separately, keying "is this studio's lead still here" on a terminal's
-   * TITLE matching the studio id breaks the moment the lead is genuinely
-   * alive: claude rewrites its own terminal's title via OSC (to
-   * `✳ <summary>`), so title-matching calls a live lead "gone" (and spawns a
-   * second one) and can call a dead one whose title still happens to read as
-   * the studio id "alive" with nothing actually running.
-   *
-   * Optional on the interface (not every existing fake `OrcaDeps` in the
-   * test suite exercises this path) but never actually undefined in
-   * production — `defaultOrcaDeps()` always wires a real implementation.
-   * Fails closed: any ambiguity here (tool absent, command errors, no
-   * match) means "not claude," never "probably fine."
-   *
-   * #1259 round 5: round 4's own real implementation (`lsof -a -d cwd +D
-   * <worktreePath>`) was ALSO measured wrong, independent of the screen-text
-   * problem above — a real repo's directory walk took 7-16s with no timeout,
-   * and `lsof`'s own non-zero exit on "some files under this tree have no
-   * matching process" (true of almost every file in a normal repo) was
-   * caught by the one try/catch and read as "not claude" even when a live
-   * session's cwd DID match. See `defaultIsClaudeForeground`'s own doc
-   * comment for round 5's replacement: a tty captured at launch (`fix 1`,
-   * `localLaunchCommand`), resolved to its foreground process group's own
-   * name via two bounded `ps` calls — no directory walk, no title, no
-   * screen text.
-   */
-  isClaudeForeground?: (worktreePath: string) => Promise<boolean>;
 }
 
 type WorkspaceOutcome =
@@ -283,25 +243,19 @@ interface OrcaTerminalEntry {
    *  1.4.209; an ISO string on older builds. Compared via Date. */
   lastOutputAt?: number | string;
   /** #124 item 7: the stray-attach sweep matches on it when no worktree row
-   *  is left to select by. #1259 round 4: also what `sendLocalWake` hands
-   *  `OrcaDeps.isClaudeForeground` to ask the OS, directly, whether claude is
-   *  genuinely still foreground in this terminal's worktree. */
+   *  is left to select by. */
   worktreePath?: string;
   /** Board #55: which worktree the terminal lives in — `fleet ls`'s ROW
    *  column reads every terminal in ONE `terminal list` and groups by it. */
   worktreeId?: string;
   /** The terminal's screen text (MEASURED on real Orca — see this interface's
-   *  own doc comment). The PRIMARY claude-is-foreground signal is
-   *  `OrcaDeps.isClaudeForeground`, asked of the OS via `worktreePath` below,
-   *  never this rendered text (#1259 round 4: 3 prior rounds trusted this
-   *  field as the primary signal and were measured wrong 3 distinct ways —
-   *  see that field's own doc comment). #1259 round 5: `sendLocalWake` now
-   *  also reads this field AFTER typing into the terminal, to confirm its
-   *  own text actually landed in the composer before ever committing Enter —
-   *  never as a glyph-shaped "looks idle" gate before typing at all (round
-   *  4's own such check, `looksLikeIdleComposerTail`, was measured to still
-   *  accept a real permission modal's tail as "safe"; see `sendLocalWake`'s
-   *  own doc comment). */
+   *  own doc comment). #1259 rounds 3-5 each tried to infer claude-liveness
+   *  from THIS field (pattern-matching glyphs, then a tail-shape check) and
+   *  were measured wrong every time — see `agentIdentity`/`agentWait` below
+   *  for the field this file now trusts instead. `sendLocalWake` still reads
+   *  this one, but only AFTER typing into the terminal, to confirm its own
+   *  text actually landed in the composer before ever committing Enter —
+   *  never as a liveness gate before typing at all. */
   preview?: string;
   /** Which agent CLI Orca itself currently tracks as this terminal's live
    *  foreground program — "claude" when claude genuinely owns it, something
@@ -789,40 +743,26 @@ export async function ensureLocalStudioWorktree(
       materializeLocalLead(existing.path, args, deps);
       const selector = existing.id ? `id:${existing.id}` : `name:${name}`;
 
-      // Fix 3 (#1259 round 4, replacing round 3's title-based fix 2): is
-      // claude genuinely still running in this worktree, asked of the OS
-      // directly — never the terminal's TITLE. Round 3's own fix keyed on
-      // `reconcileAttachTerminals`/`isHealthyAttach`, which (via
-      // `isAttachTerminal`) required the terminal's title to match this
-      // studio's id; the operator measured that check backwards: a LIVE
-      // claude rewrites its own terminal's title via OSC the moment it is
-      // genuinely working, so the title stops matching exactly when the
-      // lead is most alive — the title check would then find no match at
-      // all and this code would boot a SECOND lead claude process beside
-      // the still-running first one. A live claude here means reuse, never
-      // a second; a dead one means close the stale terminal and launch a
-      // fresh one.
-      if (await claudeForegroundCheck(deps, existing.path)) {
+      // #1259 round 6 step 4: the reuse-vs-create decision is now Orca's OWN
+      // tracked agent state on the EXACT pinned terminal — `findPinnedLeadTerminal`
+      // reads `.fleet/lead.handle` first (never a fresh re-ranked guess when
+      // the precise handle is already known), falling back to ranked
+      // discovery (and backfilling the handle file) only for a studio
+      // provisioned before this mechanism existed. Replaces round 4/5's
+      // OS-level `ps` walk entirely — see `isIdleClaudeTerminal`'s own doc
+      // comment for why.
+      const pinned = await findPinnedLeadTerminal(id, deps);
+      if (pinned && isIdleClaudeTerminal(pinned)) {
         return { kind: "exists" };
       }
-      // #1259 round 5 fix 4: round 4's own fix above closed EVERY connected
-      // terminal in this worktree once dead was decided — correct when the
-      // worktree really is single-purpose, but round 4's own liveness check
-      // was itself measured broken (always "dead", see
-      // `defaultIsClaudeForeground`'s doc comment), so every single resume
-      // closed every terminal in the worktree, including one an operator
-      // opened by hand for unrelated work. Now that dead means genuinely
-      // dead, this still only closes the ONE terminal most likely to be
-      // fleet's own prior attach — the best-ranked connected candidate
-      // (`rankAttachTerminals`, the same ranking `findAttachTerminal` and
-      // `fleet tabs`'s own dedupe already use) — leaving any OTHER connected
-      // terminal in this worktree untouched. No candidate at all means
-      // nothing to close; proceed straight to create.
-      const staleTerms = await orcaJson(deps, ["terminal", "list", "--worktree", selector, "--json"], LIST_TIMEOUT_MS);
-      const staleCandidates = (staleTerms.result?.terminals ?? []).filter((t) => t.connected === true && t.handle !== undefined);
-      const staleBest = rankAttachTerminals(staleCandidates, id)[0];
-      if (staleBest?.handle) {
-        await orcaJson(deps, ["terminal", "close", "--terminal", staleBest.handle, "--json"], LIST_TIMEOUT_MS);
+      // Not an idle claude session (or no terminal could be resolved at
+      // all): close ONLY the one specific terminal just found, by its own
+      // handle — never iterate and close every connected terminal in the
+      // worktree the way round 5 did (that closed an operator's own
+      // unrelated shell whenever round 5's own liveness check misfired).
+      // No terminal resolved at all means nothing to close.
+      if (pinned?.handle) {
+        await orcaJson(deps, ["terminal", "close", "--terminal", pinned.handle, "--json"], LIST_TIMEOUT_MS);
       }
 
       const command = localLaunchCommand(id, existing.path, join(existing.path, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");
@@ -834,6 +774,11 @@ export async function ensureLocalStudioWorktree(
       const handle = term.result?.terminal?.handle;
       if (handle) {
         await orcaJson(deps, ["terminal", "rename", "--terminal", handle, "--title", id, "--json"], LIST_TIMEOUT_MS);
+        // #1259 round 6 step 1: pin the FRESH terminal's own handle the
+        // moment it exists, overwriting whatever stale handle was there —
+        // every later wake/resume call for this studio now finds this exact
+        // terminal, never a re-ranked guess.
+        writeLeadHandle(existing.path, handle);
       }
       return { kind: "created" };
     }
@@ -1654,12 +1599,9 @@ export async function findAttachTerminal(id: string, deps: OrcaDeps): Promise<Or
  * checks before touching a terminal — Orca's own tracked agent identity and
  * wait-state, never our own OS-level or screen-text guess. Replaces rounds
  * 3-5 entirely (title/preview pattern-matching, then a tty-captured `ps`
- * walk below, `defaultIsClaudeForeground`) — see
- * `OrcaTerminalEntry.agentIdentity`/`agentWait`'s own doc comments for why
- * each of those was measured wrong. Not yet wired into any caller in THIS
- * commit — `sendLocalWake` and `ensureLocalStudioWorktree`'s resume branch
- * migrate onto it in their own, later commits; the OS-level mechanism below
- * stays live (and in use) until both have.
+ * walk) — see `OrcaTerminalEntry.agentIdentity`/`agentWait`'s own doc
+ * comments for why each of those was measured wrong. Used by both
+ * `sendLocalWake` and `ensureLocalStudioWorktree`'s resume branch.
  *
  * `agentWait == null` (loose equality, deliberate) matches BOTH `null` and
  * `undefined` — the operator's own exact wording ("agentWait==null") for
@@ -1781,86 +1723,6 @@ async function findTerminalByHandle(deps: OrcaDeps, handle: string): Promise<Orc
     return terms.find((t) => t.handle === handle) ?? null;
   } catch {
     return null;
-  }
-}
-
-const execFileP = promisify(execFile);
-
-/**
- * The effective `isClaudeForeground` check: the caller's injected fake in
- * tests, or the real OS-asking implementation in production. See
- * `OrcaDeps.isClaudeForeground`'s own doc comment for why the field is
- * optional on the interface but never actually undefined once
- * `defaultOrcaDeps()` has built the deps object.
- */
-function claudeForegroundCheck(deps: OrcaDeps, worktreePath: string): Promise<boolean> {
-  return (deps.isClaudeForeground ?? defaultIsClaudeForeground)(worktreePath);
-}
-
-/** A few seconds — generous for a `ps` call (which never does real I/O
- *  against the worktree, unlike the old `lsof +D` walk this replaces) but
- *  bounded all the same ("timeout every exec" — the operator's own fix
- *  recipe). A wedged/missing `ps` costs this delay once, never a hung
- *  wake/resume call. */
-const PS_TIMEOUT_MS = 5_000;
-
-/** The tty `localLaunchCommand` captured for this worktree's lead, or null
- *  when the file is absent, empty, or unreadable — never a throw. Absence is
- *  expected for any worktree whose lead predates this capture (round 5) or
- *  whose `tty` call itself failed (no controlling tty at all); both read as
- *  "can't tell," which `defaultIsClaudeForeground` turns into `false`, the
- *  same fail-closed posture as every other signal in this file. */
-async function readLeadTty(worktreePath: string): Promise<string | null> {
-  try {
-    const content = await readFile(join(worktreePath, ".fleet", "lead.tty"), "utf8");
-    const tty = content.trim();
-    return tty === "" ? null : tty;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Real implementation of `OrcaDeps.isClaudeForeground` — see that field's
- * own doc comment for WHY this asks the OS directly rather than trusting a
- * terminal's rendered screen text or title, and for round 4's lsof-based
- * predecessor (replaced entirely, not patched — see that round's own
- * measured failures).
- *
- * #1259 round 5, the operator's own measured fix recipe: `localLaunchCommand`
- * writes the lead's own controlling tty to `.fleet/lead.tty` BEFORE claude
- * starts (fix 1). Liveness is then purely `ps -o tpgid= -t <tty>` (the pty's
- * current foreground process GROUP) followed by `ps -o comm= -p <tpgid>`
- * (that group's own process name) — no title, no screen text, no `lsof`
- * directory walk at all.
- *
- * MEASURED in this sandbox (tmux + a real file literally named `claude`,
- * same technique test/bun/pane-probe-lead-scope.test.ts's own
- * `installFakeClaude` uses and for the identical reason — see this file's
- * sibling real-process test): `ps -t <tty>` answers with ONE ROW PER PROCESS
- * still attached to that controlling tty (the foreground leader AND any of
- * its own children that share it, e.g. claude's own backgrounded work), every
- * row carrying the SAME tpgid value — tpgid names one process GROUP, not a
- * single process. Only the FIRST line is read below; feeding the raw
- * multi-line string straight to `ps -p` as one argument throws ("process ID
- * list syntax error"), which the catch below would otherwise misread as
- * "dead" even with a genuinely live lead. Also measured: `exec -a claude
- * <bin>` only renames argv[0], never the kernel's own `comm` field (what `ps
- * -o comm=` reads here) — a real file named `claude` is required to prove
- * this at all, exactly the same lesson pane-probe-lead-scope.test.ts's own
- * header already documents for `pgrep -x`.
- */
-async function defaultIsClaudeForeground(worktreePath: string): Promise<boolean> {
-  const tty = await readLeadTty(worktreePath);
-  if (tty === null) return false;
-  try {
-    const { stdout: tpgidOut } = await execFileP("ps", ["-o", "tpgid=", "-t", tty], { timeout: PS_TIMEOUT_MS });
-    const tpgid = tpgidOut.split("\n")[0]?.trim() ?? "";
-    if (tpgid === "") return false;
-    const { stdout: commOut } = await execFileP("ps", ["-o", "comm=", "-p", tpgid], { timeout: PS_TIMEOUT_MS });
-    return commOut.split("\n")[0]?.trim() === "claude";
-  } catch {
-    return false; // fail closed: ps missing/erroring/timing out, no tty, anything ambiguous -- not claude
   }
 }
 
@@ -2375,6 +2237,5 @@ export function defaultOrcaDeps(): OrcaDeps {
     run: orcaRunner(bin),
     lock: fileLock,
     registry: fileWorkspaceRegistry(WORKSPACE_REGISTRY_PATH),
-    isClaudeForeground: defaultIsClaudeForeground,
   };
 }
