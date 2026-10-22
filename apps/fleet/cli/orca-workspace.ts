@@ -288,7 +288,11 @@ interface OrcaEnvelope {
     // to know where the lead's project-scoped files land, without a second
     // `worktree list` round trip.
     worktree?: { id?: string; displayName?: string; path?: string };
-    terminal?: { handle?: string; title?: string };
+    // #1259 round 7 fix 3: `agentIdentity`/`agentWait` are carried here too —
+    // `terminal show`'s own envelope, read by `readTerminalDetail` below.
+    // `terminal create`'s envelope never populates them (a just-created
+    // terminal has no tracked agent yet), so they stay optional.
+    terminal?: { handle?: string; title?: string; agentIdentity?: string | null; agentWait?: unknown };
   };
 }
 
@@ -1739,6 +1743,22 @@ export async function findPinnedLeadTerminal(id: string, deps: OrcaDeps): Promis
   }
 }
 
+/** #1259 round 7 fix 3: `agentWait` is absent from `terminal list --json` in
+ *  every measured state (62 real rows) -- it only lives on the per-terminal
+ *  `terminal show` call, where it reads null except during an actual
+ *  permission wait. Wake's own idle gate (unlike resume's identity-only
+ *  gate, Fix 2) needs genuine idle confirmation, so it reads this instead
+ *  of the list entry's own (always-absent) field. Null on any failure, or
+ *  when Orca no longer reports a terminal at that handle at all. */
+async function readTerminalDetail(deps: OrcaDeps, handle: string): Promise<{ agentIdentity?: string | null; agentWait?: unknown } | null> {
+  try {
+    const shown = await orcaJson(deps, ["terminal", "show", "--terminal", handle, "--json"], LIST_TIMEOUT_MS);
+    return shown.result?.terminal ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** #1259 round 6: `sendLocalWake`'s own verify-then-commit confirm step —
  *  re-reads ONE terminal by its EXACT handle, never a re-ranked guess among
  *  worktree-matched candidates (the same precise-handle discipline Step 1
@@ -1847,11 +1867,18 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
   if (term === null || term.handle === undefined) {
     return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
   }
-  if (!isIdleClaudeTerminal(term)) {
+  // #1259 round 7 fix 3: the gate reads `terminal show`, never the `terminal
+  // list` entry's own (always-absent) `agentWait` field — see
+  // `readTerminalDetail`'s own doc comment. Strict `=== null` on
+  // `agentWait` (not the loose `== null` resume's identity-only gate uses):
+  // the operator's own exact wording, since `terminal show`'s field is
+  // expected to reliably be either null or a real value, never absent.
+  const detail = await readTerminalDetail(deps, term.handle);
+  if (detail === null || detail.agentIdentity !== "claude" || detail.agentWait !== null) {
     return {
       woke: false,
       reason: `${id} is a local studio whose Orca terminal is not an idle claude session ` +
-        `(agentIdentity=${term.agentIdentity ?? "none"}${term.agentWait != null ? ", agentWait set" : ""}) — ` +
+        `(agentIdentity=${detail?.agentIdentity ?? "none"}${detail !== null && detail.agentWait !== null ? ", agentWait set" : ""}) — ` +
         `the lead may have exited or is waiting on a prompt; wake its lead yourself with: fleet task show`,
     };
   }
