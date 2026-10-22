@@ -143,9 +143,19 @@ function terminalEntries(...entries: {
   worktreeId?: string;
   worktreePath?: string;
   preview?: string;
+  // #1259 round 6: Orca's own tracked agent state — see
+  // `isIdleClaudeTerminal`'s own doc comment in cli/orca-workspace.ts.
+  agentIdentity?: string | null;
+  agentWait?: unknown;
 }[]): OrcaResult {
   return ok(JSON.stringify({ ok: true, result: { terminals: entries } }));
 }
+
+/** #1259 round 6: an idle-claude terminal's own two fields, spread onto a
+ *  `terminalEntries(...)` fixture — the ONE idiom this file uses everywhere
+ *  a test needs "Orca reports this terminal as a live, idle claude session"
+ *  (replacing round 5's injected `isClaudeForeground` fake entirely). */
+const IDLE_CLAUDE = { agentIdentity: "claude", agentWait: null } as const;
 
 const TERM_CREATED = ok(JSON.stringify({
   ok: true,
@@ -965,20 +975,26 @@ describe("local studio wake via orca terminal send (item 2)", () => {
   const WID = "repo-websites::/w/studio-websites--pilot";
 
   /**
-   * #1259 round 5 fix 5: the fake orca's `terminal list` answer, called
-   * TWICE by `sendLocalWake` per send attempt — once to locate the terminal,
-   * once again AFTER typing, to confirm the typed text actually landed. This
-   * returns `before` on the first call and `after` on every call after that,
-   * simulating a real terminal's own screen either echoing back what was
-   * just typed (`after` contains it — the happy path) or not (a modal
-   * swallowed it, or nothing changed at all — the refusal path).
+   * The fake orca's `terminal list` answer, called TWICE by `sendLocalWake`
+   * per send attempt — once to locate the terminal (`findPinnedLeadTerminal`),
+   * once again AFTER typing, to confirm the typed text actually landed
+   * (`findTerminalByHandle`). This returns `before` on the first call and
+   * `after` on every call after that, simulating a real terminal's own
+   * screen either echoing back what was just typed (`after` contains it —
+   * the happy path) or not (a modal swallowed it, or nothing changed at
+   * all — the refusal path). `idle` defaults to true (Orca reports this
+   * terminal as a live, idle claude session) — the one false-case test below
+   * passes `idle: false` explicitly.
    */
-  function sequencedTerminalList(before: string | undefined, after: string | undefined): () => Promise<OrcaResult> {
+  function sequencedTerminalList(before: string | undefined, after: string | undefined, idle = true): () => Promise<OrcaResult> {
     let n = 0;
     return async () => {
       const preview = n === 0 ? before : after;
       n++;
-      return terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview });
+      return terminalEntries({
+        handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview,
+        ...(idle ? IDLE_CLAUDE : {}),
+      });
     };
   }
 
@@ -987,7 +1003,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       "worktree list": worktrees("studio-websites--pilot"),
       "terminal list": sequencedTerminalList("❯ check on task", "❯ WAKE #1"),
       "terminal send": ok("{}"),
-    }, { isClaudeForeground: async () => true });
+    });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
     expect(out).toEqual({ woke: true, digest: "WAKE #1" });
     const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
@@ -997,18 +1013,19 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     ]);
   });
 
-  // #1259 round 5 fix 3: the measured gap — a live local lead rewrites its
-  // own terminal's title via OSC (`✳ <summary>`), never matching the studio
-  // id or any #153 attach-title form. `sendLocalWake`'s own terminal lookup
-  // must still find it: connected + worktreeId match, title irrelevant.
-  test("sendLocalWake finds and types into a terminal whose title is claude's own OSC rewrite, not the studio id (#1259 round 5 fix 3)", async () => {
+  // #1259 round 5's own measured gap, still true under round 6's mechanism:
+  // a live local lead rewrites its own terminal's title via OSC
+  // (`✳ <summary>`), never matching the studio id or any #153 attach-title
+  // form. `sendLocalWake`'s own terminal lookup must still find it: Orca's
+  // own tracked agent state, title irrelevant.
+  test("sendLocalWake finds and types into a terminal whose title is claude's own OSC rewrite, not the studio id", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
       "terminal list": () => Promise.resolve(terminalEntries({
-        handle: "term_0", title: "✳ fix the login bug", connected: true, worktreeId: WID, preview: "❯ WAKE #1",
+        handle: "term_0", title: "✳ fix the login bug", connected: true, worktreeId: WID, preview: "❯ WAKE #1", ...IDLE_CLAUDE,
       })),
       "terminal send": ok("{}"),
-    }, { isClaudeForeground: async () => true });
+    });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
     expect(out).toEqual({ woke: true, digest: "WAKE #1" });
     const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
@@ -1047,7 +1064,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       "worktree list": worktrees("studio-websites--pilot"),
       "terminal list": sequencedTerminalList("❯ check on task", `❯ ${digest}`),
       "terminal send": ok("{}"),
-    }, { isClaudeForeground: async () => true });
+    });
     const report = { woke: false as const, reason: "LOCAL", local: true as const };
     const out = await resolveLocalWake(report, "websites--pilot", 42, f.deps);
     expect(out).toEqual({ woke: true, digest });
@@ -1060,7 +1077,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": sequencedTerminalList("❯ ready", `❯ ${digest}`),
         "terminal send": ok("{}"),
-      }, { isClaudeForeground: async () => true });
+      });
       const report = { woke: false as const, reason: "LOCAL", local: true as const, digest: "$(touch PWNED)" };
       const out = await resolveLocalWake(report, "websites--pilot", 7, f.deps);
       expect(out).toEqual({ woke: true, digest });
@@ -1076,7 +1093,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": sequencedTerminalList("❯ ready", `❯ ${digest}`),
         "terminal send": ok("{}"),
-      }, { isClaudeForeground: async () => true });
+      });
       const report = {
         woke: false as const, reason: "LOCAL", local: true as const,
         digest: "x\" *(e:'touch PWNED':) \"",
@@ -1105,30 +1122,49 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     });
   });
 
-  // Fix 2 (#1259 round 4): `deps.isClaudeForeground` is the PRIMARY liveness
-  // signal, asked by worktree path — gates BEFORE any typing happens at all.
-  describe("the process check is primary — claude foreground gates before any typing (#1259 round 4 fix 2)", () => {
-    test("refuses when the fake process check says claude is NOT foreground — never even attempts to type", async () => {
+  // #1259 round 6: `isIdleClaudeTerminal` (Orca's own tracked agent state on
+  // the pinned terminal) is the PRIMARY liveness signal, gating BEFORE any
+  // typing happens at all.
+  describe("the process check is primary — claude foreground gates before any typing (#1259 round 6)", () => {
+    test("refuses when Orca reports this terminal is NOT an idle claude session — never even attempts to type", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": sequencedTerminalList("❯ ready", "❯ WAKE #1"),
+        "terminal list": sequencedTerminalList("❯ ready", "❯ WAKE #1", false),
         "terminal send": ok("{}"),
-      }, { isClaudeForeground: async () => false });
+      });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(false);
-      if (!out.woke) expect(out.reason).toContain("no claude session in the terminal");
+      if (!out.woke) expect(out.reason).toContain("not an idle claude session");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
+    });
+
+    // The operator's own exact wording: agentWait==null matches both null
+    // and undefined, but a non-null agentWait (blocked on a permission
+    // prompt/modal) must still refuse even when agentIdentity is "claude".
+    test("refuses when agentIdentity is claude but agentWait is non-null (blocked on a prompt) — never attempts to type", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": () => Promise.resolve(terminalEntries({
+          handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready",
+          agentIdentity: "claude", agentWait: "permission",
+        })),
+        "terminal send": ok("{}"),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("not an idle claude session");
       expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
     });
   });
 
-  // Fix 5 (#1259 round 5): round 4's SECONDARY idle-tail glyph check
-  // (`looksLikeIdleComposerTail`) is REMOVED entirely, not narrowed — the
-  // operator's own harness proved it still accepted a real permission
-  // modal's tail (`❯ No, exit`) as "idle, safe" and let a pending `touch`
-  // auto-run. The replacement never trusts a screenshot: type first (no
-  // --enter), re-read the SAME terminal, and only submit Enter once the
-  // re-read CONFIRMS our own text is now the tail.
-  describe("verify-then-commit: Enter is sent only after the typed text is confirmed in the composer (#1259 round 5 fix 5)", () => {
+  // Round 5's verify-then-commit protocol survives round 6 unchanged, as a
+  // SECOND, independent safety layer: the operator's own round 6 finding —
+  // a modal that treats keystrokes as navigation/selection can already act
+  // on them even without Enter — means `agentWait` alone (the PRIMARY gate,
+  // tested above) must never be trusted alone. Every fixture in this block
+  // is idle-claude-shaped (`IDLE_CLAUDE`, via `sequencedTerminalList`'s
+  // default) specifically so it exercises this SECOND layer on its own.
+  describe("verify-then-commit: Enter is sent only after the typed text is confirmed in the composer", () => {
     // The literal scenario the operator's harness measured: a modal is up
     // (or the screen simply never changes) and our own typed text never
     // actually lands in the composer, even though typing itself "succeeded"
@@ -1142,7 +1178,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         // ignored the keystrokes.
         "terminal list": sequencedTerminalList("❯ No, exit", "❯ No, exit"),
         "terminal send": ok("{}"),
-      }, { isClaudeForeground: async () => true });
+      });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(false);
       if (!out.woke) expect(out.reason).toContain("could not confirm it landed in the composer");
@@ -1157,7 +1193,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": sequencedTerminalList(undefined, undefined),
         "terminal send": ok("{}"),
-      }, { isClaudeForeground: async () => true });
+      });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(false);
       if (!out.woke) expect(out.reason).toContain("could not confirm it landed in the composer");
@@ -1169,7 +1205,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": sequencedTerminalList("❯ ready", "❯ WAKE #1"),
         "terminal send": ok("{}"),
-      }, { isClaudeForeground: async () => true });
+      });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out).toEqual({ woke: true, digest: "WAKE #1" });
       const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
@@ -1184,7 +1220,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": sequencedTerminalList("❯ ready", "❯ WAKE #1"),
         "terminal send": { ok: false, stdout: "", stderr: "orca wedged", timedOut: false },
-      }, { isClaudeForeground: async () => true });
+      });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(false);
       if (!out.woke) expect(out.reason).toContain("terminal send failed");
@@ -1212,7 +1248,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       "worktree list": worktrees("studio-websites--pilot"),
       "terminal list": sequencedTerminalList("❯ ready", `❯ ${cleaned}`),
       "terminal send": ok("{}"),
-    }, { isClaudeForeground: async () => true });
+    });
     const out = await sendLocalWake("websites--pilot", "WAKE \x03 $(reboot)\x1b", f.deps);
     expect(out.woke).toBe(true);
     expect(out.digest).toBe(cleaned);

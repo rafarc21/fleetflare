@@ -137,19 +137,15 @@ describe("fleet task message — the repo travels in the body (issue #1106)", ()
 });
 
 describe("fleet task message — local assignee wakes by Orca terminal send (item 2)", () => {
-  // #1259 round 5: `sendLocalWake`'s PRIMARY liveness signal is now
-  // `OrcaDeps.isClaudeForeground`, which asks the real OS (tty -> `ps` -> `ps`
-  // — see `defaultIsClaudeForeground`'s own doc comment) whether claude is
-  // genuinely the foreground process in the studio's worktree — never the
-  // fake `orca` binary's scripted `preview` text, and never injectable across
-  // this real `Bun.spawn` subprocess boundary (production always asks the
-  // real OS; there is no test seam here by design). The fake worktree path
-  // below has no `.fleet/lead.tty` file (nothing ever wrote one), so
-  // `readLeadTty` reads null and the real check fails closed — the swap's end
-  // result is a REFUSAL, not a send. What this test still proves: the swap
-  // RAN — the printed line is `sendLocalWake`'s own CLI-side wording, never
-  // the Worker's raw local-refusal text passed through unchanged — and no
-  // `terminal send` call was ever made.
+  // #1259 round 6: `sendLocalWake`'s PRIMARY liveness signal is now
+  // `isIdleClaudeTerminal` — Orca's own tracked `agentIdentity`/`agentWait`
+  // on the pinned terminal, read straight from the fake orca binary's own
+  // `terminal list --json` answer. The fake script below never sets
+  // `agentIdentity`, so the real check reads "not idle claude" and refuses
+  // — the swap's end result is a REFUSAL, not a send. What this test still
+  // proves: the swap RAN — the printed line is `sendLocalWake`'s own
+  // CLI-side wording, never the Worker's raw local-refusal text passed
+  // through unchanged — and no `terminal send` call was ever made.
   test("a local-refusal wake is swapped for the real Orca liveness check, printed as NO WAKE with the CLI's own reason", async () => {
     const home = tmpDir("task-message-local-home-");
     const cwd = tmpDir("task-message-local-cwd-");
@@ -206,7 +202,7 @@ describe("fleet task message — local assignee wakes by Orca terminal send (ite
     // unchanged (which is what a passthrough, with `resolveLocalWake`'s
     // call removed, would still print verbatim).
     expect(out).toContain("NO WAKE");
-    expect(out).toContain("no claude session in the terminal's foreground");
+    expect(out).toContain("not an idle claude session");
     expect(out).not.toContain("no container to wake");
     expect(out).not.toContain("not an Orca session");
     // No terminal send was ever attempted — the liveness check refused first.

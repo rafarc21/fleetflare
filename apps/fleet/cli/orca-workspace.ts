@@ -1864,48 +1864,6 @@ async function defaultIsClaudeForeground(worktreePath: string): Promise<boolean>
   }
 }
 
-/**
- * #1259 round 5 fix 3: the LOCAL wake's own terminal lookup — a studio's
- * worktree's best-ranked CONNECTED terminal, period, never gated on title the
- * way `findAttachTerminal`/`isHealthyAttach` are. Deliberately a SEPARATE
- * function rather than a relaxed `findAttachTerminal` itself: that function
- * is also `findAttachHandle`'s (board #220, `fleet attach --print-handle`)
- * own lookup, and ITS title gate is correct and load-bearing there — an
- * operator's own plain shell opened in a studio's worktree must still read
- * `title !== "fleet"` and be excluded (see
- * test/bun/orca-registry-rows.test.ts's own "no attach terminal" case,
- * title `"zsh"`), a guarantee this relaxation must not quietly remove from
- * every OTHER caller of that shared lookup.
- *
- * The relaxation itself is real and measured: a genuinely live local lead
- * rewrites its OWN Orca terminal's title via OSC the moment it starts
- * working (`✳ <summary>`) — never matching the studio id, never one of the
- * #153 attach-title forms `isAttachTitle` recognizes (those are written by
- * the CONTAINER path's `fleet attach <id>` wrapper process, which a local
- * studio's terminal never runs — Orca's terminal there runs `claude` itself,
- * directly). Measured 0/13 real live local claude terminals were found by
- * the title-gated lookup; this one asks only "is it connected, and is it in
- * this studio's worktree" — the worktree is already single-purpose by this
- * file's own design (see this file's header), so `connected` here is a much
- * narrower claim than it would be anywhere titles still matter.
- */
-async function findLocalAttachTerminal(id: string, deps: OrcaDeps): Promise<OrcaTerminalEntry | null> {
-  if (!orcaPresent(deps)) return null;
-  try {
-    const [worktrees, terms] = await Promise.all([
-      fullList(deps, "worktrees", ROW_TIMEOUT_MS), fullList(deps, "terminals", ROW_TIMEOUT_MS),
-    ]);
-    const worktree = findStudioWorktree(id, worktrees, deps.registry);
-    if (!worktree?.id) return null;
-    const candidates = terms.filter((t) => t.connected === true && t.worktreeId === worktree.id);
-    if (candidates.length === 0) return null;
-    return rankAttachTerminals(candidates, id)[0] ?? null;
-  } catch (err) {
-    deps.log(`${id}: local attach terminal lookup failed — ${errText(err)}`);
-    return null;
-  }
-}
-
 /** The last non-empty line of a multi-line terminal preview, with trailing
  *  whitespace trimmed. A terminal preview can end in blank lines (cursor
  *  position padding, a trailing newline) that would otherwise hide the real
@@ -1924,24 +1882,27 @@ function lastNonEmptyLine(preview: string): string {
  * Fleet task #1259 item 2: wake a LOCAL studio's lead. A local row has no
  * container, so the Worker's assign wake refuses with `{local:true}` and this
  * CLI turns that into the Orca equivalent of the container wake: resolve the
- * studio's healthy attach terminal and type the digest into it. Fail closed —
- * not under Orca, no healthy attach terminal, no claude session in that
- * terminal's foreground, the typed text never confirmed landing in the
- * composer, or a failed send all report a refusal, never a silent non-wake.
+ * studio's PINNED lead terminal and type the digest into it. Fail closed —
+ * not under Orca, no terminal can be resolved at all, Orca's own tracked
+ * agent is not an idle claude session, the typed text never confirmed
+ * landing in the composer, or a failed send all report a refusal, never a
+ * silent non-wake.
  *
- * Fix 2 (#1259 round 4): the PRIMARY liveness signal is `deps.isClaudeForeground`
- * — the OS's own answer to "is claude actually running here", asked by
- * worktree path, never inferred from the terminal's rendered screen text.
+ * #1259 round 6: the terminal lookup is `findPinnedLeadTerminal` — the exact
+ * handle this file persisted at `.fleet/lead.handle` when the terminal was
+ * created, never a freshly re-ranked guess among worktree-matched
+ * candidates (round 5's own bug: real list order put an operator's own
+ * unrelated shell first, and this function typed into IT). The liveness gate
+ * is `isIdleClaudeTerminal` on that EXACT entry — Orca's own tracked
+ * `agentIdentity`/`agentWait`, never an OS-level `ps` walk (round 5) or
+ * screen-text pattern match (rounds 3-4), both measured wrong independent of
+ * the terminal-selection bug above.
  *
- * Fix 5 (#1259 round 5, replacing round 4's SECONDARY `looksLikeIdleComposerTail`
- * glyph check entirely — not narrowed, REMOVED): the operator's own harness,
- * forcing `isClaudeForeground` to a correct `true` against a captured REAL
- * trust-dialog preview tail (`❯ No, exit`), showed the glyph check still read
- * that tail as "idle, safe" — a real permission modal's own option rows are
- * `❯`-prefixed, indistinguishable from the composer's own idle row by shape
- * alone. No glyph-based tail check, however narrow, can be trusted as a
- * safety gate before Enter. The replacement is a verify-THEN-commit protocol,
- * never a trust-a-screenshot one:
+ * Kept from round 5, as a SECOND, independent safety layer (the operator's
+ * own round 6 finding 4: a modal that treats keystrokes as navigation can
+ * already act on them even without Enter, so one signal — `agentWait` —
+ * must never be trusted alone): a verify-THEN-commit protocol, never a
+ * trust-a-screenshot one:
  *   1. type the (control-byte-cleaned) digest with NO `--enter` — nothing is
  *      submitted yet, so even a wrong guess here costs nothing but stray
  *      characters sitting untyped-into-Enter;
@@ -1993,15 +1954,16 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
     };
   }
   const clean = digest.replace(/[\x00-\x1f\x7f]/g, "");
-  const term = await findLocalAttachTerminal(id, deps);
+  const term = await findPinnedLeadTerminal(id, deps);
   if (term === null || term.handle === undefined) {
     return { woke: false, reason: `${id} is a local studio with no healthy Orca attach terminal — no wake was sent` };
   }
-  if (!(await claudeForegroundCheck(deps, term.worktreePath ?? ""))) {
+  if (!isIdleClaudeTerminal(term)) {
     return {
       woke: false,
-      reason: `${id} is a local studio with no claude session in the terminal's foreground — ` +
-        `the lead has exited; wake its lead yourself with: fleet task show`,
+      reason: `${id} is a local studio whose Orca terminal is not an idle claude session ` +
+        `(agentIdentity=${term.agentIdentity ?? "none"}${term.agentWait != null ? ", agentWait set" : ""}) — ` +
+        `the lead may have exited or is waiting on a prompt; wake its lead yourself with: fleet task show`,
     };
   }
   try {
@@ -2013,11 +1975,12 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
     return { woke: false, reason: errText(err) };
   }
 
-  // Never trust the type landed where expected — re-read THIS terminal's own
-  // current screen and confirm our own text is now its tail before ever
-  // committing Enter. See this function's own doc comment for why a glyph
-  // shape alone (the round 4 approach) cannot stand in for this.
-  const after = await findLocalAttachTerminal(id, deps);
+  // Never trust the type landed where expected — re-read this EXACT terminal
+  // (by handle, never a re-ranked guess) and confirm our own text is now its
+  // tail before ever committing Enter. See this function's own doc comment
+  // for why `agentWait` alone (round 6's own primary gate above) cannot
+  // stand in for this.
+  const after = await findTerminalByHandle(deps, term.handle);
   const tail = after?.preview !== undefined ? lastNonEmptyLine(after.preview) : "";
   if (!tail.includes(clean)) {
     return {
