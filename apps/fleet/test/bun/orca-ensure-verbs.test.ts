@@ -1250,18 +1250,33 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     return terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE });
   }
 
+  // #1259 round 8 fix B2: `terminal send --json`'s own submission receipt —
+  // `--wait-submit` only OBSERVES the submission (Orca's own help text: "on
+  // timeout returns the queued/input-accepted receipt"), it never fails the
+  // call for a merely-queued send. `status: "turn_started"` is this file's
+  // own considered guess at the genuine-submission value (unconfirmed
+  // against real Orca — see the field's own comment in orca-workspace.ts).
+  function sendSubmitted(): OrcaResult {
+    return ok(JSON.stringify({ ok: true, result: { submission: { status: "turn_started" } } }));
+  }
+  /** The receipt `--wait-submit` itself documents returning on a timeout —
+   *  queued or accepted into the composer, but never confirmed submitted. */
+  function sendQueuedOnly(): OrcaResult {
+    return ok(JSON.stringify({ ok: true, result: { submission: { status: "input_accepted" } } }));
+  }
+
   test("sendLocalWake types the digest and submits it in ONE terminal send call, with --wait-submit (#1259 round 7 fix 4)", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
       "terminal list": oneTerminal(),
       "terminal show": terminalShow(IDLE_CLAUDE),
-      "terminal send": ok("{}"),
+      "terminal send": sendSubmitted(),
     });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
     expect(out).toEqual({ woke: true, digest: "WAKE #1" });
     const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
     expect(sends).toEqual([
-      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter", "--wait-submit", "5"],
+      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter", "--wait-submit", "5", "--json"],
     ]);
   });
 
@@ -1277,13 +1292,13 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         handle: "term_0", title: "✳ fix the login bug", connected: true, worktreeId: WID, ...IDLE_CLAUDE,
       }),
       "terminal show": terminalShow(IDLE_CLAUDE),
-      "terminal send": ok("{}"),
+      "terminal send": sendSubmitted(),
     });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
     expect(out).toEqual({ woke: true, digest: "WAKE #1" });
     const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
     expect(sends).toEqual([
-      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter", "--wait-submit", "5"],
+      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter", "--wait-submit", "5", "--json"],
     ]);
   });
 
@@ -1316,7 +1331,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       "worktree list": worktrees("studio-websites--pilot"),
       "terminal list": oneTerminal(),
       "terminal show": terminalShow(IDLE_CLAUDE),
-      "terminal send": ok("{}"),
+      "terminal send": sendSubmitted(),
     });
     const report = { woke: false as const, reason: "LOCAL", local: true as const };
     const out = await resolveLocalWake(report, "websites--pilot", 42, f.deps);
@@ -1330,7 +1345,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": oneTerminal(),
         "terminal show": terminalShow(IDLE_CLAUDE),
-        "terminal send": ok("{}"),
+        "terminal send": sendSubmitted(),
       });
       const report = { woke: false as const, reason: "LOCAL", local: true as const, digest: "$(touch PWNED)" };
       const out = await resolveLocalWake(report, "websites--pilot", 7, f.deps);
@@ -1347,7 +1362,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": oneTerminal(),
         "terminal show": terminalShow(IDLE_CLAUDE),
-        "terminal send": ok("{}"),
+        "terminal send": sendSubmitted(),
       });
       const report = {
         woke: false as const, reason: "LOCAL", local: true as const,
@@ -1391,7 +1406,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
           handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ WAKE #1", ...IDLE_CLAUDE,
         })),
         "terminal show": terminalShow({ agentIdentity: "claude", agentWait: null }),
-        "terminal send": ok("{}"),
+        "terminal send": sendSubmitted(),
       });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(true);
@@ -1450,7 +1465,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "worktree list": worktrees("studio-websites--pilot"),
         "terminal list": oneTerminal(),
         "terminal show": terminalShow(IDLE_CLAUDE),
-        "terminal send": ok("{}"),
+        "terminal send": sendSubmitted(),
       });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out).toEqual({ woke: true, digest: "WAKE #1" });
@@ -1495,6 +1510,40 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       expect(out.woke).toBe(false);
       if (!out.woke) expect(out.reason).toContain("terminal send failed");
     });
+
+    // #1259 round 8 fix B2: `--enter --wait-submit` ACCEPTED-NOT-SUBMITTED is
+    // a real outcome `--wait-submit`'s own help text documents (timeout
+    // returns "the queued/input-accepted receipt"), never equivalent to a
+    // genuine submission. The send call must carry `--json` so the receipt
+    // can be parsed at all.
+    test("the send carries --json and reports woke:true only once the receipt shows genuine submission (turn_started) (#1259 round 8 fix B2)", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendSubmitted(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+      const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
+      expect(send).toContain("--json");
+    });
+
+    // The exact gap the operator's own review named: accepted-into-the-
+    // composer is NOT the same as genuinely submitted. A receipt that only
+    // ever reports "queued"/"input accepted" (never `turn_started`) must
+    // refuse, not report success.
+    test("a receipt showing only queued/input-accepted, never turn_started, reports woke:false -- submit was never observed (#1259 round 8 fix B2)", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendQueuedOnly(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("submit not observed");
+    });
   });
 
   // Fix 1 (#1259 round 4): fix-1b's shell-metachar strip (`$`, backtick,
@@ -1509,12 +1558,12 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       "worktree list": worktrees("studio-websites--pilot"),
       "terminal list": oneTerminal(),
       "terminal show": terminalShow(IDLE_CLAUDE),
-      "terminal send": ok("{}"),
+      "terminal send": sendSubmitted(),
     });
     const out = await sendLocalWake("websites--pilot", "WAKE \x03 $(reboot)\x1b", f.deps);
     expect(out.woke).toBe(true);
     expect(out.digest).toBe(cleaned);
     const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
-    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", cleaned, "--enter", "--wait-submit", "5"]);
+    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", cleaned, "--enter", "--wait-submit", "5", "--json"]);
   });
 });

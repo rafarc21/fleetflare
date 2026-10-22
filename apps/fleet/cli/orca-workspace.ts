@@ -293,6 +293,16 @@ interface OrcaEnvelope {
     // `terminal create`'s envelope never populates them (a just-created
     // terminal has no tracked agent yet), so they stay optional.
     terminal?: { handle?: string; title?: string; agentIdentity?: string | null; agentWait?: unknown };
+    // #1259 round 8 fix B2: `terminal send --json`'s own submission receipt
+    // — the Orca help text for `--wait-submit` says only that "timeout
+    // returns the queued/input-accepted receipt," never a confirmed key
+    // path. `status: "turn_started"` is this file's own considered guess at
+    // the value meaning "genuinely submitted" (never confirmed against real
+    // Orca — no instance in this sandbox, same posture as the `5`-second
+    // `--wait-submit` budget comment above `sendLocalWake`). Any other
+    // status (queued, input-accepted, or the field simply absent) must read
+    // as "not yet submitted," never as success.
+    submission?: { status?: string };
   };
 }
 
@@ -1873,28 +1883,48 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
   }
   try {
     // #1259 round 7 fix 4: ONE call, carrying `--enter --wait-submit
-    // <seconds>` — trusting Orca's OWN submission acknowledgment instead of
-    // re-reading screen text ourselves. The prior 2-phase verify-then-commit
-    // protocol (type without `--enter`, re-read this terminal's preview,
-    // require the LAST non-empty line to contain the FULL digest, only then
-    // a separate `--enter` call) never succeeded on real Orca: the composer
-    // wraps long text across multiple visual lines, so the digest was NEVER
-    // found whole on any single "last line," even on a fully successful
-    // type — 4/4 real measured attempts stranded the digest half-typed.
+    // <seconds>` instead of re-reading screen text ourselves. The prior
+    // 2-phase verify-then-commit protocol (type without `--enter`, re-read
+    // this terminal's preview, require the LAST non-empty line to contain
+    // the FULL digest, only then a separate `--enter` call) never succeeded
+    // on real Orca: the composer wraps long text across multiple visual
+    // lines, so the digest was NEVER found whole on any single "last line,"
+    // even on a fully successful type — 4/4 real measured attempts stranded
+    // the digest half-typed.
     // `5` (seconds) is a judgment call, not a real-Orca measurement — no
     // Orca in this sandbox to time a real submit against — chosen to leave
     // headroom inside `LIST_TIMEOUT_MS` (10s) for normal round-trip
     // overhead on top of the flag's own wait budget.
-    const res = await deps.run(
-      ["terminal", "send", "--terminal", term.handle, "--text", clean, "--enter", "--wait-submit", "5"],
+    //
+    // #1259 round 8 fix B2: round 7's own comment above overclaimed
+    // "trusting Orca's own submission acknowledgment" while never actually
+    // reading one — the call carried no `--json` and the code only checked
+    // the raw process exit (`res.ok`/`timedOut`). Orca's own `--wait-submit`
+    // help text says a timeout "returns the queued/input-accepted receipt"
+    // instead of failing the call — accepted-into-the-composer is NOT the
+    // same as genuinely submitted, so `res.ok === true` alone is not proof
+    // of anything. `--json` + `orcaJson` (this file's own established
+    // pattern for every other parsed Orca call) reads the actual receipt;
+    // only `status: "turn_started"` (`OrcaEnvelope.result.submission`'s own
+    // comment) counts as genuine submission. Any other status — queued,
+    // input-accepted, or no parseable receipt at all — refuses rather than
+    // reporting a false `woke:true`.
+    const envelope = await orcaJson(
+      deps,
+      ["terminal", "send", "--terminal", term.handle, "--text", clean, "--enter", "--wait-submit", "5", "--json"],
       LIST_TIMEOUT_MS,
     );
-    if (res.timedOut || !res.ok) {
-      return { woke: false, reason: `terminal send failed: ${(res.stderr || res.stdout).trim().slice(0, 200)}` };
+    const status = envelope.result?.submission?.status;
+    if (status !== "turn_started") {
+      return { woke: false, reason: `terminal send queued, submit not observed (status=${status ?? "none"})` };
     }
     return { woke: true, digest: clean };
   } catch (err) {
-    return { woke: false, reason: errText(err) };
+    // orcaJson's own thrown message already names the failed command (e.g.
+    // "orca terminal send failed: ..." / "... timed out after 10s") — prefix
+    // it with "terminal send failed" so callers matching that substring
+    // (pre-existing behavior) keep working for either failure shape.
+    return { woke: false, reason: `terminal send failed: ${errText(err)}` };
   }
 }
 
