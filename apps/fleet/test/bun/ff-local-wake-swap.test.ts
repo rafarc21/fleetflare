@@ -24,13 +24,14 @@
 // returns undefined on a real machine and falls through to the (matched)
 // worktree-list fallback below.
 //
-// #1259 round 6: the liveness gate `sendLocalWake` now runs is
-// `isIdleClaudeTerminal` — Orca's own tracked `agentIdentity`/`agentWait` on
-// the pinned terminal, never an OS-level check or the fake `orca` binary's
-// scripted `preview` text. The fake orca script below never sets
-// `agentIdentity`, so the real check reads "not idle claude" and refuses —
-// the swap having RUN is still the thing proved (see each test's own
-// comment for exactly how).
+// #1259 round 7 fix 1: `findPinnedLeadTerminal`'s fallback now filters
+// candidates by `agentIdentity === "claude"` (never `connected` alone,
+// which says nothing about identity), refusing (null) on anything but
+// EXACTLY one such candidate. The fake orca script below never sets
+// `agentIdentity` on its one terminal, so the fallback now finds zero
+// claude-identified candidates and resolves no terminal at all — the swap
+// having RUN is still the thing proved (see each test's own comment for
+// exactly how).
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -111,14 +112,14 @@ describe("fileTask swaps a local-refusal wake for the real Orca send, never the 
     expect(number).toBe(42);
     const wakeLine = lines.find((l) => l.includes("woke the studio") || l.includes("NO WAKE"));
     expect(wakeLine).toBeDefined();
-    // #1259 round 6: the fake orca script's terminal never carries
-    // `agentIdentity: "claude"`, so `isIdleClaudeTerminal` reads false and
-    // the swap's end result is a refusal — but the SWAP STILL RAN: the
-    // printed line is `sendLocalWake`'s own CLI-side refusal wording, never
-    // the Worker's raw "no container to wake" text unchanged (which is what
-    // a passthrough, with `resolveLocalWake`'s call removed, would still
-    // print verbatim).
-    expect(wakeLine).toContain("not an idle claude session");
+    // #1259 round 7 fix 1: the fake orca script's terminal never carries
+    // `agentIdentity: "claude"`, so `findPinnedLeadTerminal`'s fallback finds
+    // zero claude-identified candidates and resolves no terminal at all —
+    // but the SWAP STILL RAN: the printed line is `sendLocalWake`'s own
+    // CLI-side refusal wording, never the Worker's raw "no container to
+    // wake" text unchanged (which is what a passthrough, with
+    // `resolveLocalWake`'s call removed, would still print verbatim).
+    expect(wakeLine).toContain("no healthy Orca attach terminal");
     expect(wakeLine).not.toContain("no container to wake");
   });
 });
@@ -150,10 +151,10 @@ describe("adoptTask swaps a local-refusal wake for the real Orca send, never the
     expect(number).toBe(43);
     const wakeLine = lines.find((l) => l.includes("woke the studio") || l.includes("NO WAKE"));
     expect(wakeLine).toBeDefined();
-    // See the `fileTask` test above for why the fake orca's terminal reads
-    // "not idle claude" — the assertion below still proves the swap ran,
-    // not the raw Worker refusal passed through unchanged.
-    expect(wakeLine).toContain("not an idle claude session");
+    // See the `fileTask` test above for why the fallback resolves no
+    // terminal at all — the assertion below still proves the swap ran, not
+    // the raw Worker refusal passed through unchanged.
+    expect(wakeLine).toContain("no healthy Orca attach terminal");
     expect(wakeLine).not.toContain("no container to wake");
   });
 });

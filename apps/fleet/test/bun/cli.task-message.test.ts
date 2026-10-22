@@ -137,15 +137,15 @@ describe("fleet task message — the repo travels in the body (issue #1106)", ()
 });
 
 describe("fleet task message — local assignee wakes by Orca terminal send (item 2)", () => {
-  // #1259 round 6: `sendLocalWake`'s PRIMARY liveness signal is now
-  // `isIdleClaudeTerminal` — Orca's own tracked `agentIdentity`/`agentWait`
-  // on the pinned terminal, read straight from the fake orca binary's own
-  // `terminal list --json` answer. The fake script below never sets
-  // `agentIdentity`, so the real check reads "not idle claude" and refuses
-  // — the swap's end result is a REFUSAL, not a send. What this test still
-  // proves: the swap RAN — the printed line is `sendLocalWake`'s own
-  // CLI-side wording, never the Worker's raw local-refusal text passed
-  // through unchanged — and no `terminal send` call was ever made.
+  // #1259 round 7 fix 1: `findPinnedLeadTerminal`'s fallback filters
+  // candidates by `agentIdentity === "claude"`, read straight from the fake
+  // orca binary's own `terminal list --json` answer. The fake script below
+  // never sets `agentIdentity`, so the fallback finds zero claude-identified
+  // candidates and resolves no terminal at all — the swap's end result is a
+  // REFUSAL, not a send. What this test still proves: the swap RAN — the
+  // printed line is `sendLocalWake`'s own CLI-side wording, never the
+  // Worker's raw local-refusal text passed through unchanged — and no
+  // `terminal send` call was ever made.
   test("a local-refusal wake is swapped for the real Orca liveness check, printed as NO WAKE with the CLI's own reason", async () => {
     const home = tmpDir("task-message-local-home-");
     const cwd = tmpDir("task-message-local-cwd-");
@@ -202,7 +202,7 @@ describe("fleet task message — local assignee wakes by Orca terminal send (ite
     // unchanged (which is what a passthrough, with `resolveLocalWake`'s
     // call removed, would still print verbatim).
     expect(out).toContain("NO WAKE");
-    expect(out).toContain("not an idle claude session");
+    expect(out).toContain("no healthy Orca attach terminal");
     expect(out).not.toContain("no container to wake");
     expect(out).not.toContain("not an Orca session");
     // No terminal send was ever attempted — the liveness check refused first.

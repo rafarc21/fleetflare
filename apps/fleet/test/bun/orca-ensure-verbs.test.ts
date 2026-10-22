@@ -33,6 +33,8 @@ import {
   LOCAL_EXCLUDE_LINES,
   resolveStudioWorktreePath,
   writeLeadHandle,
+  readLeadHandle,
+  findPinnedLeadTerminal,
   type OrcaDeps,
   type OrcaResult,
 } from "../../cli/orca-workspace";
@@ -680,10 +682,15 @@ describe("local studio workspace — fleet task #1248", () => {
     }
   });
 
-  // The other half: a DEAD claude whose leftover terminal's title still
-  // happens to match the studio id exactly — the shape round 3's own check
-  // would have accepted as "healthy" — must still be closed and replaced.
-  test("a resume with no live claude process closes the stale terminal and creates a fresh one, even with a title that would have matched the old check (item 7, #1259 round 6 step 4)", async () => {
+  // #1259 round 7 fix 1: round 6's fallback used to rank ANY `connected`
+  // terminal and close whichever one came out first, even with no
+  // `agentIdentity` at all on it. That ranking-by-list-order IS the bug Fix 1
+  // removes: with no `agentIdentity:"claude"` candidate anywhere, the
+  // fallback now returns null (never a guess), so nothing is identified to
+  // close — a studio resumes by creating a fresh terminal, leaving whatever
+  // unidentified terminal was there alone, rather than risk closing the wrong
+  // one.
+  test("a resume with no agentIdentity:claude candidate at all closes nothing, still creates a fresh terminal (item 7, #1259 round 7 fix 1)", async () => {
     const root = mkdtempSync(join(tmpdir(), "orca-reuse-unhealthy-"));
     const existingPath = join(root, "studio-websites-pilot");
     mkdirSync(existingPath, { recursive: true });
@@ -704,8 +711,7 @@ describe("local studio workspace — fleet task #1248", () => {
       });
       expect(outcome.kind).toBe("created");
 
-      const close = f.calls.find((c) => c[0] === "terminal" && c[1] === "close");
-      expect(close).toEqual(["terminal", "close", "--terminal", "term_dead", "--json"]);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
       const create = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
       expect(create).toBeDefined();
     } finally {
@@ -713,14 +719,13 @@ describe("local studio workspace — fleet task #1248", () => {
     }
   });
 
-  // #1259 round 5 fix 4: round 4's own fix above closed EVERY connected
-  // terminal in the worktree once dead was decided. Two connected terminals
-  // here, one shaped like fleet's own prior attach (title "websites--pilot",
-  // first in list order) and one shaped like an operator's own manual shell
-  // (title "zsh", second) — only the FIRST (ranked best — same rank
-  // tie-break as `rankAttachTerminals`'s own "ties keep the oldest" rule)
-  // may be closed.
-  test("a resume with no live claude process closes only the best-ranked stale terminal, never every connected terminal in the worktree (#1259 round 6 step 4)", async () => {
+  // #1259 round 7 fix 1: two candidates, neither carrying
+  // `agentIdentity:"claude"` — ambiguous either way old `rankAttachTerminals`
+  // picked the first one (list order) and closed it, which was exactly how
+  // the operator's own regression (finding 2) closed an operator's own shell.
+  // The fallback now refuses to guess among ANY zero-or-many-claude set, so
+  // neither is closed.
+  test("a resume with no agentIdentity:claude candidate among several closes neither, never guesses which one to close (#1259 round 7 fix 1)", async () => {
     const root = mkdtempSync(join(tmpdir(), "orca-reuse-two-terms-"));
     const existingPath = join(root, "studio-websites-pilot");
     mkdirSync(existingPath, { recursive: true });
@@ -742,9 +747,7 @@ describe("local studio workspace — fleet task #1248", () => {
       });
       expect(outcome.kind).toBe("created");
 
-      const closes = f.calls.filter((c) => c[0] === "terminal" && c[1] === "close");
-      expect(closes).toEqual([["terminal", "close", "--terminal", "term_stale_lead", "--json"]]);
-      expect(closes.some((c) => c.includes("term_operator_shell"))).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -829,6 +832,98 @@ describe("local studio workspace — fleet task #1248", () => {
   test("launch command arms FLEET_WORKSPACE so hooks find the worktree, not /workspace (item 1)", () => {
     const cmd = localLaunchCommand("websites--pilot", "/w", "/w/.fleet/working-set.md", "Bash(git *)", "");
     expect(cmd).toContain('STUDIO_ID=websites--pilot FLEET_WORKSPACE="/w" claude');
+  });
+});
+
+// #1259 round 7 fix 1: findPinnedLeadTerminal's FALLBACK branch (no pin, or a
+// stale one) used to rank `connected` candidates by list order and silently
+// pick #1 — the operator's own measured regression (finding 2): a resume
+// with no pin and a list `[operator zsh, live lead]` picked the zsh, closed
+// it, spawned a SECOND lead, and PINNED THE NEW ONE, leaving the real live
+// lead running forever, unpinned. The fallback now filters candidates by
+// `agentIdentity === "claude"` (never `connected`, which says nothing about
+// identity) and only ever acts on EXACTLY one such candidate — zero or two+
+// is an unresolvable ambiguity, so it refuses (null, no pin written) rather
+// than guess among them the way `rankAttachTerminals` did.
+describe("findPinnedLeadTerminal fallback discovery — identity-filtered, exact-one-or-refuse (#1259 round 7 fix 1)", () => {
+  const WID = "repo-websites::/w/studio-websites-pilot";
+
+  function fallbackRoot(): { root: string; worktreePath: string } {
+    const root = mkdtempSync(join(tmpdir(), "orca-fallback-"));
+    const worktreePath = join(root, "studio-websites-pilot");
+    mkdirSync(worktreePath, { recursive: true });
+    return { root, worktreePath };
+  }
+
+  function fallbackFake(worktreePath: string, entries: Parameters<typeof terminalEntries>[0][]): Fake {
+    return fake({
+      "worktree list": ok(JSON.stringify({
+        ok: true,
+        result: { worktrees: [{ id: WID, displayName: "studio-websites--pilot", path: worktreePath }] },
+      })),
+      "terminal list": terminalEntries(...entries),
+    });
+  }
+
+  test("(a) exactly one agentIdentity:claude candidate among non-claude ones is found and pinned, in either list order", async () => {
+    const zsh = { handle: "term_zsh", title: "zsh", connected: true, worktreeId: WID };
+    const lead = { handle: "term_lead", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE };
+    for (const entries of [[zsh, lead], [lead, zsh]]) {
+      const { root, worktreePath } = fallbackRoot();
+      try {
+        const f = fallbackFake(worktreePath, entries);
+        const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
+        expect(found?.handle).toBe("term_lead");
+        expect(readLeadHandle(worktreePath)).toBe("term_lead");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("(b) zero agentIdentity:claude candidates returns null and writes no pin at all", async () => {
+    const { root, worktreePath } = fallbackRoot();
+    try {
+      const f = fallbackFake(worktreePath, [
+        { handle: "term_zsh", title: "zsh", connected: true, worktreeId: WID },
+      ]);
+      const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
+      expect(found).toBeNull();
+      expect(readLeadHandle(worktreePath)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("(c) two agentIdentity:claude candidates is ambiguous -- returns null, writes no pin, picks neither", async () => {
+    const { root, worktreePath } = fallbackRoot();
+    try {
+      const f = fallbackFake(worktreePath, [
+        { handle: "term_a", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE },
+        { handle: "term_b", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE },
+      ]);
+      const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
+      expect(found).toBeNull();
+      expect(readLeadHandle(worktreePath)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("(d) the operator's exact regression: [operator zsh, live lead], no pin -- pins the live lead, never the zsh, in EITHER list order", async () => {
+    const zsh = { handle: "term_operator_zsh", title: "zsh", connected: true, worktreeId: WID, agentIdentity: null };
+    const lead = { handle: "term_live_lead", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE };
+    for (const entries of [[zsh, lead], [lead, zsh]]) {
+      const { root, worktreePath } = fallbackRoot();
+      try {
+        const f = fallbackFake(worktreePath, entries);
+        const found = await findPinnedLeadTerminal("websites--pilot", f.deps);
+        expect(found?.handle).toBe("term_live_lead");
+        expect(readLeadHandle(worktreePath)).toBe("term_live_lead");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
   });
 });
 

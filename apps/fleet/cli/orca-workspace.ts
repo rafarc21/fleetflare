@@ -1670,14 +1670,31 @@ export function writeLeadHandle(worktreePath: string, handle: string): void {
  * the verified signal — real list order put an operator's own unrelated
  * shell first, and wake typed into it.
  *
- * The ranked discovery below survives as a FALLBACK ONLY, for a studio
- * provisioned before this mechanism existed (no `.fleet/lead.handle` at
- * all) or whose pinned terminal Orca has since reaped (the handle file
+ * The identity-filtered discovery below survives as a FALLBACK ONLY, for a
+ * studio provisioned before this mechanism existed (no `.fleet/lead.handle`
+ * at all) or whose pinned terminal Orca has since reaped (the handle file
  * names a terminal `terminal list` no longer reports). On a fallback hit,
  * immediately backfills `.fleet/lead.handle` with the discovered handle, so
  * every SUBSEQUENT call for this studio uses the precise path from then on
  * — a pre-PR studio self-heals onto the new mechanism instead of staying on
  * best-effort discovery forever.
+ *
+ * #1259 round 7 fix 1: the fallback's own candidate filter is
+ * `agentIdentity === "claude"`, never `connected === true` — connectedness
+ * says nothing about IDENTITY, and ranking among `connected` candidates by
+ * list order (`rankAttachTerminals`, round 6's own fallback) is exactly the
+ * bug this fix removes: the operator's own measurement (finding 2) found a
+ * real list `[operator zsh, live lead]` with no pin — list order put the
+ * zsh first, the old fallback picked it, `ensureLocalStudioWorktree`'s
+ * resume branch closed it (an operator's own live shell, gone) and spawned
+ * a SECOND lead, pinning THAT one — leaving the real live lead running
+ * forever, unpinned, vulnerable to the exact same wrong pick next time.
+ * The decision rule is now exact-one-or-refuse: EXACTLY one
+ * claude-identified candidate is used (and its handle backfills the pin,
+ * same as before); ZERO or TWO-OR-MORE is an unresolvable ambiguity — null,
+ * no pin written, nothing picked. Once pinned, every later call trusts
+ * `.fleet/lead.handle` exactly, so a wrong guess here would be permanent
+ * until corrected by hand; refusing to guess is the only safe default.
  *
  * Never fails its caller: null when Orca is absent, the studio has no
  * worktree, or no terminal at all can be resolved (pinned or fallback) —
@@ -1701,10 +1718,10 @@ export async function findPinnedLeadTerminal(id: string, deps: OrcaDeps): Promis
       // Orca, or this studio's lead was torn down and recreated by hand).
       // Fall through to discovery below and overwrite it.
     }
-    const candidates = terms.filter((t) => t.connected === true);
-    if (candidates.length === 0) return null;
-    const discovered = rankAttachTerminals(candidates, id)[0] ?? null;
-    if (discovered?.handle && worktree.path) writeLeadHandle(worktree.path, discovered.handle);
+    const candidates = terms.filter((t) => t.agentIdentity === "claude");
+    if (candidates.length !== 1) return null;
+    const discovered = candidates[0];
+    if (discovered.handle && worktree.path) writeLeadHandle(worktree.path, discovered.handle);
     return discovered;
   } catch (err) {
     deps.log(`${id}: pinned lead terminal lookup failed — ${errText(err)}`);
