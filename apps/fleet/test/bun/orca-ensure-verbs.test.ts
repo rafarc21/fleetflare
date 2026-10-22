@@ -827,6 +827,49 @@ describe("local studio workspace — fleet task #1248", () => {
     }
   });
 
+  // #1259 round 8 fix B3: mutants surviving all 21 orca-related bun files
+  // (`if (pinned)` -> always-true, `if (pinned?.handle)` -> always-false)
+  // mean no existing test positively asserted the close call for a dead
+  // pinned lead. A pinned-by-exact-handle entry with `agentIdentity: null`
+  // (the lead process exited) must be closed BY THAT EXACT HANDLE, a
+  // replacement created, and the new handle re-pinned — overwriting the
+  // dead one.
+  test("resume closes a dead pinned lead by its exact handle, creates a replacement, and re-pins (#1259 round 8 fix B3)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-dead-pin-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    writeLeadHandle(existingPath, "term_dead_lead");
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries({
+          handle: "term_dead_lead", title: "fleet", connected: true, orphaned: false, writable: true,
+          agentIdentity: null,
+        }),
+        "terminal close": ok("{}"),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      const close = f.calls.find((c) => c[0] === "terminal" && c[1] === "close");
+      expect(close).toBeDefined();
+      expect(close).toContain("term_dead_lead");
+
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(true);
+      // The replacement's handle overwrote the dead one.
+      expect(readFileSync(join(existingPath, ".fleet", "lead.handle"), "utf8").trim()).toBe("term_new");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("materializes all four container hooks with the lead gate (item 1)", async () => {
     const root = mkdtempSync(join(tmpdir(), "orca-local-"));
     const worktreePath = join(root, "worktree");
