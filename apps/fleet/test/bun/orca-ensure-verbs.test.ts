@@ -1155,30 +1155,20 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     return ok(JSON.stringify({ ok: true, result: { terminal: detail } }));
   }
 
-  /**
-   * The fake orca's `terminal list` answer, called TWICE by `sendLocalWake`
-   * per send attempt — once to locate the terminal (`findPinnedLeadTerminal`,
-   * which needs `agentIdentity:"claude"` on the entry to discover it at all
-   * — #1259 round 7 fix 1), once again AFTER typing, to confirm the typed
-   * text actually landed (`findTerminalByHandle`). This returns `before` on
-   * the first call and `after` on every call after that, simulating a real
-   * terminal's own screen either echoing back what was just typed (`after`
-   * contains it — the happy path) or not (a modal swallowed it, or nothing
-   * changed at all — the refusal path).
-   */
-  function sequencedTerminalList(before: string | undefined, after: string | undefined): () => Promise<OrcaResult> {
-    let n = 0;
-    return async () => {
-      const preview = n === 0 ? before : after;
-      n++;
-      return terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview, ...IDLE_CLAUDE });
-    };
+  /** The one `terminal list` answer `findPinnedLeadTerminal` reads to find
+   *  the lead's handle — #1259 round 7 fix 4 removes the SECOND, post-type
+   *  re-read entirely (see the describe block below), so one plain entry is
+   *  all any wake test needs now. Needs `agentIdentity:"claude"` for
+   *  `findPinnedLeadTerminal`'s own fallback discovery (#1259 round 7 fix 1)
+   *  to find it at all when no pin is already written. */
+  function oneTerminal(): OrcaResult {
+    return terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE });
   }
 
-  test("sendLocalWake types the digest into the healthy attach terminal, confirms it landed, then submits Enter separately", async () => {
+  test("sendLocalWake types the digest and submits it in ONE terminal send call, with --wait-submit (#1259 round 7 fix 4)", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": sequencedTerminalList("❯ check on task", "❯ WAKE #1"),
+      "terminal list": oneTerminal(),
       "terminal show": terminalShow(IDLE_CLAUDE),
       "terminal send": ok("{}"),
     });
@@ -1186,8 +1176,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     expect(out).toEqual({ woke: true, digest: "WAKE #1" });
     const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
     expect(sends).toEqual([
-      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1"],
-      ["terminal", "send", "--terminal", "term_0", "--enter"],
+      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter", "--wait-submit", "5"],
     ]);
   });
 
@@ -1199,9 +1188,9 @@ describe("local studio wake via orca terminal send (item 2)", () => {
   test("sendLocalWake finds and types into a terminal whose title is claude's own OSC rewrite, not the studio id", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": () => Promise.resolve(terminalEntries({
-        handle: "term_0", title: "✳ fix the login bug", connected: true, worktreeId: WID, preview: "❯ WAKE #1", ...IDLE_CLAUDE,
-      })),
+      "terminal list": terminalEntries({
+        handle: "term_0", title: "✳ fix the login bug", connected: true, worktreeId: WID, ...IDLE_CLAUDE,
+      }),
       "terminal show": terminalShow(IDLE_CLAUDE),
       "terminal send": ok("{}"),
     });
@@ -1209,8 +1198,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     expect(out).toEqual({ woke: true, digest: "WAKE #1" });
     const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
     expect(sends).toEqual([
-      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1"],
-      ["terminal", "send", "--terminal", "term_0", "--enter"],
+      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter", "--wait-submit", "5"],
     ]);
   });
 
@@ -1241,7 +1229,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     const digest = "Board task #42 has a new message. Run: fleet task show 42";
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": sequencedTerminalList("❯ check on task", `❯ ${digest}`),
+      "terminal list": oneTerminal(),
       "terminal show": terminalShow(IDLE_CLAUDE),
       "terminal send": ok("{}"),
     });
@@ -1255,7 +1243,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       const digest = "Board task #7 has a new message. Run: fleet task show 7";
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": sequencedTerminalList("❯ ready", `❯ ${digest}`),
+        "terminal list": oneTerminal(),
         "terminal show": terminalShow(IDLE_CLAUDE),
         "terminal send": ok("{}"),
       });
@@ -1272,7 +1260,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       const digest = "Board task #9 has a new message. Run: fleet task show 9";
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": sequencedTerminalList("❯ ready", `❯ ${digest}`),
+        "terminal list": oneTerminal(),
         "terminal show": terminalShow(IDLE_CLAUDE),
         "terminal send": ok("{}"),
       });
@@ -1360,79 +1348,67 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     });
   });
 
-  // Round 5's verify-then-commit protocol survives round 6 unchanged, as a
-  // SECOND, independent safety layer: the operator's own round 6 finding —
-  // a modal that treats keystrokes as navigation/selection can already act
-  // on them even without Enter — means `agentWait` alone (the PRIMARY gate,
-  // tested above) must never be trusted alone. Every fixture in this block
-  // is idle-claude-shaped (`IDLE_CLAUDE`, via `sequencedTerminalList`'s
-  // default) specifically so it exercises this SECOND layer on its own.
-  describe("verify-then-commit: Enter is sent only after the typed text is confirmed in the composer", () => {
-    // The literal scenario the operator's harness measured: a modal is up
-    // (or the screen simply never changes) and our own typed text never
-    // actually lands in the composer, even though typing itself "succeeded"
-    // (the terminal send call returned ok). The mandated case: no
-    // Enter-equivalent call is EVER made, and the result is a clean refusal.
-    test("the typed text never shows up on re-read (a modal swallowed it) -- Enter is never sent, clean refusal", async () => {
+  // #1259 round 7 fix 4: the old 2-phase verify-then-commit send (type
+  // without `--enter`, re-read the preview by exact handle, require the
+  // LAST non-empty preview line to contain the FULL digest, only then send
+  // a separate `--enter`) never succeeded on real Orca — the operator's own
+  // 4/4 measured real-Orca attempts: the composer wraps long text across
+  // multiple visual lines, so the digest was NEVER found whole on any
+  // single "last line," even on a fully successful type, stranding the
+  // digest half-typed every time. Replaced with ONE `terminal send` call
+  // carrying `--enter --wait-submit <seconds>`, trusting Orca's OWN
+  // submission acknowledgment instead of re-reading screen text ourselves —
+  // no second `terminal list`/`terminal show` call after the send, ever.
+  describe("single-call send with --wait-submit, trusting Orca's own submission acknowledgment (#1259 round 7 fix 4)", () => {
+    test("the send call carries --enter and --wait-submit with a positive value; success yields woke:true with no re-read after the send", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        // The preview NEVER reflects what was typed -- same unrelated modal
-        // option row on every read, simulating a permission dialog that
-        // ignored the keystrokes.
-        "terminal list": sequencedTerminalList("❯ No, exit", "❯ No, exit"),
-        "terminal show": terminalShow(IDLE_CLAUDE),
-        "terminal send": ok("{}"),
-      });
-      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out.woke).toBe(false);
-      if (!out.woke) expect(out.reason).toContain("could not confirm it landed in the composer");
-      // The TYPE call did happen (no --enter on it); the ENTER call never did.
-      const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
-      expect(sends).toEqual([["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1"]]);
-      expect(sends.some((c) => c.includes("--enter"))).toBe(false);
-    });
-
-    test("no preview at all on re-read still refuses, fail-closed, and never sends Enter", async () => {
-      const f = fake({
-        "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": sequencedTerminalList(undefined, undefined),
-        "terminal show": terminalShow(IDLE_CLAUDE),
-        "terminal send": ok("{}"),
-      });
-      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out.woke).toBe(false);
-      if (!out.woke) expect(out.reason).toContain("could not confirm it landed in the composer");
-      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send" && c.includes("--enter"))).toBe(false);
-    });
-
-    test("the typed text shows up on re-read -- Enter is sent as a separate, later call, and the wake succeeds", async () => {
-      const f = fake({
-        "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": sequencedTerminalList("❯ ready", "❯ WAKE #1"),
+        "terminal list": oneTerminal(),
         "terminal show": terminalShow(IDLE_CLAUDE),
         "terminal send": ok("{}"),
       });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out).toEqual({ woke: true, digest: "WAKE #1" });
-      const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
-      expect(sends).toEqual([
-        ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1"],
-        ["terminal", "send", "--terminal", "term_0", "--enter"],
-      ]);
+
+      const sendIdx = f.calls.findIndex((c) => c[0] === "terminal" && c[1] === "send");
+      expect(sendIdx).toBeGreaterThanOrEqual(0);
+      const send = f.calls[sendIdx]!;
+      expect(send).toContain("--enter");
+      const waitIdx = send.indexOf("--wait-submit");
+      expect(waitIdx).toBeGreaterThan(-1);
+      expect(Number(send[waitIdx + 1])).toBeGreaterThan(0);
+
+      // No `terminal list`/`terminal show` call happened AFTER the send —
+      // the single `list` (lookup) and single `show` (gate) calls both
+      // precede it, never follow it.
+      const afterSend = f.calls.slice(sendIdx + 1);
+      expect(afterSend.some((c) => c[0] === "terminal" && (c[1] === "list" || c[1] === "show"))).toBe(false);
     });
 
-    test("a failed type call refuses immediately -- no re-read, no Enter", async () => {
+    test("a failed terminal send refuses, surfacing orca's own stderr", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": sequencedTerminalList("❯ ready", "❯ WAKE #1"),
+        "terminal list": oneTerminal(),
         "terminal show": terminalShow(IDLE_CLAUDE),
         "terminal send": { ok: false, stdout: "", stderr: "orca wedged", timedOut: false },
       });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(false);
       if (!out.woke) expect(out.reason).toContain("terminal send failed");
-      // Only ONE `terminal list` call (the lookup) -- no confirm re-read ever ran.
+      // Only ONE `terminal list` call — the lookup; no re-read ever ran.
       expect(f.calls.filter((c) => c[0] === "terminal" && c[1] === "list").length).toBe(1);
+    });
+
+    test("a timed-out terminal send refuses the same way", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": { ok: false, stdout: "", stderr: "", timedOut: true },
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("terminal send failed");
     });
   });
 
@@ -1443,17 +1419,10 @@ describe("local studio wake via orca terminal send (item 2)", () => {
   // older, broader control-byte strip stays: it is not tied to that specific
   // threat and costs nothing to keep.
   test("a digest carrying control bytes is cleaned before sending AND before returning, shell metacharacters pass through untouched", async () => {
-    // No trailing whitespace in the cleaned digest, deliberately: the confirm
-    // step's own re-read (`lastNonEmptyLine`) trims trailing whitespace off
-    // the screen's tail (real terminal renders don't reliably preserve it
-    // either) — a digest that itself ended in whitespace could never be
-    // confirmed byte-for-byte, which is a property of trailing whitespace
-    // specifically, not of this test's actual subject (shell metacharacters
-    // passing through uncleaned).
     const cleaned = "WAKE  $(reboot)";
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": sequencedTerminalList("❯ ready", `❯ ${cleaned}`),
+      "terminal list": oneTerminal(),
       "terminal show": terminalShow(IDLE_CLAUDE),
       "terminal send": ok("{}"),
     });
@@ -1461,6 +1430,6 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     expect(out.woke).toBe(true);
     expect(out.digest).toBe(cleaned);
     const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
-    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", cleaned]);
+    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", cleaned, "--enter", "--wait-submit", "5"]);
   });
 });

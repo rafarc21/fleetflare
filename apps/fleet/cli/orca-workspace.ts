@@ -1759,89 +1759,36 @@ async function readTerminalDetail(deps: OrcaDeps, handle: string): Promise<{ age
   }
 }
 
-/** #1259 round 6: `sendLocalWake`'s own verify-then-commit confirm step —
- *  re-reads ONE terminal by its EXACT handle, never a re-ranked guess among
- *  worktree-matched candidates (the same precise-handle discipline Step 1
- *  established for finding it in the first place). Null on any failure, or
- *  when Orca no longer reports a terminal at that handle at all. */
-async function findTerminalByHandle(deps: OrcaDeps, handle: string): Promise<OrcaTerminalEntry | null> {
-  try {
-    const terms = await fullList(deps, "terminals", ROW_TIMEOUT_MS);
-    return terms.find((t) => t.handle === handle) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** The last non-empty line of a multi-line terminal preview, with trailing
- *  whitespace trimmed. A terminal preview can end in blank lines (cursor
- *  position padding, a trailing newline) that would otherwise hide the real
- *  last line of content from a tail-only check. Returns "" when every line
- *  is empty. */
-function lastNonEmptyLine(preview: string): string {
-  const lines = preview.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const trimmed = lines[i].trimEnd();
-    if (trimmed.length > 0) return trimmed;
-  }
-  return "";
-}
-
 /**
  * Fleet task #1259 item 2: wake a LOCAL studio's lead. A local row has no
  * container, so the Worker's assign wake refuses with `{local:true}` and this
  * CLI turns that into the Orca equivalent of the container wake: resolve the
  * studio's PINNED lead terminal and type the digest into it. Fail closed —
  * not under Orca, no terminal can be resolved at all, Orca's own tracked
- * agent is not an idle claude session, the typed text never confirmed
- * landing in the composer, or a failed send all report a refusal, never a
- * silent non-wake.
+ * agent is not an idle claude session, or a failed send all report a
+ * refusal, never a silent non-wake.
  *
  * #1259 round 6: the terminal lookup is `findPinnedLeadTerminal` — the exact
  * handle this file persisted at `.fleet/lead.handle` when the terminal was
  * created, never a freshly re-ranked guess among worktree-matched
  * candidates (round 5's own bug: real list order put an operator's own
- * unrelated shell first, and this function typed into IT). The liveness gate
- * is `isIdleClaudeTerminal` on that EXACT entry — Orca's own tracked
- * `agentIdentity`/`agentWait`, never an OS-level `ps` walk (round 5) or
- * screen-text pattern match (rounds 3-4), both measured wrong independent of
- * the terminal-selection bug above.
+ * unrelated shell first, and this function typed into IT). #1259 round 7
+ * fix 3: the liveness gate reads `terminal show` on that EXACT handle —
+ * Orca's own tracked `agentIdentity`/`agentWait`, never an OS-level `ps`
+ * walk (round 5) or screen-text pattern match (rounds 3-4), both measured
+ * wrong independent of the terminal-selection bug above.
  *
- * Kept from round 5, as a SECOND, independent safety layer (the operator's
- * own round 6 finding 4: a modal that treats keystrokes as navigation can
- * already act on them even without Enter, so one signal — `agentWait` —
- * must never be trusted alone): a verify-THEN-commit protocol, never a
- * trust-a-screenshot one:
- *   1. type the (control-byte-cleaned) digest with NO `--enter` — nothing is
- *      submitted yet, so even a wrong guess here costs nothing but stray
- *      characters sitting untyped-into-Enter;
- *   2. re-read this SAME terminal's current preview;
- *   3. confirm the composer's own tail (`lastNonEmptyLine`) now CONTAINS the
- *      exact text just sent — proof OUR OWN bytes landed in the composer,
- *      not a modal that swallowed or ignored them (a modal's own rows echo
- *      ITS OWN option text, never an arbitrary string we just typed, so this
- *      check is specific in a way no glyph shape is);
- *   4. ONLY on that positive confirmation, a SEPARATE `--enter`-only call
- *      submits it. Any failure at any step — the type call itself failing,
- *      the confirm re-read not finding the text, the terminal having
- *      disappeared — refuses before Enter is ever sent, and reports a clear
- *      reason rather than guessing.
- * HONEST LIMITATION: the real Orca CLI surface available to this file (via
- * the injected `deps.run`) is `terminal send --terminal <handle> [--text
- * <str>] [--enter]` — every existing call site in this file already assumes
- * exactly this grammar, and there is no separate "type without submitting"
- * verb documented anywhere this repo can see. The protocol above is the
- * considered design against that grammar: a `--text`-only call (no `--enter`)
- * for step 1, and an `--enter`-only call (no `--text`) for step 4 — never
- * inventing a flag this file has no evidence the real CLI accepts.
- *
- * SECOND HONEST LIMITATION: the confirm step reuses `lastNonEmptyLine`,
- * which trims trailing whitespace off the screen's tail (real terminal
- * renders do not reliably preserve it either). A digest that itself ended in
- * whitespace could therefore never be confirmed byte-for-byte. Harmless in
- * practice — `resolveLocalWake`'s own fixed template (the only production
- * caller) never ends in whitespace — but worth stating plainly rather than
- * discovering it by surprise later.
+ * #1259 round 7 fix 4: the send itself is ONE `terminal send` call carrying
+ * `--enter --wait-submit <seconds>`, trusting Orca's OWN submission
+ * acknowledgment. Round 5/6's own 2-phase verify-then-commit protocol (type
+ * without `--enter`, re-read the preview by exact handle, require the LAST
+ * non-empty preview line to contain the FULL digest, only then a separate
+ * `--enter`) never succeeded on real Orca — the operator's own 4/4 measured
+ * real-Orca attempts: the composer wraps long text across multiple visual
+ * lines, so the digest was NEVER found whole on any single "last line,"
+ * even on a fully successful type, stranding the digest half-typed every
+ * time. `--wait-submit` replaces that self-built confirmation with Orca's
+ * own acknowledgment of the submission instead.
  *
  * Fix 1 (#1259 round 4): round 3's fix-1b widened the control-byte strip
  * below into a shell-metacharacter strip too (`$`, backtick, backslash, `;`,
@@ -1883,33 +1830,25 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
     };
   }
   try {
-    const typeRes = await deps.run(["terminal", "send", "--terminal", term.handle, "--text", clean], LIST_TIMEOUT_MS);
-    if (typeRes.timedOut || !typeRes.ok) {
-      return { woke: false, reason: `terminal send failed: ${(typeRes.stderr || typeRes.stdout).trim().slice(0, 200)}` };
-    }
-  } catch (err) {
-    return { woke: false, reason: errText(err) };
-  }
-
-  // Never trust the type landed where expected — re-read this EXACT terminal
-  // (by handle, never a re-ranked guess) and confirm our own text is now its
-  // tail before ever committing Enter. See this function's own doc comment
-  // for why `agentWait` alone (round 6's own primary gate above) cannot
-  // stand in for this.
-  const after = await findTerminalByHandle(deps, term.handle);
-  const tail = after?.preview !== undefined ? lastNonEmptyLine(after.preview) : "";
-  if (!tail.includes(clean)) {
-    return {
-      woke: false,
-      reason: `${id}: typed but could not confirm it landed in the composer — refusing to submit; ` +
-        `wake its lead yourself with: fleet task show`,
-    };
-  }
-
-  try {
-    const enterRes = await deps.run(["terminal", "send", "--terminal", term.handle, "--enter"], LIST_TIMEOUT_MS);
-    if (enterRes.timedOut || !enterRes.ok) {
-      return { woke: false, reason: `terminal send (enter) failed: ${(enterRes.stderr || enterRes.stdout).trim().slice(0, 200)}` };
+    // #1259 round 7 fix 4: ONE call, carrying `--enter --wait-submit
+    // <seconds>` — trusting Orca's OWN submission acknowledgment instead of
+    // re-reading screen text ourselves. The prior 2-phase verify-then-commit
+    // protocol (type without `--enter`, re-read this terminal's preview,
+    // require the LAST non-empty line to contain the FULL digest, only then
+    // a separate `--enter` call) never succeeded on real Orca: the composer
+    // wraps long text across multiple visual lines, so the digest was NEVER
+    // found whole on any single "last line," even on a fully successful
+    // type — 4/4 real measured attempts stranded the digest half-typed.
+    // `5` (seconds) is a judgment call, not a real-Orca measurement — no
+    // Orca in this sandbox to time a real submit against — chosen to leave
+    // headroom inside `LIST_TIMEOUT_MS` (10s) for normal round-trip
+    // overhead on top of the flag's own wait budget.
+    const res = await deps.run(
+      ["terminal", "send", "--terminal", term.handle, "--text", clean, "--enter", "--wait-submit", "5"],
+      LIST_TIMEOUT_MS,
+    );
+    if (res.timedOut || !res.ok) {
+      return { woke: false, reason: `terminal send failed: ${(res.stderr || res.stdout).trim().slice(0, 200)}` };
     }
     return { woke: true, digest: clean };
   } catch (err) {
