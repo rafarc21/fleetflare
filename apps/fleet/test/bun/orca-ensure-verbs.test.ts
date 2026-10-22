@@ -958,16 +958,37 @@ describe("resolveStudioWorktreePath (B1 fix round)", () => {
 describe("local studio wake via orca terminal send (item 2)", () => {
   const WID = "repo-websites::/w/studio-websites--pilot";
 
-  test("sendLocalWake types the digest into the healthy attach terminal", async () => {
+  /**
+   * #1259 round 5 fix 5: the fake orca's `terminal list` answer, called
+   * TWICE by `sendLocalWake` per send attempt — once to locate the terminal,
+   * once again AFTER typing, to confirm the typed text actually landed. This
+   * returns `before` on the first call and `after` on every call after that,
+   * simulating a real terminal's own screen either echoing back what was
+   * just typed (`after` contains it — the happy path) or not (a modal
+   * swallowed it, or nothing changed at all — the refusal path).
+   */
+  function sequencedTerminalList(before: string | undefined, after: string | undefined): () => Promise<OrcaResult> {
+    let n = 0;
+    return async () => {
+      const preview = n === 0 ? before : after;
+      n++;
+      return terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview });
+    };
+  }
+
+  test("sendLocalWake types the digest into the healthy attach terminal, confirms it landed, then submits Enter separately", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ check on task" }),
+      "terminal list": sequencedTerminalList("❯ check on task", "❯ WAKE #1"),
       "terminal send": ok("{}"),
     }, { isClaudeForeground: async () => true });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
     expect(out).toEqual({ woke: true, digest: "WAKE #1" });
-    const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
-    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter"]);
+    const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
+    expect(sends).toEqual([
+      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1"],
+      ["terminal", "send", "--terminal", "term_0", "--enter"],
+    ]);
   });
 
   // #1259 round 5 fix 3: the measured gap — a live local lead rewrites its
@@ -977,15 +998,18 @@ describe("local studio wake via orca terminal send (item 2)", () => {
   test("sendLocalWake finds and types into a terminal whose title is claude's own OSC rewrite, not the studio id (#1259 round 5 fix 3)", async () => {
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": terminalEntries({
-        handle: "term_0", title: "✳ fix the login bug", connected: true, worktreeId: WID, preview: "❯ ready",
-      }),
+      "terminal list": () => Promise.resolve(terminalEntries({
+        handle: "term_0", title: "✳ fix the login bug", connected: true, worktreeId: WID, preview: "❯ WAKE #1",
+      })),
       "terminal send": ok("{}"),
     }, { isClaudeForeground: async () => true });
     const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
     expect(out).toEqual({ woke: true, digest: "WAKE #1" });
-    const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
-    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter"]);
+    const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
+    expect(sends).toEqual([
+      ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1"],
+      ["terminal", "send", "--terminal", "term_0", "--enter"],
+    ]);
   });
 
   test("sendLocalWake refuses when there is no healthy attach terminal", async () => {
@@ -1012,36 +1036,39 @@ describe("local studio wake via orca terminal send (item 2)", () => {
   // plain positive integer. See the describe block below ("the wake payload
   // is a fixed template") for the injection-proof this change exists for.
   test("resolveLocalWake swaps a local refusal for the terminal send, carrying the fixed per-task-number template", async () => {
+    const digest = "Board task #42 has a new message. Run: fleet task show 42";
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ check on task" }),
+      "terminal list": sequencedTerminalList("❯ check on task", `❯ ${digest}`),
       "terminal send": ok("{}"),
     }, { isClaudeForeground: async () => true });
     const report = { woke: false as const, reason: "LOCAL", local: true as const };
     const out = await resolveLocalWake(report, "websites--pilot", 42, f.deps);
-    expect(out).toEqual({ woke: true, digest: "Board task #42 has a new message. Run: fleet task show 42" });
+    expect(out).toEqual({ woke: true, digest });
   });
 
   describe("the wake payload is a fixed template, never attacker-influenced board content (#1259 round 4 fix 1)", () => {
     test("an attacker-shaped report.digest (shell command substitution) never reaches terminal send — it is never even read", async () => {
+      const digest = "Board task #7 has a new message. Run: fleet task show 7";
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
+        "terminal list": sequencedTerminalList("❯ ready", `❯ ${digest}`),
         "terminal send": ok("{}"),
       }, { isClaudeForeground: async () => true });
       const report = { woke: false as const, reason: "LOCAL", local: true as const, digest: "$(touch PWNED)" };
       const out = await resolveLocalWake(report, "websites--pilot", 7, f.deps);
-      expect(out).toEqual({ woke: true, digest: "Board task #7 has a new message. Run: fleet task show 7" });
+      expect(out).toEqual({ woke: true, digest });
       const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
       expect(send?.[5]).not.toContain("PWNED");
       expect(send?.[5]).not.toContain("touch");
-      expect(send?.[5]).toBe("Board task #7 has a new message. Run: fleet task show 7");
+      expect(send?.[5]).toBe(digest);
     });
 
     test("an attacker-shaped report.digest (zsh glob qualifier, no shell metacharacters needed) never reaches terminal send either", async () => {
+      const digest = "Board task #9 has a new message. Run: fleet task show 9";
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
+        "terminal list": sequencedTerminalList("❯ ready", `❯ ${digest}`),
         "terminal send": ok("{}"),
       }, { isClaudeForeground: async () => true });
       const report = {
@@ -1049,7 +1076,7 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         digest: "x\" *(e:'touch PWNED':) \"",
       };
       const out = await resolveLocalWake(report, "websites--pilot", 9, f.deps);
-      expect(out).toEqual({ woke: true, digest: "Board task #9 has a new message. Run: fleet task show 9" });
+      expect(out).toEqual({ woke: true, digest });
       const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
       expect(send?.[5]).not.toContain("PWNED");
       expect(send?.[5]).not.toContain("*(e:");
@@ -1067,18 +1094,13 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     });
   });
 
-  // Fix 2+3 (#1259 round 4): `deps.isClaudeForeground` is now the PRIMARY
-  // liveness signal, asked by worktree path — never the terminal's rendered
-  // screen text (round 3's `looksLikeClaudeScreen`, now `preview`-only and
-  // SECONDARY: `looksLikeIdleComposerTail`). A test that wants to isolate
-  // one signal injects a fake for the OTHER one.
-  describe("the process check is primary — claude foreground, not screen text (#1259 round 4 fix 2)", () => {
-    test("refuses when the fake process check says claude is NOT foreground, even though the tail looks like an idle composer row", async () => {
-      // This exact preview passed round 3's own tail-only gate — proving the
-      // process check now gates FIRST, not merely in addition.
+  // Fix 2 (#1259 round 4): `deps.isClaudeForeground` is the PRIMARY liveness
+  // signal, asked by worktree path — gates BEFORE any typing happens at all.
+  describe("the process check is primary — claude foreground gates before any typing (#1259 round 4 fix 2)", () => {
+    test("refuses when the fake process check says claude is NOT foreground — never even attempts to type", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
+        "terminal list": sequencedTerminalList("❯ ready", "❯ WAKE #1"),
         "terminal send": ok("{}"),
       }, { isClaudeForeground: async () => false });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
@@ -1086,149 +1108,104 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       if (!out.woke) expect(out.reason).toContain("no claude session in the terminal");
       expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
     });
+  });
 
-    test("a healthy attach terminal with no readable preview still refuses, fail-closed, and never sends, even with claude foreground", async () => {
+  // Fix 5 (#1259 round 5): round 4's SECONDARY idle-tail glyph check
+  // (`looksLikeIdleComposerTail`) is REMOVED entirely, not narrowed — the
+  // operator's own harness proved it still accepted a real permission
+  // modal's tail (`❯ No, exit`) as "idle, safe" and let a pending `touch`
+  // auto-run. The replacement never trusts a screenshot: type first (no
+  // --enter), re-read the SAME terminal, and only submit Enter once the
+  // re-read CONFIRMS our own text is now the tail.
+  describe("verify-then-commit: Enter is sent only after the typed text is confirmed in the composer (#1259 round 5 fix 5)", () => {
+    // The literal scenario the operator's harness measured: a modal is up
+    // (or the screen simply never changes) and our own typed text never
+    // actually lands in the composer, even though typing itself "succeeded"
+    // (the terminal send call returned ok). The mandated case: no
+    // Enter-equivalent call is EVER made, and the result is a clean refusal.
+    test("the typed text never shows up on re-read (a modal swallowed it) -- Enter is never sent, clean refusal", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID }),
+        // The preview NEVER reflects what was typed -- same unrelated modal
+        // option row on every read, simulating a permission dialog that
+        // ignored the keystrokes.
+        "terminal list": sequencedTerminalList("❯ No, exit", "❯ No, exit"),
         "terminal send": ok("{}"),
       }, { isClaudeForeground: async () => true });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(false);
-      if (!out.woke) expect(out.reason).toContain("busy or mid-prompt");
-      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("could not confirm it landed in the composer");
+      // The TYPE call did happen (no --enter on it); the ENTER call never did.
+      const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
+      expect(sends).toEqual([["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1"]]);
+      expect(sends.some((c) => c.includes("--enter"))).toBe(false);
     });
 
-    test("a prose-only preview (bare shell prompt) refuses even with claude foreground — no claude glyph, never prose-matched", async () => {
+    test("no preview at all on re-read still refuses, fail-closed, and never sends Enter", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "zsh-5.9 % git status" }),
+        "terminal list": sequencedTerminalList(undefined, undefined),
         "terminal send": ok("{}"),
       }, { isClaudeForeground: async () => true });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(false);
-      if (!out.woke) expect(out.reason).toContain("busy or mid-prompt");
-      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("could not confirm it landed in the composer");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send" && c.includes("--enter"))).toBe(false);
     });
 
-    test("a healthy attach terminal with claude foreground AND an idle composer tail wakes and sends the cleaned digest", async () => {
+    test("the typed text shows up on re-read -- Enter is sent as a separate, later call, and the wake succeeds", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
+        "terminal list": sequencedTerminalList("❯ ready", "❯ WAKE #1"),
         "terminal send": ok("{}"),
       }, { isClaudeForeground: async () => true });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out.woke).toBe(true);
-      const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
-      expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1", "--enter"]);
+      expect(out).toEqual({ woke: true, digest: "WAKE #1" });
+      const sends = f.calls.filter((c) => c[0] === "terminal" && c[1] === "send");
+      expect(sends).toEqual([
+        ["terminal", "send", "--terminal", "term_0", "--text", "WAKE #1"],
+        ["terminal", "send", "--terminal", "term_0", "--enter"],
+      ]);
     });
 
-    // Fix 2+3 (#1259 round 4): a turn-marker/status row (`⏺`/`●`) was round
-    // 3's own ACCEPTED "busy but safe" shape. Now it refuses: claude is
-    // actively streaming a turn then, not idle, and the whole point of this
-    // redesign is to never type into — or submit Enter inside — a terminal
-    // that is not genuinely waiting on input.
-    test("a turn-marker/status row as the preview's last line now refuses (busy, not idle) even with claude foreground", async () => {
+    test("a failed type call refuses immediately -- no re-read, no Enter", async () => {
       const f = fake({
         "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "⏺ done" }),
-        "terminal send": ok("{}"),
+        "terminal list": sequencedTerminalList("❯ ready", "❯ WAKE #1"),
+        "terminal send": { ok: false, stdout: "", stderr: "orca wedged", timedOut: false },
       }, { isClaudeForeground: async () => true });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(false);
-      if (!out.woke) expect(out.reason).toContain("busy or mid-prompt");
-      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("terminal send failed");
+      // Only ONE `terminal list` call (the lookup) -- no confirm re-read ever ran.
+      expect(f.calls.filter((c) => c[0] === "terminal" && c[1] === "list").length).toBe(1);
     });
   });
 
   // Fix 1 (#1259 round 4): fix-1b's shell-metachar strip (`$`, backtick,
   // backslash, `;`, `|`, `&`, `<`, `>`) is gone from `sendLocalWake` itself —
   // it was defense-in-depth for an untrusted `digest`, and `resolveLocalWake`
-  // no longer ever passes one through (see the describe block below). The
+  // no longer ever passes one through (see the describe block above). The
   // older, broader control-byte strip stays: it is not tied to that specific
   // threat and costs nothing to keep.
   test("a digest carrying control bytes is cleaned before sending AND before returning, shell metacharacters pass through untouched", async () => {
+    // No trailing whitespace in the cleaned digest, deliberately: the confirm
+    // step's own re-read (`lastNonEmptyLine`) trims trailing whitespace off
+    // the screen's tail (real terminal renders don't reliably preserve it
+    // either) — a digest that itself ended in whitespace could never be
+    // confirmed byte-for-byte, which is a property of trailing whitespace
+    // specifically, not of this test's actual subject (shell metacharacters
+    // passing through uncleaned).
+    const cleaned = "WAKE  $(reboot)";
     const f = fake({
       "worktree list": worktrees("studio-websites--pilot"),
-      "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview: "❯ ready" }),
+      "terminal list": sequencedTerminalList("❯ ready", `❯ ${cleaned}`),
       "terminal send": ok("{}"),
     }, { isClaudeForeground: async () => true });
-    const out = await sendLocalWake("websites--pilot", "WAKE \x03 $(reboot) \x1b\n", f.deps);
+    const out = await sendLocalWake("websites--pilot", "WAKE \x03 $(reboot)\x1b", f.deps);
     expect(out.woke).toBe(true);
-    expect(out.digest).toBe("WAKE  $(reboot) ");
+    expect(out.digest).toBe(cleaned);
     const send = f.calls.find((c) => c[0] === "terminal" && c[1] === "send");
-    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", "WAKE  $(reboot) ", "--enter"]);
-  });
-
-  // Fix 1a (#1259 round 3), now the SECONDARY signal (#1259 round 4 fix 2):
-  // the idle-tail check must look only at the terminal's TAIL (the current
-  // screen state), never at claude chrome left over from a just-exited
-  // session still sitting inside the preview's earlier lines. Every case
-  // here injects `isClaudeForeground: async () => true` to isolate this
-  // secondary check from the primary process check above.
-  describe("the idle-tail gate reads only the screen's current tail (#1259 round 3, narrowed round 4)", () => {
-    test("claude chrome earlier in the preview, but a bare shell prompt as the actual last line, refuses", async () => {
-      // MEASURED shape: claude runs a turn, operator ctrl-c ctrl-c's out to a
-      // bare shell, but the exited session's own chrome (`❯`, `⏺`) is still
-      // inside the ~300-char preview window.
-      const preview = [
-        "❯ Reply with…",
-        "⏺ ok",
-        "✻ Worked for 2s…",
-        "Resume this session with:",
-        "claude --resume 1234-uuid",
-        "➜  repo git:(main) ",
-      ].join("\n");
-      const f = fake({
-        "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview }),
-        "terminal send": ok("{}"),
-      }, { isClaudeForeground: async () => true });
-      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out.woke).toBe(false);
-      if (!out.woke) expect(out.reason).toContain("busy or mid-prompt");
-      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
-    });
-
-    test("a genuine composer row as the preview's last line wakes", async () => {
-      const preview = ["stale ❯ chrome from a prior turn", "❯ some draft text"].join("\n");
-      const f = fake({
-        "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview }),
-        "terminal send": ok("{}"),
-      }, { isClaudeForeground: async () => true });
-      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out.woke).toBe(true);
-    });
-
-    // Fix 2+3 (#1259 round 4): a turn-marker row is BUSY, not idle — round 3
-    // accepted it as "safe to wake"; this is the behavior change that fixes
-    // that, now covered directly in the "process check is primary" describe
-    // block above (search "busy, not idle"). Kept here only as a pointer so
-    // a future reader looking for the old case finds where it moved.
-
-    test("a `▔` modal rule anywhere in the preview refuses, even with a composer-shaped last line", async () => {
-      const preview = ["▔▔▔▔▔▔▔▔▔▔▔▔", "❯ 1. Yes", "❯ some draft text"].join("\n");
-      const f = fake({
-        "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview }),
-        "terminal send": ok("{}"),
-      }, { isClaudeForeground: async () => true });
-      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out.woke).toBe(false);
-      if (!out.woke) expect(out.reason).toContain("busy or mid-prompt");
-      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "send")).toBe(false);
-    });
-
-    test("trailing blank padding does not hide a real composer row behind it", async () => {
-      const preview = ["❯ some draft text", "", "   ", ""].join("\n");
-      const f = fake({
-        "worktree list": worktrees("studio-websites--pilot"),
-        "terminal list": terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, preview }),
-        "terminal send": ok("{}"),
-      }, { isClaudeForeground: async () => true });
-      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
-      expect(out.woke).toBe(true);
-    });
+    expect(send).toEqual(["terminal", "send", "--terminal", "term_0", "--text", cleaned]);
   });
 });

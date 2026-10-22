@@ -291,12 +291,17 @@ interface OrcaTerminalEntry {
    *  column reads every terminal in ONE `terminal list` and groups by it. */
   worktreeId?: string;
   /** The terminal's screen text (MEASURED on real Orca — see this interface's
-   *  own doc comment). Read by `sendLocalWake`'s narrower, SECONDARY idle-tail
-   *  check (`looksLikeIdleComposerTail`) — the PRIMARY claude-is-foreground
-   *  signal is `OrcaDeps.isClaudeForeground`, asked of the OS via
-   *  `worktreePath` below, never this rendered text (#1259 round 4: 3 prior
-   *  rounds trusted this field as the primary signal and were measured wrong
-   *  3 distinct ways — see that field's own doc comment). */
+   *  own doc comment). The PRIMARY claude-is-foreground signal is
+   *  `OrcaDeps.isClaudeForeground`, asked of the OS via `worktreePath` below,
+   *  never this rendered text (#1259 round 4: 3 prior rounds trusted this
+   *  field as the primary signal and were measured wrong 3 distinct ways —
+   *  see that field's own doc comment). #1259 round 5: `sendLocalWake` now
+   *  also reads this field AFTER typing into the terminal, to confirm its
+   *  own text actually landed in the composer before ever committing Enter —
+   *  never as a glyph-shaped "looks idle" gate before typing at all (round
+   *  4's own such check, `looksLikeIdleComposerTail`, was measured to still
+   *  accept a real permission modal's tail as "safe"; see `sendLocalWake`'s
+   *  own doc comment). */
   preview?: string;
 }
 
@@ -1754,29 +1759,72 @@ async function findLocalAttachTerminal(id: string, deps: OrcaDeps): Promise<Orca
   }
 }
 
+/** The last non-empty line of a multi-line terminal preview, with trailing
+ *  whitespace trimmed. A terminal preview can end in blank lines (cursor
+ *  position padding, a trailing newline) that would otherwise hide the real
+ *  last line of content from a tail-only check. Returns "" when every line
+ *  is empty. */
+function lastNonEmptyLine(preview: string): string {
+  const lines = preview.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trimEnd();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return "";
+}
+
 /**
  * Fleet task #1259 item 2: wake a LOCAL studio's lead. A local row has no
  * container, so the Worker's assign wake refuses with `{local:true}` and this
  * CLI turns that into the Orca equivalent of the container wake: resolve the
  * studio's healthy attach terminal and type the digest into it. Fail closed —
  * not under Orca, no healthy attach terminal, no claude session in that
- * terminal's foreground, the terminal's tail does not look idle, or a failed
- * send all report a refusal, never a silent non-wake.
+ * terminal's foreground, the typed text never confirmed landing in the
+ * composer, or a failed send all report a refusal, never a silent non-wake.
  *
- * Fix 2 (#1259 round 4, replacing round 3's `looksLikeClaudeScreen`): the
- * PRIMARY liveness signal is now `deps.isClaudeForeground` — the OS's own
- * answer to "is claude actually running here", asked by worktree path, never
- * inferred from the terminal's rendered screen text. See
- * `OrcaDeps.isClaudeForeground`'s own doc comment for the 3 distinct ways the
- * prior screen-text approach was measured wrong against real Orca.
+ * Fix 2 (#1259 round 4): the PRIMARY liveness signal is `deps.isClaudeForeground`
+ * — the OS's own answer to "is claude actually running here", asked by
+ * worktree path, never inferred from the terminal's rendered screen text.
  *
- * A SECOND, narrower check still runs on top, belt-and-suspenders: even with
- * claude confirmed foreground, `looksLikeIdleComposerTail(term.preview)` must
- * also hold before this types anything and presses Enter — a modal, a
- * mid-turn/busy screen, or unreadable preview text all still refuse, because
- * submitting Enter into either risks auto-approving a pending tool call or
- * interrupting a turn no one asked to interrupt. Fails closed whenever
- * EITHER signal is unsure.
+ * Fix 5 (#1259 round 5, replacing round 4's SECONDARY `looksLikeIdleComposerTail`
+ * glyph check entirely — not narrowed, REMOVED): the operator's own harness,
+ * forcing `isClaudeForeground` to a correct `true` against a captured REAL
+ * trust-dialog preview tail (`❯ No, exit`), showed the glyph check still read
+ * that tail as "idle, safe" — a real permission modal's own option rows are
+ * `❯`-prefixed, indistinguishable from the composer's own idle row by shape
+ * alone. No glyph-based tail check, however narrow, can be trusted as a
+ * safety gate before Enter. The replacement is a verify-THEN-commit protocol,
+ * never a trust-a-screenshot one:
+ *   1. type the (control-byte-cleaned) digest with NO `--enter` — nothing is
+ *      submitted yet, so even a wrong guess here costs nothing but stray
+ *      characters sitting untyped-into-Enter;
+ *   2. re-read this SAME terminal's current preview;
+ *   3. confirm the composer's own tail (`lastNonEmptyLine`) now CONTAINS the
+ *      exact text just sent — proof OUR OWN bytes landed in the composer,
+ *      not a modal that swallowed or ignored them (a modal's own rows echo
+ *      ITS OWN option text, never an arbitrary string we just typed, so this
+ *      check is specific in a way no glyph shape is);
+ *   4. ONLY on that positive confirmation, a SEPARATE `--enter`-only call
+ *      submits it. Any failure at any step — the type call itself failing,
+ *      the confirm re-read not finding the text, the terminal having
+ *      disappeared — refuses before Enter is ever sent, and reports a clear
+ *      reason rather than guessing.
+ * HONEST LIMITATION: the real Orca CLI surface available to this file (via
+ * the injected `deps.run`) is `terminal send --terminal <handle> [--text
+ * <str>] [--enter]` — every existing call site in this file already assumes
+ * exactly this grammar, and there is no separate "type without submitting"
+ * verb documented anywhere this repo can see. The protocol above is the
+ * considered design against that grammar: a `--text`-only call (no `--enter`)
+ * for step 1, and an `--enter`-only call (no `--text`) for step 4 — never
+ * inventing a flag this file has no evidence the real CLI accepts.
+ *
+ * SECOND HONEST LIMITATION: the confirm step reuses `lastNonEmptyLine`,
+ * which trims trailing whitespace off the screen's tail (real terminal
+ * renders do not reliably preserve it either). A digest that itself ended in
+ * whitespace could therefore never be confirmed byte-for-byte. Harmless in
+ * practice — `resolveLocalWake`'s own fixed template (the only production
+ * caller) never ends in whitespace — but worth stating plainly rather than
+ * discovering it by surprise later.
  *
  * Fix 1 (#1259 round 4): round 3's fix-1b widened the control-byte strip
  * below into a shell-metacharacter strip too (`$`, backtick, backslash, `;`,
@@ -1809,78 +1857,38 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
         `the lead has exited; wake its lead yourself with: fleet task show`,
     };
   }
-  if (!looksLikeIdleComposerTail(term.preview)) {
+  try {
+    const typeRes = await deps.run(["terminal", "send", "--terminal", term.handle, "--text", clean], LIST_TIMEOUT_MS);
+    if (typeRes.timedOut || !typeRes.ok) {
+      return { woke: false, reason: `terminal send failed: ${(typeRes.stderr || typeRes.stdout).trim().slice(0, 200)}` };
+    }
+  } catch (err) {
+    return { woke: false, reason: errText(err) };
+  }
+
+  // Never trust the type landed where expected — re-read THIS terminal's own
+  // current screen and confirm our own text is now its tail before ever
+  // committing Enter. See this function's own doc comment for why a glyph
+  // shape alone (the round 4 approach) cannot stand in for this.
+  const after = await findLocalAttachTerminal(id, deps);
+  const tail = after?.preview !== undefined ? lastNonEmptyLine(after.preview) : "";
+  if (!tail.includes(clean)) {
     return {
       woke: false,
-      reason: `${id}'s claude session looks busy or mid-prompt — refusing to risk typing into it; ` +
+      reason: `${id}: typed but could not confirm it landed in the composer — refusing to submit; ` +
         `wake its lead yourself with: fleet task show`,
     };
   }
+
   try {
-    const res = await deps.run(["terminal", "send", "--terminal", term.handle, "--text", clean, "--enter"], LIST_TIMEOUT_MS);
-    if (res.timedOut || !res.ok) {
-      return { woke: false, reason: `terminal send failed: ${(res.stderr || res.stdout).trim().slice(0, 200)}` };
+    const enterRes = await deps.run(["terminal", "send", "--terminal", term.handle, "--enter"], LIST_TIMEOUT_MS);
+    if (enterRes.timedOut || !enterRes.ok) {
+      return { woke: false, reason: `terminal send (enter) failed: ${(enterRes.stderr || enterRes.stdout).trim().slice(0, 200)}` };
     }
     return { woke: true, digest: clean };
   } catch (err) {
     return { woke: false, reason: errText(err) };
   }
-}
-
-/** Claude's own select-modal rule, drawn as a run of `▔` box-drawing glyphs
- *  above the modal's option rows. Those option rows are ALSO `❯`-prefixed —
- *  visually identical to the composer's own `❯` but semantically opposite
- *  ("this option is selected," not "safe to type into"). A modal glyph
- *  anywhere in the preview means refuse unconditionally, regardless of what
- *  the screen's last line looks like. Still real signal even now that the
- *  process check is primary (#1259 round 4): kept as the belt-and-suspenders
- *  half of `looksLikeIdleComposerTail` below. */
-const MODAL_RULE = /(▔)+/;
-
-/** The composer row, tail-anchored: optional leading whitespace, an optional
- *  box-drawing `│` (with its own optional trailing whitespace) then `❯`.
- *  Mirrors wake.ts's `COMPOSER_ROW` discipline — the `?` binds to the WHOLE
- *  pipe-plus-whitespace group, never to just the pipe's last byte, so a
- *  multibyte `│` is never partially matched. */
-const TAIL_COMPOSER_ROW = /^[ \t]*(│[ \t]*)?❯/;
-
-/** The last non-empty line of a multi-line terminal preview, with trailing
- *  whitespace trimmed. A terminal preview can end in blank lines (cursor
- *  position padding, a trailing newline) that would otherwise hide the real
- *  last line of content from a tail-only check. Returns "" when every line
- *  is empty. */
-function lastNonEmptyLine(preview: string): string {
-  const lines = preview.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const trimmed = lines[i].trimEnd();
-    if (trimmed.length > 0) return trimmed;
-  }
-  return "";
-}
-
-/**
- * Does the attach terminal's screen text look IDLE — safe to type a wake
- * digest into and press Enter without risking an interrupted turn or an
- * auto-approved permission prompt? Narrower than round 3's
- * `looksLikeClaudeScreen` on purpose (#1259 round 4): that function answered
- * "is this claude" (now `deps.isClaudeForeground`'s job, asked of the OS
- * instead) — this one only answers "is it idle right now."
- *
- * A turn-marker/status row (`⏺`/`●`, previously ACCEPTED as "alive, safe to
- * wake") now REFUSES: claude is actively streaming a turn then, not waiting
- * on input, and round 3's own measurement (a real claude 2.1.306 permission
- * modal does not draw the `▔` rule below, so its tail reads as an ordinary
- * option row indistinguishable from a composer row) means a denylist of
- * "busy" shapes can't be trusted either — only the ONE shape claude draws
- * when it is genuinely idle and waiting on the next line, the composer row
- * itself, counts. A modal ANYWHERE in the preview still refuses
- * unconditionally first (never risk auto-approving a pending prompt).
- * Missing or empty preview text fails closed, as before.
- */
-function looksLikeIdleComposerTail(preview: string | undefined): boolean {
-  if (preview === undefined || preview === "") return false;
-  if (MODAL_RULE.test(preview)) return false;
-  return TAIL_COMPOSER_ROW.test(lastNonEmptyLine(preview));
 }
 
 /**
