@@ -611,6 +611,44 @@ describe("local studio workspace — fleet task #1248", () => {
     }
   });
 
+  // #1259 round 7 fix 2: resume's own decision reads ONLY `agentIdentity`,
+  // never `agentWait` — the operator's own finding 3: `agentWait` is absent
+  // from `terminal list --json` in every measured state (62 real rows), so
+  // a future list schema that DID carry it must never make resume close a
+  // live-but-waiting lead (blocked on its own permission prompt is still
+  // alive). This terminal carries a non-null `agentWait` right alongside
+  // `agentIdentity: "claude"` on the SAME pinned entry — resume must still
+  // read "exists," proving the decision no longer depends on wait-state at
+  // all, not even when the field is present.
+  test("resume treats ANY claude identity as existing, even with a non-null agentWait on the SAME pinned entry (#1259 round 7 fix 2)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-waiting-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    writeLeadHandle(existingPath, "term_waiting");
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries({
+          handle: "term_waiting", title: "websites--pilot", connected: true, orphaned: false, writable: true,
+          agentIdentity: "claude", agentWait: "permission",
+        }),
+        "terminal create": TERM_CREATED,
+      });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("exists");
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(false);
+      expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   // #1259 round 6 finding 1, the exact bug this round exists to fix: round
   // 5's wake/resume both ranked worktree-matched candidates and acted on
   // whichever one came out first — real list order put an operator's own

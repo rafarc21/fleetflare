@@ -746,21 +746,31 @@ export async function ensureLocalStudioWorktree(
       // #1259 round 6 step 4: the reuse-vs-create decision is now Orca's OWN
       // tracked agent state on the EXACT pinned terminal — `findPinnedLeadTerminal`
       // reads `.fleet/lead.handle` first (never a fresh re-ranked guess when
-      // the precise handle is already known), falling back to ranked
-      // discovery (and backfilling the handle file) only for a studio
-      // provisioned before this mechanism existed. Replaces round 4/5's
-      // OS-level `ps` walk entirely — see `isIdleClaudeTerminal`'s own doc
-      // comment for why.
+      // the precise handle is already known), falling back to identity-
+      // filtered discovery (and backfilling the handle file) only for a
+      // studio provisioned before this mechanism existed. Replaces round
+      // 4/5's OS-level `ps` walk entirely.
+      //
+      // #1259 round 7 fix 2: the decision reads ONLY `agentIdentity`, never
+      // `agentWait` — the operator's own finding 3: `agentWait` is absent
+      // from `terminal list --json` in every measured state (62 real rows);
+      // it only exists on the per-terminal `terminal show` call (see
+      // `sendLocalWake`'s own gate, which genuinely needs it). If a future
+      // list schema ever DID carry it, deciding resume on it would risk
+      // closing a LIVE lead merely blocked on its own permission prompt —
+      // data loss. ANY `agentIdentity === "claude"` means a live lead is
+      // there, full stop, never closed regardless of wait state.
       const pinned = await findPinnedLeadTerminal(id, deps);
-      if (pinned && isIdleClaudeTerminal(pinned)) {
+      if (pinned && pinned.agentIdentity === "claude") {
         return { kind: "exists" };
       }
-      // Not an idle claude session (or no terminal could be resolved at
-      // all): close ONLY the one specific terminal just found, by its own
-      // handle — never iterate and close every connected terminal in the
-      // worktree the way round 5 did (that closed an operator's own
-      // unrelated shell whenever round 5's own liveness check misfired).
-      // No terminal resolved at all means nothing to close.
+      // Not claude (confirmed exited, or something else entirely), or no
+      // terminal could be resolved at all: close ONLY the one specific
+      // terminal just found, by its own handle — never iterate and close
+      // every connected terminal in the worktree the way round 5 did (that
+      // closed an operator's own unrelated shell whenever round 5's own
+      // liveness check misfired). No terminal resolved at all means nothing
+      // to close.
       if (pinned?.handle) {
         await orcaJson(deps, ["terminal", "close", "--terminal", pinned.handle, "--json"], LIST_TIMEOUT_MS);
       }
