@@ -787,17 +787,29 @@ export async function ensureLocalStudioWorktree(
       // lead is most alive — the title check would then find no match at
       // all and this code would boot a SECOND lead claude process beside
       // the still-running first one. A live claude here means reuse, never
-      // a second; a dead one means close whatever stale terminal(s) are
-      // sitting in this worktree — regardless of what their own title
-      // happens to read — and launch a fresh one.
+      // a second; a dead one means close the stale terminal and launch a
+      // fresh one.
       if (await claudeForegroundCheck(deps, existing.path)) {
         return { kind: "exists" };
       }
+      // #1259 round 5 fix 4: round 4's own fix above closed EVERY connected
+      // terminal in this worktree once dead was decided — correct when the
+      // worktree really is single-purpose, but round 4's own liveness check
+      // was itself measured broken (always "dead", see
+      // `defaultIsClaudeForeground`'s doc comment), so every single resume
+      // closed every terminal in the worktree, including one an operator
+      // opened by hand for unrelated work. Now that dead means genuinely
+      // dead, this still only closes the ONE terminal most likely to be
+      // fleet's own prior attach — the best-ranked connected candidate
+      // (`rankAttachTerminals`, the same ranking `findAttachTerminal` and
+      // `fleet tabs`'s own dedupe already use) — leaving any OTHER connected
+      // terminal in this worktree untouched. No candidate at all means
+      // nothing to close; proceed straight to create.
       const staleTerms = await orcaJson(deps, ["terminal", "list", "--worktree", selector, "--json"], LIST_TIMEOUT_MS);
-      for (const t of staleTerms.result?.terminals ?? []) {
-        if (t.connected === true && t.handle) {
-          await orcaJson(deps, ["terminal", "close", "--terminal", t.handle, "--json"], LIST_TIMEOUT_MS);
-        }
+      const staleCandidates = (staleTerms.result?.terminals ?? []).filter((t) => t.connected === true && t.handle !== undefined);
+      const staleBest = rankAttachTerminals(staleCandidates, id)[0];
+      if (staleBest?.handle) {
+        await orcaJson(deps, ["terminal", "close", "--terminal", staleBest.handle, "--json"], LIST_TIMEOUT_MS);
       }
 
       const command = localLaunchCommand(id, existing.path, join(existing.path, ".fleet", "working-set.md"), args.allowedTools, args.effort ?? "");

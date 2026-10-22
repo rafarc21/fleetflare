@@ -654,6 +654,46 @@ describe("local studio workspace — fleet task #1248", () => {
     }
   });
 
+  // #1259 round 5 fix 4: round 4's own fix above closed EVERY connected
+  // terminal in the worktree once dead was decided — harmless when round 4's
+  // own liveness check worked, catastrophic once it was measured to always
+  // read "dead" (lsof's real-world failure mode): every resume closed every
+  // terminal in the worktree, including one the operator opened by hand for
+  // unrelated work in that same worktree. Two connected terminals here, one
+  // shaped like fleet's own prior attach (title "websites--pilot", first in
+  // list order) and one shaped like an operator's own manual shell (title
+  // "zsh", second) — only the FIRST (ranked best — same rank tie-break as
+  // `rankAttachTerminals`'s own "ties keep the oldest" rule) may be closed.
+  test("a resume with no live claude process closes only the best-ranked stale terminal, never every connected terminal in the worktree (#1259 round 5 fix 4)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "orca-reuse-two-terms-"));
+    const existingPath = join(root, "studio-websites-pilot");
+    mkdirSync(existingPath, { recursive: true });
+    const existingId = "repo-websites::/w/studio-websites-pilot";
+    try {
+      const f = fake({
+        "worktree list": ok(JSON.stringify({
+          ok: true,
+          result: { worktrees: [{ id: existingId, displayName: "studio-websites--pilot", path: existingPath }] },
+        })),
+        "terminal list": terminalEntries(
+          { handle: "term_stale_lead", title: "websites--pilot", connected: true, orphaned: false, writable: true },
+          { handle: "term_operator_shell", title: "zsh", connected: true, orphaned: false, writable: true },
+        ),
+        "terminal create": TERM_CREATED,
+      }, { isClaudeForeground: async () => false });
+      const outcome = await ensureLocalStudioWorktree("websites--pilot", f.deps, {
+        localPath: "/abs/clone", defaultBranch: "main", prompt: "the prompt", allowedTools: "Bash(git *) Edit",
+      });
+      expect(outcome.kind).toBe("created");
+
+      const closes = f.calls.filter((c) => c[0] === "terminal" && c[1] === "close");
+      expect(closes).toEqual([["terminal", "close", "--terminal", "term_stale_lead", "--json"]]);
+      expect(closes.some((c) => c.includes("term_operator_shell"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("materializes all four container hooks with the lead gate (item 1)", async () => {
     const root = mkdtempSync(join(tmpdir(), "orca-local-"));
     const worktreePath = join(root, "worktree");
