@@ -1082,10 +1082,15 @@ describe("local studio wake via orca terminal send (item 2)", () => {
       expect(send?.[5]).not.toContain("*(e:");
     });
 
+    // 1e21: `Number.isInteger(1e21)` is TRUE (it has no fractional part) even
+    // though it is nowhere near a real task number — `Number.isSafeInteger`
+    // is the correct check (minor fix, #1259 round 5), rejecting it and
+    // every other value outside the safe integer range, never producing a
+    // nonsensical `#1e+21` in the fixed wake template.
     test("refuses, fail closed, when the task number is not a positive integer — no orca call at all", async () => {
       const f = fake({});
       const report = { woke: false as const, reason: "LOCAL", local: true as const };
-      for (const bad of [0, -1, 1.5, Number.NaN]) {
+      for (const bad of [0, -1, 1.5, Number.NaN, 1e21]) {
         const out = await resolveLocalWake(report, "websites--pilot", bad, f.deps);
         expect(out?.woke).toBe(false);
         if (out && !out.woke) expect(out.reason).toContain(`invalid task number ${bad}`);

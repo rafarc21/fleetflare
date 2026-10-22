@@ -2029,6 +2029,19 @@ async function cmdProvision(
   const body = (await res.json()) as LocalSpawnResponse;
   const studio = parseStudioStatus(body);
   if (studio === null) {
+    // #1259 round 5 minor fix: `host` read directly off the still-unvalidated
+    // body — the same trust level `body.localPath`/`body.prompt` already get
+    // a few lines below once `studio` exists. A `host: "local"` answer tells
+    // us flipping back IS safe (routes.ts's own synchronous D1 flip for a
+    // local row runs no container/task-gate checks either way), even though
+    // the row otherwise failed `parseStudioStatus`'s own id/state/error
+    // checks. Any OTHER value (absent, a real cloud host, or `body` not even
+    // an object) stays exactly as round 4 left it — NOT flipped back here,
+    // because calling `/destroy` before `host` is known risks a real
+    // cloud-container teardown if the row turns out non-local.
+    if (typeof body === "object" && body !== null && (body as LocalSpawnResponse).host === "local") {
+      await flipLocalRowToStopped(creds, id);
+    }
     console.error("fleet provision: answered 200 but the body was not a studio row");
     process.exit(1);
   }
@@ -2102,7 +2115,18 @@ async function cmdProvision(
     if (outcome.kind !== "created" && outcome.kind !== "exists") {
       const why = outcome.why;
       console.error(`fleet provision: ${studio.id} has no local lead — the Orca worktree did not materialize (${why})`);
-      console.error(`  tear the registered row down with: fleet destroy ${studio.id}`);
+      // #1259 round 5 minor fix: "skipped" means `ensureLocalStudioWorktree`
+      // ran no orca call at all (not under Orca) — nothing about the row
+      // itself is broken, and the flip-back right below already returns it
+      // to "stopped" so a retry works. "Tear the registered row down" was
+      // stale advice here (round 4's own fix already made the SAME call for
+      // the origin-mismatch exit above): the real remedy is simply running
+      // under Orca and re-provisioning, never destroying anything.
+      if (outcome.kind === "skipped") {
+        console.error(`  run under Orca, then re-run: fleet provision ${studio.id}`);
+      } else {
+        console.error(`  tear the registered row down with: fleet destroy ${studio.id}`);
+      }
       await flipLocalRowToStopped(creds, id);
       process.exit(1);
     }

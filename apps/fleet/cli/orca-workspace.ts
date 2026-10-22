@@ -1917,7 +1917,7 @@ export async function resolveLocalWake(
   report: AssignWakeReport | undefined, studioId: string | null, taskNumber: number, deps: OrcaDeps,
 ): Promise<AssignWakeReport | undefined> {
   if (report && !report.woke && report.local === true && studioId !== null) {
-    if (!Number.isInteger(taskNumber) || taskNumber <= 0) {
+    if (!Number.isSafeInteger(taskNumber) || taskNumber <= 0) {
       return { woke: false, reason: `invalid task number ${taskNumber} — no wake was sent` };
     }
     const digest = `Board task #${taskNumber} has a new message. Run: fleet task show ${taskNumber}`;

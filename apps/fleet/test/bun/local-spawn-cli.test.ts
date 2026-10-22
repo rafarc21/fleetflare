@@ -39,6 +39,11 @@ let destroyAnswer: (() => Response) | undefined;
 // "no prompt/allowedTools" refusal flips the row back too.
 let provisionPromptOverride: string | undefined;
 let provisionAllowedToolsOverride: string | undefined;
+// #1259 round 5 minor fix: when set, the /provision stub answers a body that
+// fails `parseStudioStatus` (an invalid `state`) while still carrying
+// `host: "local"` -- the exact shape the "answered 200 but not a studio row"
+// exit's own new host-aware flip-back targets.
+let provisionMalformedHostLocal = false;
 
 // The spawn row the stub answers POST /studio/local/spawn with — the three
 // fields parseStudioStatus demands (id/state/error) plus repoSlug, and the
@@ -61,6 +66,11 @@ beforeAll(() => {
         return Response.json(SPAWNED);
       }
       if (url.pathname === "/studio/websites--release/provision" && req.method === "POST") {
+        if (provisionMalformedHostLocal) {
+          // Invalid `state` -> parseStudioStatus returns null -> the "not a
+          // studio row" exit -- but `host: "local"` is still right there.
+          return Response.json({ id: "websites--release", state: "not-a-real-state", error: null, host: "local" });
+        }
         return Response.json({
           id: "websites--release", state: "running", error: null, repoSlug: "acme/faux",
           tailscaleHost: null, lastRefresh: null,
@@ -214,12 +224,16 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
     // repo segment (websites), so cmdProvision sends {} and the stub answers a
     // local-shaped bring-up response. No orca binary + TERM_PROGRAM=not-orca
     // means ensureLocalStudioWorktree returns skipped, so the local branch must
-    // exit non-zero naming fleet destroy — proving it fired (the cloud path
-    // would have printed the row and exited 0).
+    // exit non-zero — proving it fired (the cloud path would have printed the
+    // row and exited 0).
     const destroyBefore = countDestroyCalls();
     const r = await runFleetLocal(["provision", "websites--release"]);
     expect(r.code).toBe(1);
-    expect(r.err).toContain("fleet destroy websites--release");
+    // #1259 round 5 minor fix: "skipped" (not under Orca) is nothing the row
+    // itself needs TORN DOWN for — the flip-back right below already returns
+    // it to stopped, so the real remedy is running under Orca and retrying.
+    expect(r.err).toContain("run under Orca, then re-run: fleet provision websites--release");
+    expect(r.err).not.toContain("fleet destroy websites--release");
     // #1259 round 4 fix 4: the "no local lead" exit (ensureLocalStudioWorktree
     // skipped/failed) must flip the row it just POSTed "running" back to
     // stopped too, same as the origin-mismatch exit already did — else a
@@ -368,6 +382,25 @@ describe("fleet provision — stopped local row re-materializes (item 7)", () =>
       expect(r.err).toContain("500");
     } finally {
       destroyAnswer = undefined;
+    }
+  }, 40_000);
+
+  // #1259 round 5 minor fix: the "answered 200 but the body was not a studio
+  // row" exit runs BEFORE `studio.host` is otherwise known (that early --
+  // `parseStudioStatus` itself just failed) -- but the raw body can still
+  // carry `host: "local"` even on an otherwise-malformed row, and when it
+  // does, flipping back is provably safe (the SAME synchronous D1 flip a
+  // local row's own teardown already uses, no container checks either way).
+  test("the 'not a studio row' exit still flips back when the malformed body's own host says local (#1259 round 5 minor fix)", async () => {
+    provisionMalformedHostLocal = true;
+    const destroyBefore = countDestroyCalls();
+    try {
+      const r = await runFleetLocal(["provision", "websites--release"]);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("answered 200 but the body was not a studio row");
+      expect(countDestroyCalls() - destroyBefore).toBe(1);
+    } finally {
+      provisionMalformedHostLocal = false;
     }
   }, 40_000);
 
