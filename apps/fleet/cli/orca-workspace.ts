@@ -293,16 +293,15 @@ interface OrcaEnvelope {
     // `terminal create`'s envelope never populates them (a just-created
     // terminal has no tracked agent yet), so they stay optional.
     terminal?: { handle?: string; title?: string; agentIdentity?: string | null; agentWait?: unknown };
-    // #1259 round 8 fix B2: `terminal send --json`'s own submission receipt
-    // — the Orca help text for `--wait-submit` says only that "timeout
-    // returns the queued/input-accepted receipt," never a confirmed key
-    // path. `status: "turn_started"` is this file's own considered guess at
-    // the value meaning "genuinely submitted" (never confirmed against real
-    // Orca — no instance in this sandbox, same posture as the `5`-second
-    // `--wait-submit` budget comment above `sendLocalWake`). Any other
-    // status (queued, input-accepted, or the field simply absent) must read
-    // as "not yet submitted," never as success.
-    submission?: { status?: string };
+    // #1259 round 9 fix B2': real Orca 1.4.232's `terminal send --wait-submit
+    // --json` receipt, CONFIRMED against the installed CLI's own handler
+    // source (`Orca.app/.../out/cli/handlers/terminal-send.js`) — it is
+    // `result.send.{accepted, prompt.stages[]}`, never `result.submission.
+    // status` (round 7/8's own unconfirmed guess, which never exists on real
+    // Orca). `stages` gains `"turn_started"` once Orca observes the turn
+    // actually start; stays at just `["input_accepted"]` on timeout/stall;
+    // `prompt.observation === "permission"` when blocked on a prompt.
+    send?: { accepted?: boolean; prompt?: { stages?: string[]; observation?: string } };
   };
 }
 
@@ -1904,19 +1903,31 @@ export async function sendLocalWake(id: string, digest: string, deps: OrcaDeps):
     // instead of failing the call — accepted-into-the-composer is NOT the
     // same as genuinely submitted, so `res.ok === true` alone is not proof
     // of anything. `--json` + `orcaJson` (this file's own established
-    // pattern for every other parsed Orca call) reads the actual receipt;
-    // only `status: "turn_started"` (`OrcaEnvelope.result.submission`'s own
-    // comment) counts as genuine submission. Any other status — queued,
-    // input-accepted, or no parseable receipt at all — refuses rather than
-    // reporting a false `woke:true`.
+    // pattern for every other parsed Orca call) reads the actual receipt.
+    //
+    // #1259 round 9 fix B2': round 8's own key path above (`result.
+    // submission.status === "turn_started"`) was still wrong — that field
+    // never exists on real Orca, so every real wake read `status=none` and
+    // reported `woke:false`, regressing round 7's own 4/4 measured real-Orca
+    // successes to 0/N. Corrected to the CLI-source-confirmed shape:
+    // genuine submission requires BOTH `send.accepted === true` AND
+    // `send.prompt.stages` including `"turn_started"` — accepted alone
+    // (queued, input-accepted, or blocked on a permission prompt, all of
+    // which still set `accepted: true`) never counts as genuine submission,
+    // and neither does a parse failure or an envelope missing the field
+    // entirely.
     const envelope = await orcaJson(
       deps,
       ["terminal", "send", "--terminal", term.handle, "--text", clean, "--enter", "--wait-submit", "5", "--json"],
       LIST_TIMEOUT_MS,
     );
-    const status = envelope.result?.submission?.status;
-    if (status !== "turn_started") {
-      return { woke: false, reason: `terminal send queued, submit not observed (status=${status ?? "none"})` };
+    const accepted = envelope.result?.send?.accepted === true;
+    const turnStarted = envelope.result?.send?.prompt?.stages?.includes("turn_started") === true;
+    if (!accepted || !turnStarted) {
+      const reason = !accepted
+        ? "terminal send not accepted, submit not observed (never queued)"
+        : "terminal send queued, submit not observed (turn never started)";
+      return { woke: false, reason };
     }
     return { woke: true, digest: clean };
   } catch (err) {

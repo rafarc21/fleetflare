@@ -1250,19 +1250,36 @@ describe("local studio wake via orca terminal send (item 2)", () => {
     return terminalEntries({ handle: "term_0", title: "fleet", connected: true, worktreeId: WID, ...IDLE_CLAUDE });
   }
 
-  // #1259 round 8 fix B2: `terminal send --json`'s own submission receipt —
-  // `--wait-submit` only OBSERVES the submission (Orca's own help text: "on
-  // timeout returns the queued/input-accepted receipt"), it never fails the
-  // call for a merely-queued send. `status: "turn_started"` is this file's
-  // own considered guess at the genuine-submission value (unconfirmed
-  // against real Orca — see the field's own comment in orca-workspace.ts).
+  // #1259 round 9 fix B2': real Orca 1.4.232's own receipt shape, read from
+  // the installed CLI's own handler source
+  // (`Orca.app/.../out/cli/handlers/terminal-send.js`) — `result.send.
+  // accepted` plus `result.send.prompt.stages[]`, NOT the round-7/8
+  // `result.submission.status` guess (which never exists on real Orca and
+  // made every real wake report `woke:false`, 0/N against round 7's own 4/4).
+  // `stages` gains `"turn_started"` once Orca observes the turn actually
+  // start; stays at just `["input_accepted"]` on timeout/stall.
   function sendSubmitted(): OrcaResult {
-    return ok(JSON.stringify({ ok: true, result: { submission: { status: "turn_started" } } }));
+    return ok(JSON.stringify({
+      ok: true,
+      result: { send: { accepted: true, prompt: { stages: ["input_accepted", "turn_started"] } } },
+    }));
   }
-  /** The receipt `--wait-submit` itself documents returning on a timeout —
-   *  queued or accepted into the composer, but never confirmed submitted. */
+  /** The receipt a timeout/stall produces — accepted into the composer, but
+   *  the turn never observed starting. */
   function sendQueuedOnly(): OrcaResult {
-    return ok(JSON.stringify({ ok: true, result: { submission: { status: "input_accepted" } } }));
+    return ok(JSON.stringify({
+      ok: true,
+      result: { send: { accepted: true, prompt: { stages: ["input_accepted"] } } },
+    }));
+  }
+  /** Blocked on a permission prompt — `accepted` can still be true (the text
+   *  landed in the composer), but `prompt.observation` reports the block and
+   *  `stages` never reaches `"turn_started"` either. */
+  function sendBlockedOnPermission(): OrcaResult {
+    return ok(JSON.stringify({
+      ok: true,
+      result: { send: { accepted: true, prompt: { stages: ["input_accepted"], observation: "permission" } } },
+    }));
   }
 
   test("sendLocalWake types the digest and submits it in ONE terminal send call, with --wait-submit (#1259 round 7 fix 4)", async () => {
@@ -1573,6 +1590,25 @@ describe("local studio wake via orca terminal send (item 2)", () => {
         "terminal list": oneTerminal(),
         "terminal show": terminalShow(IDLE_CLAUDE),
         "terminal send": sendQueuedOnly(),
+      });
+      const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
+      expect(out.woke).toBe(false);
+      if (!out.woke) expect(out.reason).toContain("submit not observed");
+    });
+
+    // #1259 round 9 fix B2': `result.submission.status` never exists on real
+    // Orca — real Orca's receipt is `result.send.{accepted,prompt.stages[]}`
+    // (confirmed against the installed CLI's own handler source). A receipt
+    // blocked on a permission prompt still has `accepted: true` (the text
+    // landed in the composer) but never reaches `"turn_started"` either —
+    // must refuse the same as any other not-yet-submitted receipt, never
+    // report `woke:true` just because `accepted` was true.
+    test("a receipt blocked on a permission prompt (accepted but turn never started) reports woke:false, not woke:true (#1259 round 9 fix B2')", async () => {
+      const f = fake({
+        "worktree list": worktrees("studio-websites--pilot"),
+        "terminal list": oneTerminal(),
+        "terminal show": terminalShow(IDLE_CLAUDE),
+        "terminal send": sendBlockedOnPermission(),
       });
       const out = await sendLocalWake("websites--pilot", "WAKE #1", f.deps);
       expect(out.woke).toBe(false);
