@@ -520,6 +520,14 @@ describe("runGate: a transient checkout or merge-tree failure is retried (#1283:
     expect(out.state).toBe("failure");
     expect(world.calls.filter((c) => c.includes("merge-tree"))).toHaveLength(1);
   });
+
+  it("gives up after 5 transient merge-tree failures and reports the error", async () => {
+    const world = fakeWorld({ mergeErrs: [RATE_LIMITED, RATE_LIMITED, RATE_LIMITED, RATE_LIMITED, RATE_LIMITED] });
+    const out = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(), sleep: noSleep });
+    expect(out.state).toBe("error");
+    expect(out.description).toContain("429");
+    expect(world.calls.filter((c) => c.includes("merge-tree"))).toHaveLength(5);
+  });
 });
 
 describe("withRaisedFileLimit (live: EMFILE in vite build and bun test)", () => {
