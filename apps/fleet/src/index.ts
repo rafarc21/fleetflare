@@ -1,9 +1,6 @@
 import type { Env } from "./env";
 import { sweepGateRunsFromEnv } from "./gate/watchdog-env";
 import { drainPendingGateRuns } from "./gate/auto-run-env";
-import { drainVerdictQueue } from "./gate/verdict-queue-env";
-import { postGateStatus } from "./gate/status-post";
-import { realStatusPort } from "./gate/status-post-env";
 import { handleTelegramWebhook } from "./telegram/webhook";
 import { handleGithubWebhook } from "./github/webhook";
 import { AGENTS, telegramConfig } from "./agents/registry";
@@ -214,14 +211,6 @@ async function handleScheduled(controller: ScheduledController, env: Env, ctx: E
     await drainPendingGateRuns(env);
   } catch (err) {
     console.error("gate drain release sweep failed", err);
-  }
-  // #1276: re-post gate/verdict verdicts a rate limit kept from landing, once
-  // each queued post's reset time passes. A verdict is never lost: this cron is
-  // the retry that lands it on the PR.
-  try {
-    await drainVerdictQueue(env, (p) => postGateStatus(realStatusPort(env), p.repo, p.sha, { state: p.state, description: p.description }));
-  } catch (err) {
-    console.error("gate verdict queue drain failed", err);
   }
   // Board #334: the AgentDO watchdog is part of the legacy Telegram
   // surface — off, nobody polls AgentDO (its container never starts).

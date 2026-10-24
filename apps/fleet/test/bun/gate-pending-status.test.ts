@@ -8,7 +8,7 @@
 // cloudflare:workers), so the decisions live here.
 import { describe, it, expect } from "bun:test";
 import { pendingStatusArgs } from "../../src/gate/fanout";
-import { postGateStatus, RateLimitedStatusError, STATUS_POST_STEP_CONFIG, type StatusPort } from "../../src/gate/status-post";
+import { postGateStatus, STATUS_POST_STEP_CONFIG, type StatusPort } from "../../src/gate/status-post";
 
 const RUN_ID = "0123456789abcdef";
 const SHA = "a".repeat(40);
@@ -105,14 +105,6 @@ describe("postGateStatus: one attempt, confirmed by reading the status back (#12
     const { port } = fakePort({ mintFails: true });
     await expect(postGateStatus(port, "acme/app", SHA, { state: "pending", description: "d" }))
       .rejects.toThrow(/mint acme\/app failed/);
-  });
-
-  it("a rate-limited POST throws RateLimitedStatusError, distinct from a plain failure (#1276)", async () => {
-    const { port } = fakePort({ postError: new Error("gate/verdict HTTP 403: API rate limit exceeded for installation"), landed: undefined });
-    await expect(postGateStatus(port, "acme/app", SHA, { state: "failure", description: "d" }))
-      .rejects.toThrow(/rate limited/);
-    await expect(postGateStatus(port, "acme/app", SHA, { state: "failure", description: "d" }))
-      .rejects.toBeInstanceOf(RateLimitedStatusError);
   });
 });
 

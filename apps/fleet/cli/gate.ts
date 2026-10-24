@@ -20,9 +20,6 @@ export interface GateStatusResponse {
   state: "pending" | "success" | "failure" | "error";
   description?: string;
   statusPostFailed?: boolean;
-  /** #1276: the terminal verdict was rate limited and queued for a post-reset
-   *  retry. The verdict is not lost, but it has not landed on GitHub yet. */
-  verdictQueued?: boolean;
   legs?: GateLegLine[];
 }
 
@@ -169,13 +166,6 @@ export function parseStartResponse(text: string): ParsedStart {
   }
 }
 
-/** The first line of a non-JSON error body, trimmed and cut short — enough to
- *  show "what failed", never the whole HTML page. */
-export function firstLine(text: string): string {
-  const line = text.trim().split(/\r?\n/, 1)[0] ?? "";
-  return line.slice(0, 200);
-}
-
 /** The one line a failed status poll prints (#1144): the HTTP status, and the
  *  route's own error text when the reply is JSON. The raw body never prints, so
  *  a Cloudflare HTML error page cannot reach the terminal. */
@@ -239,7 +229,6 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
     const decision = gateWatchDecision(parsed.status, Date.now() - started);
     if (decision.kind === "terminal") {
       console.log(`gate: ${decision.status.state}${decision.status.description ? ` — ${decision.status.description}` : ""}`);
-      if (decision.status.verdictQueued) console.error("gate: verdict post rate-limited — queued for retry after reset");
       for (const line of legLines(decision.status)) console.log(line);
       process.exitCode = gateWatchExitCode(decision.status);
       return;
@@ -307,7 +296,6 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
     }
     if (status.state !== "pending") {
       console.log(`gate: ${status.state}${status.description ? ` — ${status.description}` : ""}`);
-      if (status.verdictQueued) console.error("gate: verdict post rate-limited — queued for retry after reset");
       for (const line of legLines(status)) console.log(line);
       const code = gateWatchExitCode(status);
       return code === 0 || code === 1 ? code : 2;
@@ -346,6 +334,13 @@ export async function cmdGateProtect(creds: Credentials, repo: string): Promise<
   console.log(`gate protect ${repo}: ${body.branch}`);
   console.log(`  before: ${(body.before ?? []).join(", ") || "(none)"}`);
   console.log(`  after:  ${(body.after ?? []).join(", ")}`);
+}
+
+/** The first trimmed line of an error body, cut short — enough to show "what
+ *  failed", never the whole HTML page. */
+export function firstLine(text: string): string {
+  const line = text.trim().split(/\r?\n/, 1)[0] ?? "";
+  return line.slice(0, 200);
 }
 
 /** #1277: `fleet gate log <pr> <leg> [--run <runId>] [--full]`. Reads the leg's
