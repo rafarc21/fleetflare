@@ -79,6 +79,17 @@ describe("deploy.sh: drain running gate runs before a Worker deploy (#1232)", ()
     expect(sets.length).toBeGreaterThanOrEqual(2);
   });
 
+  test("a failed re-stamp aborts the drain (exit 2) so the flag never goes stale mid-drain (#1275)", () => {
+    writeConfig(gateConfig());
+    stub("gate-instances.json", [{ id: "gate-x", status: "running" }]);
+    const r = deploy([], 0, { GATE_DRAIN_CAP_MS: "150", GATE_DRAIN_POLL_MS: "10", GATE_DRAIN_RESTAMP_MS: "100", STUB_RESTAMP_FAIL: "1" });
+    expect(r.code).toBe(1);
+    // The wait itself refuses on the failed heartbeat, before the cap.
+    expect(r.err).toContain("could not re-stamp the drain flag");
+    // No deploy ran.
+    expect(r.wrangler.some((l) => l === "wrangler deploy -c wrangler.local.jsonc")).toBe(false);
+  });
+
   test("a failed deploy clears the flag on the way out (every exit path clears)", () => {
     writeConfig(gateConfig());
     const r = deploy([], 0, { STUB_DEPLOY_EXIT: "1" });
