@@ -12,7 +12,9 @@ const INFRA_CAUSE = new RegExp([
   "Network connection lost",
   "gate container (did not start|failed|exited)",
   "gate server (unreachable|HTTP \\d+)",
-  "exceeded \\d+ min without a result",
+  // #1284: combineCauses may cut the "a result" tail of the deadline cause
+  // ("exceeded 8 min without …"), so match the part that always survives.
+  "exceeded \\d+ min without",
   "no progress past its deadline",
   ": HTTP 503\\b",
   // Workflows' own step timeout, and an AbortSignal.timeout on a leg call (#1135).
