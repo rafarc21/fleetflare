@@ -1142,7 +1142,7 @@ export async function handleStudio(
    */
   if (
     url.pathname === "/studio/gate/start" || url.pathname === "/studio/gate/status"
-    || url.pathname === "/studio/gate/protect"
+    || url.pathname === "/studio/gate/protect" || url.pathname === "/studio/gate/log"
   ) {
     return handleGateRoute(req, env);
   }

@@ -46,12 +46,19 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     "gate server unreachable: ECONNREFUSED",
     "lint: gate server HTTP 500",
     "lint exceeded 25 min without a result",
+    // #1284: combineCauses cuts the deadline cause's "a result" tail, so the
+    // classifier matches the prefix that survives truncation.
+    "lint exceeded 8 min without …",
+    "lint: gate capacity: no container instance available",
     "lint: no progress past its deadline after 35 min",
     "lint: HTTP 503 after 0 min",
     "lint: Execution timed out after 30 min",
     "lint: The operation was aborted due to timeout after 28 min",
     "lint: checkout failed: fatal: remote end hung up after 2 min",
     "lint: clone failed: fatal: remote-curl: bad line length character: UNKNO after 1 min",
+    // #1283: a GitHub 429 surfaced by the git proxy or the checkout's lazy fetch.
+    "lint: checkout failed: fatal: unable to access 'http://git-proxy.internal/o/r.git/': The requested URL returned error: 429 after 0 min",
+    "lint: HTTP 429 after 0 min",
   ])("infra: %s", (description) => {
     expect(isInfraLegFailure({ leg: "lint", state: "error", description })).toBe(true);
   });

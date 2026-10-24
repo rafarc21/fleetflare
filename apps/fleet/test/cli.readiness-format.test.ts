@@ -1006,4 +1006,18 @@ describe("formatSurvivalBriefs (cli/readiness-format.ts)", () => {
   it("an empty reason renders honestly rather than as a dangling dash", () => {
     expect(formatSurvivalBriefs([row("e--x", pending({ reason: "" }))])[0]).toContain("no reason recorded");
   });
+
+  it("issue #1282: a gave-up brief that carried a WIP ref says 'WIP ref not delivered'", () => {
+    const gaveUp = pending({ attempts: 6, gaveUpAt: "2026-09-25T12:30:00.000Z", reason: "6 delivery attempts, none landed (limit 6)" });
+    // A pending (not yet gave-up) brief never says it, even with a WIP ref.
+    expect(formatSurvivalBriefs([row("p--x", pending({ wipSyncedBootStamp: "20260925115000" }))])[0])
+      .not.toContain("WIP ref not delivered");
+    // A gave-up brief WITHOUT a WIP ref does not say it either.
+    expect(formatSurvivalBriefs([row("g--x", gaveUp)])[0]).not.toContain("WIP ref not delivered");
+    // A gave-up brief with a synced boot stamp, or a plain boot stamp, does.
+    expect(formatSurvivalBriefs([row("w1--x", { ...gaveUp, wipSyncedBootStamp: "20260925115000" })])[0])
+      .toContain("WIP ref not delivered");
+    expect(formatSurvivalBriefs([row("w2--x", { ...gaveUp, wipBootStamp: "20260925115000" })])[0])
+      .toContain("WIP ref not delivered");
+  });
 });

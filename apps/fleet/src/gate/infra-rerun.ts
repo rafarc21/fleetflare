@@ -12,7 +12,14 @@ const INFRA_CAUSE = new RegExp([
   "Network connection lost",
   "gate container (did not start|failed|exited)",
   "gate server (unreachable|HTTP \\d+)",
-  "exceeded \\d+ min without a result",
+// #1278 ask 1: account at capacity, the no-instance fail-fast outcome. Kept
+  // infra-class so a saturated fleet's legs earn the one auto-rerun, never a
+  // false red on healthy code.
+  "gate capacity: no container instance",
+  // #1284: combineCauses may cut the "a result" tail of the deadline cause
+  // ("exceeded 8 min without …"), so match the part that always survives (a
+  // superset of the old "… without a result").
+  "exceeded \\d+ min without",
   "no progress past its deadline",
   ": HTTP 503\\b",
   // Workflows' own step timeout, and an AbortSignal.timeout on a leg call (#1135).
@@ -23,6 +30,10 @@ const INFRA_CAUSE = new RegExp([
   // its git-protocol stream was garbled. Neither is the code under test.
   "remote end hung up",
   "bad line length",
+  // #1283: a GitHub 429 on a lazy blob fetch or checkout is the shared token's
+  // limit, not the code under test.
+  "returned error: 429",
+  "HTTP 429",
 ].join("|"));
 
 /** An error leg is infra-class by its cause. A leg whose first attempt was red

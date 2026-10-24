@@ -15,7 +15,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree,
+  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, listOpenPulls, listRepoTree,
 } from "../github/api";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
@@ -29,7 +29,7 @@ import {
 } from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
-  bundleKeyFor, carriedGreenByLeg, greenLegsOf, outcomeLegs, pendingStatusArgs, planBundleLeg, planFingerprint, planUnionLegs, verdictToStatusArgs,
+  bundleKeyFor, carriedGreenByLeg, greenLegsOf, legsForChangedFiles, outcomeLegs, pendingStatusArgs, planBundleLeg, planFingerprint, planUnionLegs, verdictToStatusArgs,
   type CarryGreen, type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
@@ -100,7 +100,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     const resolved = await step.do("resolve-pr", async () => {
       const token = await mintToken(repo);
       const pull = await getPullRequest(token, repo, pr);
-      const headSha = await getPullRequestHeadSha(token, repo, pr);
+      // #1276: the head sha rides on getPullRequest's own GET — one /pulls call
+      // instead of two (getPullRequestHeadSha hit the same endpoint). A missing
+      // sha keeps getPullRequestHeadSha's old throw contract: never gate on a
+      // sha we did not read.
+      const headSha = pull.headSha;
+      if (headSha === "") throw new Error(`read pull ${repo}#${pr} head failed: no head sha`);
       // The PR's own base branch, not the default branch: a PR into a
       // non-default branch must be gated against that branch.
       const baseSha = await getBranchSha(token, repo, pull.baseRef);
@@ -227,10 +232,15 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       return { base: bunLaneFiles(tree, base), head: bunLaneFiles(tree, head) };
     }) : { base: [], head: [] };
 
+    // #1274: a leg with a `paths` filter runs only when a changed file matches it.
+    // `files` here is the bun-lane file list; the per-leg filter uses the run's
+    // changedFiles (resolved.changedFiles), the same list that gates the whole run.
+    // A truncated change list or a config change runs every filtered leg.
     const planFor = (cfg: GateConfig, files: string[]): PlanInput => ({
       owner, repo: repoName, pr, runId: event.instanceId,
       headSha: resolved.headSha, baseSha: resolved.baseSha,
-      install: cfg.install, legs: cfg.legs,
+      install: cfg.install,
+      legs: legsForChangedFiles(cfg.legs, resolved.changedFiles, { truncated: resolved.truncated, configChanged }),
       bunShards: planBunShards(files, BUN_SHARD_TIMINGS.timings, cfg.bunShards),
       bunLaneRoot: cfg.bunLaneRoot ?? "",
       vitestCmd: cfg.vitestCmd, vitestShards: cfg.vitestShards, image: cfg.image,

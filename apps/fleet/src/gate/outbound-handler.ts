@@ -164,6 +164,9 @@ export const GIT_UPSTREAM_MAX_ATTEMPTS = 4;
 /** Random extra wait per retry, so legs that hit one limit do not retry in lockstep.
  *  The jitter is at least this, or half the wait if that is larger. */
 export const RETRY_JITTER_MIN_MS = 1_000;
+/** #1283: a retry waits at least this long, whatever the hint. A near-zero
+ *  Retry-After would otherwise retry straight back into the shared token's limit. */
+export const RETRY_MIN_WAIT_MS = 15_000;
 /** Wait for a 429 with no usable hint. Doubles on each retry. GitHub asks for at
  *  least one minute on a secondary limit with no header. */
 const RETRY_BACKOFF_BASE_MS = 60_000;
@@ -204,7 +207,7 @@ function isRetryable(status: number, hasLimitHint: boolean): boolean {
  *  The hint is waited in full, never cut short, so a retry cannot land before
  *  the upstream said it would accept one. */
 function retryWaitMs(hint: number | null, attempt: number, random: number): number {
-  const base = hint ?? RETRY_BACKOFF_BASE_MS * 2 ** (attempt - 1);
+  const base = Math.max(hint ?? RETRY_BACKOFF_BASE_MS * 2 ** (attempt - 1), RETRY_MIN_WAIT_MS);
   return base + Math.floor(random * Math.max(RETRY_JITTER_MIN_MS, base / 2));
 }
 
@@ -333,9 +336,17 @@ async function handleGitProxy(
     const hint = retryAfter ?? rateLimitResetMs(res, now());
     // A 403 is retried only with a limit hint: Retry-After (secondary) or an exhausted reset (primary).
     const retry = retryable && attempt < GIT_UPSTREAM_MAX_ATTEMPTS && isRetryable(res.status, hint !== null);
-    if (!retry) return new Response(null, { status: res.status });
+    // #1283: a skipped retry is the run going red with no auto-rerun, so the reason
+    // is logged — attempts exhausted, a non-retryable status, or a non-retryable body.
+    if (!retry) {
+      console.log(`gate git-proxy: skip retry status=${res.status} attempt=${attempt}/${GIT_UPSTREAM_MAX_ATTEMPTS} retryable=${retryable} hint=${hint === null ? "-" : `${hint}ms`}`);
+      return new Response(null, { status: res.status });
+    }
     const wait = retryWaitMs(hint, attempt, random());
-    if (now() + wait > deadline - RETRY_MIN_TAIL_MS) return new Response(null, { status: res.status });
+    if (now() + wait > deadline - RETRY_MIN_TAIL_MS) {
+      console.log(`gate git-proxy: skip retry status=${res.status} attempt=${attempt}/${GIT_UPSTREAM_MAX_ATTEMPTS} reason=budget wait=${wait}ms`);
+      return new Response(null, { status: res.status });
+    }
     console.log(`gate git-proxy: retry status=${res.status} wait=${wait}ms attempt=${attempt + 1}/${GIT_UPSTREAM_MAX_ATTEMPTS}`);
     await res.body?.cancel().catch(() => {});
     await sleep(wait);

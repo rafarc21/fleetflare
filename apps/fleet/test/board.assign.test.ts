@@ -382,6 +382,15 @@ describe("resolveBoardRepo", () => {
     if (res.ok) return;
     expect(res.status).toBe(503);
   });
+
+  it("answers 429 with the reset time, not 503, when the provider is rate limited (#1276)", async () => {
+    const reachRepo = vi.fn(async (): Promise<RepoReach> => ({ reachable: false, rateLimited: true, resetInMs: 120_000 }));
+    const res = await resolveBoardRepo({ reachRepo }, { requested: "acme-org/beta", defaultSlug: "acme-org/websites" });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(429);
+    expect(res.message).toContain("reset in ~120s");
+  });
 });
 
 // --- §5 assignment: which studio owns a task (P4a-2) -------------------------

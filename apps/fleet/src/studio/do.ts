@@ -6750,6 +6750,8 @@ export class StudioDO extends Sandbox<Env> {
         ),
         (prompt) => this.wakeStudioOnAssignment(prompt),
         () => ctx.moved(),
+        () => new Date(),
+        (brief) => this.survivalFallback(brief),
       );
       this.logSurvivalOutcome("bring-up", outcome);
     } catch (err) {
@@ -6834,6 +6836,9 @@ export class StudioDO extends Sandbox<Env> {
           },
         )(),
         (prompt) => this.wakeStudioOnAssignment(prompt, true),
+        async () => false,
+        () => new Date(),
+        (brief) => this.survivalFallback(brief),
       ));
     } catch (err) {
       console.error(`studio ${this.selfId()}: deferred survival re-brief retry failed`, err);
@@ -6851,6 +6856,34 @@ export class StudioDO extends Sandbox<Env> {
    */
   private async survivalBusy(): Promise<BusyVerdict> {
     return paneBusy((await sbExec(this, paneCaptureCmd(), EXEC_CLASSES.sync)).stdout);
+  }
+
+  /**
+   * Issue #1282 — the survival re-brief's FALLBACK channel, used only when the
+   * busy probe says a turn is genuinely IN FLIGHT (`BusyVerdict.midTurn`): the
+   * gated wake must never interrupt a working lead, but the brief still has to
+   * land. Two steps, and the SECOND is what makes it a delivery:
+   *
+   *   1. Write the composed brief to `/workspace/.fleet/survival-brief.md` —
+   *      the same durable, one-level-above-the-checkout directory working-set.md
+   *      and bringup.log already live in. Named in the house rules (blueprint.ts
+   *      HOUSE_RULES) so the lead knows to read it.
+   *   2. Send a one-line pointer through the SAME GATED `wakeStudioOnAssignment`
+   *      every other delivery uses — never a raw keystroke (#82/#99: nothing
+   *      calls raw `runWake` except `runGatedWake`). The pointer is the only
+   *      channel the lead reads; its outcome decides the delivery.
+   *
+   * Returns the pointer's `WakeOutcome` (the caller's `attemptSurvivalDelivery`
+   * counts `ok:true` as `fallback-delivered` and defers anything else). The
+   * file write itself is NOT the delivery — a thrown write propagates to the
+   * caller's catch and defers, and a refused pointer defers the same way.
+   */
+  private async survivalFallback(brief: string): Promise<WakeOutcome> {
+    const path = "/workspace/.fleet/survival-brief.md";
+    await sbWriteFile(this, path, new TextEncoder().encode(brief));
+    return this.wakeStudioOnAssignment(
+      "A survival re-brief was written to /workspace/.fleet/survival-brief.md while you were mid-turn — read it in full, then continue.",
+    );
   }
 
   /**
@@ -6911,8 +6944,21 @@ export class StudioDO extends Sandbox<Env> {
     if (outcome.kind === "refused") logWakeOutcome(label, outcome.wake);
     else if (outcome.kind === "deferred") {
       console.log(`${label} deferred (attempt ${outcome.attempts}): ${outcome.reason}`);
+    } else if (outcome.kind === "fallback-delivered") {
+      console.log(`${label} fallback-delivered (${outcome.incarnation}): a mid-turn lead, brief written to file`);
     } else if (outcome.kind === "gave-up") {
       console.error(`${label} UNDELIVERED, no longer retrying: ${outcome.reason}`);
+      // Issue #1282: never give up silently. The console.error above reaches a
+      // Worker tail; this event is the durable D1 record (`fleet events`) the
+      // operator and the board can both read. A failed event write is a log,
+      // not a retry of the whole give-up decision.
+      const project = parseStudioId(this.selfId())?.repo ?? this.selfId();
+      void appendEvent(this.env.DB, makeEvent({
+        from: this.selfId(), to: "board", kind: "escalation", project, ref: this.selfId(),
+        body: `survival re-brief UNDELIVERED: ${outcome.attempts} attempts, none landed (${outcome.reason})`,
+      }, new Date().getTime(), shortId())).catch((err) => {
+        console.error(`studio ${this.selfId()}: survival give-up event write failed`, err);
+      });
     }
   }
 

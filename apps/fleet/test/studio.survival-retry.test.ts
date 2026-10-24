@@ -89,6 +89,7 @@ function harness(over: {
   brief?: ComposedBrief;
   wake?: WakeOutcome;
   moved?: () => Promise<boolean>;
+  fallback?: (brief: string) => Promise<WakeOutcome>;
 } = {}) {
   const observed = fakeObserved(over.seed ?? { session: session() });
   const busy = vi.fn(async () => paneBusy(over.busyStdout ?? IDLE));
@@ -96,10 +97,11 @@ function harness(over: {
     over.brief ?? "What survived, studio:\n- Task branches: none");
   const wake = vi.fn(async (): Promise<WakeOutcome> => over.wake ?? { ok: true });
   const moved = vi.fn(over.moved ?? (async () => false));
+  const fallback = vi.fn(over.fallback ?? (async () => ({ ok: false, error: "fallback not wired" })));
   const trigger = vi.fn(async () => (over.bringup === undefined ? bringup() : over.bringup));
   const run = () =>
-    deliverSurvivalBriefOnBringup(observed.storage, trigger, busy, compose, wake, moved);
-  return { observed, trigger, busy, compose, wake, moved, run };
+    deliverSurvivalBriefOnBringup(observed.storage, trigger, busy, compose, wake, moved, () => new Date(), fallback);
+  return { observed, trigger, busy, compose, wake, moved, fallback, run };
 }
 
 describe("deliverSurvivalBriefOnBringup — the delivery", () => {
@@ -464,8 +466,20 @@ describe("shared single-flight — #229's lock is reused, never duplicated", () 
     const direct = code.filter((l) => /\bthis\.deliverTaskOnBringup\(/.test(l));
     expect(direct).toHaveLength(1); // only the one inside deliverBringupWakes
     expect(code.filter((l) => /\bthis\.deliverBringupWakes\(/.test(l))).toHaveLength(3);
-    // Exactly ONE gated-wake call site for the whole survival feature.
-    expect(code.filter((l) => /this\.wakeStudioOnAssignment\(/.test(l)).length).toBeLessThanOrEqual(3);
+    // Three gated-wake call sites for the survival feature — the two delivery
+    // wake thunks plus, since #1282, the fallback pointer inside
+    // survivalFallback. Never a raw `runWake` (see the next pin).
+    expect(code.filter((l) => /this\.wakeStudioOnAssignment\(/.test(l)).length).toBeLessThanOrEqual(4);
+  });
+
+  it("#1282: the fallback pointer rides the GATED wake, never a raw runWake", () => {
+    const src = env.TEST_STUDIO_DO_SRC;
+    // The pointer is sent through wakeStudioOnAssignment (gated), never the raw
+    // runWake that #82/#99 reserve for runGatedWake alone.
+    expect(src).toContain("return this.wakeStudioOnAssignment(");
+    expect(src).not.toContain("runWake(");
+    // And the file write is NOT the delivery — only the pointer outcome is.
+    expect(src).toContain("survival-brief.md");
   });
 
   // SURVIVAL_COMPARE_BASE's real consumer is do.ts's compareAhead wiring,
@@ -517,6 +531,7 @@ function retryHarness(over: {
   wake?: WakeOutcome;
   moved?: () => Promise<boolean>;
   now?: string;
+  fallback?: (brief: string) => Promise<WakeOutcome>;
 } = {}) {
   const observed = fakeObserved(over.seed ?? { incarnation: INCARNATION, survivalBriefPending: pending() });
   const busy = vi.fn(async () => paneBusy(over.busyStdout ?? IDLE));
@@ -524,9 +539,10 @@ function retryHarness(over: {
     over.brief ?? "What survived, s:\n- Task branches: none");
   const wake = vi.fn(async (): Promise<WakeOutcome> => over.wake ?? { ok: true });
   const moved = vi.fn(over.moved ?? (async () => false));
+  const fallback = vi.fn(over.fallback ?? (async () => ({ ok: false, error: "fallback not wired" })));
   const now = () => new Date(over.now ?? NOW);
-  const run = () => retryPendingSurvivalBrief(observed.storage, busy, compose, wake, moved, now);
-  return { observed, busy, compose, wake, moved, run };
+  const run = () => retryPendingSurvivalBrief(observed.storage, busy, compose, wake, moved, now, fallback);
+  return { observed, busy, compose, wake, moved, fallback, run };
 }
 
 describe("the pending marker — a busy bring-up leaves the brief OWED, not dropped", () => {
@@ -673,6 +689,85 @@ describe("retryPendingSurvivalBrief — THE RETRY ITSELF (round-2 item 2's mutan
     expect(await h.run()).toEqual({ kind: "refused", wake: refused });
     expect(h.observed.stored()?.survivalBriefDeliveredFor ?? null).toBeNull();
     expect(h.observed.stored()?.survivalBriefPending?.attempts).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1282 — the FALLBACK channel. A GENUINELY mid-turn pane (repaint or
+// `esc to interrupt`) no longer defers straight to give-up: the brief goes out
+// through the fallback (write file + gated pointer). Only an `ok:true` pointer
+// counts as delivered; anything else defers with the busy reason. An
+// UNREADABLE probe (`midTurn: false`) never falls back — a dead/blank pane has
+// no lead to read the file, and the old give-up path must still surface it.
+// ---------------------------------------------------------------------------
+
+describe("issue #1282 — the mid-turn fallback channel", () => {
+  const POINTER_OK: WakeOutcome = { ok: true };
+  const POINTER_REFUSED: WakeOutcome = { ok: false, skipped: true, error: "refused: a modal is on screen" };
+
+  it("a mid-turn pane with an accepted pointer delivers via the fallback, no typed wake", async () => {
+    const h = harness({ busyStdout: captured(MIDTURN_PANE), fallback: async () => POINTER_OK });
+    expect(await h.run()).toEqual({ kind: "fallback-delivered", incarnation: INCARNATION });
+    expect(h.wake).not.toHaveBeenCalled();
+    expect(h.fallback).toHaveBeenCalledTimes(1);
+    // Same at-most-once dedup clear as a typed delivery.
+    expect(h.observed.stored()?.survivalBriefDeliveredFor).toBe(INCARNATION);
+    expect(h.observed.stored()?.survivalBriefPending ?? null).toBeNull();
+  });
+
+  it("the retry path uses the SAME fallback — a mid-turn retry tick delivers via file", async () => {
+    const h = retryHarness({ busyStdout: captured(MIDTURN_PANE), fallback: async () => POINTER_OK });
+    expect(await h.run()).toEqual({ kind: "fallback-delivered", incarnation: INCARNATION });
+    expect(h.wake).not.toHaveBeenCalled();
+    expect(h.fallback).toHaveBeenCalledTimes(1);
+    expect(h.observed.stored()?.survivalBriefDeliveredFor).toBe(INCARNATION);
+  });
+
+  it("a REFUSED pointer DEFERS with the busy reason — never a lost brief, never the dedup marker", async () => {
+    const h = harness({ busyStdout: captured(MIDTURN_PANE), fallback: async () => POINTER_REFUSED });
+    expect(await h.run()).toMatchObject({
+      kind: "deferred", attempts: 1, reason: "pane shows an `esc to interrupt` row — a turn is in flight",
+    });
+    expect(h.wake).not.toHaveBeenCalled();
+    expect(h.observed.stored()?.survivalBriefDeliveredFor ?? null).toBeNull();
+    expect(h.observed.stored()?.survivalBriefPending?.attempts).toBe(1);
+  });
+
+  it("a fallback that THROWS defers with the busy reason too, and the give-up path stays reachable", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      fallback: async () => { throw new Error("file write failed: disk full"); },
+    });
+    expect(await h.run()).toMatchObject({
+      kind: "deferred", attempts: 1, reason: "pane shows an `esc to interrupt` row — a turn is in flight",
+    });
+    expect(h.observed.stored()?.survivalBriefDeliveredFor ?? null).toBeNull();
+  });
+
+  it("an UNREADABLE probe (midTurn false) NEVER falls back — the old pure-defer path is preserved", async () => {
+    // `paneBusy` returns midTurn:false for an unreadable probe: a dead or blank
+    // pane, no live lead to read a file. The fallback must not fire.
+    const h = harness({
+      busyStdout: "just one observation, no marker",
+      fallback: async () => POINTER_OK,
+    });
+    expect(await h.run()).toMatchObject({
+      kind: "deferred", attempts: 1, reason: "pane probe produced no second observation — the lead is not proven idle",
+    });
+    expect(h.fallback).not.toHaveBeenCalled();
+    expect(h.observed.stored()?.survivalBriefDeliveredFor ?? null).toBeNull();
+  });
+
+  it("a fallback-delivered brief clears the aside claim, exactly like a typed delivery", async () => {
+    const ASIDE = "~/.claude/projects/fleet-aside-x";
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE), fallback: async () => POINTER_OK,
+      seed: { session: session(), lastSessionAside: [ASIDE], lastSessionAsideAt: NOW },
+      bringup: bringup({ lastSessionAside: [ASIDE], lastSessionAsideAt: NOW }),
+    });
+    expect(await h.run()).toEqual({ kind: "fallback-delivered", incarnation: INCARNATION });
+    expect(h.observed.stored()?.lastSessionAside).toBeNull();
+    expect(h.observed.stored()?.lastSessionAsideAt).toBeNull();
   });
 });
 

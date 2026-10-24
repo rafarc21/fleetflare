@@ -120,7 +120,16 @@ export function midTurnRow(capture: string): boolean {
 }
 
 /** Busy, with the reason a log line needs, or proven idle. */
-export type BusyVerdict = { busy: false } | { busy: true; reason: string };
+export type BusyVerdict =
+  | { busy: false }
+  // `midTurn` distinguishes the two busy signals the fallback channel (#1282)
+  // may act on from the two it must not. TRUE only for a pane genuinely
+  // mid-turn — the repaint test or an `esc to interrupt` row, both of which
+  // prove a LIVE lead is working. FALSE for an unreadable probe ("no second
+  // observation" / "captured nothing"), which is a statement about the PROBE,
+  // not about a working lead — a dead or blank pane, where a fallback file
+  // write would be delivered to nobody.
+  | { busy: true; reason: string; midTurn: boolean };
 
 /**
  * Both busy signals over ONE `paneCaptureCmd()` stdout (failover.ts) — one
@@ -156,17 +165,17 @@ export type BusyVerdict = { busy: false } | { busy: true; reason: string };
 export function paneBusy(stdout: string): BusyVerdict {
   const parts = stdout.split(`${PANE_CAPTURE_MARKER}\n`);
   if (parts.length !== 2) {
-    return { busy: true, reason: "pane probe produced no second observation — the lead is not proven idle" };
+    return { busy: true, midTurn: false, reason: "pane probe produced no second observation — the lead is not proven idle" };
   }
   const [first, second] = parts.map((p) => p.replace(/\s+$/, ""));
   if (first.length === 0 || second.length === 0) {
-    return { busy: true, reason: "pane probe captured nothing — the lead is not proven idle" };
+    return { busy: true, midTurn: false, reason: "pane probe captured nothing — the lead is not proven idle" };
   }
   if (aboveAgentPanel(first) !== aboveAgentPanel(second)) {
-    return { busy: true, reason: `pane repainted within ${PANE_QUIESCE_SECONDS}s — a turn is in flight` };
+    return { busy: true, midTurn: true, reason: `pane repainted within ${PANE_QUIESCE_SECONDS}s — a turn is in flight` };
   }
   if (midTurnRow(first) || midTurnRow(second)) {
-    return { busy: true, reason: "pane shows an `esc to interrupt` row — a turn is in flight" };
+    return { busy: true, midTurn: true, reason: "pane shows an `esc to interrupt` row — a turn is in flight" };
   }
   return { busy: false };
 }
@@ -1147,7 +1156,12 @@ export type SurvivalDeliveryOutcome =
   /** The bound in `SURVIVAL_RETRY_MAX_ATTEMPTS`/`SURVIVAL_RETRY_WINDOW_MS`
    *  was exceeded: retrying has STOPPED and the row now says so. */
   | { kind: "gave-up"; reason: string; attempts: number }
-  | { kind: "delivered"; incarnation: string };
+  | { kind: "delivered"; incarnation: string }
+  /** Issue #1282: the pane was genuinely mid-turn, so the brief landed through
+   *  the FALLBACK channel instead of a typed wake — the brief was written to a
+   *  file AND the pointer wake telling the lead to read it was ACCEPTED by the
+   *  gated stack. Same at-most-once dedup and aside-clear as `delivered`. */
+  | { kind: "fallback-delivered"; incarnation: string };
 
 /**
  * Round-2 item 2, BOUND ONE — how many delivery attempts a single owed brief
@@ -1248,6 +1262,12 @@ export async function deliverSurvivalBriefOnBringup(
   wake: (prompt: string) => Promise<WakeOutcome>,
   moved: () => Promise<boolean> = async () => false,
   now: () => Date = () => new Date(),
+  // Issue #1282: the fallback channel for a mid-turn pane. Writes the composed
+  // brief to a file, then sends the pointer THROUGH THE GATED `wake` thunk and
+  // returns its outcome. Only an `ok:true` pointer counts as delivered.
+  // Absent/default (skipped "not wired") keeps every pre-#1282 caller
+  // byte-identical: a mid-turn pane defers exactly as it did before.
+  fallback: (brief: string) => Promise<WakeOutcome> = async () => ({ ok: false, skipped: true, error: "fallback not wired" }),
 ): Promise<SurvivalDeliveryOutcome> {
   const b = await bringup();
   if (b === null) return { kind: "skipped", reason: "no bring-up verdict recorded" };
@@ -1311,7 +1331,7 @@ export async function deliverSurvivalBriefOnBringup(
     attempts: priorForThis?.attempts ?? 0,
     reason: "",
   };
-  return attemptSurvivalDelivery(storage, pending, busy, compose, wake, moved);
+  return attemptSurvivalDelivery(storage, pending, busy, compose, wake, moved, fallback);
 }
 
 /**
@@ -1364,6 +1384,7 @@ export async function retryPendingSurvivalBrief(
   wake: (prompt: string) => Promise<WakeOutcome>,
   moved: () => Promise<boolean> = async () => false,
   now: () => Date = () => new Date(),
+  fallback: (brief: string) => Promise<WakeOutcome> = async () => ({ ok: false, skipped: true, error: "fallback not wired" }),
 ): Promise<SurvivalDeliveryOutcome> {
   const observed = await getObserved(storage);
   const pending = observed.survivalBriefPending ?? null;
@@ -1396,7 +1417,7 @@ export async function retryPendingSurvivalBrief(
     return { kind: "gave-up", reason: exhausted, attempts: pending.attempts };
   }
 
-  return attemptSurvivalDelivery(storage, pending, busy, () => compose(pending), wake, moved);
+  return attemptSurvivalDelivery(storage, pending, busy, () => compose(pending), wake, moved, fallback);
 }
 
 /**
@@ -1444,6 +1465,16 @@ export function retryBoundExceeded(pending: SurvivalBriefPending, now: Date): st
  *  - EVERYTHING ELSE (a busy lead, a deferred compose, a refused or
  *    unconfirmed wake) DEFERS: `attempts` advances, `since` does not, and the
  *    sync tick tries again.
+ *
+ *  ISSUE #1282: the busy branch is no longer a pure defer, and it is split by
+ *  `BusyVerdict.midTurn`. A GENUINELY MID-TURN pane (repaint or `esc to
+ *  interrupt` — a live lead is working) tries the FALLBACK channel: write the
+ *  brief to a file and send the pointer through the gated `wake`; only an
+ *  `ok:true` pointer is `fallback-delivered`, anything else DEFERS with the
+ *  busy reason. An UNREADABLE probe (`midTurn: false` — dead or blank pane,
+ *  nothing about a working lead) defers as before, with no fallback: a file
+ *  written there would be delivered to nobody, and the old give-up path at
+ *  least surfaces that.
  */
 async function attemptSurvivalDelivery(
   storage: ObservedStorage,
@@ -1452,6 +1483,7 @@ async function attemptSurvivalDelivery(
   compose: () => Promise<ComposedBrief>,
   wake: (prompt: string) => Promise<WakeOutcome>,
   moved: () => Promise<boolean>,
+  fallback: (brief: string) => Promise<WakeOutcome>,
 ): Promise<SurvivalDeliveryOutcome> {
   const defer = async (reason: string): Promise<SurvivalBriefPending> => {
     const next: SurvivalBriefPending = {
@@ -1459,6 +1491,24 @@ async function attemptSurvivalDelivery(
     };
     await mergeObserved(storage, { survivalBriefPending: next });
     return next;
+  };
+  // The dedup-clear merge BOTH landing paths share — typed wake and fallback
+  // alike. One merge (dedup marker, pending cleared, aside cleared) so a crash
+  // between the writes cannot re-deliver, and the two paths can never drift
+  // apart on what "delivered" clears.
+  const delivered = async (kind: "delivered" | "fallback-delivered"): Promise<SurvivalDeliveryOutcome> => {
+    await mergeObserved(storage, {
+      survivalBriefDeliveredFor: pending.incarnation, survivalBriefPending: null,
+      // Maestro review round 2 on PR #235 (issue #231), item 2b (second half)
+      // -- once the brief that actually CARRIED this aside claim has landed,
+      // clear it, in the SAME merge as the dedup marker above. Gated on
+      // `pending.lastSessionAside` itself: a delivery whose own frozen pending
+      // record never carried an aside has nothing to clear.
+      ...(pending.lastSessionAside != null && pending.lastSessionAside.length > 0
+        ? { lastSessionAside: null, lastSessionAsideAt: null }
+        : {}),
+    });
+    return { kind, incarnation: pending.incarnation };
   };
 
   if (await moved()) return { kind: "skipped", reason: "a destroy landed before the busy probe" };
@@ -1475,6 +1525,30 @@ async function attemptSurvivalDelivery(
 
   const verdict = await busy();
   if (verdict.busy) {
+    // Issue #1282: only a GENUINELY mid-turn lead gets the fallback. The
+    // pointer rides the gated `wake` (never a raw keystroke), and only an
+    // `ok:true` pointer counts as delivered. A refused/unconfirmed pointer (or
+    // a fallback that throws) DEFERS with the BUSY reason — the maestro ruling
+    // is "keep busy reason" — so the give-up event + `fleet ls` marker can
+    // still surface the undelivered brief. The fallback's own failure is
+    // logged (not folded into the reason) so the busy reason stays stable
+    // across retries and the anti-loop guard's string comparison still holds.
+    if (verdict.midTurn) {
+      let pointer: WakeOutcome;
+      try {
+        pointer = await fallback(composed);
+      } catch (err) {
+        console.error(`survival fallback channel threw: ${err instanceof Error ? err.message : String(err)}`);
+        const next = await defer(verdict.reason);
+        return { kind: "deferred", reason: verdict.reason, attempts: next.attempts };
+      }
+      if (pointer.ok) return delivered("fallback-delivered");
+      if (!pointer.skipped) {
+        console.error(`survival fallback pointer refused: ${pointer.error ?? "no reason given"}`);
+      }
+      const next = await defer(verdict.reason);
+      return { kind: "deferred", reason: verdict.reason, attempts: next.attempts };
+    }
     const next = await defer(verdict.reason);
     return { kind: "deferred", reason: verdict.reason, attempts: next.attempts };
   }
@@ -1486,24 +1560,5 @@ async function attemptSurvivalDelivery(
     await defer(outcome.error ?? "the wake did not land, with no reason given");
     return { kind: "refused", wake: outcome };
   }
-  await mergeObserved(storage, {
-    survivalBriefDeliveredFor: pending.incarnation, survivalBriefPending: null,
-    // Maestro review round 2 on PR #235 (issue #231), item 2b (second half)
-    // -- once the brief that actually CARRIED this aside claim has landed,
-    // clear it, in the SAME merge as the dedup marker above. `Observed.
-    // lastSessionAside`/`lastSessionAsideAt` never auto-clear (that field's
-    // own doc comment, observed.ts) precisely so a stale claim can still age
-    // visibly in the text (`sessionAsideLine`, survival-brief.ts) -- but once
-    // a lead has actually BEEN TOLD, a later brief (a deferred retry for a
-    // different reason, or a future incarnation that reads this one's
-    // leftovers) must not repeat the exact same claim as though it just
-    // happened again. Gated on `pending.lastSessionAside` itself: a delivery
-    // whose own frozen pending record never carried an aside has nothing to
-    // clear, and leaving the fields alone in that case cannot ever erase a
-    // claim this delivery never described.
-    ...(pending.lastSessionAside != null && pending.lastSessionAside.length > 0
-      ? { lastSessionAside: null, lastSessionAsideAt: null }
-      : {}),
-  });
-  return { kind: "delivered", incarnation: pending.incarnation };
+  return delivered("delivered");
 }
