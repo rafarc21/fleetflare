@@ -348,13 +348,6 @@ export async function cmdGateProtect(creds: Credentials, repo: string): Promise<
   console.log(`  after:  ${(body.after ?? []).join(", ")}`);
 }
 
-/** The first trimmed line of an error body, cut short — enough to show "what
- *  failed", never the whole HTML page. */
-function firstLine(text: string): string {
-  const line = text.trim().split(/\r?\n/, 1)[0] ?? "";
-  return line.slice(0, 200);
-}
-
 /** #1277: `fleet gate log <pr> <leg> [--run <runId>] [--full]`. Reads the leg's
  *  final R2 output via the Worker (no Cloudflare creds needed in the CLI) and
  *  prints the failing-test lines first, or the whole kept tail with `--full`. */
