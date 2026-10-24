@@ -44,8 +44,29 @@ if (!configPath) {
 const appDir = join(import.meta.dir, "..");
 const wrangler = join(appDir, "node_modules", ".bin", "wrangler");
 
+/** #1275: the drain flag goes stale at 20 min (src/gate/drain.ts's
+ *  GATE_DRAIN_STALE_MS), but the cap can now run 30 min. Re-stamp the flag's ts
+ *  this often so a long, healthy drain never reads stale and lets new runs
+ *  start mid-drain. Under the TTL, with slack for one slow re-stamp. */
+const RESTAMP_EVERY_MS = Number(process.env.GATE_DRAIN_RESTAMP_MS ?? 10 * 60_000);
+
 /** One live instance, with whatever id the list reports. */
 interface Instance { id?: string; status?: string }
+
+/** Re-stamps the gate_drain flag's ts, so a drain running past the 20-min stale
+ *  TTL keeps its flag fresh. Best-effort: a failed re-stamp logs and does not
+ *  abort the drain (the deploy.sh re-stamp before the deploy is the hard gate). */
+function restampDrainFlag(): void {
+  const nowMs = Date.now();
+  const r = spawnSync(
+    wrangler,
+    ["d1", "execute", "fleet", "--remote", "--command", `INSERT INTO fleet_state (key,value,ts) VALUES ('gate_drain','1',${nowMs}) ON CONFLICT(key) DO UPDATE SET value='1', ts=excluded.ts`, "-c", configPath],
+    { cwd: appDir, encoding: "utf8", timeout: 30_000 },
+  );
+  if (r.status !== 0) {
+    console.error(`gate-drain-wait: could not re-stamp the drain flag (${r.status}); the deploy-side re-stamp still gates the deploy`);
+  }
+}
 
 /** One page of instances, or a throw on an unreadable/empty-but-nonempty answer. */
 function list(): Instance[] {
@@ -80,7 +101,15 @@ function prOf(runId: string): number | null {
 const started = Date.now();
 let drained = false;
 let liveIds: string[] = [];
+// Started at `started`, so the first re-stamp fires RESTAMP_EVERY_MS after the
+// drain began, never immediately (deploy.sh already set the flag fresh).
+let lastRestamp = started;
 while (Date.now() - started < CAP_MS) {
+  // #1275: keep the drain flag fresh while the wait runs past the stale TTL.
+  if (Date.now() - lastRestamp >= RESTAMP_EVERY_MS) {
+    restampDrainFlag();
+    lastRestamp = Date.now();
+  }
   try {
     const live = list().filter((i) => LIVE.has(i.status ?? ""));
     liveIds = live.map((i) => i.id ?? "").filter((id) => id !== "");
