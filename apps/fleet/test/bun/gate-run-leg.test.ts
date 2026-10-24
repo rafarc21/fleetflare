@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { runLegInContainer, legResponse, type GateContainer, type OutboundBinding } from "../../src/gate/run-leg";
+import { runLegInContainer, legResponse, NO_INSTANCE_DESCRIPTION, type GateContainer, type OutboundBinding } from "../../src/gate/run-leg";
 import { buildLegEnvVars, type GateLegRequest } from "../../src/gate/leg-env";
 
 // #715: GateRunnerDO drives the native ctx.container API. These tests run the
@@ -350,6 +350,50 @@ describe("runLegInContainer: stale container", () => {
     expect(c.calls.indexOf("destroy")).toBeGreaterThanOrEqual(0);
     expect(c.calls.indexOf("destroy")).toBeLessThan(c.calls.indexOf("start"));
     expect(outcome).toEqual({ kind: "result", result: { state: "success" } });
+  });
+});
+
+describe("runLegInContainer: no-instance fail-fast (#1278 ask 1)", () => {
+  test("a start() that refuses for lack of an instance fails fast, never retries the host", async () => {
+    const c = new FakeContainer();
+    c.startThrows = new Error("There is no container instance that can be provided");
+    const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(outcome).toEqual({ kind: "infra", description: NO_INSTANCE_DESCRIPTION });
+    expect(c.destroyCount).toBe(1);
+    expect(c.clock.now).toBe(0);
+  });
+
+  test("a port fetch that fails for lack of an instance fails fast: no 240 s budget spent", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [new Error("There is no container instance that can be provided")];
+    const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(outcome).toEqual({ kind: "infra", description: NO_INSTANCE_DESCRIPTION });
+    expect(c.fetchCalls).toBe(1);
+    expect(c.clock.now).toBe(0);
+    expect(c.destroyCount).toBe(1);
+  });
+
+  test("a poll that fails for lack of an instance fails fast mid-leg", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [running()];
+    c.resultOutcomes = [new Error("no container instance can be provided")];
+    const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(outcome).toEqual({ kind: "infra", description: NO_INSTANCE_DESCRIPTION });
+    expect(c.polls).toBe(1);
+    expect(c.destroyCount).toBe(1);
+  });
+
+  test("an unrelated error is not misread as no-instance: the port-retry budget still applies", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = Array.from({ length: 1000 }, () => new Error("ECONNREFUSED"));
+    const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(outcome.kind).toBe("infra");
+    if (outcome.kind === "infra") expect(outcome.description).toContain("ECONNREFUSED");
+    expect(c.fetchCalls).toBe(481);
   });
 });
 

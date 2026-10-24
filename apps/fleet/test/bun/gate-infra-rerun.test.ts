@@ -46,6 +46,7 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     "gate server unreachable: ECONNREFUSED",
     "lint: gate server HTTP 500",
     "lint exceeded 25 min without a result",
+    "lint: gate capacity: no container instance available",
     "lint: no progress past its deadline after 35 min",
     "lint: HTTP 503 after 0 min",
     "lint: Execution timed out after 30 min",
