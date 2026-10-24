@@ -176,6 +176,23 @@ describe("POST /studio/gate/start while a deploy drains (#1232)", () => {
   });
 });
 
+// #1276: a rate-limited head-sha read must surface as JSON 503, never a bare
+// throw that reaches Cloudflare's HTML 500 page (which crashed the CLI's res.json()).
+describe("POST /studio/gate/start when the head-sha read fails (#1276)", () => {
+  it("returns JSON 503 with the underlying cause, and never creates a run", async () => {
+    const env = fakeEnv();
+    const failingHeadSha = async (): Promise<string> => { throw new Error("API rate limit exceeded for installation"); };
+    const req = new Request("https://worker/studio/gate/start", {
+      method: "POST", body: JSON.stringify({ repo: REPO, pr: 1 }),
+    });
+    const res = await handleGateRoute(req, env, failingHeadSha);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({ error: "gate start unavailable: API rate limit exceeded for installation" });
+    expect(env.GATE_WORKFLOW.create).not.toHaveBeenCalled();
+  });
+});
+
 // #1085 (refs #715): a manual start reuses only a LIVE run of the sha. Once the
 // sha's run has finished, the same POST starts a fresh run under a new id.
 describe("POST /studio/gate/start after the sha's run finished (#1085)", () => {
