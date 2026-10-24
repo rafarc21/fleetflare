@@ -231,10 +231,17 @@ export function planFingerprint(legs: PlannedLeg[]): string {
 }
 
 /** #1274: the legs that run for a PR, per-leg `paths` filters applied. A leg
- *  with no `paths` always runs; one with `paths` runs only when a changed file
- *  matches. The block's own pathRules gate the whole run; this filters within it. */
-export function legsForChangedFiles(legs: GateLeg[], changedFiles: string[]): GateLeg[] {
-  return legs.filter((l) => l.paths === undefined || matchesPathRules(changedFiles, l.paths));
+ *  with no `paths` always runs; one with `paths` runs when a changed file
+ *  matches it. Fail-open toward running: a truncated change list or a PR that
+ *  changed the gate config itself runs every filtered leg — the list is
+ *  incomplete, or the config is the thing under test, so a filter must never
+ *  silently skip it. The block's own pathRules gate the whole run; this filters
+ *  within it. */
+export function legsForChangedFiles(
+  legs: GateLeg[], changedFiles: string[], ctx: { truncated: boolean; configChanged: boolean },
+): GateLeg[] {
+  const runAll = ctx.truncated || ctx.configChanged;
+  return legs.filter((l) => l.paths === undefined || runAll || matchesPathRules(changedFiles, l.paths));
 }
 
 /** A run's green legs: `state === "success"`, the only state a carry may ever

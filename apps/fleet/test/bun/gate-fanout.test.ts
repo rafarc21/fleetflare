@@ -33,14 +33,21 @@ describe("legsForChangedFiles: a leg's per-leg paths filter (#1274)", () => {
     { name: "rust", cmd: "scripts/cargo-test-gate.sh", paths: ["src-tauri/**", "Cargo.toml"] },
     { name: "lint", cmd: "bun run lint" },
   ];
+  const ctx = { truncated: false, configChanged: false };
   it("a leg with no paths always runs", () => {
-    expect(legsForChangedFiles(legs, ["README.md"]).map((l) => l.name)).toEqual(["lint"]);
+    expect(legsForChangedFiles(legs, ["README.md"], ctx).map((l) => l.name)).toEqual(["lint"]);
   });
   it("a leg runs when a changed file matches one of its paths", () => {
-    expect(legsForChangedFiles(legs, ["src-tauri/src/lib.rs"]).map((l) => l.name)).toEqual(["rust", "lint"]);
+    expect(legsForChangedFiles(legs, ["src-tauri/src/lib.rs"], ctx).map((l) => l.name)).toEqual(["rust", "lint"]);
   });
   it("a leg with paths is skipped when nothing changed matches", () => {
-    expect(legsForChangedFiles(legs, ["apps/web/x.ts"]).map((l) => l.name)).toEqual(["lint"]);
+    expect(legsForChangedFiles(legs, ["apps/web/x.ts"], ctx).map((l) => l.name)).toEqual(["lint"]);
+  });
+  it("a truncated change list runs every filtered leg: the list is incomplete (#1274 review)", () => {
+    expect(legsForChangedFiles(legs, ["README.md"], { truncated: true, configChanged: false }).map((l) => l.name)).toEqual(["rust", "lint"]);
+  });
+  it("a PR that changed the gate config runs every filtered leg: the config is under test (#1274 review)", () => {
+    expect(legsForChangedFiles(legs, ["README.md"], { truncated: false, configChanged: true }).map((l) => l.name)).toEqual(["rust", "lint"]);
   });
 });
 

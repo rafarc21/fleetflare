@@ -31,6 +31,21 @@ RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
       git ca-certificates curl unzip gcc libc6-dev clang lld llvm libicu76 \
     && repro-seal end
 
+# Tauri Linux system deps (#1274): the desktop leg's `cargo test` on a Tauri
+# crate needs webkit2gtk-4.1, gtk3, libsoup3 and the bindgen/cc toolchain
+# (libclang-dev, cmake, ninja-build). Lives on THIS image, not the default gate
+# image: the +1.1 GB must not land on every repo's legs. The package list is the
+# operator-measured one that ran the peer repo's scripts/cargo-test-gate.sh to
+# 282 passed / 0 failed (10-23). This base (oven/bun:1.3-debian) is bookworm,
+# whose webkit2gtk is 4.1.
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      build-essential pkg-config libssl-dev \
+      libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+      libayatana-appindicator3-dev librsvg2-dev libxdo-dev libasound2-dev \
+      libclang-dev cmake ninja-build \
+    && repro-seal end
+
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \

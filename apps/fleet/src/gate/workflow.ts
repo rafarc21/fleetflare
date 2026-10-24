@@ -230,10 +230,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // #1274: a leg with a `paths` filter runs only when a changed file matches it.
     // `files` here is the bun-lane file list; the per-leg filter uses the run's
     // changedFiles (resolved.changedFiles), the same list that gates the whole run.
+    // A truncated change list or a config change runs every filtered leg.
     const planFor = (cfg: GateConfig, files: string[]): PlanInput => ({
       owner, repo: repoName, pr, runId: event.instanceId,
       headSha: resolved.headSha, baseSha: resolved.baseSha,
-      install: cfg.install, legs: legsForChangedFiles(cfg.legs, resolved.changedFiles),
+      install: cfg.install,
+      legs: legsForChangedFiles(cfg.legs, resolved.changedFiles, { truncated: resolved.truncated, configChanged }),
       bunShards: planBunShards(files, BUN_SHARD_TIMINGS.timings, cfg.bunShards),
       bunLaneRoot: cfg.bunLaneRoot ?? "",
       vitestCmd: cfg.vitestCmd, vitestShards: cfg.vitestShards, image: cfg.image,
