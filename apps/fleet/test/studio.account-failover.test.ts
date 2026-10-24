@@ -9,9 +9,11 @@ import {
   detectRateLimitModal, paneCaptureCmd, accountSwitchCmd, runAccountFailover, FLEET_TOKEN_ENV,
   exhaustedMessage, RATE_LIMIT_HEADLINES, RATE_LIMIT_MODAL_MARKERS, FLAP_GUARD_MINUTES,
   PANE_CAPTURE_MARKER, MODAL_TAIL_LINES, deadAccountScrollbackCmd, type FailoverDeps, MEMBERS_TICKING_KEY,
+  SWITCHED_CONTINUE_PROMPT,
 } from "../src/studio/failover";
 import { STATUS_KEY, OPERATION_KEY, OPERATION_STALE_MS, type StudioStorage } from "../src/studio/provision";
 import { syncSessionCycle, launchFields, recordLaunchedAccount, StudioDO } from "../src/studio/do";
+import { PANE_PROBE_CMD, PANE_SCREEN_CMD } from "../src/studio/wake";
 import type { SessionSyncDeps } from "../src/studio/session-sync";
 import type { StudioStatus } from "../src/studio/types";
 import type { DestroyOutcome } from "../src/studio/destroy";
@@ -27,6 +29,7 @@ import { STUDIO_TMUX } from "../src/studio/tmux";
 // pane shape.
 import {
   SESSION_LIMIT_LOGIN_HINT_PANE as INLINE_LIMIT_PANE, WEEKLY_LIMIT_PANE, ORG_DISABLED_PANE, ORG_SPEND_CAP_TAIL_PANE,
+  V2_SESSION_LIMIT_PANE,
 } from "./fixtures/rate-limit-panes";
 
 // ---------------------------------------------------------------------------
@@ -947,6 +950,99 @@ describe("runAccountFailover — (a) a pane showing the rate-limit modal trigger
     expect(out.kind).toBe("no-modal");
     expect(h.execs.filter((c) => c.includes("respawn-pane"))).toHaveLength(1);
     expect(h.relaunches).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1279 — after a COMPLETED switch, the `--continue` relaunch leaves the
+// lead IDLE (nothing types a prompt), so it sat 5-6 minutes until a human
+// nudged it. The fix: ONE continue prompt, typed through the same
+// `runGatedWake` gate stack every other wake uses, gated on the very
+// `claudeAccountMovedBlock` the switch just wrote so the new account's own
+// redrawn limit block does not refuse it.
+//
+// The harness's own fake `exec` answers the switch/relaunch/probe commands but
+// nothing for the wake, so each test below patches `h.deps.exec` to return a
+// realistic container answer per command. The wake is asserted by its OWN
+// prompt text (unique to the wake; accountSwitchCmd never carries it), never
+// by a bare "send-keys" count — accountSwitchCmd itself sends keystrokes.
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — issue #1279: one continue prompt after a completed switch", () => {
+  /** A completed switch whose continue wake lands (probe claude, screen empty,
+   *  submit confirmed). The patched exec records every command into `h.execs`,
+   *  like the harness's own, so the wake's commands are observable. */
+  async function harnessWithLandedWake() {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE) });
+    const base = h.deps.exec;
+    h.deps.exec = vi.fn(async (cmd: string, env?: Record<string, string>) => {
+      h.execs.push(cmd);
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude claude\n", stderr: "" };
+      if (cmd === PANE_SCREEN_CMD) return { code: 0, stdout: "", stderr: "" };
+      if (cmd.includes("send-keys")) return { code: 0, stdout: "__FLEET_WAKE__ sent\n", stderr: "" };
+      return base(cmd, env);
+    });
+    return h;
+  }
+
+  it("a completed switch types exactly one continue prompt into the pane", async () => {
+    const h = await harnessWithLandedWake();
+    const out = await run(h);
+
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    // The continue nudge goes through the full wake gate (probe, screen, keys)
+    // and lands exactly once — no second prompt, no loop.
+    expect(h.execs.filter((c) => c.includes(SWITCHED_CONTINUE_PROMPT))).toHaveLength(1);
+    expect(h.relaunches).toBe(1);
+  });
+
+  it("a failed relaunch does NOT type a continue prompt — there is no lead to continue", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE) });
+    h.deps.relaunch = vi.fn(async () => ({ code: 1, stdout: "", stderr: "studio-bringup: claude exited" }));
+    const out = await run(h);
+
+    expect(out.kind).toBe("switched");
+    expect(h.execs.some((c) => c.includes(SWITCHED_CONTINUE_PROMPT))).toBe(false);
+  });
+
+  it("a redrawn limit block of the switched-off account does not block the continue", async () => {
+    // `now` is 12:00Z, so the V2 block's 1:30pm (UTC) reset is still LIVE: the
+    // failover switches on it, recording `claudeAccountMovedBlock`; the wake's
+    // own PANE_SCREEN_CMD then redraws that SAME block, which the switched-block
+    // gate (#106 fix B) must let the continue through rather than refuse.
+    const now = new Date("2026-09-24T12:00:00.000Z");
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(V2_SESSION_LIMIT_PANE), now });
+    const base = h.deps.exec;
+    const movedBlock = "You've hit your session limit · 1:30pm (UTC)";
+    h.deps.exec = vi.fn(async (cmd: string, env?: Record<string, string>) => {
+      h.execs.push(cmd);
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude claude\n", stderr: "" };
+      if (cmd === PANE_SCREEN_CMD) return { code: 0, stdout: V2_SESSION_LIMIT_PANE, stderr: "" };
+      if (cmd.includes("send-keys")) return { code: 0, stdout: "__FLEET_WAKE__ sent\n", stderr: "" };
+      return base(cmd, env);
+    });
+
+    const out = await run(h);
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    expect((await h.storage.get(STATUS_KEY))?.claudeAccountMovedBlock).toBe(movedBlock);
+    // The continue still landed despite the redrawn block on screen.
+    expect(h.execs.filter((c) => c.includes(SWITCHED_CONTINUE_PROMPT))).toHaveLength(1);
+  });
+
+  it("a wake gate refusal does not change the switch outcome — the switch is the settled fact", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE) });
+    const base = h.deps.exec;
+    h.deps.exec = vi.fn(async (cmd: string, env?: Record<string, string>) => {
+      h.execs.push(cmd);
+      // PANE_PROBE_CMD answering "bash" is the gate-2 refusal: no claude TUI,
+      // so runGatedWake refuses before wakeCmd is ever built.
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude bash\n", stderr: "" };
+      return base(cmd, env);
+    });
+    const out = await run(h);
+
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    // No continue prompt reached the pane, yet the switch is still reported.
+    expect(h.execs.some((c) => c.includes(SWITCHED_CONTINUE_PROMPT))).toBe(false);
   });
 });
 

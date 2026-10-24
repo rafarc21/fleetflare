@@ -1664,11 +1664,72 @@ export const FLAP_GUARD_MINUTES = 5;
  *  turn started once the pane is no longer blocked on the modal. */
 export const AUTO_CONTINUE_PROMPT = "usage limit reset — resuming";
 
+/** Issue #1279: the one continue prompt typed after a COMPLETED account
+ *  switch. Distinct from AUTO_CONTINUE_PROMPT on purpose: that one says "usage
+ *  limit reset", which is wrong for a switch that moved OFF the limited
+ *  account — the lead is now on a healthy account and must be told to resume
+ *  its task, not that a limit passed. */
+export const SWITCHED_CONTINUE_PROMPT = "account switch complete — continue your task now";
+
 /** Issue #109: the hourly retry cap for an unknown-reset select modal, and
  *  the anti-hammer cadence after a known reset's first attempt (consumed
  *  back to null on fire either way — see StudioStatus.autoContinueAt's own
  *  doc comment). */
 const AUTO_CONTINUE_RETRY_MS = 60 * 60_000;
+
+/**
+ * Issue #1279 — the ONE continue prompt after a COMPLETED account switch.
+ *
+ * MEASURED 10-23: after a switch, `relaunch` re-runs BRINGUP_CMD, which
+ * `--continue`s the lead back onto its existing session and leaves it IDLE —
+ * nothing types a prompt, so a switched lead sat there 5-6 minutes until a
+ * human nudged it (14 of 18, in the incident). This is the fix: one
+ * `runGatedWake` typed the instant a switch is recorded.
+ *
+ * DELIBERATELY NOT `autoContinueAttempt` (issue #109) — that one dismisses a
+ * modal and types "usage limit reset", both wrong here: the switch already
+ * killed the pane (`respawn-pane -k`) so there is no modal to Esc, and the
+ * lead is now on a HEALTHY account, not a reset one. It is also NOT the
+ * idle-auto-continue path (auto-continue.ts) — that one is glm-led-only and
+ * gated on 10 minutes of proven idleness, the exact delay this bug is.
+ *
+ * REUSES `runGatedWake` (issue #99) and therefore its whole gate stack —
+ * stopped, claude-in-pane, limit-modal, single-flight-free (the DO's own
+ * `wakeLock` via the caller's exec, see FailoverDeps.exec's doc comment). The
+ * `switchedBlock` gate is what makes this SAFE against the very next tick's
+ * own `rerender` check: the redrawn block of the account the lead just LEFT
+ * (`claudeAccountMovedBlock`, the key or the pre-switch sighting) is history
+ * for the NEW account, so the wake goes through instead of being refused as a
+ * live limit — the SAME #106 fix B `runGatedWake` already performs for the
+ * `switchedBlockIn` reader. The new account's OWN genuinely-live block still
+ * refuses, exactly as it should.
+ *
+ * A REFUSED/SKIPPED/FAILED wake is FAILED, not retried here: the row is
+ * already `running` and correct, and the crash-detector sweep and the board
+ * re-wake are the bounded recovery (same posture `retryPendingHealWake`'s
+ * doc comment already states). The outcome is logged through
+ * `logWakeOutcome` (wake.ts) so a refused/skipped/failed continue is auditable
+ * — the failover outcome itself stays `"switched"`/`"borrowed"`, unchanged,
+ * because the switch is its own settled fact independent of the nudge.
+ */
+async function switchedContinueAttempt(
+  deps: FailoverDeps, studioId: string, row: StudioStatus, sighting: LimitSighting | null,
+): Promise<void> {
+  const { runGatedWake, logWakeOutcome } = await import("./wake");
+  const gatedDeps: GatedWakeDeps = {
+    recordedState: async () => row.state,
+    exec: deps.exec,
+    now: deps.now,
+    studioId,
+    // The block the switch just recorded, for a select-modal switch; a
+    // pre-switch inline sighting otherwise — the block runGatedWake must not
+    // read as the NEW account's live limit.
+    switchedBlock: async () => row.claudeAccountMovedBlock ?? null,
+    limitSighting: async () => sighting,
+  };
+  const outcome = await runGatedWake(gatedDeps, SWITCHED_CONTINUE_PROMPT);
+  logWakeOutcome(`studio ${studioId}: switched continue nudge`, outcome);
+}
 
 /**
  * Issue #210 — how long a studio may sit genuinely parked (every account
@@ -3080,6 +3141,17 @@ export async function runAccountFailover(
   // runs in that window must already boot, and record, the new account.
   if (!failed) await deps.onSwitched?.(next.name);
   await recordStudioFn(switched);
+  // Issue #1279: the ONE continue prompt after a COMPLETED switch. `--continue`
+  // relaunches the lead and leaves it IDLE — nothing types a prompt, so a
+  // switched lead sits there until a human nudges it. Gated on `!failed` so it
+  // fires only on the TICK that switched (there is a live lead to nudge), and
+  // never on a later tick. `claudeAccountMovedBlock` (key, or the pre-switch
+  // sighting) feeds runGatedWake's `switchedBlock` so the new account's own
+  // redrawn limit block is not misread as a live one — the very guard the
+  // switch just wrote. The wake FAILS (not errors) when it cannot land: the
+  // row is already `running` and correct, and the crash-detector sweep/board
+  // re-wake are the bounded recovery, never a loop here.
+  if (!failed) await switchedContinueAttempt(deps, studioId, switched, sighting);
   if (!failed && observedStorage) {
     // Review round 5, Finding 3: the same "container-exec-then-DO-patch"
     // two-step provisionWithStorage/restartWithStorage/recycleWithSync all
