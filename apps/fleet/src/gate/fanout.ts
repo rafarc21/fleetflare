@@ -2,7 +2,7 @@
 // Workflow/DO bindings — this file is what bun test can load, so
 // workflow.ts (which imports cloudflare:workers) stays a thin driver over
 // the decisions made here.
-import { DEFAULT_GATE_IMAGE, legTimeoutMin, MAX_LEGS_PER_PR, type GateLeg } from "./config";
+import { DEFAULT_GATE_IMAGE, legTimeoutMin, matchesPathRules, MAX_LEGS_PER_PR, type GateLeg } from "./config";
 import { bunLaneCwd } from "./bun-lane";
 import { BUNDLE_LEG } from "./leg-env";
 import type { LegResult, Verdict } from "./verdict";
@@ -228,6 +228,13 @@ export interface CarryGreen {
  *  difference (a changed fleet.json, a different shard count) changes it. */
 export function planFingerprint(legs: PlannedLeg[]): string {
   return JSON.stringify(legs.map((l) => [l.leg, ...legIdentity(l)]));
+}
+
+/** #1274: the legs that run for a PR, per-leg `paths` filters applied. A leg
+ *  with no `paths` always runs; one with `paths` runs only when a changed file
+ *  matches. The block's own pathRules gate the whole run; this filters within it. */
+export function legsForChangedFiles(legs: GateLeg[], changedFiles: string[]): GateLeg[] {
+  return legs.filter((l) => l.paths === undefined || matchesPathRules(changedFiles, l.paths));
 }
 
 /** A run's green legs: `state === "success"`, the only state a carry may ever

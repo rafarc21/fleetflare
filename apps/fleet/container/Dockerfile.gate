@@ -40,6 +40,20 @@ RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
       python3 procps zstd gcc g++ make libc6-dev jq binutils \
     && repro-seal end
 
+# Tauri Linux system deps (#1274): a repo whose gate leg runs `cargo test` on a
+# Tauri (desktop) crate needs webkit2gtk-4.1, gtk3, libsoup3 and the bindgen/cc
+# toolchain (libclang-dev clang cmake ninja-build). The package list is the
+# operator-measured one that ran the peer repo's scripts/cargo-test-gate.sh to
+# 282 passed / 0 failed (10-23); without these the crate fails on its system
+# libs, not on cargo. Debian bookworm's webkit2gtk is 4.1 (this base is Debian).
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      build-essential pkg-config libssl-dev \
+      libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+      libayatana-appindicator3-dev librsvg2-dev libxdo-dev libasound2-dev \
+      libclang-dev clang cmake ninja-build \
+    && repro-seal end
+
 # Node 22.23.3 (LTS): checksum-verified before it is unpacked (never a curl | sh).
 RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
     && curl -fsSL -o /tmp/node-v22.23.3-linux-x64.tar.xz https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.xz \
