@@ -308,3 +308,55 @@ export async function cmdGateProtect(creds: Credentials, repo: string): Promise<
   console.log(`  after:  ${(body.after ?? []).join(", ")}`);
 }
 
+/** The first trimmed line of an error body, cut short — enough to show "what
+ *  failed", never the whole HTML page. */
+function firstLine(text: string): string {
+  const line = text.trim().split(/\r?\n/, 1)[0] ?? "";
+  return line.slice(0, 200);
+}
+
+/** #1277: `fleet gate log <pr> <leg> [--run <runId>] [--full]`. Reads the leg's
+ *  final R2 output via the Worker (no Cloudflare creds needed in the CLI) and
+ *  prints the failing-test lines first, or the whole kept tail with `--full`. */
+export async function cmdGateLog(creds: Credentials, pr: number, leg: string, opts: { runId?: string; full?: boolean } = {}): Promise<void> {
+  const repo = await gatedRepo();
+  if (!repo) return;
+  const url = new URL("/studio/gate/log", creds.workerUrl);
+  url.searchParams.set("repo", repo);
+  url.searchParams.set("pr", String(pr));
+  url.searchParams.set("leg", leg);
+  if (opts.runId !== undefined) url.searchParams.set("run", opts.runId);
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: accessHeaders(creds) });
+  } catch (err) {
+    throw new Error(`fleet gate log: could not reach ${creds.workerUrl}: ${errText(err)}`);
+  }
+  const text = await res.text();
+  let body: { error?: string; state?: string; summary?: string; failing?: string[]; stdout?: string; stderr?: string };
+  try {
+    body = JSON.parse(text) as typeof body;
+  } catch {
+    console.error(`fleet gate log: HTTP ${res.status}: ${firstLine(text)}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (!res.ok || body.error) {
+    console.error(`fleet gate log: ${body.error ?? res.status}`);
+    process.exitCode = 2;
+    return;
+  }
+  console.log(`gate log ${repo}#${pr} ${leg}: ${body.state ?? "?"}${body.summary ? ` — ${body.summary}` : ""}`);
+  if (opts.full) {
+    if (body.stdout) console.log(body.stdout);
+    if (body.stderr) console.error(body.stderr);
+    return;
+  }
+  const failing = body.failing ?? [];
+  if (failing.length > 0) {
+    for (const line of failing) console.log(line);
+  } else {
+    console.log("(no failing-test lines in the kept output tail)");
+  }
+}
+
