@@ -814,4 +814,19 @@ describe("gate start / gate watch", () => {
     expect(parsed.cmd).toBe("usage");
     if (parsed.cmd === "usage") expect(parsed.message).toContain("usage: fleet gate protect");
   });
+
+  // #1277: `fleet gate log <pr> <leg> [--run <runId>] [--full]`.
+  it("gate log <pr> <leg> parses the PR and leg", () => {
+    expect(parseCliArgs(["gate", "log", "715", "vitest-6"])).toEqual({ cmd: "gate-log", pr: 715, leg: "vitest-6" });
+  });
+  it("gate log with --run and --full in either order", () => {
+    expect(parseCliArgs(["gate", "log", "--run", "wf-abc", "--full", "715", "vitest-6"]))
+      .toEqual({ cmd: "gate-log", pr: 715, leg: "vitest-6", runId: "wf-abc", full: true });
+    expect(parseCliArgs(["gate", "log", "715", "vitest-6", "--full"]))
+      .toEqual({ cmd: "gate-log", pr: 715, leg: "vitest-6", full: true });
+  });
+  it("gate log missing the leg or a non-numeric PR -> usage", () => {
+    expect(parseCliArgs(["gate", "log", "715"]).cmd).toBe("usage");
+    expect(parseCliArgs(["gate", "log", "abc", "vitest-6"]).cmd).toBe("usage");
+  });
 });

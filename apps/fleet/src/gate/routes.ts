@@ -7,7 +7,7 @@
 // (#1085). /status reads the Workflow
 // binding's OWN native instance-status API, not a second GitHub read.
 import type { Env } from "../env";
-import { getPullRequestHeadSha } from "../github/api";
+import { getPullRequest, getPullRequestHeadSha } from "../github/api";
 import {
   getDefaultBranch, getBranchProtection, setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict, setBranchProtectionRequiredStatusChecks, disableBranchProtectionEnforceAdmins,
 } from "../github/api";
@@ -20,6 +20,7 @@ import { isGateRunnerRepo } from "./config";
 import { gateDraining } from "./drain";
 import { greenLegsOf, type CarryGreen, type OutcomeLeg } from "./fanout";
 import { rerunInstanceId, statusFollowingRerun } from "./infra-rerun";
+import { finalLegKey, failingLines, type LegOutput } from "./log";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
 // Env; until then this cast keeps this module typechecking. Drop it then.
@@ -117,6 +118,44 @@ async function gateRunStatusSafe(env: Env, runId: string): Promise<Response> {
     }
     console.error("gate status failed", err);
     return j({ error: "gate status unavailable" }, 500);
+  }
+}
+
+/** #1277: read one leg's final R2 output for `fleet gate log`. The runId comes
+ *  from `--run`, else the PR's latest run pointer in D1. The canonical repo
+ *  name is resolved via GitHub (R2 keys are case-sensitive, #1119), the leg's
+ *  final-try key is chosen, and the result is returned with its fail lines
+ *  extracted. A bare throw must never reach the caller: it maps to JSON 404
+ *  (no run / no leg) or 500, the same shape gateRunStatusSafe uses. */
+async function gateLegLogSafe(
+  env: Env, repo: string, pr: number, leg: string, runId?: string,
+): Promise<Response> {
+  try {
+    const index = d1RunIndex(env.DB);
+    const run = runId !== undefined ? { runId } : await index.latest(repo, pr);
+    if (run === null || run.runId === undefined) return j({ error: "no gate run for this PR", pr }, 404);
+    const token = await repoTokenMinter(env)(repo);
+    const canonical = (await getPullRequest(token, repo, pr)).repoFullName;
+    const prefix = `gate/${canonical}/runs/${pr}/${run.runId}/`;
+    const listed = await env.STUDIO_ARCHIVE.list({ prefix });
+    const keys = listed.objects.map((o) => o.key);
+    const key = finalLegKey(keys, leg);
+    if (key === null) return j({ error: `no result for leg ${leg}`, runId: run.runId }, 404);
+    const obj = await env.STUDIO_ARCHIVE.get(key);
+    if (obj === null) return j({ error: `no result for leg ${leg}`, runId: run.runId }, 404);
+    const body = (await obj.json()) as Partial<LegOutput> | null;
+    if (body === null || typeof body !== "object") return j({ error: `leg ${leg} result unreadable` }, 500);
+    return j({
+      repo, pr, leg, runId: run.runId, key,
+      state: body.state, description: body.description, summary: body.summary, limits: body.limits,
+      stdout: body.stdout ?? "", stderr: body.stderr ?? "",
+      failing: failingLines(body as LegOutput),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`gate log failed for ${repo}#${pr} leg ${leg}`, err);
+    if (/not[ _.-]?found/i.test(message)) return j({ error: `no such gate run or leg`, pr, leg }, 404);
+    return j({ error: `gate log unavailable: ${redactSecrets(message)}` }, 500);
   }
 }
 
@@ -246,6 +285,20 @@ export async function handleGateRoute(
     const runId = url.searchParams.get("runId");
     if (!runId) return j({ error: "runId required" }, 400);
     return await gateRunStatusSafe(env, runId);
+  }
+
+  // #1277: read one leg's final R2 output. Same Access-gated lane as /status;
+  // the R2 read needs no Cloudflare cred in the CLI — the Worker does it here.
+  if (url.pathname === "/studio/gate/log" && req.method === "GET") {
+    const repo = url.searchParams.get("repo") ?? "";
+    if (env.FLEET_GATE_RUNNER !== "on" || !isGateRunnerRepo(env.GATE_RUNNER_REPOS, repo)) {
+      return j({ error: "gate runner not enabled for this repo" }, 404);
+    }
+    const pr = Number(url.searchParams.get("pr"));
+    const leg = url.searchParams.get("leg") ?? "";
+    if (!Number.isInteger(pr) || pr <= 0) return j({ error: "pr required as a positive integer" }, 400);
+    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(leg)) return j({ error: "leg required" }, 400);
+    return await gateLegLogSafe(env, repo, pr, leg, url.searchParams.get("run") ?? undefined);
   }
 
   return j({ error: "not found" }, 404);

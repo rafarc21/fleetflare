@@ -705,6 +705,19 @@ export const HOUSE_RULES = [
   "pushes race, a force-push destroys the other's work, and neither PR",
   "describes what it contains. If a task seems to need another studio's",
   "branch, say so and stop — do not commit onto it.",
+  "",
+  // Issue #1282: the survival re-brief's fallback channel (a busy lead cannot
+  // be interrupted, so the Worker writes the brief to a file and types a
+  // pointer). The lead must read it — the pointer names the file, and this
+  // rule names it again so the instruction survives a compaction or a missed
+  // pointer.
+  "## House rules — survival re-brief file",
+  "",
+  "If a message tells you a survival re-brief was written to",
+  "`/workspace/.fleet/survival-brief.md`, read that file in full before",
+  "continuing. It names the work that survived a container replacement and",
+  "which branches hold it; trusting origin, not your own memory, is the",
+  "recovery path.",
 ].join("\n");
 
 /**

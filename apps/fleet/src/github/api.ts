@@ -1579,10 +1579,11 @@ export async function pullsWithClosingIssuesForCommits(
 export async function postCommitStatus(
   token: string, repo: string, sha: string,
   state: "pending" | "success" | "failure" | "error", context: string, description: string,
+  targetUrl?: string,
 ): Promise<void> {
   await ghRequest(
     token, `https://api.github.com/repos/${repo}/statuses/${sha}`,
-    { method: "POST", body: JSON.stringify({ state, context, description }) },
+    { method: "POST", body: JSON.stringify({ state, context, description, ...(targetUrl === undefined ? {} : { target_url: targetUrl }) }) },
     `postCommitStatus ${context}=${state}`,
   );
 }
