@@ -19,6 +19,7 @@ export interface StatusPort {
   mintToken(repo: string): Promise<string>;
   postCommitStatus(
     token: string, repo: string, sha: string, state: GateStatusState, context: string, description: string,
+    targetUrl?: string,
   ): Promise<void>;
   /** Reads gate/verdict's current state back, right after a post (#1226): a
    *  2xx response from the POST is not proof it landed under a secondary rate
@@ -46,12 +47,12 @@ export const STATUS_POST_STEP_CONFIG = {
  *  "successfully" with a quietly-dropped status (#1226's actual bug). */
 export async function postGateStatus(
   port: StatusPort, repo: string, sha: string,
-  args: { state: GateStatusState; description: string },
+  args: { state: GateStatusState; description: string; targetUrl?: string },
 ): Promise<void> {
   const token = await port.mintToken(repo);
   let postErr: unknown;
   try {
-    await port.postCommitStatus(token, repo, sha, args.state, GATE_STATUS_CONTEXT, args.description);
+    await port.postCommitStatus(token, repo, sha, args.state, GATE_STATUS_CONTEXT, args.description, args.targetUrl);
   } catch (err) {
     postErr = err;
   }

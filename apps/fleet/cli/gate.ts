@@ -333,7 +333,7 @@ export async function cmdGateLog(creds: Credentials, pr: number, leg: string, op
     throw new Error(`fleet gate log: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
   const text = await res.text();
-  let body: { error?: string; state?: string; summary?: string; failing?: string[]; stdout?: string; stderr?: string };
+  let body: { error?: string; state?: string; summary?: string; failing?: string[]; stdout?: string; stderr?: string; runId?: string; key?: string };
   try {
     body = JSON.parse(text) as typeof body;
   } catch {
@@ -346,7 +346,8 @@ export async function cmdGateLog(creds: Credentials, pr: number, leg: string, op
     process.exitCode = 2;
     return;
   }
-  console.log(`gate log ${repo}#${pr} ${leg}: ${body.state ?? "?"}${body.summary ? ` — ${body.summary}` : ""}`);
+  console.log(`gate log ${repo}#${pr} ${leg}: ${body.state ?? "?"}${body.summary ? ` — ${body.summary}` : ""}${body.runId ? ` (run ${body.runId})` : ""}`);
+  if (body.key) console.log(`  ${body.key}`);
   if (opts.full) {
     if (body.stdout) console.log(body.stdout);
     if (body.stderr) console.error(body.stderr);

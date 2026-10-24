@@ -16,17 +16,17 @@ describe("finalLegKey: pick the final try, never a stale SIGTERM try (#1277)", (
       .toBe(`${prefix}shard-vitest-6.retry.json`);
   });
 
-  it("a higher -tryN beats a lower one and beats .retry", () => {
+  it(".retry ranks above every -tryN (it is written LAST, leg-run.ts)", () => {
     const keys = [
       `${prefix}shard-vitest-6.json`,
       `${prefix}shard-vitest-6.retry.json`,
       `${prefix}shard-vitest-6-try2.json`,
       `${prefix}shard-vitest-6-try3.json`,
     ];
-    expect(finalLegKey(keys, "vitest-6")).toBe(`${prefix}shard-vitest-6-try3.json`);
+    expect(finalLegKey(keys, "vitest-6")).toBe(`${prefix}shard-vitest-6.retry.json`);
   });
 
-  it("a stale SIGTERM try2 is never chosen when a later try3 exists", () => {
+  it("a higher -tryN beats a lower one when there is no .retry", () => {
     const keys = [
       `${prefix}shard-vitest-6-try2.json`, // exit 143, stale
       `${prefix}shard-vitest-6-try3.json`,

@@ -19,20 +19,20 @@ export interface LegOutput {
   limits?: string;
 }
 
-/** The try suffixes a leg result key may carry, ordered so the LAST match in
- *  file order is the final try: `.retry.json` beats the base, `-tryN.json`
- *  beats both and a higher N beats a lower one. `@head` is a DIFFERENT leg
+/** The try suffixes a leg result key may carry. `@head` is a DIFFERENT leg
  *  (the union leg), never a try of the same one. */
 const TRY_SUFFIX = /(?:-try(\d+)\.json|\.retry\.json)$/;
 
-/** A key's final-try rank: higher wins. -tryN -> N+2 (beats retry's 2, beats
- *  base's 1); .retry -> 2; base -> 1. A key that is not this leg's own shape
- *  ranks 0 and is ignored. */
+/** A key's final-try rank: higher wins. `.retry` ranks above every `-tryN`
+ *  because leg-run.ts writes `.retry.json` LAST (the red-first retry runs
+ *  after the infra-try sequence); a higher `-tryN` beats a lower one, and the
+ *  base ranks lowest. A key that is not this leg's own shape ranks 0. */
 function tryRank(key: string): number {
   const m = TRY_SUFFIX.exec(key);
   if (m === null) return key.endsWith(".json") ? 1 : 0;
-  if (m[1] !== undefined) return Number(m[1]) + 2;
-  return 2; // .retry
+  if (m[1] !== undefined) return Number(m[1]) + 1;
+  // .retry is the last write: rank it above every -tryN (1 + a large floor).
+  return 10_000;
 }
 
 /** The final-try key for one leg from the full set of keys under its run
