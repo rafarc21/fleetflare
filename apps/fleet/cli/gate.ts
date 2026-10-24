@@ -20,6 +20,9 @@ export interface GateStatusResponse {
   state: "pending" | "success" | "failure" | "error";
   description?: string;
   statusPostFailed?: boolean;
+  /** #1276: the terminal verdict was rate limited and queued for a post-reset
+   *  retry. The verdict is not lost, but it has not landed on GitHub yet. */
+  verdictQueued?: boolean;
   legs?: GateLegLine[];
 }
 
@@ -236,6 +239,7 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
     const decision = gateWatchDecision(parsed.status, Date.now() - started);
     if (decision.kind === "terminal") {
       console.log(`gate: ${decision.status.state}${decision.status.description ? ` — ${decision.status.description}` : ""}`);
+      if (decision.status.verdictQueued) console.error("gate: verdict post rate-limited — queued for retry after reset");
       for (const line of legLines(decision.status)) console.log(line);
       process.exitCode = gateWatchExitCode(decision.status);
       return;
@@ -303,6 +307,7 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
     }
     if (status.state !== "pending") {
       console.log(`gate: ${status.state}${status.description ? ` — ${status.description}` : ""}`);
+      if (status.verdictQueued) console.error("gate: verdict post rate-limited — queued for retry after reset");
       for (const line of legLines(status)) console.log(line);
       const code = gateWatchExitCode(status);
       return code === 0 || code === 1 ? code : 2;

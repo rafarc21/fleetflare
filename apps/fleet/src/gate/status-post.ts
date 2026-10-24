@@ -38,12 +38,46 @@ export const STATUS_POST_STEP_CONFIG = {
   timeout: "5 minutes" as const,
 };
 
+/** A gate/verdict post that failed because GitHub said "rate limit". Carries the
+ *  reset time so a caller can queue the post for a retry after the limit lifts,
+ *  instead of letting the verdict drop (the #1276 lost-verdict failure). */
+export class RateLimitedStatusError extends Error {
+  constructor(public readonly resetInMs: number | null, message: string) {
+    super(message);
+    this.name = "RateLimitedStatusError";
+  }
+}
+
+/** Whether a thrown error reads as a rate limit: a 429, a 403 naming "rate
+ *  limit", or the typed marker. StatusPort carries no headers (its post is a
+ *  fire-and-confirm void), so the message text is the only signal here. */
+export function isRateLimitedStatusError(err: unknown): boolean {
+  if (err instanceof RateLimitedStatusError) return true;
+  const m = err instanceof Error ? err.message : String(err);
+  return /rate limit|429|too many requests/i.test(m);
+}
+
+/** Reset time from a rate-limit error's own headers (the real postCommitStatus
+ *  attaches them via ghRequest), or null when the port gave none. */
+function resetFromError(err: unknown, now: number): number | null {
+  if (err === null || typeof err !== "object") return null;
+  const { headers } = err as { headers?: unknown };
+  if (!(headers instanceof Headers)) return null;
+  const reset = Number(headers.get("x-ratelimit-reset"));
+  if (Number.isInteger(reset) && reset > 0) return Math.max(0, reset * 1000 - now);
+  const retryAfter = headers.get("retry-after");
+  if (retryAfter !== null && /^\s*\d+\s*$/.test(retryAfter)) return Number(retryAfter) * 1000;
+  return null;
+}
+
 /** Posts gate/verdict, then confirms it actually landed by reading it back.
  *  One attempt per call — the caller's step.do (with STATUS_POST_STEP_CONFIG)
  *  is what retries this whole function on failure, with real backoff. Throws,
  *  carrying the real cause (the POST's own error, or the read-back mismatch),
  *  so a step that exhausts its retries fails the run loudly instead of ending
- *  "successfully" with a quietly-dropped status (#1226's actual bug). */
+ *  "successfully" with a quietly-dropped status (#1226's actual bug). A rate
+ *  limit throws RateLimitedStatusError (a subclass), so the caller can tell a
+ *  quota refusal — queue-and-retry — from a plain failure (#1276). */
 export async function postGateStatus(
   port: StatusPort, repo: string, sha: string,
   args: { state: GateStatusState; description: string },
@@ -54,6 +88,12 @@ export async function postGateStatus(
     await port.postCommitStatus(token, repo, sha, args.state, GATE_STATUS_CONTEXT, args.description);
   } catch (err) {
     postErr = err;
+    if (isRateLimitedStatusError(err)) {
+      throw new RateLimitedStatusError(
+        resetFromError(err, Date.now()),
+        `gate/verdict POST rate limited: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
   const landed = await port.getCommitStatus(token, repo, sha).catch(() => undefined);
   if (landed?.state === args.state && landed.description === args.description) return;

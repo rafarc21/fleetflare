@@ -1616,7 +1616,8 @@ export async function getCommitContextStatus(
   return undefined;
 }
 
-/** Head commit sha of one PR. getPullRequest does not return it. */
+/** Head commit sha of one PR, for callers that hold no PullRequestInfo. The gate
+ *  run's resolve-pr step reads it off getPullRequest instead (#1276). */
 export async function getPullRequestHeadSha(token: string, repo: string, number: number): Promise<string> {
   const raw = await ghJson<{ head?: { sha?: string } }>(
     token,

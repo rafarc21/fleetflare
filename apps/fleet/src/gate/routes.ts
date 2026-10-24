@@ -73,7 +73,7 @@ async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   const out = status.output as
     | {
         state?: string; description?: string; statusPostFailed?: boolean; skipped?: string; legs?: unknown[];
-        baseSha?: string; planFingerprint?: string; headSha?: string;
+        baseSha?: string; planFingerprint?: string; headSha?: string; verdictQueued?: boolean;
       }
     | undefined;
   // "terminated" is terminal too: mapping it to pending would poll forever.
@@ -99,6 +99,7 @@ async function gateRunStatus(env: Env, runId: string): Promise<Response> {
   return j({
     state: out.state, description: out.description, statusPostFailed: out.statusPostFailed, legs: out.legs,
     baseSha: out.baseSha, planFingerprint: out.planFingerprint, headSha: out.headSha,
+    verdictQueued: out.verdictQueued,
   });
 }
 

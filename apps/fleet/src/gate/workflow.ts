@@ -39,7 +39,9 @@ import { d1RunIndex } from "./auto-run-env";
 import {
   announceInfraRerun, infraRerunDecision, launchInfraRerun, recordInfraRerun, rerunInstanceId, rerunStarted, rerunStatusArgs,
 } from "./infra-rerun";
-import { postGateStatus, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
+import { postGateStatus, RateLimitedStatusError, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
+import { verdictPostResetAt } from "./verdict-queue";
+import { gateVerdictQueue } from "./verdict-queue-env";
 import { realStatusPort } from "./status-post-env";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
@@ -69,6 +71,10 @@ export interface GateWorkflowParams {
 export type GateRunOutcome =
   | {
       state: "success" | "failure" | "error"; description?: string; statusPostFailed: boolean; legs: OutcomeLeg[];
+      /** #1276: the terminal verdict was rate limited and queued for a post-reset
+       *  retry, rather than landed. The verdict is NOT lost; the status route
+       *  surfaces it so `fleet gate watch` shows a pending post. */
+      verdictQueued?: boolean;
       /** #1230: the plan this run resolved to. Only the two post-plan returns
        *  below set these; the early-return paths (fail/precheck/skip) never
        *  reach a plan, so they carry neither. */
@@ -87,6 +93,31 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
   /** The real GitHub calls behind every gate/verdict post in this run. */
   private statusPort(): StatusPort {
     return realStatusPort(this.env);
+  }
+
+  /** #1276: a terminal verdict that GitHub refused for quota is queued for a
+   *  post-rate-limit retry instead of dropped. Only the TERMINAL posts queue —
+   *  a pending post that failed is re-issued by the run's own post-pending step
+   *  retries, never queued. */
+  private async postTerminal(
+    repo: string, sha: string, args: { state: "success" | "failure" | "error"; description: string },
+  ): Promise<boolean> {
+    try {
+      await postGateStatus(this.statusPort(), repo, sha, args);
+      return false;
+    } catch (err) {
+      if (err instanceof RateLimitedStatusError) {
+        await gateVerdictQueue(this.env.DB).append({
+          repo, sha, state: args.state, description: args.description,
+          resetAt: verdictPostResetAt(err.resetInMs, Date.now()),
+        });
+        // The verdict is NOT lost: it is queued and lands after the reset. The
+        // run still reports its real state — the CLI's `fleet gate watch`
+        // surfaces the queued post via the status route.
+        return true;
+      }
+      throw err;
+    }
   }
 
   async run(event: WorkflowEvent<GateWorkflowParams>, step: WorkflowStep): Promise<GateRunOutcome> {
@@ -152,9 +183,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     });
     // A failure posts on the head: a bad head config, or a base with no gate block (#1132).
     if (decision.action === "fail") {
-      await step.do("post-head-invalid", STATUS_POST_STEP_CONFIG, async () =>
-        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: decision.description }));
-      return { state: "failure", description: decision.description, statusPostFailed: false, legs: [] };
+      const verdictQueued = await step.do("post-head-invalid", STATUS_POST_STEP_CONFIG, async () =>
+        this.postTerminal(repo, resolved.headSha, { state: "failure", description: decision.description }));
+      return { state: "failure", description: decision.description, statusPostFailed: false, legs: [], verdictQueued };
     }
     // #1169: the merge prechecks GitHub auto-merge would otherwise skip —
     // closing keyword + leak scan on title/body/diff/commit identities. Runs
@@ -180,9 +211,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
     if (precheckFailure.length > 0) {
       const description = capStatusDescription(precheckFailure[0]);
-      await step.do("post-precheck-failure", STATUS_POST_STEP_CONFIG, async () =>
-        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description }));
-      return { state: "failure", description, statusPostFailed: false, legs: [] };
+      const verdictQueued = await step.do("post-precheck-failure", STATUS_POST_STEP_CONFIG, async () =>
+        this.postTerminal(repo, resolved.headSha, { state: "failure", description }));
+      return { state: "failure", description, statusPostFailed: false, legs: [], verdictQueued };
     }
 
     // #1176: a green run must not certify a title/body edited after the run
@@ -200,9 +231,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     };
     const postRecheckFailure = async (failures: string[]) => {
       const description = capStatusDescription(failures[0]);
-      await step.do("post-recheck-failure", STATUS_POST_STEP_CONFIG, async () =>
-        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description }));
-      return { state: "failure" as const, description, statusPostFailed: false, legs: [] };
+      const verdictQueued = await step.do("post-recheck-failure", STATUS_POST_STEP_CONFIG, async () =>
+        this.postTerminal(repo, resolved.headSha, { state: "failure", description }));
+      return { state: "failure" as const, description, statusPostFailed: false, legs: [], verdictQueued };
     };
 
     if (decision.action === "skip") {
@@ -217,9 +248,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // route and CLI report the same red the downgraded skip posts to GitHub.
       const guarded = guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
         { state: "success", description: "no gated paths changed" });
-      await step.do("post-skip-status", STATUS_POST_STEP_CONFIG, async () =>
-        postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
-      return { ...guarded, statusPostFailed: false, legs: [] };
+      const verdictQueued = await step.do("post-skip-status", STATUS_POST_STEP_CONFIG, async () =>
+        this.postTerminal(repo, resolved.headSha, guarded));
+      return { ...guarded, statusPostFailed: false, legs: [], verdictQueued };
     }
 
     // The bun-test lane is the head's own test files under each block's root,
@@ -372,15 +403,15 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       ? guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
         { state: "success", description: verdictArgs.description })
       : verdictArgs;
-    await step.do("post-verdict", STATUS_POST_STEP_CONFIG, async () =>
-      postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
+    const verdictQueued = await step.do("post-verdict", STATUS_POST_STEP_CONFIG, async () =>
+      this.postTerminal(repo, resolved.headSha, guarded));
     // Per-leg output (#1049) rides in the final result, in plan order. #1214
     // round 2: `guarded` (not `final`) rides, so a downgraded success reports
     // failure here exactly as GitHub sees it. #1230: baseSha/planFingerprint ride
     // too, so a later `--failed-only` rerun can validate its own carry against them.
     return {
       ...guarded, statusPostFailed: false, legs: outcomeLegs(results),
-      baseSha: resolved.baseSha, planFingerprint: fingerprint, headSha: resolved.headSha,
+      baseSha: resolved.baseSha, planFingerprint: fingerprint, headSha: resolved.headSha, verdictQueued,
     };
   }
 }
