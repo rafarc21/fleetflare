@@ -241,6 +241,8 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
   const [base, head] = req.commit.split("..");
   const bundlePath = deps.bundlePath ?? BUNDLE_PATH;
   const isBundleLeg = req.leg === BUNDLE_LEG;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const random = deps.random ?? Math.random;
   // The bundle leg builds the run's snapshot and clones nothing (#1080 HIGH 1).
   if (isBundleLeg) return buildSnapshot(req, deps, base, head, bundlePath);
 
@@ -252,8 +254,6 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
   if (!fromBundle) {
     // Blobless and without a checkout: commits and trees come down now, file
     // contents only when a step reads them.
-    const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-    const random = deps.random ?? Math.random;
     const cloneArgs = ["clone", "--filter=blob:none", "--no-checkout", "--quiet", cloneUrl(repo, req.private === true), workdir];
     let clone = await run("git", cloneArgs, { cwd: "/workspace" });
     for (let attempt = 2; clone.code !== 0 && attempt <= CLONE_ATTEMPTS && TRANSIENT_CLONE.test(clone.stderr); attempt++) {
@@ -273,7 +273,13 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
   }
 
   // Every leg tests the merge result (PR head merged onto its base), not the bare branch.
-  const merged = await resolveMergeTree(run, workdir, base, head, req.baseRef, fromBundle ? req.mergeBase : undefined);
+  // #1283: merge-tree is where the lazy blob fetch happens; a 429/5xx there is the
+  // shared token's limit, retried with the same backoff the clone uses.
+  let merged = await resolveMergeTree(run, workdir, base, head, req.baseRef, fromBundle ? req.mergeBase : undefined);
+  for (let attempt = 2; merged.ok === false && merged.kind === "error" && attempt <= CLONE_ATTEMPTS && TRANSIENT_CLONE.test(merged.message); attempt++) {
+    await sleep(CLONE_BACKOFF_BASE_MS * 2 ** (attempt - 2) * (0.5 + random()));
+    merged = await resolveMergeTree(run, workdir, base, head, req.baseRef, fromBundle ? req.mergeBase : undefined);
+  }
   if (!merged.ok) {
     if (merged.kind === "conflict") return { state: "failure", description: `merge conflict against ${req.baseRef}` };
     return { state: "error", description: merged.message };
@@ -285,7 +291,13 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
     : `base moved: origin/${req.baseRef} now ${merged.baseMoved.slice(0, 7)}, tested ${base.slice(0, 7)}`;
   if (req.leg === "merge-tree") return { state: "success", commit: merged.commit, description: baseNote };
 
-  const checkout = await run("git", ["checkout", "--quiet", merged.commit], { cwd: workdir });
+  // #1283: checkout reads the merged tree's blobs lazily; a 429/5xx there is the
+  // same limit, retried with the clone's backoff.
+  let checkout = await run("git", ["checkout", "--quiet", merged.commit], { cwd: workdir });
+  for (let attempt = 2; checkout.code !== 0 && attempt <= CLONE_ATTEMPTS && TRANSIENT_CLONE.test(checkout.stderr); attempt++) {
+    await sleep(CLONE_BACKOFF_BASE_MS * 2 ** (attempt - 2) * (0.5 + random()));
+    checkout = await run("git", ["checkout", "--quiet", merged.commit], { cwd: workdir });
+  }
   if (checkout.code !== 0) return { state: "error", description: `checkout failed: ${firstLine(checkout.stderr)}` };
 
   // Restored after checkout: a baseline tar must never block the checkout.

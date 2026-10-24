@@ -52,6 +52,9 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     "lint: The operation was aborted due to timeout after 28 min",
     "lint: checkout failed: fatal: remote end hung up after 2 min",
     "lint: clone failed: fatal: remote-curl: bad line length character: UNKNO after 1 min",
+    // #1283: a GitHub 429 surfaced by the git proxy or the checkout's lazy fetch.
+    "lint: checkout failed: fatal: unable to access 'http://git-proxy.internal/o/r.git/': The requested URL returned error: 429 after 0 min",
+    "lint: HTTP 429 after 0 min",
   ])("infra: %s", (description) => {
     expect(isInfraLegFailure({ leg: "lint", state: "error", description })).toBe(true);
   });

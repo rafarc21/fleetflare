@@ -23,6 +23,10 @@ const INFRA_CAUSE = new RegExp([
   // its git-protocol stream was garbled. Neither is the code under test.
   "remote end hung up",
   "bad line length",
+  // #1283: a GitHub 429 on a lazy blob fetch or checkout is the shared token's
+  // limit, not the code under test.
+  "returned error: 429",
+  "HTTP 429",
 ].join("|"));
 
 /** An error leg is infra-class by its cause. A leg whose first attempt was red

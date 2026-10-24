@@ -79,18 +79,18 @@ describe("git proxy: upstream 429 is retried server-side (#1137)", () => {
     expect(git.sleeps.length).toBe(1);
   });
 
-  it("honors Retry-After in seconds: waits exactly that long on the fake clock", async () => {
+  it("honors Retry-After in seconds, floored at 15s (#1283): a 3s hint waits 15s", async () => {
     const git = scriptedGit([{ status: 429, headers: { "retry-after": "3" } }, { status: 200 }]);
     await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
-    expect(git.sleeps).toEqual([3000]);
+    expect(git.sleeps).toEqual([15_000]);
   });
 
-  it("honors Retry-After as an HTTP date: waits until that instant on the fake clock", async () => {
+  it("honors Retry-After as an HTTP date, floored at 15s (#1283)", async () => {
     const startMs = Date.UTC(2026, 9, 16, 12, 0, 0);
     const at = new Date(startMs + 5000).toUTCString();
     const git = scriptedGit([{ status: 429, headers: { "retry-after": at } }, { status: 200 }], { startMs });
     await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
-    expect(git.sleeps).toEqual([5000]);
+    expect(git.sleeps).toEqual([15_000]);
   });
 
   it("a Retry-After too long for the budget is never retried early: the 429 passes through at once", async () => {
@@ -107,11 +107,11 @@ describe("git proxy: upstream 429 is retried server-side (#1137)", () => {
     expect(git.sleeps).toEqual([240_000]);
   });
 
-  it("jitter scales with the wait: at least 1s, or half the wait if that is larger", async () => {
-    // 3s wait: jitter = floor(0.5 * max(1000, 1500)) = 750.
+  it("jitter scales with the wait: at least 1s, or half the wait if that is larger (#1283 floor: 3s hint waits 15s + 7.5s jitter)", async () => {
+    // 3s hint is floored to 15s: jitter = floor(0.5 * max(1000, 7500)) = 3750.
     const small = scriptedGit([{ status: 429, headers: { "retry-after": "3" } }, { status: 200 }], { random: 0.5 });
     await handleGateOutbound(gitGet(), noBucket, OWN, small.deps);
-    expect(small.sleeps).toEqual([3750]);
+    expect(small.sleeps).toEqual([18_750]);
     // 60s wait: jitter = floor(0.5 * max(1000, 30000)) = 15000.
     const large = scriptedGit([{ status: 429, headers: { "retry-after": "60" } }, { status: 200 }], { random: 0.5 });
     await handleGateOutbound(gitGet(), noBucket, OWN, large.deps);
@@ -125,14 +125,27 @@ describe("git proxy: upstream 429 is retried server-side (#1137)", () => {
     expect(git.sleeps).toEqual([60_000]);
   });
 
-  it("x-ratelimit-reset is honored when remaining is 0 and there is no Retry-After", async () => {
-    // startMs 0: reset epoch 10s is 10s away.
+  it("a near-zero Retry-After still waits the 15s floor, never retries straight into the limit (#1283)", async () => {
+    const git = scriptedGit([{ status: 429, headers: { "retry-after": "1" } }, { status: 200 }]);
+    await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
+    expect(git.upstream.length).toBe(2);
+    expect(git.sleeps).toEqual([15_000]);
+  });
+
+  it("a 15s-or-longer Retry-After is honored whole, not cut down to the floor (#1283)", async () => {
+    const git = scriptedGit([{ status: 429, headers: { "retry-after": "30" } }, { status: 200 }]);
+    await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
+    expect(git.sleeps).toEqual([30_000]);
+  });
+
+  it("x-ratelimit-reset is honored when remaining is 0 and there is no Retry-After, floored at 15s (#1283)", async () => {
+    // startMs 0: reset epoch 10s is 10s away, but the floor raises it to 15s.
     const git = scriptedGit([
       { status: 429, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "10" } },
       { status: 200 },
     ]);
     await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
-    expect(git.sleeps).toEqual([10_000]);
+    expect(git.sleeps).toEqual([15_000]);
   });
 
   it("a Retry-After that is neither seconds nor an HTTP date ('1.5') is ignored: the backoff applies", async () => {
@@ -301,8 +314,41 @@ describe("git proxy: retries are logged, never with the token (#1137)", () => {
       const line = logged.find((l) => l.includes("gate git-proxy: retry status="));
       expect(line).toBeDefined();
       expect(line).toContain("status=429");
-      expect(line).toContain("wait=2000ms");
+      expect(line).toContain("wait=15000ms");
       expect(line).toContain("attempt=2/4");
+      expect(logged.join("\n")).not.toContain(TOKEN);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a skipped retry logs its reason, so a red run is diagnosable (#1283)", async () => {
+    const logged: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.join(" ")); });
+    try {
+      // A non-retryable status (404) skips; the reason is logged.
+      const git = scriptedGit([{ status: 404 }, { status: 200 }]);
+      await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
+      const line = logged.find((l) => l.includes("gate git-proxy: skip retry status=404"));
+      expect(line).toBeDefined();
+      expect(line).toContain("retryable=true");
+      expect(line).toContain("hint=-");
+      expect(logged.join("\n")).not.toContain(TOKEN);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a retry skipped because the wait would overrun the budget logs the reason (#1283)", async () => {
+    const logged: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.join(" ")); });
+    try {
+      const git = scriptedGit([{ status: 429, headers: { "retry-after": "1" } }, { status: 200 }], { costMs: 590_000 });
+      await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
+      const line = logged.find((l) => l.includes("skip retry status=429"));
+      expect(line).toBeDefined();
+      expect(line).toContain("reason=budget");
+      expect(git.upstream.length).toBe(1);
       expect(logged.join("\n")).not.toContain(TOKEN);
     } finally {
       spy.mockRestore();

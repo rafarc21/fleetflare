@@ -152,7 +152,7 @@ const RUN: GateRun = {
 };
 const MERGE_RUN: GateRun = { ...RUN, leg: "merge-tree", installCmd: "", legCmd: "" };
 
-interface WorldOpts { cloneCode?: number; cloneErrs?: string[]; checkoutCode?: number; mergeCode?: number; legCode?: number; headPresent?: boolean; baseMovedTo?: string; legOutput?: { stdout: string; stderr: string }; installCode?: number }
+interface WorldOpts { cloneCode?: number; cloneErrs?: string[]; checkoutCode?: number; checkoutErrs?: string[]; mergeCode?: number; mergeErrs?: string[]; legCode?: number; headPresent?: boolean; baseMovedTo?: string; legOutput?: { stdout: string; stderr: string }; installCode?: number }
 
 // A scripted git. Every command succeeds unless the opts fail it. `rev-parse` resolves only the
 // refs in `known`; the PR head is missing until a fetch brings it in (the fork-PR path).
@@ -188,10 +188,18 @@ function fakeWorld(opts: WorldOpts = {}) {
         const sha = name === SHA.head && !headPresent ? undefined : known[name];
         return sha ? ok(`${sha}\n`) : fail(1, "");
       }
-      case "merge-tree": return opts.mergeCode !== undefined ? fail(opts.mergeCode, "") : ok(`${SHA.tree}\n`);
+      case "merge-tree": {
+        const err = opts.mergeErrs?.shift();
+        if (err !== undefined) return fail(128, err);
+        return opts.mergeCode !== undefined ? fail(opts.mergeCode, "") : ok(`${SHA.tree}\n`);
+      }
       case "commit-tree": return ok(`${SHA.merge}\n`);
       case "rev-list": return ok(`${SHA.merge} ${SHA.base} ${SHA.head}\n`);
-      case "checkout": return opts.checkoutCode ? fail(opts.checkoutCode, "error: pathspec") : ok();
+      case "checkout": {
+        const err = opts.checkoutErrs?.shift();
+        if (err !== undefined) return fail(128, err);
+        return opts.checkoutCode ? fail(opts.checkoutCode, "error: pathspec") : ok();
+      }
       default: return ok();
     }
   };
@@ -462,6 +470,55 @@ describe("runGate: a transient clone failure is retried (live: 429 from GitHub o
     const out = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(), sleep: noSleep });
     expect(out.state).toBe("error");
     expect(cloneCalls(world.calls)).toBe(1);
+  });
+});
+
+describe("runGate: a transient checkout or merge-tree failure is retried (#1283: GitHub 429 on the lazy fetch)", () => {
+  it("retries a checkout answered 429, with the clone backoff, then runs the leg", async () => {
+    const world = fakeWorld({ checkoutErrs: [RATE_LIMITED] });
+    const waits: number[] = [];
+    const out = await runGate(RUN, {
+      exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(),
+      sleep: async (ms) => { waits.push(ms); }, random: () => 0.5,
+    });
+    expect(out.state).toBe("success");
+    expect(world.calls.filter(isCheckout)).toHaveLength(2);
+    expect(waits).toEqual([3_000]);
+  });
+
+  it("gives up after 5 transient checkout failures and reports the checkout error", async () => {
+    const world = fakeWorld({ checkoutErrs: [RATE_LIMITED, RATE_LIMITED, RATE_LIMITED, RATE_LIMITED, RATE_LIMITED] });
+    const out = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(), sleep: noSleep });
+    expect(out.state).toBe("error");
+    expect(out.description).toContain("429");
+    expect(world.calls.filter(isCheckout)).toHaveLength(5);
+  });
+
+  it("does not retry a checkout that failed for good (bad pathspec)", async () => {
+    const world = fakeWorld({ checkoutCode: 1 });
+    const out = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(), sleep: noSleep });
+    expect(out.state).toBe("error");
+    expect(world.calls.filter(isCheckout)).toHaveLength(1);
+  });
+
+  it("retries a merge-tree answered 429 before running the leg", async () => {
+    const world = fakeWorld({ mergeErrs: [RATE_LIMITED] });
+    const waits: number[] = [];
+    const out = await runGate(RUN, {
+      exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(),
+      sleep: async (ms) => { waits.push(ms); }, random: () => 0.5,
+    });
+    expect(out.state).toBe("success");
+    const mergeCalls = world.calls.filter((c) => c.includes("merge-tree"));
+    expect(mergeCalls).toHaveLength(2);
+    expect(waits).toEqual([3_000]);
+  });
+
+  it("a real merge conflict is never retried: it is data, not a transient error", async () => {
+    const world = fakeWorld({ mergeCode: 1 });
+    const out = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(), sleep: noSleep });
+    expect(out.state).toBe("failure");
+    expect(world.calls.filter((c) => c.includes("merge-tree"))).toHaveLength(1);
   });
 });
 
