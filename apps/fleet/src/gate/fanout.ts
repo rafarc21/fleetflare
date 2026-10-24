@@ -2,7 +2,7 @@
 // Workflow/DO bindings — this file is what bun test can load, so
 // workflow.ts (which imports cloudflare:workers) stays a thin driver over
 // the decisions made here.
-import { DEFAULT_GATE_IMAGE, legTimeoutMin, MAX_LEGS_PER_PR, type GateLeg } from "./config";
+import { DEFAULT_GATE_IMAGE, legTimeoutMin, matchesPathRules, MAX_LEGS_PER_PR, type GateLeg } from "./config";
 import { bunLaneCwd } from "./bun-lane";
 import { BUNDLE_LEG } from "./leg-env";
 import type { LegResult, Verdict } from "./verdict";
@@ -228,6 +228,20 @@ export interface CarryGreen {
  *  difference (a changed fleet.json, a different shard count) changes it. */
 export function planFingerprint(legs: PlannedLeg[]): string {
   return JSON.stringify(legs.map((l) => [l.leg, ...legIdentity(l)]));
+}
+
+/** #1274: the legs that run for a PR, per-leg `paths` filters applied. A leg
+ *  with no `paths` always runs; one with `paths` runs when a changed file
+ *  matches it. Fail-open toward running: a truncated change list or a PR that
+ *  changed the gate config itself runs every filtered leg — the list is
+ *  incomplete, or the config is the thing under test, so a filter must never
+ *  silently skip it. The block's own pathRules gate the whole run; this filters
+ *  within it. */
+export function legsForChangedFiles(
+  legs: GateLeg[], changedFiles: string[], ctx: { truncated: boolean; configChanged: boolean },
+): GateLeg[] {
+  const runAll = ctx.truncated || ctx.configChanged;
+  return legs.filter((l) => l.paths === undefined || runAll || matchesPathRules(changedFiles, l.paths));
 }
 
 /** A run's green legs: `state === "success"`, the only state a carry may ever
