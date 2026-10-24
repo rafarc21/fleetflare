@@ -56,6 +56,16 @@ describe("deploy.sh: drain running gate runs before a Worker deploy (#1232)", ()
     expect(r.wrangler.some((l) => l.includes("'gate_drain','1'"))).toBe(true);
   });
 
+  test("the refusal names the run id still blocking the drain (#1275)", () => {
+    writeConfig(gateConfig());
+    stub("gate-instances.json", [{ id: "gate-x", status: "running" }]);
+    const r = deploy([], 0, { GATE_DRAIN_CAP_MS: "150", GATE_DRAIN_POLL_MS: "10" });
+    expect(r.code).toBe(1);
+    // gate-drain-wait.ts's own refusal line names the blocking run, so the
+    // operator sees WHAT blocks, not just "still running".
+    expect(r.err).toContain("gate-drain-wait: gate instances still running after the drain cap: gate-x");
+  });
+
   test("a failed deploy clears the flag on the way out (every exit path clears)", () => {
     writeConfig(gateConfig());
     const r = deploy([], 0, { STUB_DEPLOY_EXIT: "1" });
