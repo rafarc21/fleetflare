@@ -1,4 +1,5 @@
 import type { Env } from "../env";
+import { rateLimitResetMs } from "./api";
 import { MintTokenError } from "./mint-token-error";
 
 export { MintTokenError };
@@ -194,7 +195,13 @@ export async function mintInstallationTokenDetail(
   if (!res.ok) {
     // GitHub's error body is safe to surface (e.g. "Bad credentials"); the
     // JWT and any token are not — neither is logged or included here.
-    throw new MintTokenError(res.status, `installation token failed (${res.status}): ${text.slice(0, 300)}`);
+    // #1276: a rate-limited mint carries the reset time so reachRepo can turn
+    // it into 429 + reset instead of a generic 503.
+    throw new MintTokenError(
+      res.status,
+      `installation token failed (${res.status}): ${text.slice(0, 300)}`,
+      rateLimitResetMs(res.headers, Date.now()),
+    );
   }
   const parsed = JSON.parse(text) as { token?: string; repositories?: { full_name?: unknown }[] };
   // A 2xx body can still lack token — never hand callers undefined or "" on the mint path.

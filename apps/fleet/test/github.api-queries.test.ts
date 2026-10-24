@@ -388,12 +388,13 @@ describe("closingIssuesForPull", () => {
 describe("getPullRequest", () => {
   it("reads merged state, merge commit sha, and base/head refs", async () => {
     respond = () => Response.json({
-      number: 7, merged: true, merge_commit_sha: "deadbeef", base: { ref: "staging", repo: { full_name: "O/R" } }, head: { ref: "feat/x" },
+      number: 7, merged: true, merge_commit_sha: "deadbeef", base: { ref: "staging", repo: { full_name: "O/R" } }, head: { ref: "feat/x", sha: "aaa111" },
       title: "feat: x", body: "Closes #3", state: "open",
     });
     expect(await getPullRequest("tok", "o/r", 7)).toEqual({
       number: 7, merged: true, mergeCommitSha: "deadbeef", baseRef: "staging", headRef: "feat/x",
       title: "feat: x", body: "Closes #3", repoFullName: "O/R", open: true, baseRepoPrivate: false,
+      headSha: "aaa111",
     });
   });
 
@@ -404,6 +405,20 @@ describe("getPullRequest", () => {
       number: 7, merged: false, state: "open", base: { ref: "main", repo: { full_name: "o/r", private: true } }, head: { ref: "feat/x" },
     });
     expect((await getPullRequest("tok", "o/r", 7)).baseRepoPrivate).toBe(true);
+  });
+
+  // #1276: the head sha rides the same GET, so the gate run's resolve-pr step
+  // reads one /pulls call instead of two. Missing sha reads "" (a throw in the
+  // workflow), never undefined.
+  it("reads the head sha off the same GET, empty when GitHub omits it", async () => {
+    respond = () => Response.json({
+      number: 7, merged: false, base: { ref: "main" }, head: { ref: "feat/x", sha: "bbb222" },
+    });
+    expect((await getPullRequest("tok", "o/r", 7)).headSha).toBe("bbb222");
+    respond = () => Response.json({
+      number: 8, merged: false, base: { ref: "main" }, head: { ref: "feat/y" },
+    });
+    expect((await getPullRequest("tok", "o/r", 8)).headSha).toBe("");
   });
 
   it("an unmerged PR reads merged: false and a null merge commit sha", async () => {

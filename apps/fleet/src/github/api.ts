@@ -58,7 +58,13 @@ export async function ghRequest(
   const res = await fetch(url, { ...init, headers });
   const text = await res.text();
   if (!res.ok && !okStatuses.includes(res.status)) {
-    throw new Error(`${what} failed (${res.status}): ${text.slice(0, 300)}`);
+    // #1276: attach status + headers to the thrown error so a caller can tell a
+    // rate limit (429, or a 403 with a limit hint) from a plain failure and read
+    // the reset time — without parsing it back out of the message text.
+    throw Object.assign(
+      new Error(`${what} failed (${res.status}): ${text.slice(0, 300)}`),
+      { status: res.status, headers: res.headers },
+    );
   }
   return { res, text };
 }
@@ -280,6 +286,51 @@ export async function upsertRepoFile(
 export const INSTALLATION_REPOS_PAGE_SIZE = 100;
 export const INSTALLATION_REPOS_MAX_PAGES = 10;
 
+/** #1276: a GitHub rate-limit refusal, carrying the reset time GitHub reported
+ *  so a caller can answer 429 + reset instead of a generic 503. Thrown by
+ *  listInstallationRepos on a 403/429 that carries a limit hint. */
+export class GitHubRateLimitedError extends Error {
+  constructor(public readonly resetInMs: number | null, message: string) {
+    super(message);
+    this.name = "GitHubRateLimitedError";
+  }
+}
+
+/** x-ratelimit-reset (epoch seconds) as ms-until-reset, or null when absent or
+ *  unreadable. The same shape outbound-handler.ts's rateLimitResetMs already
+ *  uses for the clone path. */
+export function rateLimitResetMs(headers: Headers, now: number): number | null {
+  const reset = Number(headers.get("x-ratelimit-reset"));
+  return Number.isInteger(reset) && reset > 0 ? Math.max(0, reset * 1000 - now) : null;
+}
+
+/** The thrown-error view of a GitHub failure (ghRequest attaches `status` and
+ *  `headers`): a rate limit is a 429, or a 403 carrying a reset hint (primary
+ *  limit) / Retry-After (secondary limit). Returns the reset ms, or null when
+ *  this failure was not a rate limit. */
+export function rateLimitResetMsFromError(err: unknown, now: number): number | null {
+  if (err === null || typeof err !== "object") return null;
+  const { status, headers } = err as { status?: unknown; headers?: unknown };
+  if (status !== 403 && status !== 429) return null;
+  if (!(headers instanceof Headers)) return null;
+  const reset = rateLimitResetMs(headers, now);
+  if (reset !== null) return reset;
+  const retryAfter = headers.get("retry-after");
+  if (retryAfter !== null && /^\s*\d+\s*$/.test(retryAfter)) return Number(retryAfter) * 1000;
+  // A plain 429/403 with no hint carries no reset time; callers wait their own default.
+  return null;
+}
+
+/** Whether a thrown GitHub failure is a rate limit (429, or a 403 with a limit
+ *  hint). A plain 403 is a permission refusal, never a rate limit. */
+export function isRateLimitedError(err: unknown): boolean {
+  if (err === null || typeof err !== "object") return false;
+  const { status, headers } = err as { status?: unknown; headers?: unknown };
+  if (status === 429) return true;
+  if (status !== 403 || !(headers instanceof Headers)) return false;
+  return headers.get("x-ratelimit-reset") !== null || headers.get("retry-after") !== null;
+}
+
 /**
  * Every repo the GitHub App installation can reach, as `owner/name` full
  * names. This is the fleet's real repo boundary — the App token already
@@ -303,7 +354,12 @@ export async function listInstallationRepos(token: string): Promise<string[]> {
       `https://api.github.com/installation/repositories?per_page=${INSTALLATION_REPOS_PAGE_SIZE}&page=${page}`,
       { method: "GET", headers: GH_HEADERS_GET(token) },
       "installation repositories",
-    );
+    ).catch((err) => {
+      // #1276: a rate limit surfaces as a typed error carrying the reset time,
+      // never as "not reachable" (which would read as a permission refusal).
+      if (isRateLimitedError(err)) throw new GitHubRateLimitedError(rateLimitResetMsFromError(err, Date.now()), (err as Error).message);
+      throw err;
+    });
     const body = JSON.parse(text) as { total_count?: number; repositories?: { full_name?: string }[] };
     const batch = body.repositories ?? [];
     for (const r of batch) if (typeof r.full_name === "string") names.push(r.full_name);
@@ -1098,13 +1154,17 @@ interface PullRequestInfo {
    *  exclude a CLOSED-unmerged PR: it can never merge, so warning about it
    *  would nag forever. */
   open: boolean;
+  /** #1276: the PR's live head sha, read from the SAME GET that returns every
+   *  other field — so a caller that needs the head sha does not pay a second
+   *  /pulls/{number} GET (the gate run's resolve-pr step did exactly that). */
+  headSha: string;
 }
 
 export async function getPullRequest(token: string, repo: string, number: number): Promise<PullRequestInfo> {
   const raw = await ghJson<{
     number: number; merged?: boolean; merge_commit_sha?: string | null;
     state?: string;
-    base: { ref: string; repo?: { full_name?: string; private?: boolean } }; head: { ref: string }; title?: string; body?: string | null;
+    base: { ref: string; repo?: { full_name?: string; private?: boolean } }; head: { ref: string; sha?: string }; title?: string; body?: string | null;
   }>(
     token,
     `https://api.github.com/repos/${repo}/pulls/${number}`,
@@ -1122,6 +1182,7 @@ export async function getPullRequest(token: string, repo: string, number: number
     repoFullName: raw.base.repo?.full_name ?? repo,
     baseRepoPrivate: raw.base.repo?.private === true,
     open: raw.state === "open",
+    headSha: raw.head.sha ?? "",
   };
 }
 
@@ -1556,7 +1617,8 @@ export async function getCommitContextStatus(
   return undefined;
 }
 
-/** Head commit sha of one PR. getPullRequest does not return it. */
+/** Head commit sha of one PR, for callers that hold no PullRequestInfo. The gate
+ *  run's resolve-pr step reads it off getPullRequest instead (#1276). */
 export async function getPullRequestHeadSha(token: string, repo: string, number: number): Promise<string> {
   const raw = await ghJson<{ head?: { sha?: string } }>(
     token,

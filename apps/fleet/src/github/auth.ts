@@ -56,7 +56,7 @@
 
 import type { Env } from "../env";
 import { installationEnvName, mintInstallationToken, mintInstallationTokenDetail, MintTokenError, type MintTokenOpts } from "./app";
-import { listInstallationRepos, repoIsWritable, resolveCanonicalRepoName } from "./api";
+import { GitHubRateLimitedError, isRateLimitedError, listInstallationRepos, rateLimitResetMsFromError, repoIsWritable, resolveCanonicalRepoName } from "./api";
 import type { RepoReach } from "./reach";
 
 export type RepoAuthKind = "token" | "app";
@@ -535,12 +535,71 @@ export function repoTokenMinter(env: Env): (repo: string) => Promise<string> {
 export async function reachRepo(env: Env, repo: string): Promise<RepoReach> {
   const owner = repoOwner(repo);
   if (resolveRepoAuthKind(env, repo) === "token") {
-    const ok = await repoIsWritable(repoToken(env, owner) as string, repo);
-    return ok ? { reachable: true } : { reachable: false, remedy: tokenRemedy(tokenVarName(env, owner)) };
+    try {
+      const ok = await repoIsWritable(repoToken(env, owner) as string, repo);
+      return ok ? { reachable: true } : { reachable: false, remedy: tokenRemedy(tokenVarName(env, owner)) };
+    } catch (err) {
+      // #1276: a rate limit is "ask again later", not "the fleet may not have
+      // this repo" and not an outage — a returned third answer the caller maps
+      // to 429 + reset time.
+      if (isRateLimitedError(err)) return { reachable: false, rateLimited: true, resetInMs: rateLimitResetMsFromError(err, Date.now()) };
+      throw err;
+    }
   }
-  const reachable = await listInstallationRepos(await mintInstallationToken(env, owner, repo, { unscoped: true }));
+  let reachable: string[];
+  try {
+    reachable = await cachedInstallationRepos(env, owner, repo);
+  } catch (err) {
+    if (err instanceof GitHubRateLimitedError) return { reachable: false, rateLimited: true, resetInMs: err.resetInMs };
+    // The mint itself can hit the installation's hourly REST quota — same third
+    // answer, same reset hint. A 403 is only read as a rate limit when it names
+    // one (a reset hint or GitHub's own "rate limit" text): a plain 403 mint is
+    // a different failure and must keep throwing as the generic 503 it was.
+    if (err instanceof MintTokenError && (err.status === 429 || (err.status === 403 && (err.resetInMs !== null || /rate limit/i.test(err.message))))) {
+      return { reachable: false, rateLimited: true, resetInMs: err.resetInMs ?? null };
+    }
+    throw err;
+  }
   const wanted = repo.toLowerCase();
   return reachable.some((full) => full.toLowerCase() === wanted)
     ? { reachable: true }
     : { reachable: false, remedy: appRemedy(owner) };
+}
+
+// --- reachability caching (#1276) -------------------------------------------
+//
+// The App's reachability check lists /installation/repositories on every board
+// call for any non-default repo. Under a 50-studio load that single uncached
+// GET was measured driving the installation over its hourly REST quota. The
+// list is per-OWNER (an installation answers the same list for every repo it
+// covers), so the cache is keyed by owner, lowercased the same way repoOwner
+// normalises. A resolveWorkRepo call is the expensive case — a genuinely
+// unknown repo, or a repo that may not be anyone's work repo yet — so only a
+// call whose OWNER cache entry missed fetches.
+//
+// Reachability list TTL: 5 minutes, deliberately longer than the per-PR gate
+// run (~2-3 min) so one board refresh or push does not re-list mid-run, and far
+// shorter than GitHub's own hourly reset — a repo added to the installation is
+// reachable within minutes, never stuck behind an hour-long cache.
+export const REACH_TTL_MS = 5 * 60_000;
+
+const reachCache = new Map<string, { names: string[]; at: number }>();
+
+/** The installation repository list for `owner`, cached per-owner with a TTL.
+ *  The `repo` parameter matters only for the token mint (unscoped, as
+ *  reachRepo's own doc comment requires); the list itself is the owner's. */
+async function cachedInstallationRepos(env: Env, owner: string, repo: string): Promise<string[]> {
+  const now = Date.now();
+  const hit = reachCache.get(owner);
+  if (hit !== undefined && now - hit.at <= REACH_TTL_MS) return hit.names;
+  const token = await mintInstallationToken(env, owner, repo, { unscoped: true });
+  const names = await listInstallationRepos(token);
+  reachCache.set(owner, { names, at: now });
+  return names;
+}
+
+/** Test-only reset: clears the per-owner cache so a test can assert a list is
+ *  re-fetched. */
+export function __resetReachCacheForTests(): void {
+  reachCache.clear();
 }

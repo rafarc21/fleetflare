@@ -247,7 +247,19 @@ export async function handleGateRoute(
     if (await gateDraining(env.DB)) {
       return j({ started: false, pending: true });
     }
-    const headSha = await headShaOf(body.repo, body.pr);
+    // #1276: the head-sha read is one GitHub GET that can hit the installation's
+    // hourly REST quota. A throw here reached Cloudflare's HTML 500 page and the
+    // CLI's `res.json()` crashed on "Failed to parse JSON". Guard it: JSON 503,
+    // the same shape gateRunStatusSafe returns for its own throw, so the CLI sees
+    // a parseable body and the real cause, never an HTML page.
+    let headSha: string;
+    try {
+      headSha = await headShaOf(body.repo, body.pr);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`gate start: head sha read failed for ${body.repo}#${body.pr}`, err);
+      return j({ error: `gate start unavailable: ${redactSecrets(message)}` }, 503);
+    }
     const index = d1RunIndex(env.DB);
     // #1230: `fleet gate run --failed-only` reruns only the legs the PR's
     // latest run did not already go green on. The new run still targets the

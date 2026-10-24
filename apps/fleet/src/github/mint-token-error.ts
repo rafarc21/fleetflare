@@ -18,7 +18,15 @@
  * type-check and break it (issue #233 follow-up fix).
  */
 export class MintTokenError extends Error {
-  constructor(public readonly status: number, message: string) {
+  constructor(
+    public readonly status: number,
+    message: string,
+    /** When GitHub said "rate limited", the reset time it reported
+     *  (x-ratelimit-reset epoch seconds, or null). Undefined for every other
+     *  failure. Callers read it to answer 429 + reset instead of a generic
+     *  503. */
+    public readonly resetInMs: number | null | undefined = undefined,
+  ) {
     super(message);
     this.name = "MintTokenError";
   }

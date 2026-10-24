@@ -91,18 +91,23 @@ export async function cmdGateStart(creds: Credentials, pr: number): Promise<void
   } catch (err) {
     throw new Error(`fleet gate-start: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
-  const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; pending?: boolean; error?: string };
-  if (!res.ok || body.error) {
-    console.error(`gate-start failed: ${body.error ?? res.status}`);
+  const text = await res.text();
+  const parsed = parseStartResponse(text);
+  if (!res.ok || !parsed.ok || parsed.body.error) {
+    // #1276: a non-JSON reply (Cloudflare's HTML 500, e.g. a rate-limited head
+    // read) must print the status and the first body line, never crash on
+    // res.json(). The JSON path prints the route's own error text.
+    const detail = parsed.ok ? (parsed.body.error ?? res.status) : `HTTP ${res.status}: ${firstLine(text)}`;
+    console.error(`gate-start failed: ${detail}`);
     process.exitCode = 2;
     return;
   }
-  if (body.pending === true) {
+  if (parsed.body.pending === true) {
     console.error(gateQueuedLine(pr));
     process.exitCode = 2; // match runGate: a queued start is not a started run
     return;
   }
-  console.log(gateStartLine({ runId: body.runId ?? "", reused: body.reused }, pr));
+  console.log(gateStartLine({ runId: parsed.body.runId ?? "", reused: parsed.body.reused }, pr));
 }
 
 /** Pure — extracted so the exit-code mapping is unit-testable without a
@@ -137,6 +142,27 @@ export function parseStatusResponse(text: string): ParsedStatus {
     return { ok: true, status: v };
   } catch {
     return { ok: false, body: text.slice(0, 200) };
+  }
+}
+
+/** The start-reply body shape, plus an `error` the route may carry. */
+export type GateStartBody = {
+  started?: boolean; runId?: string; reused?: boolean; pending?: boolean; error?: string;
+};
+
+/** Pure parse of a /studio/gate/start reply. A non-JSON body is `ok:false`
+ *  (the CLI prints the status + first body line), never a throw. */
+export type ParsedStart =
+  | { ok: true; body: GateStartBody }
+  | { ok: false };
+
+export function parseStartResponse(text: string): ParsedStart {
+  try {
+    const v = JSON.parse(text) as GateStartBody;
+    if (v === null || typeof v !== "object") return { ok: false };
+    return { ok: true, body: v };
+  } catch {
+    return { ok: false };
   }
 }
 
@@ -233,21 +259,23 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
       method: "POST", headers: { ...accessHeaders(creds), "content-type": "application/json" },
       body: JSON.stringify({ repo, pr, ...(opts.failedOnly ? { failedOnly: true } : {}) }),
     });
-    const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; pending?: boolean; error?: string };
-    if (!res.ok || body.error) {
-      console.error(`gate-start failed: ${body.error ?? res.status}`);
+    const text = await res.text();
+    const parsed = parseStartResponse(text);
+    if (!res.ok || !parsed.ok || parsed.body.error) {
+      const detail = parsed.ok ? (parsed.body.error ?? res.status) : `HTTP ${res.status}: ${firstLine(text)}`;
+      console.error(`gate-start failed: ${detail}`);
       return 2;
     }
-    if (body.pending === true) {
+    if (parsed.body.pending === true) {
       console.error(gateQueuedLine(pr));
       return 2;
     }
-    if (typeof body.runId !== "string") {
+    if (typeof parsed.body.runId !== "string") {
       console.error(`gate-start failed: ${res.status}`);
       return 2;
     }
-    runId = body.runId;
-    console.log(gateStartLine({ runId, reused: body.reused }, pr));
+    runId = parsed.body.runId;
+    console.log(gateStartLine({ runId, reused: parsed.body.reused }, pr));
   } catch (err) {
     console.error(`fleet gate run: could not reach ${creds.workerUrl}: ${errText(err)}`);
     return 2;
@@ -310,7 +338,7 @@ export async function cmdGateProtect(creds: Credentials, repo: string): Promise<
 
 /** The first trimmed line of an error body, cut short — enough to show "what
  *  failed", never the whole HTML page. */
-function firstLine(text: string): string {
+export function firstLine(text: string): string {
   const line = text.trim().split(/\r?\n/, 1)[0] ?? "";
   return line.slice(0, 200);
 }

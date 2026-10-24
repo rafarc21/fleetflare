@@ -29,8 +29,25 @@
  * both callers can answer 503 "ask again" instead of 403 "no". Collapsing the
  * two would make a GitHub outage read to an operator as a permission problem
  * they would then go and "fix".
+ *
+ * A RATE LIMIT (#1276) is a third answer, distinct from both: it RETURNS
+ * `{ rateLimited: true, resetInMs }` so the callers can answer 429 with the
+ * reset time — the operator sees "retry in Ns", not an outage 503 and not a
+ * permission 403. It is not a throw because a rate limit is a predictable,
+ * named upstream condition (unlike a transient outage, which the throw path
+ * already treats as "ask again" without a reset hint).
  */
-export type RepoReach = { reachable: true } | { reachable: false; remedy: string };
+export type RepoReach =
+  | { reachable: true; rateLimited?: false }
+  | { reachable: false; remedy: string; rateLimited?: false }
+  | { reachable: false; remedy?: string; rateLimited: true; resetInMs: number | null };
+
+/** The 429 message a resolve caller returns for a rate limit: names the retry,
+ *  with GitHub's reset time in seconds when it was given. */
+export function rateLimitMessage(resetInMs: number | null): string {
+  const retry = resetInMs === null ? "" : ` (reset in ~${Math.ceil(resetInMs / 1000)}s)`;
+  return `GitHub rate limit reached — retry later${retry}`;
+}
 
 /**
  * The fetch-side alias of the answer above: what src/github/auth.ts's
