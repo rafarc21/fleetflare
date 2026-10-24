@@ -27,6 +27,16 @@ const POLL_MS = 5_000;
  *  attempt, retried; the leg itself is bounded by its own deadline. */
 const REQUEST_TIMEOUT_MS = 15_000;
 
+/** A host with no spare container instance refuses start() (or the port fetch)
+ *  with this wording. It is account capacity, not a leg defect: fail fast and
+ *  back off, never spend the 240 s port-retry budget thrashing a saturated host. */
+const NO_INSTANCE_RE = /no container instance|container instance that can be provided|no instances? available/i;
+
+/** The infra description a no-instance leg returns. Named so the step's
+ *  exponential retry backs off the same saturated host, and infra-rerun.ts still
+ *  classifies it as infra (its INFRA_CAUSE matches "no container instance"). */
+export const NO_INSTANCE_DESCRIPTION = "gate capacity: no container instance available";
+
 export type LegResult = { state: "success" | "failure" | "error"; description?: string };
 
 /** A leg run ends in exactly one of two things: a real gate-server body
@@ -119,6 +129,9 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
     }
     return await runOnServer(c, req, now, sleep, deps.readResult);
   } catch (err) {
+    // The account-at-capacity refusal surfaces here from start(): fail fast,
+    // never retry the host in place.
+    if (isNoInstance(err)) return { kind: "infra", description: NO_INSTANCE_DESCRIPTION };
     return { kind: "infra", description: `gate container failed: ${errorText(err)}` };
   } finally {
     // The container bills while it lives: release it after every leg.
@@ -177,6 +190,9 @@ async function runOnServer(
         const stored = await storedLegResult(readResult, req.resultKey);
         if (stored !== undefined) return { kind: "result", result: stored };
       }
+      // Account at capacity: fail fast, never spend the full budget on a host
+      // that cannot provide an instance (live: 459 x 240 s under peer load).
+      if (isNoInstance(err)) return { kind: "infra", description: NO_INSTANCE_DESCRIPTION };
       if (now() - postStarted >= PORT_RETRY_BUDGET_MS) {
         return { kind: "infra", description: `gate server unreachable: ${errorText(err)}` };
       }
@@ -203,15 +219,24 @@ async function runOnServer(
       const res = await port.fetch("http://container/result", { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       if (res.status === 200) return { kind: "result", result: (await res.json()) as LegResult };
       // 202: still running. Any other status is retried like a thrown poll.
-    } catch {
+    } catch (err) {
       // A transport loss reads R2 for the leg's own result (#1122). Otherwise the
       // poll is retried; only the leg deadline ends the leg.
       const stored = await storedLegResult(readResult, req.resultKey);
       if (stored !== undefined) return { kind: "result", result: stored };
+      // The host lost capacity mid-leg: fail fast rather than poll a saturated host.
+      if (isNoInstance(err)) return { kind: "infra", description: NO_INSTANCE_DESCRIPTION };
     }
   }
 }
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Whether an error is the account-at-capacity refusal, not a leg or host
+ *  defect. Retrying a saturated host only adds the failure's 240 s retry budget
+ *  on top; fail fast and let the step's exponential backoff shed the load. */
+function isNoInstance(err: unknown): boolean {
+  return NO_INSTANCE_RE.test(errorText(err));
 }

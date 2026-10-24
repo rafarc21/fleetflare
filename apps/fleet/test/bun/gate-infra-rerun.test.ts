@@ -49,6 +49,7 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     // #1284: combineCauses cuts the deadline cause's "a result" tail, so the
     // classifier matches the prefix that survives truncation.
     "lint exceeded 8 min without …",
+    "lint: gate capacity: no container instance available",
     "lint: no progress past its deadline after 35 min",
     "lint: HTTP 503 after 0 min",
     "lint: Execution timed out after 30 min",

@@ -100,9 +100,9 @@ let realFetch: typeof globalThis.fetch;
 let compareCalls = 0;
 let compareThrows2nd = false;
 // #1203: the title getPullRequest serves is call-count driven, so a test can
-// leave it clean through resolve-pr (calls 1-2) and flip it to a closing
-// keyword only at the recheck (call 3), which re-reads the PR after the
-// initial precheck passed.
+// leave it clean through resolve-pr (call 1) and flip it to a closing keyword
+// only at the recheck (call 2), which re-reads the PR after the initial
+// precheck passed (#1276 dropped resolve-pr's second /pulls GET).
 let pullsCalls = 0;
 // The compare's commit message, so a test can hold the precheck clean (the
 // default "Fix #9" fails it before the recheck could ever run).
@@ -120,7 +120,7 @@ let openPullsThrowsFirst = false;
 let openPullsAlwaysThrows = false;
 let openPullsTruncated = false;
 // #1214: the /pulls/<n> title mock flips to a closing keyword at the recheck
-// (call 3) by default (#1203). A guard test keeps the title clean so the run
+// (call 2) by default (#1203). A guard test keeps the title clean so the run
 // reaches the verdict guard instead of failing the success recheck.
 let titleFlipsOnRecheck = true;
 // #1226: gate/verdict's current landed state, served back by the combined
@@ -145,17 +145,16 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   recorded.push({ method, url, body: init?.body === undefined ? undefined : JSON.parse(init.body as string) });
 
   if (method === "GET" && /\/pulls\/\d+$/.test(url)) {
-    // getPullRequest + getPullRequestHeadSha: same body serves both (head.sha
-    // is read only by the latter; getPullRequest ignores it). The title is
-    // clean through resolve-pr's two reads (calls 1-2) and flips to a closing
-    // keyword at the recheck's re-read (call 3), so a title edited between the
-    // initial precheck and the recheck goes red.
+    // #1276: one getPullRequest GET serves resolve-pr (head.sha and title ride
+    // the same body). The title is clean through resolve-pr's one read (call 1)
+    // and flips to a closing keyword at the recheck's re-read (call 2), so a
+    // title edited between the initial precheck and the recheck goes red.
     pullsCalls++;
     return Promise.resolve(json({
       number: PR, merged: false, merge_commit_sha: null, state: "open",
       base: { ref: "main", repo: { full_name: REPO, private: false } },
       head: { ref: "feature", sha: HEAD },
-      title: titleFlipsOnRecheck && pullsCalls >= 3 ? "Fix #2" : "Docs update", body: "Readme tweak",
+      title: titleFlipsOnRecheck && pullsCalls >= 2 ? "Fix #2" : "Docs update", body: "Readme tweak",
     }));
   }
   if (method === "GET" && /\/pulls\?state=open/.test(url)) {

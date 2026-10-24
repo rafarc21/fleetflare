@@ -15,7 +15,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listOpenPulls, listRepoTree,
+  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, listOpenPulls, listRepoTree,
 } from "../github/api";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
@@ -100,7 +100,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     const resolved = await step.do("resolve-pr", async () => {
       const token = await mintToken(repo);
       const pull = await getPullRequest(token, repo, pr);
-      const headSha = await getPullRequestHeadSha(token, repo, pr);
+      // #1276: the head sha rides on getPullRequest's own GET — one /pulls call
+      // instead of two (getPullRequestHeadSha hit the same endpoint). A missing
+      // sha keeps getPullRequestHeadSha's old throw contract: never gate on a
+      // sha we did not read.
+      const headSha = pull.headSha;
+      if (headSha === "") throw new Error(`read pull ${repo}#${pr} head failed: no head sha`);
       // The PR's own base branch, not the default branch: a PR into a
       // non-default branch must be gated against that branch.
       const baseSha = await getBranchSha(token, repo, pull.baseRef);

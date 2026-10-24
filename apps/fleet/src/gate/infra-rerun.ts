@@ -12,8 +12,13 @@ const INFRA_CAUSE = new RegExp([
   "Network connection lost",
   "gate container (did not start|failed|exited)",
   "gate server (unreachable|HTTP \\d+)",
+// #1278 ask 1: account at capacity, the no-instance fail-fast outcome. Kept
+  // infra-class so a saturated fleet's legs earn the one auto-rerun, never a
+  // false red on healthy code.
+  "gate capacity: no container instance",
   // #1284: combineCauses may cut the "a result" tail of the deadline cause
-  // ("exceeded 8 min without …"), so match the part that always survives.
+  // ("exceeded 8 min without …"), so match the part that always survives (a
+  // superset of the old "… without a result").
   "exceeded \\d+ min without",
   "no progress past its deadline",
   ": HTTP 503\\b",

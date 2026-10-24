@@ -186,6 +186,18 @@ describe("resolveWorkRepo — a requested repo is verified, never trusted", () =
     expect(res.status).toBe(503);
   });
 
+  it("429s with the reset time when the provider is rate limited (#1276)", async () => {
+    const res = await resolveWorkRepo({
+      reachRepo: async (): Promise<RepoReach> => ({ reachable: false, rateLimited: true, resetInMs: 90_000 }),
+    }, {
+      requested: "acme-org/beta", defaultSlug: DEFAULT_SLUG, rows: [],
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(429);
+    expect(res.message).toContain("reset in ~90s");
+  });
+
   it("400s a malformed repo before any network call happens", async () => {
     const res = await resolveWorkRepo(deps(new Error("must not be called")), {
       requested: "not-a-slug", defaultSlug: DEFAULT_SLUG, rows: [],

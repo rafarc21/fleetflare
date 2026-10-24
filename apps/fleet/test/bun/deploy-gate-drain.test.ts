@@ -56,6 +56,43 @@ describe("deploy.sh: drain running gate runs before a Worker deploy (#1232)", ()
     expect(r.wrangler.some((l) => l.includes("'gate_drain','1'"))).toBe(true);
   });
 
+  test("the refusal names the run id still blocking the drain (#1275)", () => {
+    writeConfig(gateConfig());
+    stub("gate-instances.json", [{ id: "gate-x", status: "running" }]);
+    const r = deploy([], 0, { GATE_DRAIN_CAP_MS: "150", GATE_DRAIN_POLL_MS: "10" });
+    expect(r.code).toBe(1);
+    // gate-drain-wait.ts's own refusal line names the blocking run, so the
+    // operator sees WHAT blocks, not just "still running".
+    expect(r.err).toContain("gate-drain-wait: gate instances still running after the drain cap: gate-x");
+  });
+
+  test("a long drain re-stamps the flag's ts so it never reads stale past the 20-min TTL (#1275)", () => {
+    writeConfig(gateConfig());
+    stub("gate-instances.json", [{ id: "gate-x", status: "running" }]);
+    // Cap long enough for one re-stamp to fire (RESTAMP_MS 100 < cap 150), so
+    // the flag's ts is refreshed while the drain waits.
+    const r = deploy([], 0, { GATE_DRAIN_CAP_MS: "150", GATE_DRAIN_POLL_MS: "10", GATE_DRAIN_RESTAMP_MS: "100" });
+    expect(r.code).toBe(1);
+    // The heartbeat re-stamp is a third (or later) gate_drain=1 write, after the
+    // initial set — proof the wait kept the flag fresh, not just set-once.
+    const sets = r.wrangler.filter((l) => l.includes("'gate_drain','1'"));
+    expect(sets.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("a failed re-stamp aborts the drain (exit 2) so the flag never goes stale mid-drain (#1275)", () => {
+    writeConfig(gateConfig());
+    stub("gate-instances.json", [{ id: "gate-x", status: "running" }]);
+    const r = deploy([], 0, { GATE_DRAIN_CAP_MS: "150", GATE_DRAIN_POLL_MS: "10", GATE_DRAIN_RESTAMP_MS: "100", STUB_RESTAMP_FAIL: "1" });
+    expect(r.code).toBe(1);
+    // The wait itself refuses on the failed heartbeat, before the cap.
+    expect(r.err).toContain("could not re-stamp the drain flag");
+    // The refusal is the re-stamp's own, NOT the cap's: the drain aborted
+    // early, so the "still running after the drain cap" line never prints.
+    expect(r.err).not.toContain("gate-drain-wait: gate instances still running after the drain cap");
+    // No deploy ran.
+    expect(r.wrangler.some((l) => l === "wrangler deploy -c wrangler.local.jsonc")).toBe(false);
+  });
+
   test("a failed deploy clears the flag on the way out (every exit path clears)", () => {
     writeConfig(gateConfig());
     const r = deploy([], 0, { STUB_DEPLOY_EXIT: "1" });

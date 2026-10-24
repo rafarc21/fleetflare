@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import {
   mintRepoToken, parseRepoAuthMap, reachRepo, repoOwner, repoTokenMinter, resolveRepoAuthKind,
-  tokenEnvName,
+  tokenEnvName, __resetReachCacheForTests,
 } from "../src/github/auth";
 import type { Env } from "../src/env";
 
@@ -94,6 +94,7 @@ beforeEach(() => {
     });
     return route(url);
   }) as typeof globalThis.fetch;
+  __resetReachCacheForTests();
 });
 
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -467,6 +468,55 @@ describe("reachRepo — the App provider, unchanged", () => {
     await reachRepo(mixedEnv(), "acme-org/beta");
     const mint = calls.find((c) => c.url.includes("/access_tokens"))!;
     expect(mint.body).toBeFalsy();
+  });
+});
+
+// #1276 — the App installation's hourly REST quota, and the reachability cache.
+describe("reachRepo — rate limit and the per-owner list cache (#1276)", () => {
+  it("a rate-limited installation list is a third answer (rateLimited), never a throw or a refusal", async () => {
+    const reset = Math.floor(Date.now() / 1000) + 600;
+    route = (url) => url.includes("/access_tokens")
+      ? Response.json({ token: "ghs_installation_token" })
+      : new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+          status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) },
+        });
+    const reach = await reachRepo(appEnv(), "acme-org/beta");
+    expect(reach.rateLimited).toBe(true);
+    if (!reach.rateLimited) return;
+    expect(reach.resetInMs).toBeGreaterThan(0);
+    expect(reach.resetInMs).toBeLessThanOrEqual(600 * 1000);
+  });
+
+  it("a rate-limited token MINT is the same third answer, with the mint's own reset hint", async () => {
+    const reset = Math.floor(Date.now() / 1000) + 600;
+    route = () => new Response(JSON.stringify({ message: "API rate limit exceeded for installation" }), {
+      status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) },
+    });
+    const reach = await reachRepo(appEnv(), "acme-org/beta");
+    expect(reach.rateLimited).toBe(true);
+  });
+
+  it("caches the installation list per owner: a second reach for the same owner lists once", async () => {
+    route = installationList(["acme-org/websites", "acme-org/beta"]);
+    await reachRepo(mixedEnv(), "acme-org/beta");
+    const first = calls.filter((c) => c.url.includes("/installation/repositories")).length;
+    await reachRepo(mixedEnv(), "acme-org/websites");
+    const second = calls.filter((c) => c.url.includes("/installation/repositories")).length;
+    expect(first).toBe(1);
+    expect(second).toBe(1); // the second hit the cache, no re-list
+  });
+
+  it("a repo added to the installation after the list is refused until the TTL expires — the cached list answers", async () => {
+    route = installationList(["acme-org/websites"]);
+    await reachRepo(mixedEnv(), "acme-org/beta"); // not in the list -> refusal
+    // The installation gains acme-org/beta between the two calls. The cached
+    // list still governs until REACH_TTL_MS passes, so this stays a refusal —
+    // proof the second call did NOT re-mint/re-list (a fresh list would have
+    // included beta).
+    const reach = await reachRepo(mixedEnv(), "acme-org/beta");
+    expect(reach.rateLimited).toBeFalsy();
+    expect(reach.reachable).toBe(false);
+    expect(calls.filter((c) => c.url.includes("/installation/repositories")).length).toBe(1);
   });
 });
 

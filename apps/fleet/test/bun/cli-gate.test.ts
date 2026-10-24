@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, spyOn } from "bun:test";
-import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, runGate, formatMs, legLines, gateStartLine, gateQueuedLine, type GateStatusResponse } from "../../cli/gate";
+import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, parseStartResponse, firstLine, runGate, formatMs, legLines, gateStartLine, gateQueuedLine, type GateStatusResponse } from "../../cli/gate";
 
 // #1085 (refs #715): the start line says whether the run was reattached or fresh.
 describe("gateStartLine: reattached to a live run vs a fresh run (#1085)", () => {
@@ -142,6 +142,15 @@ describe("runGate exit codes", () => {
     expect(stub.seen.statusCalls).toBe(0);
   });
 
+  it("start answers a non-JSON HTML 500: 2, prints status + first line, never polls (#1276)", async () => {
+    const stub = stubWorker({
+      start: () => new Response("<html><body>Error</body></html>", { status: 500 }),
+      statuses: [{ state: "success" }],
+    });
+    expect(await runGate(stub.creds, "acme/example", 7, { pollMs: 1 })).toBe(2);
+    expect(stub.seen.statusCalls).toBe(0);
+  });
+
   it("unreachable Worker -> 2", async () => {
     const dead = { ...creds, workerUrl: "http://127.0.0.1:1" };
     expect(await runGate(dead, "acme/example", 7, { pollMs: 1 })).toBe(2);
@@ -179,6 +188,28 @@ describe("parseStatusResponse", () => {
   });
   it("JSON that is not a status object (e.g. null) is an error too", () => {
     expect(parseStatusResponse("null").ok).toBe(false);
+  });
+});
+
+describe("parseStartResponse (#1276)", () => {
+  it("parses a start body with an error field", () => {
+    const parsed = parseStartResponse(JSON.stringify({ error: "gate start unavailable: boom" }));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.body.error).toBe("gate start unavailable: boom");
+  });
+  it("a non-JSON body (Cloudflare HTML 500) is ok:false, never a throw", () => {
+    const parsed = parseStartResponse("<html><body>Error</body></html>");
+    expect(parsed.ok).toBe(false);
+  });
+  it("JSON null is ok:false too", () => {
+    expect(parseStartResponse("null").ok).toBe(false);
+  });
+});
+
+describe("firstLine (#1276)", () => {
+  it("returns the first trimmed line, cut at 200 chars", () => {
+    expect(firstLine("\n\n  Error\nrest")).toBe("Error");
+    expect(firstLine("x".repeat(500))).toBe("x".repeat(200));
   });
 });
 

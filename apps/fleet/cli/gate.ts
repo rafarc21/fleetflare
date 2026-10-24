@@ -91,18 +91,23 @@ export async function cmdGateStart(creds: Credentials, pr: number): Promise<void
   } catch (err) {
     throw new Error(`fleet gate-start: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
-  const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; pending?: boolean; error?: string };
-  if (!res.ok || body.error) {
-    console.error(`gate-start failed: ${body.error ?? res.status}`);
+  const text = await res.text();
+  const parsed = parseStartResponse(text);
+  if (!res.ok || !parsed.ok || parsed.body.error) {
+    // #1276: a non-JSON reply (Cloudflare's HTML 500, e.g. a rate-limited head
+    // read) must print the status and the first body line, never crash on
+    // res.json(). The JSON path prints the route's own error text.
+    const detail = parsed.ok ? (parsed.body.error ?? res.status) : `HTTP ${res.status}: ${firstLine(text)}`;
+    console.error(`gate-start failed: ${detail}`);
     process.exitCode = 2;
     return;
   }
-  if (body.pending === true) {
+  if (parsed.body.pending === true) {
     console.error(gateQueuedLine(pr));
     process.exitCode = 2; // match runGate: a queued start is not a started run
     return;
   }
-  console.log(gateStartLine({ runId: body.runId ?? "", reused: body.reused }, pr));
+  console.log(gateStartLine({ runId: parsed.body.runId ?? "", reused: parsed.body.reused }, pr));
 }
 
 /** Pure — extracted so the exit-code mapping is unit-testable without a
@@ -137,6 +142,27 @@ export function parseStatusResponse(text: string): ParsedStatus {
     return { ok: true, status: v };
   } catch {
     return { ok: false, body: text.slice(0, 200) };
+  }
+}
+
+/** The start-reply body shape, plus an `error` the route may carry. */
+export type GateStartBody = {
+  started?: boolean; runId?: string; reused?: boolean; pending?: boolean; error?: string;
+};
+
+/** Pure parse of a /studio/gate/start reply. A non-JSON body is `ok:false`
+ *  (the CLI prints the status + first body line), never a throw. */
+export type ParsedStart =
+  | { ok: true; body: GateStartBody }
+  | { ok: false };
+
+export function parseStartResponse(text: string): ParsedStart {
+  try {
+    const v = JSON.parse(text) as GateStartBody;
+    if (v === null || typeof v !== "object") return { ok: false };
+    return { ok: true, body: v };
+  } catch {
+    return { ok: false };
   }
 }
 
@@ -233,21 +259,23 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
       method: "POST", headers: { ...accessHeaders(creds), "content-type": "application/json" },
       body: JSON.stringify({ repo, pr, ...(opts.failedOnly ? { failedOnly: true } : {}) }),
     });
-    const body = await res.json() as { started?: boolean; runId?: string; reused?: boolean; pending?: boolean; error?: string };
-    if (!res.ok || body.error) {
-      console.error(`gate-start failed: ${body.error ?? res.status}`);
+    const text = await res.text();
+    const parsed = parseStartResponse(text);
+    if (!res.ok || !parsed.ok || parsed.body.error) {
+      const detail = parsed.ok ? (parsed.body.error ?? res.status) : `HTTP ${res.status}: ${firstLine(text)}`;
+      console.error(`gate-start failed: ${detail}`);
       return 2;
     }
-    if (body.pending === true) {
+    if (parsed.body.pending === true) {
       console.error(gateQueuedLine(pr));
       return 2;
     }
-    if (typeof body.runId !== "string") {
+    if (typeof parsed.body.runId !== "string") {
       console.error(`gate-start failed: ${res.status}`);
       return 2;
     }
-    runId = body.runId;
-    console.log(gateStartLine({ runId, reused: body.reused }, pr));
+    runId = parsed.body.runId;
+    console.log(gateStartLine({ runId, reused: parsed.body.reused }, pr));
   } catch (err) {
     console.error(`fleet gate run: could not reach ${creds.workerUrl}: ${errText(err)}`);
     return 2;
@@ -306,5 +334,58 @@ export async function cmdGateProtect(creds: Credentials, repo: string): Promise<
   console.log(`gate protect ${repo}: ${body.branch}`);
   console.log(`  before: ${(body.before ?? []).join(", ") || "(none)"}`);
   console.log(`  after:  ${(body.after ?? []).join(", ")}`);
+}
+
+/** The first trimmed line of an error body, cut short — enough to show "what
+ *  failed", never the whole HTML page. */
+export function firstLine(text: string): string {
+  const line = text.trim().split(/\r?\n/, 1)[0] ?? "";
+  return line.slice(0, 200);
+}
+
+/** #1277: `fleet gate log <pr> <leg> [--run <runId>] [--full]`. Reads the leg's
+ *  final R2 output via the Worker (no Cloudflare creds needed in the CLI) and
+ *  prints the failing-test lines first, or the whole kept tail with `--full`. */
+export async function cmdGateLog(creds: Credentials, pr: number, leg: string, opts: { runId?: string; full?: boolean } = {}): Promise<void> {
+  const repo = await gatedRepo();
+  if (!repo) return;
+  const url = new URL("/studio/gate/log", creds.workerUrl);
+  url.searchParams.set("repo", repo);
+  url.searchParams.set("pr", String(pr));
+  url.searchParams.set("leg", leg);
+  if (opts.runId !== undefined) url.searchParams.set("run", opts.runId);
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: accessHeaders(creds) });
+  } catch (err) {
+    throw new Error(`fleet gate log: could not reach ${creds.workerUrl}: ${errText(err)}`);
+  }
+  const text = await res.text();
+  let body: { error?: string; state?: string; summary?: string; failing?: string[]; stdout?: string; stderr?: string; runId?: string; key?: string };
+  try {
+    body = JSON.parse(text) as typeof body;
+  } catch {
+    console.error(`fleet gate log: HTTP ${res.status}: ${firstLine(text)}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (!res.ok || body.error) {
+    console.error(`fleet gate log: ${body.error ?? res.status}`);
+    process.exitCode = 2;
+    return;
+  }
+  console.log(`gate log ${repo}#${pr} ${leg}: ${body.state ?? "?"}${body.summary ? ` — ${body.summary}` : ""}${body.runId ? ` (run ${body.runId})` : ""}`);
+  if (body.key) console.log(`  ${body.key}`);
+  if (opts.full) {
+    if (body.stdout) console.log(body.stdout);
+    if (body.stderr) console.error(body.stderr);
+    return;
+  }
+  const failing = body.failing ?? [];
+  if (failing.length > 0) {
+    for (const line of failing) console.log(line);
+  } else {
+    console.log("(no failing-test lines in the kept output tail)");
+  }
 }
 

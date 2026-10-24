@@ -494,6 +494,10 @@ cd "$FLEET_DIR"
 # nothing to drain). d1 migrations, versions list, whoami etc. never drain.
 # --skip-gate-drain (consumed above, never passed to wrangler) skips it loudly;
 # it is a separate gate from --allow-unrescued and does not ride on it.
+# #1275: the drain cap is derived from one run's legitimate wall clock (see
+# gate-drain-wait.ts), not a fixed 15 min, so a long but healthy run is allowed
+# to finish. On refusal, gate-drain-wait.ts names the run ids (with PR #) still
+# blocking, so the operator sees WHAT blocks rather than a bare count.
 GATE_DRAIN=0
 GATE_DRAIN_FLAG_SET=0
 # Match the binding on a comment-stripped copy with a bash regex, never a

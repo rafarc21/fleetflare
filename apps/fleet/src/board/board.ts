@@ -32,7 +32,7 @@ import { extractPaths, findPathOverlaps, formatPathOverlapWarnings } from "./pat
 import { parseRepoSlug, type WorkRepoDeps } from "../studio/repo";
 // Type-only, and from reach.ts not auth.ts — same reason src/studio/repo.ts
 // does: this module touches no Env and no binding. See github/reach.ts.
-import type { RepoReach } from "../github/reach";
+import { rateLimitMessage, type RepoReach } from "../github/reach";
 import { parseStudioId } from "../studio/ids";
 
 /**
@@ -1104,6 +1104,11 @@ export async function resolveBoardRepo(
     // logged server-side only, same posture resolveWorkRepo takes.
     console.error(`board: reachability unavailable for "${slug}"`, err);
     return { ok: false, status: 503, message: "repo reachability unavailable" };
+  }
+  if (reach.rateLimited) {
+    // #1276: a rate limit is the operator's signal to wait, not an outage —
+    // 429 with the reset time, so the caller sees "retry in Ns" not a 503.
+    return { ok: false, status: 429, message: rateLimitMessage(reach.resetInMs) };
   }
   if (!reach.reachable) {
     // The remedy is the answering provider's own — "install the app" or

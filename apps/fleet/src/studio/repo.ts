@@ -33,7 +33,7 @@ import type { StudioStatus } from "./types";
 // Type-only, and from reach.ts rather than auth.ts on purpose: this module
 // imports no binding and touches no Env, and cli/fleet.ts type-checks against
 // it under a tsconfig with no workers-types. See github/reach.ts's header.
-import type { RepoReach } from "../github/reach";
+import { rateLimitMessage, type RepoReach } from "../github/reach";
 
 // GitHub's own repo/owner charset. Deliberately excludes every path and
 // shell metacharacter: this value reaches a `git clone https://github.com/
@@ -366,6 +366,12 @@ export async function resolveWorkRepo(
       // spawn.ts's org-unavailable branch takes.
       console.error(`repo: reachability unavailable for "${slug}"`, err);
       return { ok: false, status: 503, message: "repo reachability unavailable" };
+    }
+    if (reach.rateLimited) {
+      // #1276: 429 + reset time, not an outage 503 — the operator sees the
+      // limit and its reset, never a "repo unreachable" that would read as a
+      // permission problem to go and "fix".
+      return { ok: false, status: 429, message: rateLimitMessage(reach.resetInMs) };
     }
     if (!reach.reachable) {
       // The remedy comes from the provider that actually answered, so the
