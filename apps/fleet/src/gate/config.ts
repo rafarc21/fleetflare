@@ -57,6 +57,9 @@ export interface GateLeg {
   cmd: string;
   /** The leg's own deadline in minutes, when the block sets one. Absent means the default. */
   timeoutMin?: number;
+  /** #1274: the container image THIS leg runs on, overriding the block's image.
+   *  Absent means the block's image (or the default). */
+  image?: string;
 }
 
 export interface GateConfig {
@@ -102,7 +105,13 @@ export function parseLegs(raw: unknown): GateLeg[] | null {
       const e = entry as Record<string, unknown>;
       if (typeof e.name !== "string" || typeof e.cmd !== "string" || e.cmd === "") return null;
       if (e.timeoutMin !== undefined && (typeof e.timeoutMin !== "number" || !Number.isFinite(e.timeoutMin))) return null;
-      leg = { name: e.name, cmd: e.cmd, ...(e.timeoutMin === undefined ? {} : { timeoutMin: legTimeoutMin(e.timeoutMin) }) };
+      // #1274: an optional per-leg image. Fail-closed on any key outside GATE_IMAGES.
+      if (e.image !== undefined && (typeof e.image !== "string" || !GATE_IMAGES.has(e.image))) return null;
+      leg = {
+        name: e.name, cmd: e.cmd,
+        ...(e.timeoutMin === undefined ? {} : { timeoutMin: legTimeoutMin(e.timeoutMin) }),
+        ...(e.image === undefined ? {} : { image: e.image }),
+      };
     } else {
       return null;
     }

@@ -5,7 +5,7 @@ import {
   bunLegs, carriedGreenByLeg, normalizeLegResult, outcomeLegs, planFingerprint, planLegs, planUnionLegs, vitestLegs,
   type CarryGreen,
 } from "../../src/gate/fanout";
-import { MAX_LEGS_PER_PR } from "../../src/gate/config";
+import { DEFAULT_GATE_IMAGE, MAX_LEGS_PER_PR } from "../../src/gate/config";
 import { resolveOutboundTarget } from "../../src/gate/outbound-handler";
 
 const LEGS = [
@@ -27,6 +27,22 @@ const BASE = {
 
 const BUN_SHARDS = [["test/bun/alpha.test.ts", "test/bun/beta.test.ts"], ["test/bun/gamma.test.ts"]];
 
+describe("planLegs: a per-leg image overrides the block image (#1274)", () => {
+  const legs = [
+    { name: "rust", cmd: "scripts/cargo-test-gate.sh", image: "desktop" as const },
+    { name: "lint", cmd: "bun run lint" },
+  ];
+  it("a leg with image desktop runs on desktop; its sibling carries no override (the block default applies at run time)", () => {
+    const planned = planLegs({ ...BASE, legs });
+    expect(planned.find((l) => l.leg === "rust")?.image).toBe("desktop");
+    expect(planned.find((l) => l.leg === "lint")?.image).toBeUndefined();
+  });
+  it("a per-leg image overrides an explicit block image", () => {
+    const planned = planLegs({ ...BASE, legs, image: "gate" });
+    expect(planned.find((l) => l.leg === "rust")?.image).toBe("desktop");
+    expect(planned.find((l) => l.leg === "lint")?.image).toBe("gate");
+  });
+});
 
 describe("vitestLegs", () => {
   it("substitutes {i} and {n} once per shard, 1-based", () => {

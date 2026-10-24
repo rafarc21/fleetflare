@@ -152,12 +152,15 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   const keyFor = (leg: string) => `gate/${owner}/${repo}/runs/${pr}/${runId}/shard-${leg}.json`;
   const fixedLegs = 1 + legs.length + bunShards.length; // merge-tree + block legs + bun shards
   const shards = Math.max(1, Math.min(vitestShards, MAX_LEGS_PER_PR - fixedLegs));
-  const leg = (base: string, commit: string, installCmd: string, legCmd: string, keys: string[], timeoutMin?: number): PlannedLeg => {
+  // #1274: a per-leg image overrides the block image for that leg alone; lanes
+  // (bun/vitest) and merge-tree always take the block's image.
+  const leg = (base: string, commit: string, installCmd: string, legCmd: string, keys: string[], timeoutMin?: number, legImage?: string): PlannedLeg => {
     const name = legName(base);
+    const imageForLeg = legImage ?? image;
     return {
       leg: name, commit, installCmd, legCmd, resultKey: keyFor(name), baselineKeys: keys,
       ...(timeoutMin === undefined ? {} : { timeoutMin }),
-      ...(image === undefined ? {} : { image }),
+      ...(imageForLeg === undefined ? {} : { image: imageForLeg }),
     };
   };
   // Every leg commits to the base..head range: the container resolves the merge
@@ -166,7 +169,7 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   const range = `${baseSha}..${headSha}`;
   return [
     leg("merge-tree", range, "", "", []),
-    ...legs.map((l) => leg(l.name, range, install, l.cmd, baselineKeys, l.timeoutMin)),
+    ...legs.map((l) => leg(l.name, range, install, l.cmd, baselineKeys, l.timeoutMin, l.image)),
     ...bunLegs(bunShards, bunLaneRoot).map((b) => leg(b.leg, range, install, b.legCmd, baselineKeys)),
     ...(vitestCmd === undefined ? [] : vitestLegs(vitestCmd, shards))
       .map((v) => leg(v.leg, range, install, v.legCmd, baselineKeys)),
