@@ -294,6 +294,22 @@ export function sessionSupersededKey(id: string, atIso: string): string {
 }
 
 /**
+ * Issue #1282: R2 key for a studio's `.context/` bundle — the gitignored
+ * evidence (screenshots, working notes, operator instructions) that lives
+ * inside the checkout's `.context/` and therefore died with the container on
+ * every park/destroy/recycle/replace. Shipped beside the session snapshot on
+ * the WIP-sync tick and restored on a replacement, so a lead's context
+ * survives a container swap the way its session already does.
+ *
+ * A FIXED key (no `latest`/daily split), deliberately: `.context/` is small
+ * and best-effort — the newest bundle always wins, and a displaced/older copy
+ * is not worth the keeper machinery the session snapshot carries.
+ */
+export function contextBundleKey(id: string): string {
+  return `sessions/${id}/context.tar.gz`;
+}
+
+/**
  * Per-studio transcript shipping cursor, persisted in DO storage between
  * `shipTranscript` ticks.
  *

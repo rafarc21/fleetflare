@@ -2642,3 +2642,49 @@ export function wipSyncCmd(
     `fi`
   );
 }
+
+/**
+ * Issue #1282 — the `.context/` bundle the WIP-sync tick ships to R2 beside
+ * the session snapshot, so a lead's gitignored evidence survives a container
+ * replace the way its session already does. Tars `/workspace/<repo>/.context`
+ * (the checkout's own gitignored dir — screenshots, working notes, operator
+ * instructions), verifies it, and prints its size in bytes. The tar lands in
+ * a fixed staging path (`CONTEXT_TAR_PATH`) the caller reads back with
+ * `contextReadCmd`, then clears with `contextCleanCmd` — the same three-
+ * command split session-sync uses for its own tar.
+ *
+ * `CONTEXT_EMPTY` is printed (exit 0) when `.context` is absent or empty: a
+ * studio with no evidence to ship is the overwhelmingly common case, and the
+ * caller treats it as "nothing to upload", never a failure. `mkdir` before
+ * tar is deliberately NOT done — `.context` is created by the lead or the
+ * operator, never by this command; an absent dir means nothing to ship.
+ *
+ * `root` defaults to `/workspace`, `repo` is the parsed work-repo slug — the
+ * two join to the same `/workspace/<repo>` guardedCloneCmd clones into.
+ */
+export const CONTEXT_EMPTY = "CONTEXT_EMPTY";
+export const CONTEXT_TAR_PATH = "/tmp/fleet-context.tar.gz";
+
+export function contextBundleCmd(
+  repo: string, root = "/workspace", contextName = ".context",
+): string {
+  const dir = `${root}/${repo}`;
+  const ctx = `${dir}/${contextName}`;
+  return (
+    `if [ ! -d "${ctx}" ] || [ -z "$(find "${ctx}" -mindepth 1 -print -quit 2>/dev/null)" ]; then ` +
+    `echo "${CONTEXT_EMPTY}"; else ` +
+    `rm -f ${CONTEXT_TAR_PATH} && ( cd "${dir}" && tar -czf ${CONTEXT_TAR_PATH} "${contextName}" && gzip -t ${CONTEXT_TAR_PATH} ) && ` +
+    `stat -c %s ${CONTEXT_TAR_PATH}; fi`
+  );
+}
+
+/** Reads the staged `.context` bundle back out as base64 (session-sync.ts's
+ *  `singleReadCmd` shape, over the context staging path). */
+export function contextReadCmd(): string {
+  return `base64 ${CONTEXT_TAR_PATH}`;
+}
+
+/** Clears the staged `.context` bundle after a ship (or a Worker-side failure). */
+export function contextCleanCmd(): string {
+  return `rm -f ${CONTEXT_TAR_PATH}`;
+}
