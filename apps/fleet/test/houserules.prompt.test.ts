@@ -379,6 +379,13 @@ describe("HOUSE_RULES — one branch per studio (#269)", () => {
   });
 });
 
+describe("HOUSE_RULES — survival re-brief file (#1282)", () => {
+  it("names the survival-brief.md path so the lead reads a fallback-delivered brief", () => {
+    expect(HOUSE_RULES).toContain("/workspace/.fleet/survival-brief.md");
+    expect(HOUSE_RULES).toMatch(/read that file in full before[\s\S]*?continuing/i);
+  });
+});
+
 describe("appendHouseRules", () => {
   it("appends, never replaces — the prompt survives byte for byte as the prefix", () => {
     expect(appendHouseRules("lead prompt")).toBe(`lead prompt\n\n${HOUSE_RULES}\n`);
