@@ -240,6 +240,54 @@ describe("a leg reads the run's snapshot instead of cloning (#1080)", () => {
   });
 });
 
+describe("a large bundle GET streams to disk and never hangs the leg (#1284)", () => {
+  /** A fetch that serves the bundle as a ReadableStream, the shape the Worker's
+   *  outbound handler really returns for an R2 object (never a buffered body). */
+  function streamedFetch(chunks: Uint8Array[], stallMs?: number) {
+    const fetchFn: FetchFn = async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(ctl) {
+          for (const chunk of chunks) ctl.enqueue(chunk);
+          if (stallMs === undefined) ctl.close();
+          // else: never close, so the reader sees silence forever — a dead stream.
+        },
+      });
+      return new Response(body, { status: 200 });
+    };
+    return fetchFn;
+  }
+
+  it("writes a streamed body to the bundle path through the reader, with no clone", async () => {
+    const bundlePath = join(scratch(), "b.bundle");
+    const fetchFn = streamedFetch([new Uint8Array([1, 2]), new Uint8Array([3])]);
+    const world = fakeExec();
+    const out = await runGate(LEG, { exec: world.exec, fetchFn, workdir: join(scratch(), "repo"), bundlePath });
+    expect(out.state).toBe("success");
+    expect(cloneCalls(world.calls)).toHaveLength(0);
+    expect(readFileSync(bundlePath)).toEqual(Buffer.from([1, 2, 3]));
+  });
+
+  it("a stalled bundle read falls back to the clone instead of hanging to the deadline", async () => {
+    const bundlePath = join(scratch(), "b.bundle");
+    const fetchFn = streamedFetch([new Uint8Array([1])], /* stallMs */ 60_000);
+    const world = fakeExec();
+    const out = await runGate(LEG, { exec: world.exec, fetchFn, workdir: join(scratch(), "repo"), bundlePath, bundleReadStallMs: 10 });
+    expect(out.state).toBe("success");
+    expect(cloneCalls(world.calls)).toHaveLength(1);
+    expect(existsSync(bundlePath)).toBe(false);
+  });
+
+  it("a bundle body over the cap is removed and the leg clones, never buffered whole", async () => {
+    const bundlePath = join(scratch(), "b.bundle");
+    const fetchFn = streamedFetch([new Uint8Array(4), new Uint8Array(4)]);
+    const world = fakeExec();
+    const out = await runGate(LEG, { exec: world.exec, fetchFn, workdir: join(scratch(), "repo"), bundlePath, maxBundleBytes: 3 });
+    expect(out.state).toBe("success");
+    expect(cloneCalls(world.calls)).toHaveLength(1);
+    expect(existsSync(bundlePath)).toBe(false);
+  });
+});
+
 describe("the bundle leg snapshots the run and uploads it once (#1080 HIGH 1)", () => {
   it("clones nothing: it fetches base, head, merge base and the base tip shallow, and bundles only those refs", async () => {
     const r2 = fakeR2();

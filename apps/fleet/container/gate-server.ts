@@ -25,6 +25,11 @@ const BUNDLE_LEG = "bundle";
  *  leg uploads nothing and every leg clones. Provisional until measured on a large repo. */
 export const BUNDLE_MAX_BYTES = 256 * 1024 * 1024;
 
+/** #1284: a bundle GET body with no chunk for this long is a stall, not a slow
+ *  download. 198 MiB at 1-3 s per GET has made thousands of chunks by then, so
+ *  a quiet stream is dead — the leg clones instead of hanging to its deadline. */
+export const BUNDLE_READ_STALL_MS = 60_000;
+
 /** #715: a private repo clones through the Worker git proxy (outbound-handler.ts),
  *  which holds the read grant. A public repo clones anonymously from github.com.
  *  Neither URL carries a credential. */
@@ -85,6 +90,9 @@ export interface GateDeps {
   bundlePath?: string;
   /** #1080 HIGH 1: the snapshot cap. Tests lower it; live it is BUNDLE_MAX_BYTES. */
   maxBundleBytes?: number;
+  /** #1284: how long a bundle read may produce no chunk before it counts as stalled.
+   *  Tests shorten it; live it is BUNDLE_READ_STALL_MS. */
+  bundleReadStallMs?: number;
 }
 
 /** Live: concurrent legs got HTTP 429 from GitHub on clone. A rate limit or a
@@ -204,8 +212,10 @@ async function cloneFromBundle(bundleKey: string, shas: string[], bundlePath: st
   try {
     const res = await deps.fetchFn(`${R2_INTERNAL_BASE}/${bundleKey}`);
     if (!res.ok) return false;
-    // Streamed to disk, never read whole into memory.
-    await Bun.write(bundlePath, res);
+    // Streamed to disk, never read whole into memory. Bun.write(path, res) buffers a
+    // streamed body and hangs on a large bundle (#1284), so the body is pulled through
+    // an explicit reader into a file sink: constant memory, and a stall ends it early.
+    await streamBodyToFile(res, bundlePath, deps.maxBundleBytes ?? BUNDLE_MAX_BYTES, deps.bundleReadStallMs ?? BUNDLE_READ_STALL_MS);
   } catch (err) {
     console.error("gate-server: bundle read failed", err instanceof Error ? err.message : String(err));
     return false;
@@ -233,6 +243,43 @@ async function cloneFromBundle(bundleKey: string, shas: string[], bundlePath: st
   console.error("gate-server: bundle unusable, cloning", firstLine(fetched.stderr));
   await run("rm", ["-rf", workdir], { cwd: "/workspace" });
   return false;
+}
+
+/** #1284: writes a bundle response to disk a chunk at a time, never buffering the
+ *  whole body. Bun.write(path, res) buffers a streamed body and hangs on a large
+ *  bundle; an explicit reader into a file sink stays flat-memory. A stream that
+ *  produces no chunk for `stallMs` (or crosses `cap` bytes) is a dead or runaway
+ *  transfer: the partial file is removed and the read throws, so the caller clones. */
+async function streamBodyToFile(res: Response, path: string, cap: number, stallMs: number): Promise<void> {
+  const reader = res.body?.getReader();
+  if (reader === undefined) throw new Error("bundle body empty");
+  const sink = Bun.file(path).writer();
+  let total = 0;
+  type ReadResult = Awaited<ReturnType<typeof reader.read>>;
+  const readWithStall = (): Promise<ReadResult> => new Promise<ReadResult>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`no bundle chunk for ${stallMs} ms`)), stallMs);
+    reader.read().then(
+      (r: ReadResult) => { clearTimeout(timer); resolve(r); },
+      (e: unknown) => { clearTimeout(timer); reject(e); },
+    );
+  });
+  try {
+    for (;;) {
+      const { done, value } = await readWithStall();
+      if (done) break;
+      total += value.byteLength;
+      if (total > cap) throw new Error(`bundle ${total} bytes over the ${cap} cap`);
+      await sink.write(value);
+    }
+    await sink.end();
+  } catch (err) {
+    // The sink must be closed before the partial file is removed, and the removal
+    // must not turn a genuine read error into a success. Bun's sink.end() is not
+    // a Promise here, so it is awaited behind a plain try, not chained.
+    try { await sink.end(); } catch { /* already closed or never opened */ }
+    try { const f = Bun.file(path); if (await f.exists()) await f.delete(); } catch { /* removal is best-effort */ }
+    throw err;
+  }
 }
 
 async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
