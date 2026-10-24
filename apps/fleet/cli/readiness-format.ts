@@ -781,8 +781,15 @@ export function formatSurvivalBriefs(studios: StudioStatus[]): string[] {
     const p = s.observed?.survivalBriefPending;
     if (!p) continue;
     const why = p.reason === "" ? "no reason recorded" : p.reason;
+    // Issue #1282: when the owed brief carried a WIP ref and delivery gave up,
+    // say so in the fleet ls line itself — "WIP ref not delivered" is the
+    // exact marker a maestro skimming `fleet ls` needs to go recover the work
+    // by hand, rather than only a Worker-tail error line nobody reads.
+    const wipRefUndelivered = (p.wipSyncedBootStamp != null || p.wipBootStamp != null)
+      ? " — WIP ref not delivered"
+      : "";
     lines.push(p.gaveUpAt
-      ? `SURVIVAL ${s.id}: re-brief undelivered since ${p.since}, gave up ${p.gaveUpAt} after ${p.attempts} attempts — ${why}`
+      ? `SURVIVAL ${s.id}: re-brief undelivered since ${p.since}, gave up ${p.gaveUpAt} after ${p.attempts} attempts — ${why}${wipRefUndelivered}`
       : `SURVIVAL ${s.id}: re-brief pending since ${p.since}, ${p.attempts} attempts so far — ${why}`);
   }
   return lines;

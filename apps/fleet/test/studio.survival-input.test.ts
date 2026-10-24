@@ -142,7 +142,7 @@ describe("paneBusy — two independent busy signals", () => {
     expect(midTurnRow(a)).toBe(false);
     expect(midTurnRow(b)).toBe(false);
     expect(paneBusy(captured(a, b))).toEqual({
-      busy: true, reason: `pane repainted within ${PANE_QUIESCE_SECONDS}s — a turn is in flight`,
+      busy: true, midTurn: true, reason: `pane repainted within ${PANE_QUIESCE_SECONDS}s — a turn is in flight`,
     });
   });
 
@@ -164,7 +164,7 @@ describe("paneBusy — two independent busy signals", () => {
     expect(stdout.split(`${PANE_CAPTURE_MARKER}\n`).map((p) => p.replace(/\s+$/, ""))[0])
       .toEqual(stdout.split(`${PANE_CAPTURE_MARKER}\n`).map((p) => p.replace(/\s+$/, ""))[1]);
     expect(paneBusy(stdout)).toEqual({
-      busy: true, reason: "pane shows an `esc to interrupt` row — a turn is in flight",
+      busy: true, midTurn: true, reason: "pane shows an `esc to interrupt` row — a turn is in flight",
     });
   });
 
@@ -184,10 +184,10 @@ describe("paneBusy — two independent busy signals", () => {
     // free. Biasing this to idle would let a broken probe type into a working
     // lead, which is the one outcome this gate must never produce.
     expect(paneBusy("just one observation, no marker")).toEqual({
-      busy: true, reason: "pane probe produced no second observation — the lead is not proven idle",
+      busy: true, midTurn: false, reason: "pane probe produced no second observation — the lead is not proven idle",
     });
     expect(paneBusy(captured("", ""))).toEqual({
-      busy: true, reason: "pane probe captured nothing — the lead is not proven idle",
+      busy: true, midTurn: false, reason: "pane probe captured nothing — the lead is not proven idle",
     });
   });
 });
