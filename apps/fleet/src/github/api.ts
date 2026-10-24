@@ -1154,13 +1154,17 @@ interface PullRequestInfo {
    *  exclude a CLOSED-unmerged PR: it can never merge, so warning about it
    *  would nag forever. */
   open: boolean;
+  /** #1276: the PR's live head sha, read from the SAME GET that returns every
+   *  other field — so a caller that needs the head sha does not pay a second
+   *  /pulls/{number} GET (the gate run's resolve-pr step did exactly that). */
+  headSha: string;
 }
 
 export async function getPullRequest(token: string, repo: string, number: number): Promise<PullRequestInfo> {
   const raw = await ghJson<{
     number: number; merged?: boolean; merge_commit_sha?: string | null;
     state?: string;
-    base: { ref: string; repo?: { full_name?: string; private?: boolean } }; head: { ref: string }; title?: string; body?: string | null;
+    base: { ref: string; repo?: { full_name?: string; private?: boolean } }; head: { ref: string; sha?: string }; title?: string; body?: string | null;
   }>(
     token,
     `https://api.github.com/repos/${repo}/pulls/${number}`,
@@ -1178,6 +1182,7 @@ export async function getPullRequest(token: string, repo: string, number: number
     repoFullName: raw.base.repo?.full_name ?? repo,
     baseRepoPrivate: raw.base.repo?.private === true,
     open: raw.state === "open",
+    headSha: raw.head.sha ?? "",
   };
 }
 
