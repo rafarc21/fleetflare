@@ -83,13 +83,22 @@ describe("parseGateBlock: object legs", () => {
   it("null on an object leg whose timeoutMin is not a number", () => {
     expect(parseGateBlock({ ...BLOCK, legs: [{ name: "e2e", cmd: "c", timeoutMin: "12" }] })).toBeNull();
   });
-  it("an object leg's paths filter is read as its per-leg file globs (#1274)", () => {
+it("an object leg's paths filter is read as its per-leg file globs (#1274)", () => {
     const cfg = parseGateBlock({ ...BLOCK, legs: [{ name: "rust", cmd: "scripts/cargo-test-gate.sh", paths: ["src-tauri/**", "Cargo.toml"] }] });
     expect(cfg?.legs).toEqual([{ name: "rust", cmd: "scripts/cargo-test-gate.sh", paths: ["src-tauri/**", "Cargo.toml"] }]);
   });
   it("null on an object leg whose paths is not a string array (#1274)", () => {
     expect(parseGateBlock({ ...BLOCK, legs: [{ name: "rust", cmd: "c", paths: "src-tauri/**" }] })).toBeNull();
     expect(parseGateBlock({ ...BLOCK, legs: [{ name: "rust", cmd: "c", paths: [1] }] })).toBeNull();
+  });
+  it("an object leg's image is read as its per-leg container image (#1274)", () => {
+    const cfg = parseGateBlock({ ...BLOCK, legs: [{ name: "rust", cmd: "c", image: "desktop" }] });
+    expect(cfg?.legs).toEqual([{ name: "rust", cmd: "c", image: "desktop" }]);
+  });
+  it("null on an object leg whose image is not an allowlisted key (#1274 fail-closed)", () => {
+    for (const image of ["other", "", "gate-desktop", 3, null]) {
+      expect(parseGateBlock({ ...BLOCK, legs: [{ name: "rust", cmd: "c", image }] })).toBeNull();
+    }
   });
   it("a string leg has no timeoutMin, so it takes the 25 min default at run time", () => {
     const cfg = parseGateBlock({ ...BLOCK, legs: ["lint"] });

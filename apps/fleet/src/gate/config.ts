@@ -60,6 +60,9 @@ export interface GateLeg {
   /** #1274: the leg runs only when a changed file matches one of these (same
    *  shape as the block's pathRules). Absent means the leg always runs. */
   paths?: string[];
+  /** #1274: the container image THIS leg runs on, overriding the block's image.
+   *  Absent means the block's image (or the default). */
+  image?: string;
 }
 
 export interface GateConfig {
@@ -107,10 +110,13 @@ export function parseLegs(raw: unknown): GateLeg[] | null {
       if (e.timeoutMin !== undefined && (typeof e.timeoutMin !== "number" || !Number.isFinite(e.timeoutMin))) return null;
       // #1274: an optional per-leg path filter. Reuses the block's pathRules shape.
       if (e.paths !== undefined && !isStringArray(e.paths)) return null;
+      // #1274: an optional per-leg image. Fail-closed on any key outside GATE_IMAGES.
+      if (e.image !== undefined && (typeof e.image !== "string" || !GATE_IMAGES.has(e.image))) return null;
       leg = {
         name: e.name, cmd: e.cmd,
         ...(e.timeoutMin === undefined ? {} : { timeoutMin: legTimeoutMin(e.timeoutMin) }),
         ...(e.paths === undefined ? {} : { paths: e.paths }),
+        ...(e.image === undefined ? {} : { image: e.image }),
       };
     } else {
       return null;
