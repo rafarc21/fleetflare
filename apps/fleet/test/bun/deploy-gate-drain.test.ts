@@ -86,6 +86,9 @@ describe("deploy.sh: drain running gate runs before a Worker deploy (#1232)", ()
     expect(r.code).toBe(1);
     // The wait itself refuses on the failed heartbeat, before the cap.
     expect(r.err).toContain("could not re-stamp the drain flag");
+    // The refusal is the re-stamp's own, NOT the cap's: the drain aborted
+    // early, so the "still running after the drain cap" line never prints.
+    expect(r.err).not.toContain("gate-drain-wait: gate instances still running after the drain cap");
     // No deploy ran.
     expect(r.wrangler.some((l) => l === "wrangler deploy -c wrangler.local.jsonc")).toBe(false);
   });
