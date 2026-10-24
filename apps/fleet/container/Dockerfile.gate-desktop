@@ -36,8 +36,8 @@ RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
 # (libclang-dev, cmake, ninja-build). Lives on THIS image, not the default gate
 # image: the +1.1 GB must not land on every repo's legs. The package list is the
 # operator-measured one that ran the peer repo's scripts/cargo-test-gate.sh to
-# 282 passed / 0 failed (10-23). This base (oven/bun:1.3-debian) is bookworm,
-# whose webkit2gtk is 4.1.
+# 282 passed / 0 failed (10-23). This base (oven/bun:1.3-debian) is trixie,
+# whose webkit2gtk is still 4.1.
 RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
     && apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev \
