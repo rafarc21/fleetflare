@@ -213,7 +213,11 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       const guarded = guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
         { state: "success", description: "no gated paths changed" });
       await step.do("post-skip-status", STATUS_POST_STEP_CONFIG, async () =>
-        postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
+        postGateStatus(this.statusPort(), repo, resolved.headSha, {
+          ...guarded,
+          // #1277 item 2: same summary link the verdict post carries.
+          targetUrl: `${this.env.WORKER_PUBLIC_URL}/studio/gate/summary?repo=${encodeURIComponent(repo)}&pr=${pr}&run=${encodeURIComponent(event.instanceId)}`,
+        }));
       return { ...guarded, statusPostFailed: false, legs: [] };
     }
 
@@ -368,7 +372,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         { state: "success", description: verdictArgs.description })
       : verdictArgs;
     await step.do("post-verdict", STATUS_POST_STEP_CONFIG, async () =>
-      postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
+      postGateStatus(this.statusPort(), repo, resolved.headSha, {
+        ...guarded,
+        // #1277 item 2: the "Details" link opens the run-summary page, which
+        // names each red leg and links to its log.
+        targetUrl: `${this.env.WORKER_PUBLIC_URL}/studio/gate/summary?repo=${encodeURIComponent(repo)}&pr=${pr}&run=${encodeURIComponent(event.instanceId)}`,
+      }));
     // Per-leg output (#1049) rides in the final result, in plan order. #1214
     // round 2: `guarded` (not `final`) rides, so a downgraded success reports
     // failure here exactly as GitHub sees it. #1230: baseSha/planFingerprint ride

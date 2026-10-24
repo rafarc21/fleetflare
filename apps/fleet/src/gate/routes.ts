@@ -120,6 +120,35 @@ async function gateRunStatusSafe(env: Env, runId: string): Promise<Response> {
   }
 }
 
+/** #1277 item 2: render the run-summary page a gate/verdict target_url links to.
+ *  The per-leg verdict comes from the run's own output (the same shape the
+ *  status route serves); each red leg links to its log page. A bare throw maps
+ *  to a JSON 404/500, never an HTML error page. */
+async function gateSummarySafe(env: Env, repo: string, pr: number, runId: string): Promise<Response> {
+  try {
+    const statusRes = await gateRunStatus(env, runId);
+    const body = (await statusRes.json()) as { state?: string; description?: string; legs?: OutcomeLeg[] };
+    const legs = body.legs ?? [];
+    const rows = legs.map((l) => {
+      const mark = l.state === "success" ? "ok" : l.state === "failure" ? "FAIL" : "ERR";
+      const log = l.state === "success"
+        ? ""
+        : ` <a href="/studio/gate/log?repo=${encodeURIComponent(repo)}&pr=${pr}&leg=${encodeURIComponent(l.leg)}&run=${encodeURIComponent(runId)}">log</a>`;
+      const text = `${mark} ${l.leg}${l.summary ? ` — ${l.summary}` : ""}${log}`;
+      return `<li>${text}</li>`;
+    }).join("");
+    const html = `<!doctype html><meta charset="utf-8"><title>gate ${repo}#${pr}</title>`
+      + `<h1>gate ${repo}#${pr}</h1><p>${body.state ?? "?"}${body.description ? ` — ${body.description}` : ""}</p>`
+      + `<ul>${rows}</ul>`;
+    return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`gate summary failed for ${repo}#${pr}`, err);
+    if (/not[ _.-]?found/i.test(message)) return j({ error: "no such gate run", runId }, 404);
+    return j({ error: `gate summary unavailable: ${redactSecrets(message)}` }, 500);
+  }
+}
+
 /** #1277: read one leg's final R2 output for `fleet gate log`. The runId comes
  *  from `--run`, else the PR's latest run pointer in D1. The canonical repo
  *  name is resolved via GitHub (R2 keys are case-sensitive, #1119), the leg's
@@ -286,6 +315,22 @@ export async function handleGateRoute(
     if (!Number.isInteger(pr) || pr <= 0) return j({ error: "pr required as a positive integer" }, 400);
     if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(leg)) return j({ error: "leg required" }, 400);
     return await gateLegLogSafe(env, repo, pr, leg, url.searchParams.get("run") ?? undefined);
+  }
+
+  // #1277 item 2: the run-summary page a gate/verdict status's target_url links
+  // to. Renders the per-leg verdict from the run's own output, and each red leg
+  // links to its `fleet gate log` page (the /studio/gate/log route above).
+  if (url.pathname === "/studio/gate/summary" && req.method === "GET") {
+    const repo = url.searchParams.get("repo") ?? "";
+    if (env.FLEET_GATE_RUNNER !== "on" || !isGateRunnerRepo(env.GATE_RUNNER_REPOS, repo)) {
+      return j({ error: "gate runner not enabled for this repo" }, 404);
+    }
+    const pr = Number(url.searchParams.get("pr"));
+    const runId = url.searchParams.get("run") ?? "";
+    if (!Number.isInteger(pr) || pr <= 0 || !/^[\w-]+$/.test(runId)) {
+      return j({ error: "pr and run required" }, 400);
+    }
+    return await gateSummarySafe(env, repo, pr, runId);
   }
 
   return j({ error: "not found" }, 404);

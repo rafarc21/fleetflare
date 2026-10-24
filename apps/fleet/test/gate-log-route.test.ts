@@ -91,3 +91,31 @@ describe("GET /studio/gate/log (#1277)", () => {
     expect((await res.json() as { error: string }).error).toContain("no result");
   });
 });
+
+describe("GET /studio/gate/summary (#1277 item 2)", () => {
+  it("renders the run's per-leg verdict, red legs linking to their log", async () => {
+    const e = logEnv();
+    (e as unknown as { GATE_WORKFLOW: unknown }).GATE_WORKFLOW = {
+      get: async () => ({
+        status: async () => ({
+          status: "complete",
+          output: {
+            state: "failure", description: "1/2 green; red: vitest-1 (run gate-summary)",
+            legs: [
+              { leg: "merge-tree", state: "success", ms: 900 },
+              { leg: "vitest-1", state: "failure", ms: 83_000, summary: "Tests  1 failed" },
+            ],
+          },
+        }),
+      }),
+    };
+    const req = new Request(`https://worker/studio/gate/summary?repo=${REPO}&pr=${PR}&run=gate-summary`);
+    const res = await handleGateRoute(req, e);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const html = await res.text();
+    expect(html).toContain("gate acme/example#9");
+    expect(html).toContain("FAIL vitest-1");
+    expect(html).toContain("/studio/gate/log?repo=acme%2Fexample&pr=9&leg=vitest-1&run=gate-summary");
+  });
+});

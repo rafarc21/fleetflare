@@ -214,7 +214,7 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     if (statusPostFailOn.has(statusPostCalls)) {
       return Promise.reject(new Error(`gate/verdict HTTP 503 (attempt ${statusPostCalls})`));
     }
-    lastPostedStatus = init?.body === undefined ? undefined : (JSON.parse(init.body as string) as { state: string; description?: string });
+    lastPostedStatus = init?.body === undefined ? undefined : (JSON.parse(init.body as string) as { state: string; description?: string; target_url?: string });
     return Promise.resolve(json({}));
   }
   if (method === "GET" && /\/commits\/[0-9a-f]{40}\/statuses/.test(url)) {
@@ -514,6 +514,8 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
         state: "failure",
         context: GATE_STATUS_CONTEXT,
         description: "head aaaaaaaa shared with PR #8",
+        // #1277 item 2: the verdict status links to the run summary.
+        target_url: "https://fleet-test.example-subdomain.workers.dev/studio/gate/summary?repo=acme%2Fexample&pr=7&run=gate-guard-skip-shared",
       });
     } finally {
       await instance.dispose();
@@ -551,6 +553,8 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
         state: "failure",
         context: GATE_STATUS_CONTEXT,
         description: "head aaaaaaaa shared with PR #8",
+        // #1277 item 2: the verdict status links to the run summary.
+        target_url: "https://fleet-test.example-subdomain.workers.dev/studio/gate/summary?repo=acme%2Fexample&pr=7&run=gate-guard-verdict-shared",
       });
     } finally {
       await instance.dispose();
@@ -615,6 +619,8 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
         state: "failure",
         context: GATE_STATUS_CONTEXT,
         description: "gate: cannot list shared-head PRs",
+        // #1277 item 2: the skip status links to the run summary.
+        target_url: "https://fleet-test.example-subdomain.workers.dev/studio/gate/summary?repo=acme%2Fexample&pr=7&run=gate-guard-skip-error",
       });
       // No leg ran: the SKIP path and its guard never touch GATE_RUNNER.
       const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
@@ -826,6 +832,8 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       // 1 pending post + 3 verdict-post attempts (2 failed, 1 landed).
       expect(statusPostCalls).toBe(4);
       expect(lastPostedStatus?.state).toBe("success");
+      // #1277 item 2: the verdict status carries target_url -> the run summary.
+      expect(lastPostedStatus?.target_url).toContain("/studio/gate/summary?");
     } finally {
       await instance.dispose();
     }
