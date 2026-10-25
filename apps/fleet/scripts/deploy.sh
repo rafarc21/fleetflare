@@ -524,9 +524,20 @@ clear_gate_drain_flag() {
       || echo "deploy.sh: WARNING -- could not clear the gate drain flag; clear it by hand." >&2
   fi
 }
-trap 'clear_gate_drain_flag' EXIT
-trap 'clear_gate_drain_flag; exit 130' INT
-trap 'clear_gate_drain_flag; exit 143' TERM
+# Issue #1315 review r1: the 100146 capture log is created only on the plain
+# deploy path, but the EXIT trap runs on every exit path — remove it here so a
+# Ctrl-C mid-deploy never strands a temp log. `-n` guards the non-plain path
+# (DEPLOY_OUT stays empty there).
+cleanup() {
+  clear_gate_drain_flag
+  # `${DEPLOY_OUT:-}` and `if`, not `&&`: under `set -u` the trap can fire
+  # before DEPLOY_OUT is assigned, and an unbound read or a last-command
+  # failure here would override the real `exit $RC`/`exit 130` below.
+  if [[ -n "${DEPLOY_OUT:-}" ]]; then rm -f "$DEPLOY_OUT"; fi
+}
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 if [[ "$GATE_DRAIN" == 1 ]]; then
   GATE_DRAIN_FLAG_SET=1
@@ -545,6 +556,16 @@ if [[ "$GATE_DRAIN" == 1 ]]; then
     || { echo "deploy.sh: refusing -- could not re-stamp the gate drain flag; pass --skip-gate-drain to override." >&2; exit 1; }
 fi
 
+# Issue #1315: `wrangler deploy` can exit 1 with CF 100146 "version not found"
+# after the version upload and deployment have landed — a race in CF's version
+# lookup (wrangler's own fetchUploadedVersion retries 5x500ms and gives up).
+# The upload DID succeed, but container apply and triggers (routes/crons) may
+# not have run, and there is no version id to check against. Do NOT auto-
+# succeed: report the half-deploy and exit a DISTINCT non-zero code (75) so the
+# operator re-runs. Non-plain commands (versions deploy, rollback, d1 ...) keep
+# their original rc and are never tee'd — a tee'd stdout stops being a TTY and
+# would auto-yes wrangler's "continue?" confirmations.
+DEPLOY_OUT=""
 RC=0
 if ((${#ARGS[@]})); then
   set +e
@@ -552,12 +573,19 @@ if ((${#ARGS[@]})); then
   RC=$?
   set -e
 else
+  # Plain deploy only: capture output to tell a 100146 race from a real
+  # failure. mktemp + EXIT-trap cleanup, never a fixed path.
+  DEPLOY_OUT="$(mktemp "${TMPDIR:-/tmp}/fleet-deploy-XXXXXX.log")"
   set +e
-  "$WRANGLER" deploy -c wrangler.local.jsonc
-  RC=$?
+  "$WRANGLER" deploy -c wrangler.local.jsonc 2>&1 | tee "$DEPLOY_OUT"
+  RC=${PIPESTATUS[0]}
   set -e
+  if [[ "$RC" != 0 ]] && grep -qiE '100146|version not found' "$DEPLOY_OUT"; then
+    echo "deploy.sh: Worker version uploaded, but wrangler exited $RC with CF 100146 (version not found) before containers/triggers were applied — re-run the same deploy to finish." >&2
+    RC=75
+  fi
 fi
 
-# The EXIT trap clears the flag on every path (success, deploy failure, Ctrl-C).
-# Nothing below needs to clear it itself; the trap runs at `exit $RC`.
+# The EXIT trap clears the gate-drain flag and the 100146 capture log on every
+# path (success, deploy failure, Ctrl-C). Nothing below clears them itself.
 exit $RC
