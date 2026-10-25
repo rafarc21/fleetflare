@@ -301,7 +301,7 @@ export type CliCommand =
   | { cmd: "gate-start"; pr: number }
   | { cmd: "gate-watch"; pr: number; runId: string }
   | { cmd: "gate-protect"; repo: string }
-  | { cmd: "gate-log"; pr: number; leg: string; runId?: string; full?: boolean }
+  | { cmd: "gate-log"; pr: number; leg: string; runId?: string; full?: boolean; all?: boolean }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -534,8 +534,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Set branch protection on <owner/repo>'s default branch requiring status context gate/verdict (strict=false, enforce_admins=false). Idempotent; prints before/after.",
   },
   "gate-log": {
-    args: "log <pr> <leg> [--run <runId>] [--full]",
-    summary: "Read one gate leg's final R2 output for <pr> via the Worker (no Cloudflare creds needed) and print its failing-test lines first; --full prints the whole kept tail. --run names a specific run; the default is the PR's latest.",
+    args: "log <pr> <leg> [--run <runId>] [--full] [--all]",
+    summary: "Read one gate leg's final R2 output for <pr> via the Worker (no Cloudflare creds needed) and print its failing-test lines first; --full prints the whole kept tail, --all lists every attempt of the leg (first try + retry) with its first failing test. --run names a specific run; the default is the PR's latest.",
   },
 };
 
@@ -1543,18 +1543,19 @@ export function parseCliArgs(argv: string[]): CliCommand {
         return { cmd: "gate-protect", repo: rest[1] };
       }
       if (rest[0] === "log") {
-        // #1277: --run <id> and --full may appear before/after the two positionals.
+        // #1277/#1318: --run <id>, --full and --all may appear before/after the two positionals.
         const runIdx = rest.indexOf("--run");
         const runId = runIdx >= 0 ? rest[runIdx + 1] : undefined;
         const full = rest.includes("--full");
-        const positional = rest.slice(1).filter((a) => a !== "--run" && a !== runId && a !== "--full");
+        const all = rest.includes("--all");
+        const positional = rest.slice(1).filter((a) => a !== "--run" && a !== runId && a !== "--full" && a !== "--all");
         if (positional.length !== 2 || !/^\d+$/.test(positional[0])) {
-          return usage("usage: fleet gate log [--run <runId>] [--full] <pr> <leg>");
+          return usage("usage: fleet gate log [--run <runId>] [--full] [--all] <pr> <leg>");
         }
         if (runIdx >= 0 && (runId === undefined || !/^[\w-]+$/.test(runId))) {
-          return usage("usage: fleet gate log [--run <runId>] [--full] <pr> <leg>");
+          return usage("usage: fleet gate log [--run <runId>] [--full] [--all] <pr> <leg>");
         }
-        return { cmd: "gate-log", pr: Number(positional[0]), leg: positional[1], ...(runId !== undefined ? { runId } : {}), ...(full ? { full: true } : {}) };
+        return { cmd: "gate-log", pr: Number(positional[0]), leg: positional[1], ...(runId !== undefined ? { runId } : {}), ...(full ? { full: true } : {}), ...(all ? { all: true } : {}) };
       }
       return usage("usage: fleet gate [run [--failed-only] <pr> | start <pr> | watch <pr> <runId> | log <pr> <leg>]");
     }

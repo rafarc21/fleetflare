@@ -160,3 +160,63 @@ describe("GET /studio/gate/log (#1277)", () => {
     expect((await res.json() as { error: string }).error).toContain("no result");
   });
 });
+describe("GET /studio/gate/log --all (#1318)", () => {
+  it("lists every attempt of a flaky leg, oldest first, each with status and first failing test", async () => {
+    realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/pulls/")) {
+        return new Response(JSON.stringify({
+          number: PR, merged: false, merge_commit_sha: null, state: "open",
+          base: { ref: "main", repo: { full_name: CANONICAL, private: false } },
+          head: { ref: "feature", sha: "a".repeat(40) },
+          title: "t", body: "",
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+
+    // First try failed, retry passed later try — the route must list BOTH.
+    await env.STUDIO_ARCHIVE.put(
+      `gate/${CANONICAL}/runs/${PR}/${RUN}/shard-vitest-6.json`,
+      JSON.stringify({ state: "failure", stdout: "FAIL src/a.test.ts > a > should trim\n", summary: "Tests 1 failed" }),
+    );
+    await env.STUDIO_ARCHIVE.put(
+      `gate/${CANONICAL}/runs/${PR}/${RUN}/shard-vitest-6.retry.json`,
+      JSON.stringify({ state: "success", summary: "1393 passed" }),
+    );
+
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=vitest-6&run=${RUN}&all=1`);
+    const res = await handleGateRoute(req, logEnv());
+    expect(res.status).toBe(200);
+    const body = await res.json() as { attempts: unknown[]; final?: unknown };
+    expect(body.attempts).toHaveLength(2);
+    const first = body.attempts[0] as { key: string; state: string; failingTest: string | null };
+    expect(first.key).toContain("shard-vitest-6.json");
+    expect(first.state).toBe("failure");
+    expect(first.failingTest).toBe("should trim");
+    const retry = body.attempts[1] as { key: string; state: string };
+    expect(retry.key).toContain("shard-vitest-6.retry.json");
+    expect(retry.state).toBe("success");
+  });
+
+  it("--all on a leg with no result 404s the same as the single-key path", async () => {
+    realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/pulls/")) {
+        return new Response(JSON.stringify({
+          number: PR, merged: false, state: "open",
+          base: { ref: "main", repo: { full_name: CANONICAL, private: false } },
+          head: { ref: "feature" }, title: "t", body: "",
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=merge-tree&run=${RUN}&all=1`);
+    const res = await handleGateRoute(req, logEnv());
+    expect(res.status).toBe(404);
+    expect((await res.json() as { error: string }).error).toContain("no result");
+  });
+});

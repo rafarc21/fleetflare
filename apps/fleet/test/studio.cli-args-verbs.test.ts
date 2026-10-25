@@ -829,4 +829,9 @@ describe("gate start / gate watch", () => {
     expect(parseCliArgs(["gate", "log", "715"]).cmd).toBe("usage");
     expect(parseCliArgs(["gate", "log", "abc", "vitest-6"]).cmd).toBe("usage");
   });
+  // #1318: `fleet gate log --all` lists every attempt of a flaky leg.
+  it("gate log --all parses alongside --run", () => {
+    expect(parseCliArgs(["gate", "log", "--all", "715", "vitest-6"]))
+      .toEqual({ cmd: "gate-log", pr: 715, leg: "vitest-6", all: true });
+  });
 });
