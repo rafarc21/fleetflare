@@ -17,10 +17,10 @@ const PLANNED: PlannedLeg = {
 /** Workflows' retry rule: a throwing step re-runs until its retry limit is spent. */
 function fakeStep() {
   return {
-    do: async (_name: string, config: LegStepConfig, fn: () => Promise<LegResult>): Promise<LegResult> => {
+    do: async (_name: string, config: LegStepConfig, fn: (ctx: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>): Promise<LegResult> => {
       for (let attempt = 0; ; attempt++) {
         try {
-          return await fn();
+          return await fn({ attempt: attempt + 1, step: { name: _name, count: 1 } });
         } catch (err) {
           if (attempt >= config.retries.limit) throw err;
         }

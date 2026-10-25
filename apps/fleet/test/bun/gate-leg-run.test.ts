@@ -13,17 +13,18 @@ const PLANNED: PlannedLeg = {
 };
 
 // Mirrors Workflows' retry rule: a step that throws is re-run until its retry
-// limit is spent, then the error propagates to the caller.
+// limit is spent, then the error propagates to the caller. ctx.attempt is
+// 1-based, matching Workflows' durable per-attempt counter (#1321).
 function fakeStep() {
   const calls: { name: string; config: LegStepConfig }[] = [];
   return {
     calls,
-    do: async (name: string, config: LegStepConfig, fn: () => Promise<LegResult>): Promise<LegResult> => {
+    do: async (name: string, config: LegStepConfig, fn: (ctx: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>): Promise<LegResult> => {
       calls.push({ name, config });
       const limit = config.retries.limit;
       for (let attempt = 0; ; attempt++) {
         try {
-          return await fn();
+          return await fn({ attempt: attempt + 1, step: { name, count: 1 } });
         } catch (err) {
           if (attempt >= limit) throw err;
         }
@@ -395,11 +396,12 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
     let sent = 0;
     const dispatch = async () => { sent++; throw new Error(LOST); };
     const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => EXITED });
-    // A failure from R2 earns the one failure-retry on a fresh container, which also reads R2.
+    // A SIGTERM'd container's "exited 143" is infra, never a red test (#1321):
+    // no flaky retry, so the run auto-reruns instead of reading it back red.
     expect(result).toMatchObject({
-      leg: "lint", state: "failure", description: "result read from R2 after transport loss: lint exited 143",
+      leg: "lint", state: "error", description: "result read from R2 after transport loss: lint exited 143",
     });
-    expect(sent).toBe(2);
+    expect(sent).toBe(1);
   });
 
   it("no R2 result for the leg: the description is the transport error, combined across all 3 attempts (#1231)", async () => {
@@ -436,7 +438,7 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
     expect(sent).toBe(1);
   });
 
-  it("a container that exited mid-leg (503) with a known R2 failure: the failure-retry runs, each try reads its own key", async () => {
+  it("a container that exited mid-leg (503) with a known R2 SIGTERM failure: infra, no retry (#1321)", async () => {
     const step = fakeStep();
     const keys: string[] = [];
     const dispatch = async () => reply({ error: "gate container exited mid-leg" }, 503);
@@ -444,9 +446,9 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
       readResult: async (key) => { keys.push(key); return EXITED; },
     });
     expect(result).toMatchObject({
-      leg: "lint", state: "failure", description: "result read from R2 after transport loss: lint exited 143",
+      leg: "lint", state: "error", description: "result read from R2 after transport loss: lint exited 143",
     });
-    expect(keys).toEqual([PLANNED.resultKey, "gate/o/r/runs/1/i/shard-lint.retry.json"]);
+    expect(keys).toEqual([PLANNED.resultKey]);
   });
 
   it("R2 failure then a passing retry: flaky, the first cause is the R2 result (#1122)", async () => {
@@ -540,6 +542,65 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
     });
     expect(result.state).toBe("error");
     expect(result.description).toBe("result read from R2 after transport loss: try 3's own result");
+  });
+});
+
+// #1321: the per-try result key comes from the step's durable attempt counter
+// (ctx.attempt), never a closure counter an engine restart would reset. A
+// restart therefore keeps tries 2 and 3 on their own distinct keys.
+describe("runLegStep: per-try keys from ctx.attempt survive an engine restart (#1321)", () => {
+  it("a step whose callback resumes at attempt 2 still writes try 2's key, never the base key", async () => {
+    // A fake engine that models the restart: the first attempt ran (and its
+    // result was lost with the old engine), then the step re-enters at attempt 2.
+    const step = {
+      do: async (_name: string, config: LegStepConfig, fn: (ctx: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>) => {
+        let attempt = 2; // restart: durable attemptedCount is already 2
+        for (; ; attempt++) {
+          try {
+            return await fn({ attempt, step: { name: _name, count: 1 } });
+          } catch (err) {
+            if (attempt >= 1 + config.retries.limit) throw err;
+          }
+        }
+      },
+    };
+    const readKeys: string[] = [];
+    const dispatch = async () => { throw new Error("Network connection lost."); };
+    await runLegStep(step, dispatch, PLANNED, { readResult: async (key) => { readKeys.push(key); return undefined; } });
+    // Attempts 2 and 3 (retries.limit=2) must read -try2/-try3, never the base
+    // key, so a late try-1 write cannot be read back as try 2's own result.
+    expect(readKeys).toEqual([
+      "gate/o/r/runs/1/i/shard-lint-try2.json",
+      "gate/o/r/runs/1/i/shard-lint-try3.json",
+    ]);
+  });
+
+  it("the retry-<leg> step waits a jittered delay before its first dispatch only (#1321)", async () => {
+    const step = fakeStep();
+    const sleeps: number[] = [];
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" });
+    };
+    await runLegStep(step, dispatch, PLANNED, {
+      retryJitterMs: 4_000, random: () => 0.5, sleep: async (ms) => { sleeps.push(ms); },
+    });
+    // One jitter wait on the retry step's first attempt, none on the start step.
+    expect(sleeps).toEqual([2_000]);
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+  });
+
+  it("no jitter when the cap is 0 (default): the retry dispatches without a wait (#1321)", async () => {
+    const step = fakeStep();
+    const sleeps: number[] = [];
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" });
+    };
+    await runLegStep(step, dispatch, PLANNED, { sleep: async (ms) => { sleeps.push(ms); } });
+    expect(sleeps).toEqual([]);
   });
 });
 

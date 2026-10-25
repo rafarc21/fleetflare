@@ -19,11 +19,11 @@ const PLANNED: PlannedLeg = {
 
 function fakeStep() {
   return {
-    do: async (_name: string, config: LegStepConfig, fn: () => Promise<LegResult>): Promise<LegResult> => {
+    do: async (_name: string, config: LegStepConfig, fn: (ctx: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>): Promise<LegResult> => {
       const limit = config.retries.limit;
       for (let attempt = 0; ; attempt++) {
         try {
-          return await fn();
+          return await fn({ attempt: attempt + 1, step: { name: _name, count: 1 } });
         } catch (err) {
           if (attempt >= limit) throw err;
         }
@@ -59,6 +59,10 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     // #1283: a GitHub 429 surfaced by the git proxy or the checkout's lazy fetch.
     "lint: checkout failed: fatal: unable to access 'http://git-proxy.internal/o/r.git/': The requested URL returned error: 429 after 0 min",
     "lint: HTTP 429 after 0 min",
+    // #1321: a container the platform SIGTERM/SIGKILL'd reports "exited 143/137";
+    // the kill is infra, never the code under test, whatever prefix rides on it.
+    "lint: exited 143 after 0 min",
+    "result read from R2 after transport loss: lint exited 137",
   ])("infra: %s", (description) => {
     expect(isInfraLegFailure({ leg: "lint", state: "error", description })).toBe(true);
   });
