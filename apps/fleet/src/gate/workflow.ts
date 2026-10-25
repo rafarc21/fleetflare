@@ -33,7 +33,7 @@ import {
   type CarryGreen, type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
-import { bundleStepEnabled, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
+import { bundleStepEnabled, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, RETRY_LEG_JITTER_MS, type LegRunResult } from "./leg-run";
 import { markRunProgress } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import {
@@ -443,6 +443,10 @@ function runLeg(
     },
     planned,
     // The container writes its R2 result before it stops; a lost transport reads it back (#1094).
-    { readResult: legResultReader(env.STUDIO_ARCHIVE) },
+    {
+      readResult: legResultReader(env.STUDIO_ARCHIVE),
+      // #1321: desync the retry-<leg> steps so N red legs do not clone in lockstep.
+      retryJitterMs: RETRY_LEG_JITTER_MS,
+    },
   );
 }

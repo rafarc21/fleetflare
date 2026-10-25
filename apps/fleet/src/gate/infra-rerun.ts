@@ -34,6 +34,9 @@ const INFRA_CAUSE = new RegExp([
   // limit, not the code under test.
   "returned error: 429",
   "HTTP 429",
+  // #1321: a container the platform SIGTERM/SIGKILL'd writes "exited 143/137";
+  // the kill is infra (a Workflows internal error), never the code under test.
+  "exited 1(43|37)",
 ].join("|"));
 
 /** An error leg is infra-class by its cause. A leg whose first attempt was red

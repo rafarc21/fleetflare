@@ -53,9 +53,16 @@ export interface LegStepConfig {
   timeout: "30 minutes";
 }
 
+/** The slice of Workflows' WorkflowStepContext the step callback receives:
+ *  attempt (1-based, durable across an engine restart) and step name/count. */
+export interface LegStepContext {
+  attempt: number;
+  step: { name: string; count: number };
+}
+
 /** The slice of Workflows' WorkflowStep this module uses. */
 export interface LegStepRunner {
-  do(name: string, config: LegStepConfig, fn: () => Promise<LegRunResult>): Promise<LegRunResult>;
+  do(name: string, config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<LegRunResult>): Promise<LegRunResult>;
 }
 
 export const LEG_STEP_CONFIG: LegStepConfig = {
@@ -86,7 +93,17 @@ export interface LegRunDeps {
   readResult?: (resultKey: string) => Promise<StoredLegResult | undefined>;
   /** Overrides the step deadline (tests). Default: legStepDeadlineMs(planned.timeoutMin). */
   stepDeadlineMs?: number;
+  /** Upper bound of the random wait before a retry-<leg> dispatch (#1321). 0
+   *  disables the jitter (tests). Default: 0; the live caller passes a real cap. */
+  retryJitterMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  random?: () => number;
 }
+
+/** The live cap on the retry-step start jitter (#1321): each retry-<leg> step
+ *  waits a random 0..cap before its clone, so N red legs do not clone in
+ *  lockstep and burst the shared GitHub token with 429s. */
+export const RETRY_LEG_JITTER_MS = 4_000;
 
 /** Slack past the leg's own timeout before its step gives up on a dispatch that
  *  never answered: covers the DO's readiness wait (180 s) and port-retry budget (240 s). */
@@ -116,6 +133,19 @@ export function withStepDeadline<T>(work: Promise<T>, ms: number, message: strin
 /** A leg's result as the container wrote it to R2: state and description, no leg name. */
 export type StoredLegResult = { state: LegResult["state"]; description?: string };
 
+/** #1321: a leg killed by SIGTERM (143) or SIGKILL (137) writes "exited 143/137".
+ *  A LIVE gate-server that returns this means the test proc itself died — an OOM
+ *  kill (137) or `timeout -s KILL` in the leg cmd is a REAL failure. Only a
+ *  result recovered from R2 after a transport loss (carrying R2_PREFIX) means the
+ *  platform killed the container, so that alone is re-read as infra. */
+const SIGNAL_KILL_RE = /\bexited 1(43|37)\b/;
+
+/** Whether a description names a SIGTERM/SIGKILL leg exit (#1321). Callers gate
+ *  the infra re-read on the R2 read-back prefix themselves. */
+export function isSignalKill(description: string | undefined): boolean {
+  return description !== undefined && SIGNAL_KILL_RE.test(description);
+}
+
 /** The description prefix a result read back from R2 carries (#1122). Kept in one
  *  place so isRetryable can strip it before matching the underlying cause. */
 export const R2_PREFIX = "result read from R2 after transport loss: ";
@@ -131,21 +161,35 @@ export async function runLegStep(
   deps: LegRunDeps = {},
 ): Promise<LegRunResult> {
   // targetFor takes the try number: the start step's infra retry gets its own
-  // result key (see infraRetryResultKey).
+  // result key (see infraRetryResultKey). The try number is ctx.attempt, the
+  // durable per-attempt counter (1-based, survives an engine restart), never a
+  // closure counter that an engine restart would reset (#1321).
   const deadlineMs = deps.stepDeadlineMs ?? legStepDeadlineMs(planned.timeoutMin);
+  const jitterMs = deps.retryJitterMs ?? 0;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const random = deps.random ?? Math.random;
   const attempt = (name: string, targetFor: (tryNo: number) => PlannedLeg): Promise<LegRunResult> => {
-    let tryNo = 0;
-    // Persists across this step's own Workflows retries (same closure, like
-    // tryNo above) — one cause per failed attempt, so the final throw (if
-    // retries run out) carries all of them, never just the last.
+    // Persists across this step's own Workflows retries (same closure) — one
+    // cause per failed attempt, so the final throw (if retries run out) carries
+    // all of them, never just the last.
     const causes: string[] = [];
-    return step.do(name, LEG_STEP_CONFIG, async () => {
-      const target = targetFor(++tryNo);
+    return step.do(name, LEG_STEP_CONFIG, async (ctx: LegStepContext | undefined) => {
+      // #1321: the try number is the durable per-attempt counter. A runtime that
+      // omits the context falls back to 1 (the old single-key behavior) rather
+      // than a fleet-wide TypeError on the first leg.
+      const tryNo = ctx?.attempt ?? 1;
+      // #1321: retry-<leg> steps all dispatch in one Promise.all, so every red
+      // leg would clone at once and burst the shared token. A random wait on the
+      // step's FIRST attempt (only) desyncs the clones.
+      if (name.startsWith("retry-") && tryNo === 1 && jitterMs > 0) {
+        await sleep(Math.floor(random() * jitterMs));
+      }
+      const target = targetFor(tryNo);
       // Made inside the callback: a Workflows step retry re-runs it, so every
       // try gets its own runner DO. A replayed step returns its recorded result.
       const attemptId = crypto.randomUUID();
-      // Timed inside the callback: a Workflow replay returns the recorded ms
-      // instead of timing the replay.
+      // Timed inside the callback (after any jitter): a Workflow replay returns
+      // the recorded ms instead of timing the replay.
       const started = Date.now();
       // The dispatch call carries its own signal, so a hung DO call is aborted
       // at the deadline, not just abandoned by the race below (#1135).
@@ -176,7 +220,17 @@ export async function runLegStep(
         // The container may have written its own result before the transport
         // died. A known state there IS the leg's result (#1122), state included.
         const stored = await storedLegResult(deps.readResult, target.resultKey);
-        if (stored !== undefined) return { leg: planned.leg, ms: Date.now() - started, ...stored };
+        if (stored !== undefined) {
+          // #1321: a SIGTERM/SIGKILL'd container writes "exited 143/137" as a
+          // failure. Read back after a transport loss (R2_PREFIX present), the
+          // platform kill is infra, never a red test. A live 200 with the same
+          // text stays a real failure (OOM kill / `timeout -s KILL`), never
+          // converted here.
+          if (stored.state === "failure" && stored.description.startsWith(R2_PREFIX) && isSignalKill(stored.description)) {
+            return { leg: planned.leg, ms: Date.now() - started, state: "error", description: stored.description };
+          }
+          return { leg: planned.leg, ms: Date.now() - started, ...stored };
+        }
         // A thrown attempt still counts: its wall time rides in the message, so
         // a failed leg's description shows real time (ms skips thrown attempts).
         // Our own deadline's abort reads as the deadline message, whatever the
