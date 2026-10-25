@@ -89,7 +89,7 @@ export interface LegRunDeps {
 }
 
 /** Slack past the leg's own timeout before its step gives up on a dispatch that
- *  never answered: covers the DO's readiness wait (180 s) and port-retry budget (240 s). */
+ *  never answered: covers the DO's readiness wait (180 s) and port-retry budget (90 s). */
 const LEG_STEP_GRACE_MS = 10 * 60_000;
 
 /** The per-attempt deadline for one leg: its timeout plus grace, capped under the
@@ -322,16 +322,20 @@ export function legRequest(
   };
 }
 
-/** The bundle step's config: one attempt. A retry would only repeat a clone the
- *  legs can do themselves, and a hung bundle leg must not stall the run. */
+/** The bundle step's config: two infra retries, like a leg step. A 503 (infra:
+ *  unreachable, a cold host, container failed to start) is retried on a fresh
+ *  attempt; a 200 with a non-success state is data and is never retried (the
+ *  legs clone). A hung bundle leg is still bounded by its own 5-min timeout. */
 const BUNDLE_STEP_CONFIG: LegStepConfig = {
-  retries: { limit: 0, delay: "15 seconds", backoff: "constant" },
+  retries: { limit: 2, delay: "15 seconds", backoff: "exponential" },
   timeout: "30 minutes",
 };
 
-/** The slice of Workflows' WorkflowStep the bundle step uses. */
+/** The slice of Workflows' WorkflowStep the bundle step uses. The step's return
+ *  value is the built/not-built boolean, so a Workflow replay returns the
+ *  recorded verdict instead of recomputing it. */
 export interface BundleStepRunner {
-  do(name: string, config: LegStepConfig, fn: () => Promise<void>): Promise<void>;
+  do(name: string, config: LegStepConfig, fn: () => Promise<boolean>): Promise<boolean>;
 }
 
 /** #1080: the bundle step needs two switches, both off by default. The fleet
@@ -343,8 +347,9 @@ export function bundleStepEnabled(fleetFlag: string | undefined, repoOptIn: bool
 }
 
 /** #1080: the one bundle step before the legs. True only when the bundle leg
- *  answered 200 with state success (the DO answers 200 for a leg error too). False
- *  on any failure, and it never throws: a run whose bundle did not build clones in
+ *  answered 200 with state success (the DO answers 200 for a leg error too). A
+ *  503 (infra) is retried by the step config (#1313); any other failure is
+ *  final, and the step never throws: a run whose bundle did not build clones in
  *  each leg, as before. */
 export async function runBundleStep(
   step: BundleStepRunner,
@@ -353,8 +358,12 @@ export async function runBundleStep(
 ): Promise<boolean> {
   return step.do("build-bundle", BUNDLE_STEP_CONFIG, async () => {
     const res = await dispatch(planned);
+    // A non-2xx (infra, 503) throws, so the step's retries re-run it on a fresh
+    // attempt (#1313). A 200 with a non-success state is data: return false, so
+    // the legs clone and the step never retries a genuine leg error.
     if (!res.ok) throw new Error(`bundle leg: HTTP ${res.status}`);
     const body = await res.json() as { state?: unknown };
-    if (body.state !== "success") throw new Error(`bundle leg: state ${String(body.state)}`);
-  }).then(() => true, () => false);
+    return body.state === "success";
+    // Retries exhausted on infra still never fail the run: false, the legs clone.
+  }).catch(() => false);
 }

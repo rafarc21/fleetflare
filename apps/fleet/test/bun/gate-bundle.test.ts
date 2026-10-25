@@ -220,12 +220,22 @@ describe("parseGateBlock: per-repo bundle opt-in (#1080, default off)", () => {
 });
 
 describe("runBundleStep: the bundle step never fails the run (#1080)", () => {
-  /** A step runner that just runs the callback and records each step name and config. */
+  /** A step runner that models Workflows' retry rule and records each step name and config. */
   function fakeStep() {
     const names: string[] = [];
     const configs: { retries: { limit: number } }[] = [];
     const step: BundleStepRunner = {
-      do: async (name, config, fn) => { names.push(name); configs.push(config); return fn(); },
+      do: async (name, config, fn) => {
+        names.push(name); configs.push(config);
+        const limit = config.retries.limit;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await fn();
+          } catch (err) {
+            if (attempt >= limit) return false;
+          }
+        }
+      },
     };
     return { step, names, configs };
   }
@@ -244,16 +254,37 @@ describe("runBundleStep: the bundle step never fails the run (#1080)", () => {
     expect(built).toBe(false);
   });
 
-  it("is never retried: one attempt, then the legs clone", async () => {
+  it("is configured with two infra retries, like a leg step (#1313)", async () => {
     const { step, configs } = fakeStep();
     await runBundleStep(step, async () => new Response("{}", { status: 503 }), PLANNED);
-    expect(configs[0].retries.limit).toBe(0);
+    expect(configs[0].retries.limit).toBe(2);
   });
 
-  it("reports no bundle when the bundle leg answers 503, and does not throw", async () => {
+  it("a 503 is retried, and a later success builds the bundle (#1313)", async () => {
     const { step } = fakeStep();
-    const built = await runBundleStep(step, async () => new Response("{}", { status: 503 }), PLANNED);
+    let sent = 0;
+    const built = await runBundleStep(step, async () => {
+      sent++;
+      return sent === 1 ? new Response("{}", { status: 503 }) : Response.json({ state: "success" });
+    }, PLANNED);
+    expect(built).toBe(true);
+    expect(sent).toBe(2);
+  });
+
+  it("three 503s exhaust the retries and the legs clone, never a throw (#1313)", async () => {
+    const { step } = fakeStep();
+    let sent = 0;
+    const built = await runBundleStep(step, async () => { sent++; return new Response("{}", { status: 503 }); }, PLANNED);
     expect(built).toBe(false);
+    expect(sent).toBe(3);
+  });
+
+  it("a 200 with a non-success state is data and is never retried: the legs clone", async () => {
+    const { step } = fakeStep();
+    let sent = 0;
+    const built = await runBundleStep(step, async () => { sent++; return Response.json({ state: "error", description: "bundle failed" }); }, PLANNED);
+    expect(built).toBe(false);
+    expect(sent).toBe(1);
   });
 
   it("reports no bundle when the dispatch itself throws, and does not throw", async () => {

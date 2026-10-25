@@ -18,9 +18,12 @@ export const GATE_INSTANCE = "standard-4";
 const READY_TIMEOUT_MS = 180_000;
 const READY_POLL_MS = 250;
 const PORT_RETRY_MS = 500;
-/** Live: on a host that has not pulled the (Rust-sized) gate image yet, the
- *  server took over 60 s to listen after start(). Pulls are cached per host. */
-const PORT_RETRY_BUDGET_MS = 240_000;
+/** #1313: the budget a cold host gets to bring the gate server up. Live: a host
+ *  that has not pulled the (Rust-sized) gate image yet took over 60 s to listen
+ *  after start(); 90 s still covers that while failing fast. The old 240 s
+ *  turned every post-deploy first-try leg into a ~10-min "gate server
+ *  unreachable" stall before its step retry landed on a now-warm host. */
+const PORT_RETRY_BUDGET_MS = 90_000;
 /** How often a running leg is polled for its result. */
 const POLL_MS = 5_000;
 /** Ceiling on one request to the container. A request past it is a failed
@@ -191,10 +194,13 @@ async function runOnServer(
         if (stored !== undefined) return { kind: "result", result: stored };
       }
       // Account at capacity: fail fast, never spend the full budget on a host
-      // that cannot provide an instance (live: 459 x 240 s under peer load).
+      // that cannot provide an instance (live: 459 concurrent legs thrashed a
+      // saturated host under peer load).
       if (isNoInstance(err)) return { kind: "infra", description: NO_INSTANCE_DESCRIPTION };
       if (now() - postStarted >= PORT_RETRY_BUDGET_MS) {
-        return { kind: "infra", description: `gate server unreachable: ${errorText(err)}` };
+        // #1313: name the budget that was spent, so the fail-fast shape is
+        // visible in the description a leg's combined causes report.
+        return { kind: "infra", description: `gate server unreachable after ${PORT_RETRY_BUDGET_MS / 1000} s: ${errorText(err)}` };
       }
       await sleep(PORT_RETRY_MS);
       continue;
@@ -235,7 +241,7 @@ function errorText(err: unknown): string {
 }
 
 /** Whether an error is the account-at-capacity refusal, not a leg or host
- *  defect. Retrying a saturated host only adds the failure's 240 s retry budget
+ *  defect. Retrying a saturated host only adds the failure's port-retry budget
  *  on top; fail fast and let the step's exponential backoff shed the load. */
 function isNoInstance(err: unknown): boolean {
   return NO_INSTANCE_RE.test(errorText(err));
