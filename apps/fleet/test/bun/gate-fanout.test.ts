@@ -406,3 +406,25 @@ describe("carriedGreenByLeg (#1230)", () => {
     expect(carriedGreenByLeg(undefined, CTX).size).toBe(0);
   });
 });
+
+describe("planLegs: lane timeouts (#1319)", () => {
+  it("vitestTimeoutMin applies to every generated vitest shard", () => {
+    const planned = planLegs({ ...BASE, vitestTimeoutMin: 12 });
+    const vitest = planned.filter((l) => l.leg.startsWith("vitest-"));
+    expect(vitest).toHaveLength(2);
+    for (const l of vitest) expect(l.timeoutMin).toBe(12);
+  });
+  it("bunTimeoutMin applies to every bun shard, not to vitest or block legs", () => {
+    const planned = planLegs({ ...BASE, bunShards: BUN_SHARDS, bunTimeoutMin: 7, vitestTimeoutMin: 9 });
+    const bun = planned.filter((l) => l.leg.startsWith("bun-"));
+    for (const l of bun) expect(l.timeoutMin).toBe(7);
+    const vitest = planned.filter((l) => l.leg.startsWith("vitest-"));
+    for (const l of vitest) expect(l.timeoutMin).toBe(9);
+    const typecheck = planned.find((l) => l.leg === "typecheck")!;
+    expect(typecheck.timeoutMin).toBeUndefined();
+  });
+  it("no lane timeout -> lanes carry none (default at run time)", () => {
+    const planned = planLegs(BASE);
+    expect(planned.find((l) => l.leg === "vitest-1")?.timeoutMin).toBeUndefined();
+  });
+});
