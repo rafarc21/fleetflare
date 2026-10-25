@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, spyOn } from "bun:test";
-import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, parseStartResponse, firstLine, runGate, formatMs, legLines, gateStartLine, gateQueuedLine, type GateStatusResponse } from "../../cli/gate";
+import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, parseStartResponse, firstLine, runGate, formatMs, legLines, gateStartLine, gateQueuedLine, gateLogHeader, type GateStatusResponse } from "../../cli/gate";
 
 // #1085 (refs #715): the start line says whether the run was reattached or fresh.
 describe("gateStartLine: reattached to a live run vs a fresh run (#1085)", () => {
@@ -287,5 +287,16 @@ describe("runGate prints one line per leg after the verdict (#1049)", () => {
       "gate: failure — 1/2 green; red: vitest-1 (run 01234567)",
       ...legLines(status),
     ]);
+  });
+});
+
+describe("gateLogHeader (#1318 r1)", () => {
+  const h = (body: Parameters<typeof gateLogHeader>[3]) => gateLogHeader("acme/example", 9, "vitest-6", body);
+  it("restores '<state> — <summary>' before '(run X)'", () => {
+    expect(h({ state: "failure", summary: "Tests 1 failed", runId: "run-a" }))
+      .toBe("gate log acme/example#9 vitest-6: failure — Tests 1 failed (run run-a)");
+  });
+  it("no summary or run -> just the state", () => {
+    expect(h({ state: "success" })).toBe("gate log acme/example#9 vitest-6: success");
   });
 });

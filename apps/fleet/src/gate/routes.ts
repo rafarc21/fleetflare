@@ -20,7 +20,7 @@ import { isGateRunnerRepo } from "./config";
 import { gateDraining } from "./drain";
 import { greenLegsOf, type CarryGreen, type OutcomeLeg } from "./fanout";
 import { rerunInstanceId, statusFollowingRerun } from "./infra-rerun";
-import { finalLegKey, failingLines, type LegOutput } from "./log";
+import { finalLegKey, failingLines, firstFailingTest, legAttemptKeys, type LegOutput } from "./log";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
 // Env; until then this cast keeps this module typechecking. Drop it then.
@@ -127,7 +127,7 @@ async function gateRunStatusSafe(env: Env, runId: string): Promise<Response> {
  *  extracted. A bare throw must never reach the caller: it maps to JSON 404
  *  (no run / no leg) or 500, the same shape gateRunStatusSafe uses. */
 async function gateLegLogSafe(
-  env: Env, repo: string, pr: number, leg: string, runId?: string,
+  env: Env, repo: string, pr: number, leg: string, runId?: string, all = false,
 ): Promise<Response> {
   try {
     const index = d1RunIndex(env.DB);
@@ -140,6 +140,32 @@ async function gateLegLogSafe(
     const keys = listed.objects.map((o) => o.key);
     const key = finalLegKey(keys, leg);
     if (key === null) return j({ error: `no result for leg ${leg}`, runId: run.runId }, 404);
+    if (all) {
+      // #1318: every attempt of the leg, oldest first. The first-attempt shard
+      // is always written by the container's putResult (runSteps returns on
+      // every path, including a throw), so it exists for a red-first retry.
+      const attemptKeys = legAttemptKeys(keys, leg);
+      const attempts = await Promise.all(attemptKeys.map(async (k) => {
+        const obj = await env.STUDIO_ARCHIVE.get(k);
+        if (obj === null) return { key: k, state: "error", failingTest: null };
+        // One malformed shard must not fail the whole listing (#1318 r1): that
+        // attempt reports "error", the rest still list.
+        let b: Partial<LegOutput> | null;
+        try {
+          b = (await obj.json()) as Partial<LegOutput> | null;
+        } catch {
+          b = null;
+        }
+        if (b === null || typeof b !== "object") return { key: k, state: "error", failingTest: null };
+        return {
+          key: k,
+          state: b.state ?? "error",
+          summary: b.summary,
+          failingTest: firstFailingTest(b as LegOutput),
+        };
+      }));
+      return j({ repo, pr, leg, runId: run.runId, attempts });
+    }
     const obj = await env.STUDIO_ARCHIVE.get(key);
     if (obj === null) return j({ error: `no result for leg ${leg}`, runId: run.runId }, 404);
     const body = (await obj.json()) as Partial<LegOutput> | null;
@@ -297,7 +323,11 @@ export async function handleGateRoute(
     const leg = url.searchParams.get("leg") ?? "";
     if (!Number.isInteger(pr) || pr <= 0) return j({ error: "pr required as a positive integer" }, 400);
     if (!/^[a-z0-9][a-z0-9-]{0,39}(?:@head(?:-\d+)?)?$/.test(leg)) return j({ error: "leg required" }, 400);
-    return await gateLegLogSafe(env, repo, pr, leg, url.searchParams.get("run") ?? undefined);
+    // Only all=1 / all=true means --all; any other value (or none) is the
+    // single-key final-try read (#1318 r1).
+    const allParam = url.searchParams.get("all");
+    const all = allParam === "1" || allParam === "true";
+    return await gateLegLogSafe(env, repo, pr, leg, url.searchParams.get("run") ?? undefined, all);
   }
 
   return j({ error: "not found" }, 404);

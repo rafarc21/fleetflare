@@ -2,7 +2,7 @@
 // failing-line extraction — kept apart from the Worker route so bun test can
 // load them.
 import { describe, it, expect } from "bun:test";
-import { finalLegKey, failingLines, type LegOutput } from "../../src/gate/log";
+import { finalLegKey, failingLines, legAttemptKeys, firstFailingTest, type LegOutput } from "../../src/gate/log";
 
 describe("finalLegKey: pick the final try, never a stale SIGTERM try (#1277)", () => {
   const prefix = "gate/acme/example/runs/7/run-abc/";
@@ -75,5 +75,88 @@ describe("failingLines: failing tests + assertions, never fabricated (#1277)", (
 
   it("(fail) bun markers are caught too", () => {
     expect(failingLines(out("(fail) should trim [5.00ms]\n"))).toEqual(["(fail) should trim [5.00ms]"]);
+  });
+});
+describe("legAttemptKeys: every attempt of one leg, oldest first (#1318)", () => {
+  const prefix = "gate/acme/example/runs/7/run-abc/";
+  const base = `${prefix}shard-vitest-6`;
+
+  it("lists the base, each -tryN and .retry in write order", () => {
+    const keys = [
+      `${base}.json`,
+      `${base}-try2.json`,
+      `${base}.retry.json`,
+      `${base}-try3.json`,
+    ];
+    expect(legAttemptKeys(keys, "vitest-6")).toEqual([
+      `${base}.json`,
+      `${base}-try2.json`,
+      `${base}-try3.json`,
+      `${base}.retry.json`,
+    ]);
+  });
+
+  it("ignores other legs' keys, including @head and @head shards", () => {
+    const keys = [
+      `${base}.json`,
+      `${prefix}shard-vitest-7.json`,
+      `${prefix}shard-vitest-6@head.json`,
+      `${prefix}shard-vitest@head-6.json`,
+    ];
+    expect(legAttemptKeys(keys, "vitest-6")).toEqual([`${base}.json`]);
+  });
+
+  it("empty when the leg has no result at all", () => {
+    expect(legAttemptKeys([`${prefix}shard-merge-tree.json`], "vitest-6")).toEqual([]);
+  });
+});
+
+describe("firstFailingTest: the first named failing test in an attempt's output (#1318)", () => {
+  const out = (stdout: string): LegOutput => ({ state: "failure", stdout });
+
+  it("picks the vitest '> name' that follows a FAIL line", () => {
+    expect(firstFailingTest(out([
+      "FAIL src/a.test.ts > a > should trim",
+      "AssertionError: expected 'x ' to equal 'x'",
+    ].join("\n")))).toBe("should trim");
+  });
+
+  it("picks a bun (fail) name", () => {
+    expect(firstFailingTest(out("(fail) should add [4.00ms]\n"))).toBe("should add");
+  });
+
+  it("picks the first ✕ line's name", () => {
+    expect(firstFailingTest(out(" ✕ should drop (2ms)\n"))).toBe("should drop");
+  });
+
+  it("null when no failing test is named in the tail", () => {
+    expect(firstFailingTest(out("1393 passed\n"))).toBeNull();
+    expect(firstFailingTest(out("FAIL (no name follows)\n"))).toBeNull();
+  });
+});
+
+describe("legAttemptKeys: @head legs (#1318 r1)", () => {
+  const prefix = "gate/acme/example/runs/7/run-abc/";
+
+  it("lists the attempts of a union leg vitest-6@head", () => {
+    const keys = [
+      `${prefix}shard-vitest-6@head.json`,
+      `${prefix}shard-vitest-6@head-try2.json`,
+    ];
+    expect(legAttemptKeys(keys, "vitest-6@head")).toEqual([
+      `${prefix}shard-vitest-6@head.json`,
+      `${prefix}shard-vitest-6@head-try2.json`,
+    ]);
+  });
+
+  it("lists the attempts of a sharded union leg vitest@head-6", () => {
+    const keys = [
+      `${prefix}shard-vitest@head-6.json`,
+      `${prefix}shard-vitest@head-6.retry.json`,
+    ];
+    expect(legAttemptKeys(keys, "vitest@head-6")).toEqual([
+      `${prefix}shard-vitest@head-6.json`,
+      `${prefix}shard-vitest@head-6.retry.json`,
+    ]);
   });
 });

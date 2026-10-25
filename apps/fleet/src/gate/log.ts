@@ -78,3 +78,48 @@ export function failingLines(output: LegOutput): string[] {
   }
   return out;
 }
+
+/** The key suffix after the base `shard-<leg>`: "" for the first attempt,
+ *  "-try<N>" for an infra retry, ".retry" for a red-first retry. */
+function attemptSuffix(key: string): string | null {
+  const base = key.replace(/\.json$/, "").replace(/-try\d+$/, "").replace(/\.retry$/, "");
+  const m = base.match(/shard-([^/]+)$/);
+  if (m === null) return null;
+  return m[1];
+}
+
+/** Every attempt key of one leg, oldest first (#1318): the first attempt,
+ *  then each infra `-tryN` in numeric order, then `.retry` last (leg-run.ts
+ *  writes it after the infra-try sequence). Only keys whose base matches
+ *  `shard-<leg>` exactly count — `@head` legs (sharded or not) are a
+ *  different leg and never appear. */
+export function legAttemptKeys(keys: string[], leg: string): string[] {
+  const own = keys.filter((key) => {
+    const suffix = attemptSuffix(key);
+    // The exact-base match alone isolates the leg: a query for `vitest-6`
+    // never picks up `vitest-6@head`, and a query for `vitest-6@head` (or
+    // `vitest@head-6`) matches only its own `@head` attempts (#1318 r1).
+    return suffix !== null && suffix === leg;
+  });
+  const rank = (key: string): number => tryRank(key);
+  return own.sort((a, b) => rank(a) - rank(b));
+}
+
+/** The first named failing test in one attempt's output (#1318): vitest's
+ *  "FAIL <file> > <suite> > <name>" (or its "✕ <name>" line), or bun test's
+ *  "(fail) <name>". Null when the tail names none — a hung leg writes no
+ *  output, so the honest answer is "unnamed", never a guess. */
+export function firstFailingTest(output: LegOutput): string | null {
+  const text = `${output.stdout ?? ""}\n${output.stderr ?? ""}`;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const vitest = /^FAIL\b.*>\s*([^>\s][^>]*?)\s*$/.exec(line);
+    if (vitest !== null) return vitest[1];
+    const bun = /^\(fail\)\s+(.+?)\s*\[[\d.]+\w+\]$/.exec(line);
+    if (bun !== null) return bun[1];
+    const cross = /^[✕✗]\s+(.+?)\s+\(\d+(?:\.\d+)?\w+\)$/.exec(line);
+    if (cross !== null) return cross[1];
+  }
+  return null;
+}
