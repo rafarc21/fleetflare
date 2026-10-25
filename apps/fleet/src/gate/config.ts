@@ -76,6 +76,11 @@ export interface GateConfig {
   /** Repo-root path the bun-test lane runs from (e.g. "apps/fleet"). Absent
    *  means the block has no bun lane: no bun legs for that repo. */
   bunLaneRoot?: string;
+  /** #1319: every generated vitest-N leg's deadline in minutes (clamped via
+   *  legTimeoutMin). Absent means the 25 min default applies per shard. */
+  vitestTimeoutMin?: number;
+  /** #1319: every generated bun-N leg's deadline in minutes. Absent means the default. */
+  bunTimeoutMin?: number;
   /** Lane file globs, relative to bunLaneRoot. Absent means the lane's default set. */
   bunLaneGlobs?: string[];
   /** #1080: the repo opts into the one-bundle-per-run path. Absent means off: the legs clone. Opt in only
@@ -143,6 +148,10 @@ export function parseGateBlock(block: unknown): GateConfig | null {
   if (typeof bunShards !== "number" || !Number.isInteger(bunShards) || bunShards < 1) return null;
   if (g.bunLaneRoot !== undefined && (typeof g.bunLaneRoot !== "string" || g.bunLaneRoot === "")) return null;
   if (g.bunLaneGlobs !== undefined && !isStringArray(g.bunLaneGlobs)) return null;
+  // #1319: lane timeouts clamp the same as per-leg timeouts. Fail-closed on any
+  // non-finite number; absent keeps the default so lanes run at 25 min.
+  if (g.vitestTimeoutMin !== undefined && (typeof g.vitestTimeoutMin !== "number" || !Number.isFinite(g.vitestTimeoutMin))) return null;
+  if (g.bunTimeoutMin !== undefined && (typeof g.bunTimeoutMin !== "number" || !Number.isFinite(g.bunTimeoutMin))) return null;
   if (g.bundle !== undefined && typeof g.bundle !== "boolean") return null;
   // Bun shards only take cap room when the block has a bun lane. A vitest
   // lane, when configured, needs at least one shard of room.
@@ -160,6 +169,8 @@ export function parseGateBlock(block: unknown): GateConfig | null {
     install: g.install, legs, vitestCmd: g.vitestCmd, pathRules: g.pathRules, vitestShards, bunShards,
     bunLaneRoot: g.bunLaneRoot, bunLaneGlobs: g.bunLaneGlobs, ...(image === undefined ? {} : { image }),
     ...(g.bundle === true ? { bundle: true } : {}),
+    ...(g.vitestTimeoutMin === undefined ? {} : { vitestTimeoutMin: legTimeoutMin(g.vitestTimeoutMin) }),
+    ...(g.bunTimeoutMin === undefined ? {} : { bunTimeoutMin: legTimeoutMin(g.bunTimeoutMin) }),
   };
 }
 

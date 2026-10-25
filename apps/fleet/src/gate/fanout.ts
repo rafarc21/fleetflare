@@ -74,6 +74,10 @@ export interface PlanInput {
   bunLaneRoot: string;
   /** Absent means the block has no vitest lane: zero vitest legs. */
   vitestCmd?: string; vitestShards: number;
+  /** #1319: every generated vitest-N leg's deadline. Absent: the default. */
+  vitestTimeoutMin?: number;
+  /** #1319: every generated bun-N leg's deadline. Absent: the default. */
+  bunTimeoutMin?: number;
   baselineKeys: string[];
   /** The block's image key, carried onto every leg of this plan. Absent: the default image. */
   image?: string;
@@ -147,7 +151,7 @@ export function bunLegs(shards: string[][], root: string): { leg: string; legCmd
 export function planLegs(input: PlanInput): PlannedLeg[] {
   const {
     owner, repo, pr, runId, headSha, baseSha, install, legs, bunShards, bunLaneRoot, vitestCmd, vitestShards, baselineKeys,
-    image, legName = (name: string) => name,
+    image, legName = (name: string) => name, vitestTimeoutMin, bunTimeoutMin,
   } = input;
   const keyFor = (leg: string) => `gate/${owner}/${repo}/runs/${pr}/${runId}/shard-${leg}.json`;
   const fixedLegs = 1 + legs.length + bunShards.length; // merge-tree + block legs + bun shards
@@ -170,9 +174,9 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   return [
     leg("merge-tree", range, "", "", []),
     ...legs.map((l) => leg(l.name, range, install, l.cmd, baselineKeys, l.timeoutMin, l.image)),
-    ...bunLegs(bunShards, bunLaneRoot).map((b) => leg(b.leg, range, install, b.legCmd, baselineKeys)),
+    ...bunLegs(bunShards, bunLaneRoot).map((b) => leg(b.leg, range, install, b.legCmd, baselineKeys, bunTimeoutMin)),
     ...(vitestCmd === undefined ? [] : vitestLegs(vitestCmd, shards))
-      .map((v) => leg(v.leg, range, install, v.legCmd, baselineKeys)),
+      .map((v) => leg(v.leg, range, install, v.legCmd, baselineKeys, vitestTimeoutMin)),
   ];
 }
 
