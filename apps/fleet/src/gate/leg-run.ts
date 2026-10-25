@@ -62,7 +62,7 @@ export interface LegStepContext {
 
 /** The slice of Workflows' WorkflowStep this module uses. */
 export interface LegStepRunner {
-  do(name: string, config: LegStepConfig, fn: (ctx: LegStepContext) => Promise<LegRunResult>): Promise<LegRunResult>;
+  do(name: string, config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<LegRunResult>): Promise<LegRunResult>;
 }
 
 export const LEG_STEP_CONFIG: LegStepConfig = {
@@ -133,15 +133,15 @@ export function withStepDeadline<T>(work: Promise<T>, ms: number, message: strin
 /** A leg's result as the container wrote it to R2: state and description, no leg name. */
 export type StoredLegResult = { state: LegResult["state"]; description?: string };
 
-/** #1321: a leg killed by SIGTERM (143) or SIGKILL (137) writes "exited 143/137"
- *  as a failure, but the kill is the platform shutting the container down (a
- *  Workflows internal error), never the code under test. Read back after a
- *  transport loss, it is infra — a real test exit code is never 143/137. */
+/** #1321: a leg killed by SIGTERM (143) or SIGKILL (137) writes "exited 143/137".
+ *  A LIVE gate-server that returns this means the test proc itself died — an OOM
+ *  kill (137) or `timeout -s KILL` in the leg cmd is a REAL failure. Only a
+ *  result recovered from R2 after a transport loss (carrying R2_PREFIX) means the
+ *  platform killed the container, so that alone is re-read as infra. */
 const SIGNAL_KILL_RE = /\bexited 1(43|37)\b/;
 
-/** Whether a description names a SIGTERM/SIGKILL leg exit (#1321). Matches
- *  through the R2 read-back prefix, so a recovered result is classified the
- *  same as a live one. */
+/** Whether a description names a SIGTERM/SIGKILL leg exit (#1321). Callers gate
+ *  the infra re-read on the R2 read-back prefix themselves. */
 export function isSignalKill(description: string | undefined): boolean {
   return description !== undefined && SIGNAL_KILL_RE.test(description);
 }
@@ -173,14 +173,18 @@ export async function runLegStep(
     // cause per failed attempt, so the final throw (if retries run out) carries
     // all of them, never just the last.
     const causes: string[] = [];
-    return step.do(name, LEG_STEP_CONFIG, async (ctx) => {
+    return step.do(name, LEG_STEP_CONFIG, async (ctx: LegStepContext | undefined) => {
+      // #1321: the try number is the durable per-attempt counter. A runtime that
+      // omits the context falls back to 1 (the old single-key behavior) rather
+      // than a fleet-wide TypeError on the first leg.
+      const tryNo = ctx?.attempt ?? 1;
       // #1321: retry-<leg> steps all dispatch in one Promise.all, so every red
       // leg would clone at once and burst the shared token. A random wait on the
       // step's FIRST attempt (only) desyncs the clones.
-      if (name.startsWith("retry-") && ctx.attempt === 1 && jitterMs > 0) {
+      if (name.startsWith("retry-") && tryNo === 1 && jitterMs > 0) {
         await sleep(Math.floor(random() * jitterMs));
       }
-      const target = targetFor(ctx.attempt);
+      const target = targetFor(tryNo);
       // Made inside the callback: a Workflows step retry re-runs it, so every
       // try gets its own runner DO. A replayed step returns its recorded result.
       const attemptId = crypto.randomUUID();
@@ -207,13 +211,6 @@ export async function runLegStep(
           throw new Error(cause);
         }
         const normalized = normalizeLegResult(planned.leg, (await res.json()) as LegRunResult);
-        // #1321: a container the platform SIGTERM/SIGKILL'd reports "exited
-        // 143/137" as a failure; that kill is infra, never a red test. Applied
-        // on the live 200 path too, so the DO's own R2 read-back ("container
-        // exited mid-leg") is classified the same as a workflow-side read.
-        if (normalized.state === "failure" && isSignalKill(normalized.description)) {
-          return { leg: planned.leg, ms: Date.now() - started, state: "error" as const, description: normalized.description };
-        }
         return {
           ...normalized,
           description: normalized.description?.slice(0, MAX_DESCRIPTION_CHARS),
@@ -224,9 +221,12 @@ export async function runLegStep(
         // died. A known state there IS the leg's result (#1122), state included.
         const stored = await storedLegResult(deps.readResult, target.resultKey);
         if (stored !== undefined) {
-          // #1321: a container the platform SIGTERM/SIGKILL'd writes "exited
-          // 143/137" as a failure; that kill is infra, never a red test.
-          if (stored.state === "failure" && isSignalKill(stored.description)) {
+          // #1321: a SIGTERM/SIGKILL'd container writes "exited 143/137" as a
+          // failure. Read back after a transport loss (R2_PREFIX present), the
+          // platform kill is infra, never a red test. A live 200 with the same
+          // text stays a real failure (OOM kill / `timeout -s KILL`), never
+          // converted here.
+          if (stored.state === "failure" && stored.description.startsWith(R2_PREFIX) && isSignalKill(stored.description)) {
             return { leg: planned.leg, ms: Date.now() - started, state: "error", description: stored.description };
           }
           return { leg: planned.leg, ms: Date.now() - started, ...stored };

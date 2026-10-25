@@ -396,12 +396,27 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
     let sent = 0;
     const dispatch = async () => { sent++; throw new Error(LOST); };
     const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => EXITED });
-    // A SIGTERM'd container's "exited 143" is infra, never a red test (#1321):
-    // no flaky retry, so the run auto-reruns instead of reading it back red.
+    // A SIGTERM'd container's "exited 143" read back after a transport loss is
+    // infra, never a red test (#1321): no flaky retry, so the run auto-reruns
+    // instead of reading it back red.
     expect(result).toMatchObject({
       leg: "lint", state: "error", description: "result read from R2 after transport loss: lint exited 143",
     });
     expect(sent).toBe(1);
+  });
+
+  it("a LIVE 200 'exited 137' stays a real failure: the test proc died, not the container (#1321 review)", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; return reply({ state: "failure", description: "lint exited 137" }); };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    // An OOM kill (137) or `timeout -s KILL` in the leg cmd is the code under
+    // test, so it earns the flaky retry and stays a red-first failure.
+    expect(result).toMatchObject({
+      leg: "lint", state: "failure", description: "lint exited 137", redFirst: true,
+    });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(sent).toBe(2);
   });
 
   it("no R2 result for the leg: the description is the transport error, combined across all 3 attempts (#1231)", async () => {
@@ -601,6 +616,48 @@ describe("runLegStep: per-try keys from ctx.attempt survive an engine restart (#
     };
     await runLegStep(step, dispatch, PLANNED, { sleep: async (ms) => { sleeps.push(ms); } });
     expect(sleeps).toEqual([]);
+  });
+
+  it("the retry step jitters on its first attempt even when that attempt throws (#1321 review)", async () => {
+    // A step engine that always throws the retry step's callback: the jitter
+    // must still fire on attempt 1 before the infra retries re-run the step.
+    const step = {
+      do: async (name: string, config: LegStepConfig, fn: (ctx?: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>): Promise<LegResult> => {
+        if (name === "start-lint") return await fn({ attempt: 1, step: { name, count: 1 } });
+        // retry-lint: throw on every attempt, exercising the jitter + infra retries.
+        const limit = config.retries.limit;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await fn({ attempt: attempt + 1, step: { name, count: 1 } });
+          } catch (err) {
+            if (attempt >= limit) throw err;
+          }
+        }
+      },
+    };
+    const sleeps: number[] = [];
+    const dispatch = async () => reply({ state: "failure", description: "timing" });
+    await runLegStep(step, dispatch, PLANNED, {
+      retryJitterMs: 4_000, random: () => 0.25, sleep: async (ms) => { sleeps.push(ms); },
+    });
+    // The start step returned a failure, so the retry step ran and its first
+    // attempt waited 0.25*4000 = 1000 ms before dispatching.
+    expect(sleeps).toEqual([1_000]);
+  });
+
+  it("a step context that omits ctx falls back to try 1, never a TypeError (#1321 review)", async () => {
+    const step = {
+      do: async (name: string, config: LegStepConfig, fn: (ctx?: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>): Promise<LegResult> => {
+        // The runtime passed no context: fn() with no argument.
+        return await fn();
+      },
+    };
+    const readKeys: string[] = [];
+    const dispatch = async () => { throw new Error("Network connection lost."); };
+    const result = await runLegStep(step, dispatch, PLANNED, { readResult: async (key) => { readKeys.push(key); return undefined; } });
+    // ctx absent -> tryNo 1 -> the base key is read, and the transport error is the cause.
+    expect(readKeys).toEqual([PLANNED.resultKey]);
+    expect(result.state).toBe("error");
   });
 });
 
