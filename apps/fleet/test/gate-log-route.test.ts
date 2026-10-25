@@ -71,6 +71,75 @@ describe("GET /studio/gate/log (#1277)", () => {
     expect(body.failing).toContain("AssertionError: expected 1 to equal 2");
   });
 
+  it("accepts a union '@head' leg (cargo-test@head)", async () => {
+    realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/pulls/")) {
+        return new Response(JSON.stringify({
+          number: PR, merged: false, merge_commit_sha: null, state: "open",
+          base: { ref: "main", repo: { full_name: CANONICAL, private: false } },
+          head: { ref: "feature", sha: "a".repeat(40) },
+          title: "t", body: "",
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+
+    await env.STUDIO_ARCHIVE.put(
+      `gate/${CANONICAL}/runs/${PR}/${RUN}/shard-cargo-test@head.json`,
+      JSON.stringify({ state: "failure", stdout: "FAIL cargo test failed\n", summary: "Tests 1 failed" }),
+    );
+
+    // `leg=cargo-test%40head` — the URL-encoded form the CLI sends.
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=cargo-test%40head&run=${RUN}`);
+    const res = await handleGateRoute(req, logEnv());
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.key).toContain("shard-cargo-test@head.json");
+    expect(body.state).toBe("failure");
+  });
+
+  it("accepts a sharded union head leg (vitest@head-6)", async () => {
+    realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/pulls/")) {
+        return new Response(JSON.stringify({
+          number: PR, merged: false, merge_commit_sha: null, state: "open",
+          base: { ref: "main", repo: { full_name: CANONICAL, private: false } },
+          head: { ref: "feature", sha: "a".repeat(40) },
+          title: "t", body: "",
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+
+    await env.STUDIO_ARCHIVE.put(
+      `gate/${CANONICAL}/runs/${PR}/${RUN}/shard-vitest@head-6.json`,
+      JSON.stringify({ state: "failure", stdout: "FAIL shard 6 failed\n", summary: "Tests 1 failed" }),
+    );
+
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=vitest%40head-6&run=${RUN}`);
+    const res = await handleGateRoute(req, logEnv());
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.key).toContain("shard-vitest@head-6.json");
+    expect(body.state).toBe("failure");
+  });
+
+  it("rejects a leg with an '@' that is not '@head'", async () => {
+    realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error("unexpected fetch");
+    }) as unknown as typeof globalThis.fetch;
+
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=cargo-test@main&run=${RUN}`);
+    const res = await handleGateRoute(req, logEnv());
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toBe("leg required");
+  });
+
   it("404 (JSON) when the leg has no result", async () => {
     realFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (input: any) => {

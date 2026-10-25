@@ -296,7 +296,7 @@ export async function handleGateRoute(
     const pr = Number(url.searchParams.get("pr"));
     const leg = url.searchParams.get("leg") ?? "";
     if (!Number.isInteger(pr) || pr <= 0) return j({ error: "pr required as a positive integer" }, 400);
-    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(leg)) return j({ error: "leg required" }, 400);
+    if (!/^[a-z0-9][a-z0-9-]{0,39}(?:@head(?:-\d+)?)?$/.test(leg)) return j({ error: "leg required" }, 400);
     return await gateLegLogSafe(env, repo, pr, leg, url.searchParams.get("run") ?? undefined);
   }
 
