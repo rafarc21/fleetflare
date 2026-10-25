@@ -455,7 +455,14 @@ async function findByKey(api: BoardApi, repo: string, key: string): Promise<Boar
  * so the studio held no open task and was reaped mid-work. The follow-up
  * becomes a real task: assigned to #n's studio unless the caller names one
  * (read from #n, never retyped), and "Continues #n." heads its objective.
- * Returns the brief to parse, `continues` consumed.
+ *
+ * That inheritance — the whole of #54's safeguard — applies only while #n is
+ * still LIVE (non-terminal). Task #1316: `--continues` on a task that already
+ * reached a terminal state (completed/failed/canceled) is NEW work, not the
+ * in-flight continuation #54 guards, and inheriting its studio handed a
+ * backlog follow-up to a frozen sprint's studio before anyone noticed. A
+ * follow-up to a terminal #n keeps the caller's own --studio, or stays
+ * unassigned. Returns the brief to parse, `continues` consumed.
  */
 async function resolveContinues(api: BoardApi, repo: string, raw: unknown): Promise<BoardResult<unknown>> {
   if (typeof raw !== "object" || raw === null || !("continues" in raw)) return { ok: true, value: raw };
@@ -473,14 +480,18 @@ async function resolveContinues(api: BoardApi, repo: string, raw: unknown): Prom
     throw err;
   }
   const given = typeof rest.assignee === "string" && rest.assignee.trim() !== "";
-  if (!given && prior.assignee === null) {
+  // Task #1316: only an in-flight #n is the continuation #54 guards. A
+  // terminal #n (completed/failed/canceled) is finished work, so its studio
+  // does not carry over to the follow-up.
+  const priorLive = prior.state !== null && !TERMINAL_TASK_STATES.includes(prior.state);
+  if (!given && priorLive && prior.assignee === null) {
     return {
       ok: false, status: 400,
       message: `task #${continues} has no studio to continue with -- pass --studio <id>`,
     };
   }
   const objective = typeof rest.objective === "string" ? `Continues #${continues}.\n\n${rest.objective}` : rest.objective;
-  return { ok: true, value: { ...rest, objective, ...(given ? {} : { assignee: prior.assignee }) } };
+  return { ok: true, value: { ...rest, objective, ...(given || !priorLive ? {} : { assignee: prior.assignee }) } };
 }
 
 /**
