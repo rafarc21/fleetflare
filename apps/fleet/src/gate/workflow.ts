@@ -244,6 +244,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       bunShards: planBunShards(files, BUN_SHARD_TIMINGS.timings, cfg.bunShards),
       bunLaneRoot: cfg.bunLaneRoot ?? "",
       vitestCmd: cfg.vitestCmd, vitestShards: cfg.vitestShards, image: cfg.image,
+      vitestTimeoutMin: cfg.vitestTimeoutMin, bunTimeoutMin: cfg.bunTimeoutMin,
       baselineKeys: [], // lockfile baseline keys are not wired yet; each leg installs from scratch
     });
     const legs = planUnionLegs(

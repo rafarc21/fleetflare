@@ -877,3 +877,46 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
     }
   }, 60_000);
 });
+
+// #1319: a run-path block with a vitest lane and a lane timeout, so a test can
+// assert the vitest leg's /run-leg body carries the clamped timeoutMin.
+const RUN_FLEET_JSON_VITEST_TIMEOUT = JSON.stringify({
+  gate: { install: "bun install", legs: [], pathRules: ["docs/**"], vitestCmd: "bun test --shard={i}/{n}", vitestShards: 2, vitestTimeoutMin: 9 },
+});
+
+  // #1319: deleting workflow.ts's vitestTimeoutMin/bunTimeoutMin passthrough
+  // (planFor) makes this red: the vitest legs' /run-leg bodies would carry no
+  // timeoutMin. The lane timeout must reach the dispatched leg.
+  it("a vitest lane timeout rides the /run-leg body of each vitest shard (#1319)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON_VITEST_TIMEOUT;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-vitest-lane-timeout");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-vitest-lane-timeout", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string };
+      expect(out.state).toBe("success");
+
+      const vitestCalls = recorded.filter((r) =>
+        /\/run-leg/.test(r.url) && /^vitest-/.test((r.body as { leg?: string }).leg ?? ""));
+      expect(vitestCalls).toHaveLength(2);
+      for (const call of vitestCalls) {
+        expect((call.body as { timeoutMin?: number }).timeoutMin).toBe(9);
+      }
+      // The merge-tree leg carries no lane timeout.
+      const merge = recorded.find((r) => /\/run-leg/.test(r.url) && (r.body as { leg?: string }).leg === "merge-tree");
+      expect(merge).toBeDefined();
+      expect((merge!.body as { timeoutMin?: number }).timeoutMin).toBeUndefined();
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);

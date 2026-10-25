@@ -477,3 +477,21 @@ describe("sharedHeadFailure / guardSuccessStatus: red wins across PRs sharing a 
     expect(clean).toEqual({ state: "success", description: "2/2 green" });
   });
 });
+
+describe("parseGateBlock: lane timeouts (#1319)", () => {
+  it("vitestTimeoutMin and bunTimeoutMin are read and clamped via legTimeoutMin", () => {
+    const cfg = parseGateBlock({ ...BLOCK, vitestTimeoutMin: 12, bunTimeoutMin: 40 });
+    expect(cfg?.vitestTimeoutMin).toBe(12);
+    expect(cfg?.bunTimeoutMin).toBe(MAX_LEG_TIMEOUT_MIN);
+  });
+  it("absent lane timeouts stay absent (lanes take the 25 min default)", () => {
+    const cfg = parseGateBlock({ ...BLOCK });
+    expect(cfg?.vitestTimeoutMin).toBeUndefined();
+    expect(cfg?.bunTimeoutMin).toBeUndefined();
+  });
+  it("null on a non-number lane timeout", () => {
+    expect(parseGateBlock({ ...BLOCK, vitestTimeoutMin: "12" })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, bunTimeoutMin: NaN })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, vitestTimeoutMin: null })).toBeNull();
+  });
+});
