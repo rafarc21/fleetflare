@@ -343,6 +343,16 @@ export function firstLine(text: string): string {
   return line.slice(0, 200);
 }
 
+/** The `fleet gate log` header line (#1277/#1318): the leg and its state —
+ *  summary, then the run id. Kept pure so the default-output shape is pinned
+ *  by a test (r1 found it had lost the state/summary part). */
+export function gateLogHeader(repo: string, pr: number, leg: string, body: { state?: string; summary?: string; runId?: string }): string {
+  const state = body.state ?? "?";
+  const summary = body.summary ? ` — ${body.summary}` : "";
+  const run = body.runId ? ` (run ${body.runId})` : "";
+  return `gate log ${repo}#${pr} ${leg}: ${state}${summary}${run}`;
+}
+
 /** One attempt of a leg as `--all` prints it (#1318). */
 interface GateLogAttempt {
   key: string;
@@ -385,7 +395,7 @@ export async function cmdGateLog(creds: Credentials, pr: number, leg: string, op
     process.exitCode = 2;
     return;
   }
-  console.log(`gate log ${repo}#${pr} ${leg}:${body.runId ? ` (run ${body.runId})` : ""}`);
+  console.log(gateLogHeader(repo, pr, leg, body));
   if (opts.all && body.attempts !== undefined) {
     for (const a of body.attempts) {
       const failing = a.failingTest ?? "(no failing test named in the kept tail)";

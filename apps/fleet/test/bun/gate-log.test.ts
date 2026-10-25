@@ -134,3 +134,29 @@ describe("firstFailingTest: the first named failing test in an attempt's output 
     expect(firstFailingTest(out("FAIL (no name follows)\n"))).toBeNull();
   });
 });
+
+describe("legAttemptKeys: @head legs (#1318 r1)", () => {
+  const prefix = "gate/acme/example/runs/7/run-abc/";
+
+  it("lists the attempts of a union leg vitest-6@head", () => {
+    const keys = [
+      `${prefix}shard-vitest-6@head.json`,
+      `${prefix}shard-vitest-6@head-try2.json`,
+    ];
+    expect(legAttemptKeys(keys, "vitest-6@head")).toEqual([
+      `${prefix}shard-vitest-6@head.json`,
+      `${prefix}shard-vitest-6@head-try2.json`,
+    ]);
+  });
+
+  it("lists the attempts of a sharded union leg vitest@head-6", () => {
+    const keys = [
+      `${prefix}shard-vitest@head-6.json`,
+      `${prefix}shard-vitest@head-6.retry.json`,
+    ];
+    expect(legAttemptKeys(keys, "vitest@head-6")).toEqual([
+      `${prefix}shard-vitest@head-6.json`,
+      `${prefix}shard-vitest@head-6.retry.json`,
+    ]);
+  });
+});

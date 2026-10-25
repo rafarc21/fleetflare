@@ -148,11 +148,19 @@ async function gateLegLogSafe(
       const attempts = await Promise.all(attemptKeys.map(async (k) => {
         const obj = await env.STUDIO_ARCHIVE.get(k);
         if (obj === null) return { key: k, state: "error", failingTest: null };
-        const b = (await obj.json()) as Partial<LegOutput> | null;
+        // One malformed shard must not fail the whole listing (#1318 r1): that
+        // attempt reports "error", the rest still list.
+        let b: Partial<LegOutput> | null;
+        try {
+          b = (await obj.json()) as Partial<LegOutput> | null;
+        } catch {
+          b = null;
+        }
+        if (b === null || typeof b !== "object") return { key: k, state: "error", failingTest: null };
         return {
           key: k,
-          state: b?.state ?? "error",
-          summary: b?.summary,
+          state: b.state ?? "error",
+          summary: b.summary,
           failingTest: firstFailingTest(b as LegOutput),
         };
       }));
@@ -315,7 +323,11 @@ export async function handleGateRoute(
     const leg = url.searchParams.get("leg") ?? "";
     if (!Number.isInteger(pr) || pr <= 0) return j({ error: "pr required as a positive integer" }, 400);
     if (!/^[a-z0-9][a-z0-9-]{0,39}(?:@head(?:-\d+)?)?$/.test(leg)) return j({ error: "leg required" }, 400);
-    return await gateLegLogSafe(env, repo, pr, leg, url.searchParams.get("run") ?? undefined, url.searchParams.get("all") !== null);
+    // Only all=1 / all=true means --all; any other value (or none) is the
+    // single-key final-try read (#1318 r1).
+    const allParam = url.searchParams.get("all");
+    const all = allParam === "1" || allParam === "true";
+    return await gateLegLogSafe(env, repo, pr, leg, url.searchParams.get("run") ?? undefined, all);
   }
 
   return j({ error: "not found" }, 404);

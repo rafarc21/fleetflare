@@ -96,9 +96,10 @@ function attemptSuffix(key: string): string | null {
 export function legAttemptKeys(keys: string[], leg: string): string[] {
   const own = keys.filter((key) => {
     const suffix = attemptSuffix(key);
-    if (suffix === null) return false;
-    // Reject any `@head` suffix on the leg name itself.
-    return suffix === leg && !key.includes("@head");
+    // The exact-base match alone isolates the leg: a query for `vitest-6`
+    // never picks up `vitest-6@head`, and a query for `vitest-6@head` (or
+    // `vitest@head-6`) matches only its own `@head` attempts (#1318 r1).
+    return suffix !== null && suffix === leg;
   });
   const rank = (key: string): number => tryRank(key);
   return own.sort((a, b) => rank(a) - rank(b));
