@@ -515,20 +515,37 @@ describe("createTask — idempotency key (#139)", () => {
 
 // Issue #54: a merge auto-completes a task; follow-up typed into the lead is
 // invisible to the board, so the studio holds no open task and gets reaped
-// mid-work. `continues` files the follow-up as a real task, to the SAME
-// studio, read from the finished one rather than retyped.
+// mid-work. `continues` files the follow-up as a real task, assigned to #n's
+// studio unless --studio is given. Issue #1316: that inheritance applies only
+// while #n is LIVE — a follow-up to a TERMINAL #n (completed/failed/canceled)
+// is new work, not the in-flight continuation #54 guards, and must not inherit
+// a finished task's studio.
 describe("createTask — continues (issue #54)", () => {
   const FINISHED = task({ number: 7, state: "completed", labels: ["completed", "studio:demo--web-studio"],
     assignee: "demo--web-studio", open: false });
+  const IN_FLIGHT = task({ number: 7, state: "working", labels: ["working", "studio:demo--web-studio"],
+    assignee: "demo--web-studio", open: true });
 
-  it("no --studio: assigned to the continued task's studio, lineage in the body", async () => {
+  it("live #n, no --studio: assigned to #n's studio, lineage in the body (#54)", async () => {
+    const createIssue = vi.fn(async () => task({ number: 8 }));
+    const api = fakeApi({ getIssue: vi.fn(async () => IN_FLIGHT), createIssue });
+    const res = await createTask(api, "o/r", { ...brief, continues: 7 });
+    expect(res.ok).toBe(true);
+    expect(api.getIssue).toHaveBeenCalledWith("o/r", 7);
+    const input = (createIssue.mock.calls[0] as unknown[])[1] as { labels: string[]; body: string };
+    expect(input.labels).toContain("studio:demo--web-studio");
+    expect(input.body).toContain("Continues #7.");
+  });
+
+  it("terminal #n, no --studio: unassigned, lineage in the body — never #n's studio (#1316)", async () => {
     const createIssue = vi.fn(async () => task({ number: 8 }));
     const api = fakeApi({ getIssue: vi.fn(async () => FINISHED), createIssue });
     const res = await createTask(api, "o/r", { ...brief, continues: 7 });
     expect(res.ok).toBe(true);
     expect(api.getIssue).toHaveBeenCalledWith("o/r", 7);
     const input = (createIssue.mock.calls[0] as unknown[])[1] as { labels: string[]; body: string };
-    expect(input.labels).toContain("studio:demo--web-studio");
+    expect(input.labels).not.toContain("studio:demo--web-studio");
+    expect(input.labels).toEqual(["submitted"]);
     expect(input.body).toContain("Continues #7.");
   });
 
@@ -542,14 +559,24 @@ describe("createTask — continues (issue #54)", () => {
     expect(input.body).toContain("Continues #7.");
   });
 
-  it("continued task has no studio and none given: 400, nothing filed", async () => {
-    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 7, assignee: null })) });
+  it("live continued task has no studio and none given: 400, nothing filed", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 7, state: "working", assignee: null })) });
     const res = await createTask(api, "o/r", { ...brief, continues: 7 });
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.status).toBe(400);
     expect(res.message).toContain("#7");
     expect(api.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("terminal continued task with no studio and none given: still files, unassigned", async () => {
+    const createIssue = vi.fn(async () => task({ number: 8 }));
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 7, state: "completed", assignee: null })), createIssue });
+    const res = await createTask(api, "o/r", { ...brief, continues: 7 });
+    expect(res.ok).toBe(true);
+    const input = (createIssue.mock.calls[0] as unknown[])[1] as { labels: string[]; body: string };
+    expect(input.labels).toEqual(["submitted"]);
+    expect(input.body).toContain("Continues #7.");
   });
 
   it("continued task does not exist: 404, nothing filed", async () => {
