@@ -45,10 +45,6 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     "gate container failed: boom",
     "gate server unreachable: ECONNREFUSED",
     "lint: gate server HTTP 500",
-    "lint exceeded 25 min without a result",
-    // #1284: combineCauses cuts the deadline cause's "a result" tail, so the
-    // classifier matches the prefix that survives truncation.
-    "lint exceeded 8 min without …",
     "lint: gate capacity: no container instance available",
     "lint: no progress past its deadline after 35 min",
     "lint: HTTP 503 after 0 min",
@@ -74,6 +70,9 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     "private clone token unavailable",
     "gate image not bound (images.gate)",
     "lint: returned an unknown state",
+    // #1387: a leg past its own deadline is a real red verdict, never infra,
+    // so it never earns the infra auto-rerun.
+    "lint exceeded 25 min without a result",
   ])("not infra: %s", (description) => {
     expect(isInfraLegFailure({ leg: "lint", state: "error", description })).toBe(false);
   });

@@ -412,8 +412,10 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       planBundleLeg({ owner, repo: repoName, pr, runId: event.instanceId, headSha: resolved.headSha, baseSha: resolved.baseSha }),
     );
 
-    // Every leg attempt stamps the run's progress, so a live run that stops
-    // progressing is hung to a manual start (#1135). A failed stamp never fails the leg.
+    // Each leg's first attempt stamps the run's progress, so a live run that
+    // stops progressing is hung to a manual start (#1135). A failed stamp never
+    // fails the leg. #1387: an infra retry of the same step does NOT stamp — the
+    // watchdog must see a retry loop, not a run that keeps "progressing".
     const touch = (): Promise<void> =>
       markRunProgress(d1RunIndex(this.env.DB), repo, pr, event.instanceId, Date.now());
     const results = await Promise.all(
@@ -613,7 +615,6 @@ function runLeg(
       // must never share one container, one leg per container is the DO's
       // contract, and a retry must never reuse a DO a prior attempt is tearing down (#1068).
       const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(gateRunnerName(instanceId, leg.leg, attemptId)));
-      await touch();
       // The signal ends a hung DO call at the attempt deadline, so it cannot hold the step open (#1135).
       return stub.fetch("https://gate-runner/run-leg", {
         method: "POST",
@@ -627,6 +628,9 @@ function runLeg(
       readResult: legResultReader(env.STUDIO_ARCHIVE),
       // #1321: desync the retry-<leg> steps so N red legs do not clone in lockstep.
       retryJitterMs: RETRY_LEG_JITTER_MS,
+      // #1387: stamp progress only on a step's first attempt (runLegStep calls
+      // this on tryNo === 1). An infra retry of the same step does not stamp.
+      touch,
     },
   );
 }

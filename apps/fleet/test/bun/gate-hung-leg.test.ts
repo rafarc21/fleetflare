@@ -5,7 +5,7 @@
 import { describe, it, expect } from "bun:test";
 import { MAX_LEG_TIMEOUT_MIN } from "../../src/gate/config";
 import { infraRerunDecision, isInfraLegFailure } from "../../src/gate/infra-rerun";
-import { legStepDeadlineMs, runLegStep, storedLegResult, type LegStepConfig } from "../../src/gate/leg-run";
+import { legStepDeadlineMs, runLegStep, storedLegResult, totalLegWallMs, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
 
@@ -72,6 +72,22 @@ describe("legStepDeadlineMs: the per-attempt deadline always ends before the ste
 
   it("a short leg keeps its own timeout plus grace, so it is not held to the cap", () => {
     expect(legStepDeadlineMs(5)).toBe(15 * 60_000);
+  });
+});
+
+// #1387: the whole leg's total wall time (every attempt, every step) is capped
+// at the leg's timeout plus grace. Distinct from the per-attempt step deadline.
+describe("totalLegWallMs: the whole leg is bounded (#1387)", () => {
+  it("the default leg's total is 35 min: 25 min timeout plus 10 min grace", () => {
+    expect(totalLegWallMs(undefined)).toBe(35 * 60_000);
+  });
+
+  it("a short leg's total is its own timeout plus grace", () => {
+    expect(totalLegWallMs(3)).toBe(13 * 60_000);
+  });
+
+  it("the total is NOT clamped to the per-attempt step timeout: it spans two steps", () => {
+    expect(totalLegWallMs(undefined)).toBeGreaterThan(legStepDeadlineMs(undefined));
   });
 });
 

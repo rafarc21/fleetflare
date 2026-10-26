@@ -6,7 +6,8 @@ import type { LegResult } from "./verdict";
 
 /** A leg error whose cause is the platform or host, not the code: a Workflows
  *  internal error, a lost connection, a container that never started, exited
- *  or answered, or a leg past its deadline. */
+ *  or answered. A leg past its own deadline is NOT infra (#1387): the deadline
+ *  is the leg's real red verdict, never retried and never auto-rerun. */
 const INFRA_CAUSE = new RegExp([
   "internal workflows error",
   "Network connection lost",
@@ -16,10 +17,6 @@ const INFRA_CAUSE = new RegExp([
   // infra-class so a saturated fleet's legs earn the one auto-rerun, never a
   // false red on healthy code.
   "gate capacity: no container instance",
-  // #1284: combineCauses may cut the "a result" tail of the deadline cause
-  // ("exceeded 8 min without …"), so match the part that always survives (a
-  // superset of the old "… without a result").
-  "exceeded \\d+ min without",
   "no progress past its deadline",
   ": HTTP 503\\b",
   // Workflows' own step timeout, and an AbortSignal.timeout on a leg call (#1135).
