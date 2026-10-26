@@ -233,6 +233,6 @@ export default defineConfig({
     // excluded from the root tsconfig project (see tsconfig.json's own
     // comment) — same files, same reason, two different tools that both
     // auto-discover by filename.
-    exclude: [...configDefaults.exclude, "test/bun/**/*.test.ts", "test/studio.studio-blueprint.test.ts", "test/studio.files.test.ts"],
+    exclude: [...configDefaults.exclude, "test/bun/**/*.test.ts", "test/browser/**/*.test.ts", "test/studio.studio-blueprint.test.ts", "test/studio.files.test.ts"],
   },
 });

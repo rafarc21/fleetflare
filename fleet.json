@@ -7,7 +7,17 @@
   "instance_type": "standard-2",
   "gate": {
     "install": "cd apps/fleet && bun install --frozen-lockfile",
-    "legs": ["check", "test-lies-check", "english-check"],
+    "legs": [
+      "check",
+      "test-lies-check",
+      "english-check",
+      {
+        "name": "browser-guard",
+        "cmd": "cd apps/fleet && bun test test/browser",
+        "timeoutMin": 10,
+        "paths": ["apps/fleet/container/gate/browser/**", "apps/fleet/test/browser/**"]
+      }
+    ],
     "bunShards": 6,
     "bunLaneRoot": "apps/fleet",
     "vitestCmd": "cd apps/fleet && bun run test --shard={i}/{n}",
