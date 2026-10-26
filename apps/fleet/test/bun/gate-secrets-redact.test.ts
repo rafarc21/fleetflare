@@ -61,6 +61,45 @@ describe("redactKnownSecretValues: common encodings", () => {
   });
 });
 
+// #1346 security review r2: container/gate-server.ts's own 32k tail cut can
+// land in the MIDDLE of a granted secret, leaving just its TRAILING fragment
+// at the very START of the kept stdout/stderr -- a full-value match never
+// finds a fragment shorter than the whole value.
+describe("redactKnownSecretValues: leading partial from a mid-secret tail cut", () => {
+  it("redacts a >=8-char trailing fragment of a secret sitting at the start of the text", () => {
+    const value = "sup3r-s3cret-abcdefgh"; // 21 chars
+    // Simulate the tail cut landing 13 chars into the secret: only the last
+    // 8 chars of the value ("abcdefgh") survive, at position 0.
+    const text = `${value.slice(13)} ... rest of stdout follows normally`;
+    expect(redactKnownSecretValues(text, [value])).toBe("«redacted» ... rest of stdout follows normally");
+  });
+
+  it("finds the LONGEST qualifying fragment, not just the shortest 8-char match", () => {
+    const value = "0123456789ABCDEF"; // 16 chars
+    const text = "6789ABCDEF-trailing-text"; // the last 10 chars of value, at position 0
+    expect(redactKnownSecretValues(text, [value])).toBe("«redacted»-trailing-text");
+  });
+
+  it("does NOT redact an overlap shorter than the 8-char threshold (avoids false positives)", () => {
+    const value = "sup3r-s3cret-abcdefgh";
+    const text = "efgh is just four letters, not a leak"; // only the last 4 chars of value
+    expect(redactKnownSecretValues(text, [value])).toBe(text);
+  });
+
+  it("a text with no relationship to the secret is left alone", () => {
+    const text = "all tests passed, no secrets printed";
+    expect(redactKnownSecretValues(text, ["sup3r-s3cret-abcdefgh"])).toBe(text);
+  });
+
+  it("the full-result field-scoped path also catches the leading partial (end to end)", () => {
+    const value = "sup3r-s3cret-abcdefgh";
+    const result = { state: "failure" as const, stdout: `${value.slice(13)} trailing output` };
+    const redacted = redactLegResultFields(result, [value]);
+    expect(redacted.state).toBe("failure");
+    expect(redacted.stdout).toBe("«redacted» trailing output");
+  });
+});
+
 // #1346 correctness review r1 item 3: a short/common granted value must never
 // corrupt a structural field (state) by matching it as plain text would.
 describe("redactLegResultFields: field-scoped, never touches `state`", () => {

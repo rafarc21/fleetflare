@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { runLegInContainer, legResponse, NO_INSTANCE_DESCRIPTION, type GateContainer, type OutboundBinding } from "../../src/gate/run-leg";
+import {
+  runLegInContainer, runLegWithSecrets, legResponse, NO_INSTANCE_DESCRIPTION, type GateContainer, type OutboundBinding,
+  type LegOutcome,
+} from "../../src/gate/run-leg";
 import { buildLegEnvVars, type GateLegRequest } from "../../src/gate/leg-env";
 
 // #715: GateRunnerDO drives the native ctx.container API. These tests run the
@@ -613,5 +616,56 @@ describe("runLegInContainer: R2 result after transport loss (#1122)", () => {
     });
 
     expect(outcome).toEqual({ kind: "result", result: { state: "failure" } });
+  });
+});
+
+// #1346 security review r2: do.ts can never be loaded under bun test
+// (cloudflare:workers), so BOTH "an unresolved granted secret never runs"
+// and "redact the leg's own result" moved here, into one pure function a
+// test can call directly with a fake `run`, with no container at all.
+describe("runLegWithSecrets", () => {
+  test("every granted name resolved: run() is called, and its result is redacted", async () => {
+    let ran = false;
+    const run = async (): Promise<LegOutcome> => {
+      ran = true;
+      return { kind: "result", result: { state: "failure", description: "login as sup3r-s3cret failed" } };
+    };
+    const outcome = await runLegWithSecrets(["staging-login"], { "staging-login": "sup3r-s3cret" }, run);
+
+    expect(ran).toBe(true);
+    expect(outcome).toEqual({ kind: "result", result: { state: "failure", description: "login as «redacted» failed" } });
+  });
+
+  test("an unresolved granted name: run() is NEVER called, and the leg goes RED", async () => {
+    let ran = false;
+    const run = async (): Promise<LegOutcome> => {
+      ran = true;
+      return { kind: "result", result: { state: "success" } };
+    };
+    const outcome = await runLegWithSecrets(["staging-login"], {}, run);
+
+    expect(ran).toBe(false);
+    expect(outcome).toEqual({ kind: "result", result: { state: "error", description: 'DID-NOT-RUN: secret "staging-login" unresolved' } });
+  });
+
+  test("no granted names at all: run() is called, nothing is redacted", async () => {
+    const run = async (): Promise<LegOutcome> => ({ kind: "result", result: { state: "success", description: "all good" } });
+    const outcome = await runLegWithSecrets([], {}, run);
+
+    expect(outcome).toEqual({ kind: "result", result: { state: "success", description: "all good" } });
+  });
+
+  test("an infra outcome from run() passes through untouched, never redacted", async () => {
+    const run = async (): Promise<LegOutcome> => ({ kind: "infra", description: "gate container did not start within 180 s" });
+    const outcome = await runLegWithSecrets(["staging-login"], { "staging-login": "sup3r-s3cret" }, run);
+
+    expect(outcome).toEqual({ kind: "infra", description: "gate container did not start within 180 s" });
+  });
+
+  test("redacts summary too, and never touches state even when the value equals it", async () => {
+    const run = async (): Promise<LegOutcome> => ({ kind: "result", result: { state: "success", summary: "1 fail (success)" } });
+    const outcome = await runLegWithSecrets(["staging-login"], { "staging-login": "success" }, run);
+
+    expect(outcome).toEqual({ kind: "result", result: { state: "success", summary: "1 fail («redacted»)" } });
   });
 });

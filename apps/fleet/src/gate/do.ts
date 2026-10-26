@@ -19,12 +19,11 @@ import { DurableObject, exports as workerExports } from "cloudflare:workers";
 import type { Env } from "../env";
 import { mintPrivateCloneToken } from "../github/auth";
 import { gateOutboundProps, legGitToken, type GateLegRequest } from "./leg-env";
-import { legResponse, runLegInContainer, type LegResult } from "./run-leg";
+import { legResponse, runLegInContainer, runLegWithSecrets, type LegResult } from "./run-leg";
 import { legResultReader } from "./leg-run";
 import { legTimeoutMin } from "./config";
-import { firstUnresolvedSecret, resolveGrantedSecrets } from "./secrets-registry";
+import { resolveGrantedSecrets } from "./secrets-registry";
 import { mintRunToken } from "./secrets-ai-token";
-import { redactLegResultFields } from "./secrets-redact";
 
 /** The one refusal a PAT-served private leg gets. Named so it reaches the leg. */
 const PAT_ONLY_REFUSAL = "private clone needs the GitHub App on this owner";
@@ -73,36 +72,24 @@ export class GateRunnerDO extends DurableObject<Env> {
       const secretValues = await resolveGrantedSecrets(
         body.secretNames ?? [], this.env as unknown as Record<string, string | undefined>, mintAiToken(body, this.env),
       );
-      // #1346 security review r1 item 3: a name this leg was GRANTED (by the
-      // already-gated workflow.ts decision) that still failed to resolve is a
-      // broken deploy, never "run without it" -- the container never starts.
-      const unresolved = firstUnresolvedSecret(body.secretNames ?? [], secretValues);
-      if (unresolved !== null) {
-        const failed: LegResult = { state: "error", description: `DID-NOT-RUN: secret "${unresolved}" unresolved` };
-        return Response.json(failed);
-      }
       // Every plain outbound request from the leg container is served by
       // GateOutbound, the Worker-side entrypoint that holds the R2 binding.
       // Props carry this leg's own resultKey (the only key the container may PUT),
       // for a private leg its one repo and minted token, and the plain VALUES
       // (never names) of its granted secrets, for result-body redaction.
       const outbound = workerExports.GateOutbound({ props: gateOutboundProps(body, gitToken, secretValues) });
-      // The container's own R2 result, read on a transport loss (#1122).
-      const result = await runLegInContainer(body, {
-        container: this.ctx.container, outbound, readResult: legResultReader(this.env.STUDIO_ARCHIVE), secretValues,
-      });
-      // #1346 security review r1 item 2: the container's direct /run and
-      // /result HTTP responses reach this DO WITHOUT going through the R2-PUT
-      // outbound handler's own redaction at all -- a different path (gate
-      // server's TCP response body, read in run-leg.ts) that becomes this
-      // step's return value and, from there, the public verdict. Redact the
-      // same granted values here too, on the leg's actual result only (an
-      // infra description is Worker-generated text, never leg output).
-      const secretValueList = Object.values(secretValues);
-      const redacted = result.kind === "result"
-        ? { kind: "result" as const, result: redactLegResultFields(result.result, secretValueList) }
-        : result;
-      return legResponse(redacted);
+      // #1346 security review r2: both "an unresolved granted secret never
+      // runs" and "redact the leg's own result before it leaves this DO"
+      // live in run-leg.ts's runLegWithSecrets, not here -- this file
+      // imports cloudflare:workers and can never be loaded under bun test,
+      // so either guard living as plain code here could be silently
+      // reverted without failing a single test. The container's own R2
+      // result (read on a transport loss, #1122) is passed straight through.
+      const outcome = await runLegWithSecrets(body.secretNames ?? [], secretValues, () =>
+        runLegInContainer(body, {
+          container: this.ctx.container, outbound, readResult: legResultReader(this.env.STUDIO_ARCHIVE), secretValues,
+        }));
+      return legResponse(outcome);
     }
     return new Response("not found", { status: 404 });
   }

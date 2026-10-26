@@ -4,11 +4,15 @@ Issue: https://github.com/rafarc21/fleetflare/issues/1346. Refs
 https://github.com/rafarc21/fleetflare/issues/1134. Date 2026-10-26.
 Status: proposal, design + first implementation slice in the same PR per the
 task's own output format ("design doc FIRST in PR, then impl"). Revised after
-operator security + correctness review r1 on PR
-https://github.com/rafarc21/fleetflare/pull/1354 — the trust filter (§2),
-fail-closed behavior on a missing secret or an unreadable allowlist (§4a),
-and field-scoped (not whole-blob) redaction (§6) are all r1 changes; every
-section below describes the FINAL design, not the pre-review one.
+two rounds of operator review on PR
+https://github.com/rafarc21/fleetflare/pull/1354 — r1: the trust filter
+(§2), fail-closed behavior on a missing secret or an unreadable allowlist
+(§4a), and field-scoped (not whole-blob) redaction (§6); r2: do.ts's
+unresolved-secret guard and result redaction moved into `runLegWithSecrets`
+(§4a/§6, since do.ts itself can never be loaded under `bun test`), and
+redaction now also catches a secret split by `gate-server.ts`'s own 32k tail
+cut (§6). Every section below describes the FINAL design, not an
+intermediate one.
 
 ## Non-goals
 
@@ -288,13 +292,22 @@ needed:
 - **A granted name that fails to resolve** (an OPS allowlist entry naming a
   Worker secret that was never `deploy.sh secret put`, a `GATE_SECRET_SIGNING_KEY`
   absent so the `workers-ai` token cannot mint, a registry entry quietly
-  removed after the OPS file still lists it): `do.ts` checks every granted
-  name against `resolveGrantedSecrets`' own output
-  (`secrets-registry.ts`'s `firstUnresolvedSecret`) BEFORE the container ever
-  starts. The first unresolved name turns into an immediate RED leg,
+  removed after the OPS file still lists it): checked against
+  `resolveGrantedSecrets`' own output (`secrets-registry.ts`'s
+  `firstUnresolvedSecret`) BEFORE the container ever starts. The first
+  unresolved name turns into an immediate RED leg,
   `{ state: "error", description: "DID-NOT-RUN: secret \"<name>\" unresolved" }`
   — the container never starts, the PR's test command never runs "as if"
-  nothing had been granted.
+  nothing had been granted. **security review r2:** this check (and the
+  result redaction in §6) originally lived as plain code inside `do.ts`'s
+  `fetch` handler — but `do.ts` imports `cloudflare:workers`, so `bun test`
+  can never load it, meaning a silent revert of either guard would have
+  passed every existing test. Both now live in one injectable function,
+  `run-leg.ts`'s `runLegWithSecrets(secretNames, secretValues, run)` — `run`
+  stands in for `runLegInContainer`, so a test fakes it and asserts on the
+  `LegOutcome` this function hands back, exactly as if `do.ts` had called
+  it. `do.ts`'s own `fetch` handler is now just: resolve secrets, call
+  `runLegWithSecrets`, call `legResponse` on the result.
 - **The OPS allowlist itself is unreadable** on a trusted PR (the file is
   missing in a way that isn't "intentionally absent," a network error, JSON
   that doesn't parse): `workflow.ts`'s fetch step returns `null`, distinct
@@ -363,6 +376,21 @@ the way `ghs_`/`tskey-auth-`/`sk-ant-` have fixed prefixes. It also redacts
 the value's common encodings (JSON-escaped, base64/base64url,
 percent/URL-encoded — security review r1 item 4), since a test or script
 may well print the secret already encoded rather than raw.
+
+**Leading-partial redaction for a mid-secret tail cut (security review r2):**
+`container/gate-server.ts` keeps only the last `OUTPUT_TAIL_CHARS` (32k) of
+stdout/stderr before any of this ever reaches the Worker — a cut that can
+land in the MIDDLE of a granted secret, leaving just its TRAILING fragment
+sitting at the very START of the kept text. A full-value match (above) never
+finds a fragment shorter than the whole value, so that leading fragment
+would otherwise leak untouched. `redactKnownSecretValues` now also checks,
+per granted value, whether the text's own prefix equals some SUFFIX of that
+value at least 8 characters long (the longest such suffix wins), and redacts
+that leading fragment too — a Worker-side-only fix, no container/image
+change, since the cut itself happens before this code ever sees the bytes.
+The 8-character floor exists so a short, coincidental overlap (two or three
+characters any real text could share with any secret) never triggers a
+redaction that would read like a bug rather than a fix.
 
 **Field-scoped, never a whole-blob string replace (correctness review r1
 item 3):** a short or common granted value — literally the word "success",
@@ -437,12 +465,19 @@ leg-run.ts legRequestContext(...) -> legRequest(...)
 do.ts  (GateRunnerDO.fetch, where legGitToken already mints per leg)
   for each granted name: resolve value (registry envVar -> this.env[envVar],
     or mint a run-scoped AI token)              (new: secrets-registry.ts / secrets-ai-token.ts)
-  a granted name with no resolved value -> immediate RED leg,
-    container never starts                       (new: §4a)
   buildLegEnvVars(...) gains GATE_SECRET_* entries
   gateOutboundProps(...) gains `secretValues: string[]` (values only, for redaction)
-  the container's own /run, /result response: redactLegResultFields on
-    description + summary, before legResponse    (new: §6, security review r1 item 2)
+      |
+      v
+run-leg.ts runLegWithSecrets(secretNames, secretValues, run)  (new: §4a/§6,
+    security review r2 -- do.ts itself can never be loaded under bun test,
+    so both of the following moved OUT of its fetch handler and into this
+    one injectable, tested function)
+  a granted name with no resolved value -> immediate RED leg,
+    `run` (runLegInContainer) is NEVER called                 (§4a)
+  else: run(), then redactLegResultFields on the result's description +
+    summary -- the container's own /run, /result response, a path separate
+    from the R2 PUT below                                     (§6, security review r1 item 2)
       |
       v
 outbound-handler.ts handleGateOutbound PUT path
@@ -486,11 +521,15 @@ than inventing a third.
 3. **Secret value redacted from logs.** A leg result, run through
    `redactLegResultFields`, no longer contains a granted value in its
    `description`/`summary`/`stdout`/`stderr` fields, including its common
-   encodings; an UNgranted value is left alone (exact-value scrubbing, not a
-   blanket wipe); a granted value equal to the literal word "success" never
-   corrupts the result's own `state` field (field-scoped, not a whole-blob
-   replace); both the R2-PUT path and the container's direct HTTP-response
-   path are redacted.
+   encodings AND a leading fragment left behind by `gate-server.ts`'s own
+   32k tail cut landing mid-secret; an UNgranted value is left alone
+   (exact-value scrubbing, not a blanket wipe); a granted value equal to the
+   literal word "success" never corrupts the result's own `state` field
+   (field-scoped, not a whole-blob replace); both the R2-PUT path and the
+   container's direct HTTP-response path (`run-leg.ts`'s `runLegWithSecrets`)
+   are redacted, each with its own test using a fake `run`/bucket so a
+   silent revert of either path fails a real test — `do.ts` itself can never
+   be loaded under `bun test`.
 4. **Run token expires with run.** `verifyRunToken` accepts a token minted
    at `now` for `exp = now + ttl` when checked at `now + ttl - 1`, and
    rejects the identical token checked at `now + ttl + 1` — and rejects a
