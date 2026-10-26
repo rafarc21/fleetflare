@@ -45,6 +45,9 @@ function writeInstalledWrangler(app: string, stub: string, version = "4.141.0") 
   // Issue #36: and scripts/deploy-target.ts before that. Same passing stub.
   mkdirSync(join(app, "scripts"), { recursive: true });
   writeFileSync(join(app, "scripts", "deploy-target.ts"), "process.exit(0);\n");
+  // Issue #1314: the plain-deploy desktop-image probe. Same passing stub (exit
+  // 0 = "not digest-pinned": this suite's config declares no GateRunnerDO).
+  writeFileSync(join(app, "scripts", "gate-desktop-image.ts"), "process.exit(0);\n");
 }
 
 function run(configBody: string): { code: number; stdout: string; stderr: string } {

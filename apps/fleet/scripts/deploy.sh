@@ -122,12 +122,17 @@ fi
 ALLOW_DIRTY_OPS=0
 ALLOW_UNRESCUED=0
 SKIP_GATE_DRAIN=0
+# Issue #1314: default = DETECT ONLY (hash the Dockerfile + COPYs, no docker);
+# --repin-desktop-image = build + push + print the new digest (operator commits
+# the pin bump). Both are ours, never passed to wrangler.
+REPIN_DESKTOP_IMAGE=0
 ARGS=()
 for a in "$@"; do
   case "$a" in
     --allow-dirty-ops) ALLOW_DIRTY_OPS=1 ;;
     --allow-unrescued) ALLOW_UNRESCUED=1 ;;
     --skip-gate-drain) SKIP_GATE_DRAIN=1 ;;
+    --repin-desktop-image) REPIN_DESKTOP_IMAGE=1 ;;
     *) ARGS+=("$a") ;;
   esac
 done
@@ -484,6 +489,44 @@ if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
 fi
 
 cd "$FLEET_DIR"
+
+# Issue #1314: a digest-pinned `desktop` named image on GateRunnerDO is
+# invisible to `wrangler deploy` (wrangler treats `{ "image": ... }` as
+# already-built), so a Dockerfile.gate-desktop edit leaves the pin stale.
+# PLAIN deploy only, two modes:
+#   - default (DETECT ONLY, no docker): hash the Dockerfile + its COPYs and
+#     compare against the `dockerfile-sha:` marker the operator records next to
+#     the pin. Unchanged -> proceed silently; changed -> REFUSE with a distinct
+#     rc, printing the manual build/push/repin steps. Docker-down never blocks
+#     a Worker-only deploy.
+#   - --repin-desktop-image: build once, push, print the new digest; the
+#     operator commits the pin bump (this script NEVER writes FLEET_CONFIG or
+#     the ops clone).
+# Not piped: build/push noise reaches the operator live; stdout stays a TTY.
+if is_plain_deploy ${ARGS[@]+"${ARGS[@]}"}; then
+  DESKTOP_RC=0
+  if [[ "$REPIN_DESKTOP_IMAGE" == 1 ]]; then
+    # Standalone: build once, push, print the new digest. The operator then
+    # commits the pin bump (this script never writes FLEET_CONFIG or the ops
+    # clone) and runs a normal deploy. Do NOT deploy here: the config still
+    # pins the OLD digest.
+    bun "$FLEET_DIR/scripts/gate-desktop-image.ts" wrangler.local.jsonc --repin-desktop-image || DESKTOP_RC=$?
+    if [[ "$DESKTOP_RC" != 0 ]]; then
+      echo "deploy.sh: refusing -- desktop image rebuild/push failed (exit $DESKTOP_RC)." >&2
+      exit 1
+    fi
+    exit 0
+  else
+    bun "$FLEET_DIR/scripts/gate-desktop-image.ts" wrangler.local.jsonc || DESKTOP_RC=$?
+    if [[ "$DESKTOP_RC" == 1 ]]; then
+      echo "deploy.sh: refusing -- desktop gate image changed; rebuild+push+repin by hand (steps above)." >&2
+      exit 75
+    elif [[ "$DESKTOP_RC" != 0 ]]; then
+      echo "deploy.sh: refusing -- desktop image probe failed (exit $DESKTOP_RC)." >&2
+      exit 1
+    fi
+  fi
+fi
 
 # Issue #1232: drain running gate runs before the plain Worker deploy. A
 # Worker deploy ends live Workflows instances (code_update_strategy immediate),
