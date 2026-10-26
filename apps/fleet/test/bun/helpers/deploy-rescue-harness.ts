@@ -81,6 +81,7 @@ const DEPLOY_SH = resolve(import.meta.dir, "../../../scripts/deploy.sh");
 const DEPLOY_TARGET_TS = resolve(import.meta.dir, "../../../scripts/deploy-target.ts");
 const CONTAINERS_CHANGED_TS = resolve(import.meta.dir, "../../../scripts/deploy-containers-changed.ts");
 const GATE_DRAIN_WAIT_TS = resolve(import.meta.dir, "../../../scripts/gate-drain-wait.ts");
+const GATE_DESKTOP_IMAGE_TS = resolve(import.meta.dir, "../../../scripts/gate-desktop-image.ts");
 const REAL_WRANGLER = resolve(import.meta.dir, "../../../node_modules/wrangler");
 
 // Filled by the hooks below. Each test file copies these into its own `let`s
@@ -144,6 +145,7 @@ export function useDeployRescueHarness(assign: (s: typeof state) => void) {
     if (existsSync(DEPLOY_TARGET_TS)) copyFileSync(DEPLOY_TARGET_TS, join(fleet, "scripts", "deploy-target.ts"));
     if (existsSync(CONTAINERS_CHANGED_TS)) copyFileSync(CONTAINERS_CHANGED_TS, join(fleet, "scripts", "deploy-containers-changed.ts"));
     if (existsSync(GATE_DRAIN_WAIT_TS)) copyFileSync(GATE_DRAIN_WAIT_TS, join(fleet, "scripts", "gate-drain-wait.ts"));
+    if (existsSync(GATE_DESKTOP_IMAGE_TS)) copyFileSync(GATE_DESKTOP_IMAGE_TS, join(fleet, "scripts", "gate-desktop-image.ts"));
     mkdirSync(stubs);
     const bin = join(fleet, "node_modules", ".bin");
     mkdirSync(bin, { recursive: true });
@@ -247,6 +249,13 @@ export function setCreds(workerUrl: string | null) {
   mkdirSync(join(state.home, ".fleet"), { recursive: true });
   writeFileSync(join(state.home, ".fleet", "credentials"),
     JSON.stringify({ workerUrl, accessClientId: "x", accessClientSecret: "y" }), { mode: 0o600 });
+}
+
+/** Replace the copied gate-desktop-image.ts with a stub that exits `code`, so
+ *  deploy.sh's probe branches (proceed/refuse/repin) are testable without a
+ *  real Dockerfile build. */
+export function stubDesktopProbe(code: number): void {
+  writeFileSync(join(state.fleet, "scripts", "gate-desktop-image.ts"), `process.exit(${code});\n`);
 }
 
 export function deploy(args: string[], rescueExit: number, extraEnv: Record<string, string> = {}) {

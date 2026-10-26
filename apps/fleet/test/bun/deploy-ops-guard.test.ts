@@ -50,6 +50,9 @@ beforeEach(() => {
   writeFileSync(join(fleet, "cli", "fleet.ts"), "process.exit(0);\n");
   // Issue #36: and scripts/deploy-target.ts before that. Same passing stub.
   writeFileSync(join(fleet, "scripts", "deploy-target.ts"), "process.exit(0);\n");
+  // Issue #1314: the plain-deploy desktop-image probe. Exit 0 = not
+  // digest-pinned (this suite's config declares no GateRunnerDO).
+  writeFileSync(join(fleet, "scripts", "gate-desktop-image.ts"), "process.exit(0);\n");
   const bin = join(root, "bin");
   mkdirSync(bin);
   writeFileSync(join(bin, "wrangler"), `#!/bin/sh\necho "PATH-wrangler $*" >> "${calls}"\n`);
