@@ -49,7 +49,7 @@ import {
 import { postGateStatus, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
 import { realStatusPort } from "./status-post-env";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
-import { browserLegsToCheck, classifyManifest, enforceBrowserLegs, type ManifestRead, verdictEvidenceUrl } from "./browser-leg";
+import { browserLegsToCheck, enforceBrowserLegs, manifestReadFrom, type ManifestRead, verdictEvidenceUrl } from "./browser-leg";
 import { evidenceKeyFor } from "./leg-env";
 import { finalLegKey } from "./log";
 
@@ -419,12 +419,13 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
           const manifest = await this.env.STUDIO_ARCHIVE.get(`${dir}manifest.json`);
           // No manifest file at all: absent -> a reported success downgrades to
           // DID-NOT-RUN (no spec evidence). A manifest that fails to parse is
-          // present-but-unreadable: classifyManifest(null) -> "unverified"
-          // ('manifest lacks counts'), never green.
-          if (manifest === null) { seen[planned.leg] = { kind: "absent" }; continue; }
+          // present-but-unreadable: manifestReadFrom(null, true) ->
+          // "unverified" ('manifest lacks counts'), never green.
           let parsed: unknown = null;
-          try { parsed = await manifest.json(); } catch { parsed = null; }
-          seen[planned.leg] = classifyManifest(parsed);
+          if (manifest !== null) {
+            try { parsed = await manifest.json(); } catch { parsed = null; }
+          }
+          seen[planned.leg] = manifestReadFrom(parsed, manifest !== null);
         }
         return seen;
       });

@@ -120,9 +120,13 @@ The fleet verdict from those counts:
 - All counts present, `passed + failed + flaky > 0`, `didNotRun == 0` ->
   the only shape that greens the leg.
 
-A harness writes `manifest.json` (and `stats.json` if it prefers a separate
-stats file) into the evidence dir; the counts are what the fleet reads, not
-the scheduled test count.
+A count that is not a non-negative integer (`null`, a boolean, a numeric
+string, a fraction, negative, `NaN`) is malformed and reads RED, never
+coerced. `executed` less than `passed + failed + flaky` is inconsistent and
+reads RED.
+
+A harness writes `manifest.json` into the evidence dir; the counts are what
+the fleet reads, not the scheduled test count.
 
 ## Multi-user specs
 
