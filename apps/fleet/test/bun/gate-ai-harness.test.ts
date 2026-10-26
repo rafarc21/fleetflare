@@ -204,6 +204,26 @@ describe("runAICase guards", () => {
     expect(runner.calls.every((c) => c.ctx.floor && c.ctx.modelId === "stand-in-model")).toBe(true);
   });
 
+  test("floor stand-in with empty inputs -> red, never green 0/0", async () => {
+    const res = await runAICase(
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], standInInputs: [], repeat: 1 }),
+      stubRunner(modelWithCall),
+      { standInModel: "s", realRouteBlocked: true },
+    );
+    expect(res.status).toBe("red");
+    expect(res.description).toContain("3 distinct");
+  });
+
+  test("floor stand-in with one phrasing -> red, never green on one phrasing", async () => {
+    const res = await runAICase(
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], standInInputs: [{ z: 9 }], repeat: 1 }),
+      stubRunner(modelWithCall),
+      { standInModel: "s", realRouteBlocked: true },
+    );
+    expect(res.status).toBe("red");
+    expect(res.description).toContain("3 distinct");
+  });
+
   test("floor result is visibly distinct: floor:true vs real floor:false", async () => {
     const real = await runAICase(goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1 }), stubRunner(modelWithCall), realEnv);
     const floor = await runAICase(

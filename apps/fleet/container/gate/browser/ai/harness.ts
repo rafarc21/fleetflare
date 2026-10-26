@@ -260,9 +260,6 @@ export async function runAICase(
   if (repeat === null) {
     return { status: "red", description: `${cse.name}: invalid repeat (must be an integer >= 1)`, didNotRun: false, floor: false, totalRuns: 0, attempts: 0, passed: 0, turns: [], failed: [] };
   }
-  if (!Array.isArray(cse.inputs) || new Set(cse.inputs.map((i) => JSON.stringify(i))).size < 3) {
-    return { status: "red", description: `${cse.name}: needs at least 3 distinct input phrasings`, didNotRun: false, floor: false, totalRuns: 0, attempts: 0, passed: 0, turns: [], failed: [] };
-  }
   const detectors = cse.redChips ?? defaultRedChipDetectors();
   const timeoutMs = cse.timeoutMs ?? opts.timeoutMs;
 
@@ -274,7 +271,13 @@ export async function runAICase(
     return didNotRun("no real-model secret in the leg environment", false, cse.inputs.length * repeat, 0, 0, [], []);
   }
 
+  // The distinct-phrasing rule applies to whichever inputs actually RUN: the
+  // real inputs, or the floor stand-in's override. A stand-in override of one
+  // phrasing (or none) must never read as a green on fewer than 3 phrasings.
   const inputs = floor.floor ? (cse.standInInputs ?? cse.inputs) : cse.inputs;
+  if (!Array.isArray(inputs) || new Set(inputs.map((i) => JSON.stringify(i))).size < 3) {
+    return { status: "red", description: `${cse.name}: needs at least 3 distinct input phrasings`, didNotRun: false, floor: floor.floor, totalRuns: 0, attempts: 0, passed: 0, turns: [], failed: [] };
+  }
   const modelId = floor.floor ? floor.modelId! : (env.realModelId ?? "real");
   const totalRuns = inputs.length * repeat;
 
@@ -320,7 +323,7 @@ export async function runAICase(
     }
   }
 
-  if (passed === totalRuns) {
+  if (passed === totalRuns && totalRuns > 0) {
     return { status: "green", didNotRun: false, floor: floor.floor, totalRuns, attempts: attempt, passed, turns };
   }
   const first = failed[0];
