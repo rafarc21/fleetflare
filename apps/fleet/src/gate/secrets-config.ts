@@ -48,6 +48,19 @@ function isStringArray(v: unknown): v is string[] {
  *  slug (every real repo key contains "/"). */
 const TRUST_OWN_APP_KEY = "trustOwnApp";
 
+/** #1388 review r1 BLOCKER: a key literally named "__proto__" is never a real
+ *  repo slug (it holds no "/") or leg name in a hand-authored OPS file, and a
+ *  plain `{}` container's `out[key] = ...` SET turns exactly that key into the
+ *  object's prototype rather than an own key -- which would leak a
+ *  non-Object.prototype object into the parsed allowlist (the step result)
+ *  and DataCloneError the gate-secrets-allowlist workflow step all over again,
+ *  the exact failure #1382 was. JSON.parse sees "__proto__" as a REAL own key
+ *  (so Object.entries hands it over here), unlike a JS object literal, so the
+ *  parser must refuse it explicitly rather than rely on the container shape. */
+function isUnsafeKey(key: string): boolean {
+  return key === "__proto__";
+}
+
 /** The only keys the object form (`{secrets, head?}`) ever reads. */
 const LEG_ENTRY_KEYS: ReadonlySet<string> = new Set(["secrets", "head"]);
 
@@ -85,27 +98,47 @@ function parseLegEntry(raw: unknown, context: string): GateSecretsLegEntry | nul
  *  is logged (the repo/leg NAME only, never the malformed value itself) so a
  *  typo in a hand-edited OPS file is visible, not silently eaten.
  *
- *  Built with `Object.create(null)`, not `{}`: the allowlist's own keys come
- *  from an external file, and a plain object literal's inherited
- *  Object.prototype would let a key literally named "__proto__" pollute it on
- *  assignment (`out[repo] = ...` is a normal property SET, unlike
- *  Object.entries' own read, which only sees own-enumerable JSON properties
- *  safely). A null-prototype object has no such setter to trigger. */
+ *  Built with plain `{}`, not `Object.create(null)`: this parsed allowlist is
+ *  the RETURN VALUE of the "gate-secrets-allowlist" workflow step
+ *  (workflow.ts), and Workflows serializes every step result with a structured
+ *  clone -- which throws `DataCloneError: Could not serialize object of type
+ *  Object` on any null-prototype container, the exact regression #1382 was.
+ *  The proto-pollution safety those null-prototype containers used to buy at
+ *  build time now lives at READ time instead: every reader looks up own keys
+ *  only (secrets-scope.ts's ownLegEntry via Object.hasOwn, gateSecretsRepoEntry
+ *  via Object.entries), so a key literally named "__proto__" -- which a
+ *  plain-object SET turns into the object's prototype rather than an own key --
+ *  is simply never seen, the same fail-closed result the null-prototype
+ *  container produced. */
 export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
-  const empty: GateSecretsAllowlist = Object.create(null);
+  const empty: GateSecretsAllowlist = {};
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return empty;
-  const out: Record<string, Record<string, GateSecretsLegEntry>> = Object.create(null);
+  const out: Record<string, Record<string, GateSecretsLegEntry>> = {};
   for (const [repo, legs] of Object.entries(raw as Record<string, unknown>)) {
     // #1380: the one reserved top-level key that is never a repo slug (every
     // real repo key contains "/"; this one never does) -- parseTrustOwnApp,
     // below, reads it from this SAME raw value instead.
     if (repo === TRUST_OWN_APP_KEY) continue;
+    // #1388 review r1 BLOCKER: refuse a "__proto__" repo key BEFORE the
+    // `out[repo] = perLeg` SET below can swap the container's prototype (see
+    // isUnsafeKey). Warned and dropped, never granted: it is not a real repo.
+    if (isUnsafeKey(repo)) {
+      console.warn(`gate-secrets allowlist: repo key "${repo}" is unsafe -- dropped`);
+      continue;
+    }
     if (typeof legs !== "object" || legs === null || Array.isArray(legs)) {
       console.warn(`gate-secrets allowlist: repo "${repo}" entry is not an object -- dropped`);
       continue;
     }
-    const perLeg: Record<string, GateSecretsLegEntry> = Object.create(null);
+    const perLeg: Record<string, GateSecretsLegEntry> = {};
     for (const [leg, value] of Object.entries(legs as Record<string, unknown>)) {
+      // #1388 review r1 BLOCKER: same refusal at the leg level -- `perLeg[leg]
+      // = entry` below would swap THIS container's prototype on a "__proto__"
+      // leg key, leaking a non-plain object into the step result.
+      if (isUnsafeKey(leg)) {
+        console.warn(`gate-secrets allowlist: ${repo}/"${leg}" is an unsafe leg name -- dropped`);
+        continue;
+      }
       const entry = parseLegEntry(value, `${repo}/"${leg}"`);
       if (entry !== null) {
         perLeg[leg] = entry;

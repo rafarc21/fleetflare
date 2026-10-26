@@ -136,17 +136,19 @@ export function trustedForSecrets(input: SecretsTrustInput): boolean {
 
 /** A leg's own OPS-allowlist entry, looked up prototype-safely. #1346 security
  *  review r1 LOW: a leg literally named "constructor" or "__proto__" must not
- *  resolve through the object's own prototype chain. Belt and suspenders,
- *  both load-bearing against a DIFFERENT construction of `allowlist` than
- *  this file's own parseGateSecretsAllowlist produces (which already uses
- *  Object.create(null) containers, making a bare bracket lookup safe on its
- *  own): Object.hasOwn refuses an inherited property outright, and the
- *  `secrets`-array check refuses whatever that property turns out to be (a
- *  function, `Object.prototype` itself) when it isn't a real entry -- see
- *  gate-secrets-scope.test.ts's own RAW_ALLOWLIST fixture, built as a plain
- *  object specifically to exercise both of these independently of the
- *  parser's own hardening. Undefined for anything that isn't a well-formed
- *  `GateSecretsLegEntry`, never a thrown error. */
+ *  resolve through the object's own prototype chain. This Object.hasOwn guard
+ *  is the SOLE load-bearing safety now, not a belt-and-suspenders extra:
+ *  parseGateSecretsAllowlist builds plain `{}` containers (the #1382 fix --
+ *  its return value is a Workflows step result, which structured-clone rejects
+ *  null-prototype objects), and a plain object's SET of a key literally named
+ *  "__proto__" turns it into the prototype rather than an own key -- so only
+ *  Object.hasOwn (refusing an inherited property outright) plus the
+ *  `secrets`-array check (refusing whatever that property turns out to be: a
+ *  function, `Object.prototype` itself) keeps such a leg from resolving to a
+ *  grant. See gate-secrets-scope.test.ts's own RAW_ALLOWLIST fixture, built as
+ *  a plain object specifically to exercise both of these. Undefined for
+ *  anything that isn't a well-formed `GateSecretsLegEntry`, never a thrown
+ *  error. */
 function ownLegEntry(
   forRepo: Readonly<Record<string, GateSecretsLegEntry>>, leg: string,
 ): GateSecretsLegEntry | undefined {

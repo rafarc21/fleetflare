@@ -187,6 +187,122 @@ describe("parseTrustOwnApp", () => {
   });
 });
 
+// #1382 regression: parseGateSecretsAllowlist's output is the return value of
+// the "gate-secrets-allowlist" workflow step (workflow.ts's step.do), and
+// Workflows serializes every step result with a structured clone -- which
+// threw `DataCloneError: Could not serialize object of type Object` on the
+// Object.create(null) containers the parser used to build, failing every
+// same-repo default-base run before a verdict. bun's own structuredClone
+// SILENTLY NORMALIZES a null-prototype object to a plain one (it does not
+// reproduce the Workflows rejection), so the guard here is a serialization
+// helper that walks the result and rejects any object whose prototype is not
+// Object.prototype/Array.prototype -- the same rule that failed the deploy.
+describe("parseGateSecretsAllowlist: step result is structured-clone safe (#1382)", () => {
+  /** Reproduces Workflows' structured-clone rejection of null-prototype
+   *  objects at any depth: bun's structuredClone normalizes them instead of
+   *  throwing, so the load-bearing check is this walk, not structuredClone. */
+  const assertCloneSafe = (value: unknown): void => {
+    const seen = new Set<object>();
+    const walk = (x: unknown): void => {
+      if (typeof x !== "object" || x === null) return;
+      if (seen.has(x)) return;
+      seen.add(x);
+      const proto = Object.getPrototypeOf(x);
+      if (proto !== Object.prototype && proto !== Array.prototype) {
+        throw new Error("DataCloneError: Could not serialize object of type Object");
+      }
+      for (const key of Object.keys(x)) walk((x as Record<string, unknown>)[key]);
+    };
+    walk(value);
+  };
+
+  // Negative control: prove the helper itself is load-bearing, not vacuous --
+  // it must throw on exactly the null-prototype shape the pre-#1382 parser
+  // produced. Without this, a revert that restores Object.create(null) would
+  // silently pass the happy-path assertions below.
+  it("the helper rejects a null-prototype container nested in the step result (negative control)", () => {
+    const nullProto = Object.create(null) as Record<string, unknown>;
+    nullProto["acme/example"] = { "ai-smoke": { secrets: ["workers-ai"], head: true } };
+    expect(() => assertCloneSafe({ allowlist: nullProto, trustOwnApp: true })).toThrow(/DataCloneError/);
+  });
+
+  it("a full allowlist with nested repo/leg maps and head:true entries survives the serialization walk", () => {
+    const parsed = parseGateSecretsAllowlist({
+      "acme/example": {
+        "browser-e2e": ["staging-login"],
+        "ai-smoke": { secrets: ["workers-ai"], head: true },
+      },
+      "acme/other": { "vitest-3": { secrets: ["staging-login"], head: true } },
+    });
+    const stepResult = { allowlist: parsed, trustOwnApp: true };
+    expect(() => assertCloneSafe(stepResult)).not.toThrow();
+  });
+
+  it("a malformed OPS file (empty allowlist) also survives the serialization walk", () => {
+    const stepResult = { allowlist: parseGateSecretsAllowlist("nope"), trustOwnApp: false };
+    expect(() => assertCloneSafe(stepResult)).not.toThrow();
+  });
+
+  it("the parsed allowlist, its repo map, and its leg entry are all plain objects", () => {
+    const parsed = parseGateSecretsAllowlist({
+      "acme/example": { "ai-smoke": { secrets: ["workers-ai"], head: true } },
+    });
+    const expectPlainObject = (v: unknown): void => {
+      expect(typeof v).toBe("object");
+      expect(v).not.toBeNull();
+      expect(Object.getPrototypeOf(v)).toBe(Object.prototype);
+    };
+    expectPlainObject(parsed);
+    expectPlainObject(parsed["acme/example"]);
+    expectPlainObject(parsed["acme/example"]["ai-smoke"]);
+  });
+
+  // #1388 review r1 BLOCKER: a "__proto__" repo or leg key in the OPS file
+  // (which JSON.parse hands over as a REAL own key, unlike a JS object
+  // literal) must not survive into the parsed allowlist -- a plain `{}`
+  // container's `out[key] = ...` SET would swap the container's prototype,
+  // leak a non-Object.prototype object into the step result, and re-trigger
+  // the exact DataCloneError #1382 was. Built via JSON.parse to reproduce the
+  // real file path's own-key shape.
+  it("a '__proto__' repo key is dropped (warned) and the result stays clone-safe", () => {
+    const raw = JSON.parse(`{"__proto__": {"leg": ["staging-login"]}, "acme/example": {"leg": ["staging-login"]}}`);
+    expect(Object.hasOwn(raw, "__proto__")).toBe(true); // the real file path's shape
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); };
+    let parsed: ReturnType<typeof parseGateSecretsAllowlist>;
+    try {
+      parsed = parseGateSecretsAllowlist(raw);
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+    expect(Object.hasOwn(parsed, "__proto__")).toBe(false);
+    expect(parsed).toEqual({ "acme/example": { "leg": { secrets: ["staging-login"] } } });
+    expect(warnings.some((w) => w.includes('"__proto__"'))).toBe(true);
+    expect(() => assertCloneSafe({ allowlist: parsed, trustOwnApp: false })).not.toThrow();
+  });
+
+  it("a '__proto__' leg key is dropped (warned) and the result stays clone-safe", () => {
+    const raw = JSON.parse(`{"acme/example": {"__proto__": ["staging-login"], "leg": ["staging-login"]}}`);
+    expect(Object.hasOwn(raw["acme/example"], "__proto__")).toBe(true); // the real file path's shape
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); };
+    let parsed: ReturnType<typeof parseGateSecretsAllowlist>;
+    try {
+      parsed = parseGateSecretsAllowlist(raw);
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(Object.getPrototypeOf(parsed["acme/example"])).toBe(Object.prototype);
+    expect(Object.hasOwn(parsed["acme/example"], "__proto__")).toBe(false);
+    expect(parsed).toEqual({ "acme/example": { "leg": { secrets: ["staging-login"] } } });
+    expect(warnings.some((w) => w.includes('"__proto__"'))).toBe(true);
+    expect(() => assertCloneSafe({ allowlist: parsed, trustOwnApp: false })).not.toThrow();
+  });
+});
+
 describe("parseGateSecretsAllowlist: trustOwnApp is never mistaken for a repo entry (#1380)", () => {
   it("a top-level trustOwnApp key is skipped, not warned about or parsed as a malformed repo", () => {
     const warnings: unknown[][] = [];

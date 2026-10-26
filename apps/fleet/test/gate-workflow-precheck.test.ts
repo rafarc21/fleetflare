@@ -131,6 +131,16 @@ let titleFlipsOnRecheck = true;
 let lastPostedStatus: { state: string; description?: string } | undefined;
 let statusPostCalls = 0;
 let statusPostFailOn: Set<number> = new Set();
+// #1388: the gate-secrets-allowlist step runs ONLY for a same-repo
+// (head.repo === base.repo) default-base PR. Every pre-existing test's
+// getPullRequest mock omits head.repo (sameRepo false), so the step is
+// skipped and never fetches gate-secrets.json. This flag adds head.repo for
+// the one test that must drive the step for real through the Workflows engine.
+let headSameRepo = false;
+// #1388: the OPS gate-secrets.json body served to the allowlist step. "{}"
+// parses to an empty allowlist; the #1388 test sets the full shape (array form
+// + head:true + trustOwnApp + two repos).
+let gateSecretsRaw = "{}";
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -153,9 +163,25 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     return Promise.resolve(json({
       number: PR, merged: false, merge_commit_sha: null, state: "open",
       base: { ref: "main", repo: { full_name: REPO, private: false } },
-      head: { ref: "feature", sha: HEAD },
+      // #1388: head.repo is what getPullRequest's sameRepo derives from -- set
+      // only when a test opts in (headSameRepo), so the gate-secrets-allowlist
+      // step runs for real. A missing head.repo (every pre-existing test) keeps
+      // sameRepo false and the step skipped.
+      head: { ref: "feature", sha: HEAD, ...(headSameRepo ? { repo: { full_name: REPO } } : {}) },
       title: titleFlipsOnRecheck && pullsCalls >= 2 ? "Fix #2" : "Docs update", body: "Readme tweak",
     }));
+  }
+  if (method === "GET" && /\/repos\/[^/]+\/[^/]+$/.test(url) && !/\/contents\/|\/commits\/|\/pulls\//.test(url)) {
+    // #1388: getDefaultBranch -- the repo's ACTUAL default branch, one of
+    // trustedForSecrets' four guards. Only fetched when sameRepo is true; serve
+    // "main" so a same-repo default-base PR passes that guard.
+    return Promise.resolve(json({ default_branch: "main" }));
+  }
+  if (method === "GET" && /\/contents\/gate-secrets\.json\?ref=HEAD$/.test(url)) {
+    // #1388: fetchRepoFile for the OPS gate-secrets.json (FLEET_OPS_REPO at
+    // "HEAD"), served back as raw JSON text. The #1388 test sets the full
+    // allowlist shape; every other test leaves "{}" (empty allowlist).
+    return Promise.resolve(new Response(gateSecretsRaw, { status: 200 }));
   }
   if (method === "GET" && /\/pulls\?state=open/.test(url)) {
     // #1215: listOpenPulls — the shared-head guard. Paged; an empty body means
@@ -246,6 +272,8 @@ beforeEach(() => {
   lastPostedStatus = undefined;
   statusPostCalls = 0;
   statusPostFailOn = new Set();
+  headSameRepo = false;
+  gateSecretsRaw = "{}";
   realFetch = globalThis.fetch;
   globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
 });
@@ -872,6 +900,45 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       // retries, all failed): the real engine ran the full retry budget, not
       // postGateStatus's own old 2x-immediate loop.
       expect(statusPostCalls).toBe(7);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  // #1388 review r1 BLOCKER (workerd proof): the gate-secrets-allowlist step's
+  // return value must survive the REAL Workflows engine's serialization for a
+  // same-repo default-base PR. Before the fix the step returned
+  // Object.create(null) containers and every such run DataCloneError'd with no
+  // verdict; reviewer proved main's code errors here, this head passes. The
+  // full gate-secrets.json shape exercises array-form entries, head:true, the
+  // fleet-wide trustOwnApp opt-in, and two repos.
+  it("a same-repo default-base PR with a full gate-secrets.json completes, not DataCloneError (#1388)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+    headSameRepo = true;
+    gateSecretsRaw = JSON.stringify({
+      "acme/example": {
+        "browser-e2e": ["staging-login"],
+        "ai-smoke": { secrets: ["workers-ai"], head: true },
+      },
+      "acme/other": { "vitest-3": { secrets: ["staging-login"], head: true } },
+      trustOwnApp: true,
+    });
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-secrets-allowlist-dataclone");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-secrets-allowlist-dataclone", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string };
+      expect(out.state).toBe("success");
     } finally {
       await instance.dispose();
     }
