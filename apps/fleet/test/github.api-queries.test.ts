@@ -394,7 +394,51 @@ describe("getPullRequest", () => {
     expect(await getPullRequest("tok", "o/r", 7)).toEqual({
       number: 7, merged: true, mergeCommitSha: "deadbeef", baseRef: "staging", headRef: "feat/x",
       title: "feat: x", body: "Closes #3", repoFullName: "O/R", open: true, baseRepoPrivate: false,
-      headSha: "aaa111",
+      headSha: "aaa111", sameRepo: false,
+    });
+  });
+
+  // #1346: gate-scoped secrets gate on same-repo, never a fork. head.repo is
+  // read off the same GET as everything else here, no second call.
+  describe("sameRepo (#1346)", () => {
+    it("true when head.repo and base.repo share a full_name", async () => {
+      respond = () => Response.json({
+        number: 7, merged: false, state: "open",
+        base: { ref: "main", repo: { full_name: "o/r" } }, head: { ref: "feat/x", repo: { full_name: "o/r" } },
+      });
+      expect((await getPullRequest("tok", "o/r", 7)).sameRepo).toBe(true);
+    });
+
+    it("matches case-insensitively, like GitHub's own owner/name", async () => {
+      respond = () => Response.json({
+        number: 7, merged: false, state: "open",
+        base: { ref: "main", repo: { full_name: "O/R" } }, head: { ref: "feat/x", repo: { full_name: "o/r" } },
+      });
+      expect((await getPullRequest("tok", "o/r", 7)).sameRepo).toBe(true);
+    });
+
+    it("false for a fork PR (head.repo names a different full_name)", async () => {
+      respond = () => Response.json({
+        number: 7, merged: false, state: "open",
+        base: { ref: "main", repo: { full_name: "o/r" } }, head: { ref: "feat/x", repo: { full_name: "attacker/r" } },
+      });
+      expect((await getPullRequest("tok", "o/r", 7)).sameRepo).toBe(false);
+    });
+
+    it("false, fail closed, for a fork whose source repo is deleted (head.repo: null)", async () => {
+      respond = () => Response.json({
+        number: 7, merged: false, state: "open",
+        base: { ref: "main", repo: { full_name: "o/r" } }, head: { ref: "feat/x", repo: null },
+      });
+      expect((await getPullRequest("tok", "o/r", 7)).sameRepo).toBe(false);
+    });
+
+    it("false when head carries no repo field at all", async () => {
+      respond = () => Response.json({
+        number: 7, merged: false, state: "open",
+        base: { ref: "main", repo: { full_name: "o/r" } }, head: { ref: "feat/x" },
+      });
+      expect((await getPullRequest("tok", "o/r", 7)).sameRepo).toBe(false);
     });
   });
 
