@@ -48,6 +48,19 @@ function isStringArray(v: unknown): v is string[] {
  *  slug (every real repo key contains "/"). */
 const TRUST_OWN_APP_KEY = "trustOwnApp";
 
+/** #1388 review r1 BLOCKER: a key literally named "__proto__" is never a real
+ *  repo slug (it holds no "/") or leg name in a hand-authored OPS file, and a
+ *  plain `{}` container's `out[key] = ...` SET turns exactly that key into the
+ *  object's prototype rather than an own key -- which would leak a
+ *  non-Object.prototype object into the parsed allowlist (the step result)
+ *  and DataCloneError the gate-secrets-allowlist workflow step all over again,
+ *  the exact failure #1382 was. JSON.parse sees "__proto__" as a REAL own key
+ *  (so Object.entries hands it over here), unlike a JS object literal, so the
+ *  parser must refuse it explicitly rather than rely on the container shape. */
+function isUnsafeKey(key: string): boolean {
+  return key === "__proto__";
+}
+
 /** The only keys the object form (`{secrets, head?}`) ever reads. */
 const LEG_ENTRY_KEYS: ReadonlySet<string> = new Set(["secrets", "head"]);
 
@@ -106,12 +119,26 @@ export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
     // real repo key contains "/"; this one never does) -- parseTrustOwnApp,
     // below, reads it from this SAME raw value instead.
     if (repo === TRUST_OWN_APP_KEY) continue;
+    // #1388 review r1 BLOCKER: refuse a "__proto__" repo key BEFORE the
+    // `out[repo] = perLeg` SET below can swap the container's prototype (see
+    // isUnsafeKey). Warned and dropped, never granted: it is not a real repo.
+    if (isUnsafeKey(repo)) {
+      console.warn(`gate-secrets allowlist: repo key "${repo}" is unsafe -- dropped`);
+      continue;
+    }
     if (typeof legs !== "object" || legs === null || Array.isArray(legs)) {
       console.warn(`gate-secrets allowlist: repo "${repo}" entry is not an object -- dropped`);
       continue;
     }
     const perLeg: Record<string, GateSecretsLegEntry> = {};
     for (const [leg, value] of Object.entries(legs as Record<string, unknown>)) {
+      // #1388 review r1 BLOCKER: same refusal at the leg level -- `perLeg[leg]
+      // = entry` below would swap THIS container's prototype on a "__proto__"
+      // leg key, leaking a non-plain object into the step result.
+      if (isUnsafeKey(leg)) {
+        console.warn(`gate-secrets allowlist: ${repo}/"${leg}" is an unsafe leg name -- dropped`);
+        continue;
+      }
       const entry = parseLegEntry(value, `${repo}/"${leg}"`);
       if (entry !== null) {
         perLeg[leg] = entry;

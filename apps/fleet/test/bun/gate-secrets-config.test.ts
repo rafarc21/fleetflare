@@ -256,6 +256,51 @@ describe("parseGateSecretsAllowlist: step result is structured-clone safe (#1382
     expectPlainObject(parsed["acme/example"]);
     expectPlainObject(parsed["acme/example"]["ai-smoke"]);
   });
+
+  // #1388 review r1 BLOCKER: a "__proto__" repo or leg key in the OPS file
+  // (which JSON.parse hands over as a REAL own key, unlike a JS object
+  // literal) must not survive into the parsed allowlist -- a plain `{}`
+  // container's `out[key] = ...` SET would swap the container's prototype,
+  // leak a non-Object.prototype object into the step result, and re-trigger
+  // the exact DataCloneError #1382 was. Built via JSON.parse to reproduce the
+  // real file path's own-key shape.
+  it("a '__proto__' repo key is dropped (warned) and the result stays clone-safe", () => {
+    const raw = JSON.parse(`{"__proto__": {"leg": ["staging-login"]}, "acme/example": {"leg": ["staging-login"]}}`);
+    expect(Object.hasOwn(raw, "__proto__")).toBe(true); // the real file path's shape
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); };
+    let parsed: ReturnType<typeof parseGateSecretsAllowlist>;
+    try {
+      parsed = parseGateSecretsAllowlist(raw);
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+    expect(Object.hasOwn(parsed, "__proto__")).toBe(false);
+    expect(parsed).toEqual({ "acme/example": { "leg": { secrets: ["staging-login"] } } });
+    expect(warnings.some((w) => w.includes('"__proto__"'))).toBe(true);
+    expect(() => assertCloneSafe({ allowlist: parsed, trustOwnApp: false })).not.toThrow();
+  });
+
+  it("a '__proto__' leg key is dropped (warned) and the result stays clone-safe", () => {
+    const raw = JSON.parse(`{"acme/example": {"__proto__": ["staging-login"], "leg": ["staging-login"]}}`);
+    expect(Object.hasOwn(raw["acme/example"], "__proto__")).toBe(true); // the real file path's shape
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); };
+    let parsed: ReturnType<typeof parseGateSecretsAllowlist>;
+    try {
+      parsed = parseGateSecretsAllowlist(raw);
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(Object.getPrototypeOf(parsed["acme/example"])).toBe(Object.prototype);
+    expect(Object.hasOwn(parsed["acme/example"], "__proto__")).toBe(false);
+    expect(parsed).toEqual({ "acme/example": { "leg": { secrets: ["staging-login"] } } });
+    expect(warnings.some((w) => w.includes('"__proto__"'))).toBe(true);
+    expect(() => assertCloneSafe({ allowlist: parsed, trustOwnApp: false })).not.toThrow();
+  });
 });
 
 describe("parseGateSecretsAllowlist: trustOwnApp is never mistaken for a repo entry (#1380)", () => {
