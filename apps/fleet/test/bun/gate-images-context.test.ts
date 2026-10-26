@@ -67,6 +67,12 @@ test("the example names the gate image", () => {
   expect(images.map((i) => i.name)).toContain("GateRunnerDO.images.gate");
 });
 
+test("the example names the e2e image, built from the same Dockerfile.gate (#1342)", () => {
+  expect(images.map((i) => i.name)).toContain("GateRunnerDO.images.e2e");
+  const e2e = images.find((i) => i.name === "GateRunnerDO.images.e2e")!;
+  expect(e2e.dockerfile).toBe("./container/Dockerfile.gate");
+});
+
 describe.each(images)("$name", ({ dockerfile, context }) => {
   test("every COPY/ADD source exists under its build context", () => {
     const df = join(FLEET, dockerfile);

@@ -1158,19 +1158,41 @@ interface PullRequestInfo {
    *  other field — so a caller that needs the head sha does not pay a second
    *  /pulls/{number} GET (the gate run's resolve-pr step did exactly that). */
   headSha: string;
+  /** #1346: whether the PR's head repo is the SAME repo as its base repo —
+   *  false for every fork PR, and for a fork whose source repo is gone
+   *  (GitHub sends `head.repo: null` for a deleted fork — fail closed, never
+   *  treat a vanished identity as same-repo). Case-insensitive, matching how
+   *  GitHub itself treats `owner/name`. Gate-scoped secrets (secrets-scope.ts)
+   *  are the one thing this flag gates; nothing else in this repo reads it. */
+  sameRepo: boolean;
+  /** #1346 security review r1: GitHub's own author_association for this PR
+   *  ("OWNER"/"MEMBER"/"COLLABORATOR"/"CONTRIBUTOR"/"FIRST_TIME_CONTRIBUTOR"/
+   *  "NONE"/...), read off the same GET. "NONE" when GitHub sends none at all
+   *  (never seen in practice, but fail closed rather than guess trusted). */
+  authorAssociation: string;
+  /** #1346 security review r1: the PR author's GitHub account type is "Bot"
+   *  (dependabot[bot] and friends) — sameRepo alone does not distinguish a
+   *  human collaborator's branch from an automated one. */
+  authorIsBot: boolean;
 }
 
 export async function getPullRequest(token: string, repo: string, number: number): Promise<PullRequestInfo> {
   const raw = await ghJson<{
     number: number; merged?: boolean; merge_commit_sha?: string | null;
     state?: string;
-    base: { ref: string; repo?: { full_name?: string; private?: boolean } }; head: { ref: string; sha?: string }; title?: string; body?: string | null;
+    base: { ref: string; repo?: { full_name?: string; private?: boolean } };
+    head: { ref: string; sha?: string; repo?: { full_name?: string } | null };
+    title?: string; body?: string | null;
+    author_association?: string;
+    user?: { type?: string } | null;
   }>(
     token,
     `https://api.github.com/repos/${repo}/pulls/${number}`,
     { method: "GET" },
     `read pull ${repo}#${number}`,
   );
+  const baseFullName = raw.base.repo?.full_name ?? repo;
+  const headFullName = raw.head.repo?.full_name;
   return {
     number: raw.number,
     merged: raw.merged === true,
@@ -1179,10 +1201,13 @@ export async function getPullRequest(token: string, repo: string, number: number
     headRef: raw.head.ref,
     title: raw.title ?? "",
     body: raw.body ?? "",
-    repoFullName: raw.base.repo?.full_name ?? repo,
+    repoFullName: baseFullName,
     baseRepoPrivate: raw.base.repo?.private === true,
     open: raw.state === "open",
     headSha: raw.head.sha ?? "",
+    sameRepo: headFullName !== undefined && headFullName.toLowerCase() === baseFullName.toLowerCase(),
+    authorAssociation: raw.author_association ?? "NONE",
+    authorIsBot: raw.user?.type === "Bot",
   };
 }
 

@@ -12,6 +12,8 @@ import type { GateLegRequest } from "./leg-env";
 import { buildLegEnvVars } from "./leg-env";
 import { DEFAULT_GATE_IMAGE, GATE_IMAGES, legTimeoutMin } from "./config";
 import { storedLegResult, type StoredLegResult } from "./leg-run";
+import { firstUnresolvedSecret } from "./secrets-registry";
+import { redactLegResultFields } from "./secrets-redact";
 
 export const GATE_CONTAINER_PORT = 8080;
 export const GATE_INSTANCE = "standard-4";
@@ -40,7 +42,14 @@ const NO_INSTANCE_RE = /no container instance|container instance that can be pro
  *  classifies it as infra (its INFRA_CAUSE matches "no container instance"). */
 export const NO_INSTANCE_DESCRIPTION = "gate capacity: no container instance available";
 
-export type LegResult = { state: "success" | "failure" | "error"; description?: string };
+// #1346 correctness review r1: gate-server.ts's runGate actually returns
+// { state, description, summary } (container/gate-server.ts's own RunOutcome,
+// `return { state: body.state, description: body.description, summary: body.summary }`)
+// -- summary was missing from this type even though it was already flowing
+// through at runtime (res.json() as LegResult does not strip it, just hides
+// it from the type checker). Declaring it here is what let do.ts's redaction
+// (secrets-redact.ts's redactLegResultFields) see and scrub it.
+export type LegResult = { state: "success" | "failure" | "error"; description?: string; summary?: string };
 
 /** A leg run ends in exactly one of two things: a real gate-server body
  *  (success/failure/error — data, 200) or an infra failure (container never
@@ -92,6 +101,12 @@ export interface RunLegDeps {
   readResult?: (resultKey: string) => Promise<StoredLegResult | undefined>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** #1346: this leg's granted secrets, name -> resolved value -- do.ts
+   *  builds this from req.secretNames (never read off `req` itself, same
+   *  split as gateOutboundProps' own gitToken parameter). Fed straight into
+   *  buildLegEnvVars below, so the container's GATE_SECRET_* env vars are set
+   *  before start(), never after. */
+  secretValues?: Record<string, string>;
 }
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -125,7 +140,7 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
       image,
       enableInternet: true,
       instance: GATE_INSTANCE,
-      env: buildLegEnvVars(req),
+      env: buildLegEnvVars(req, deps.secretValues),
     });
     if (!(await waitUntilRunning(c, now, sleep))) {
       return { kind: "infra", description: "gate container did not start within 180 s" };
@@ -144,6 +159,42 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
       console.error("gate-runner: destroy failed", errorText(err));
     }
   }
+}
+
+/**
+ * #1346 security review r2: do.ts (GateRunnerDO) imports cloudflare:workers,
+ * so bun test can never load it -- which is exactly how a silent revert of
+ * EITHER "an unresolved granted secret never runs" OR "redact the leg's own
+ * result before it leaves this DO" could pass every existing test (both
+ * lived as plain code in do.ts's fetch handler before this). Pulling both
+ * into this one pure, injectable function -- `run` stands in for
+ * `runLegInContainer`, so a test can fake it and assert on the LegOutcome
+ * this function hands back, exactly as if do.ts had called it -- closes that
+ * gap. do.ts's own fetch handler is now just: resolve secrets, call this,
+ * call legResponse on the result.
+ */
+export async function runLegWithSecrets(
+  secretNames: readonly string[],
+  secretValues: Readonly<Record<string, string>>,
+  run: () => Promise<LegOutcome>,
+): Promise<LegOutcome> {
+  // A granted name that failed to resolve (an unset Worker secret, a missing
+  // signing key) is a broken deploy, never "run without it" -- the container
+  // (and `run`) never starts at all.
+  const unresolved = firstUnresolvedSecret(secretNames, secretValues);
+  if (unresolved !== null) {
+    return { kind: "result", result: { state: "error", description: `DID-NOT-RUN: secret "${unresolved}" unresolved` } };
+  }
+  const outcome = await run();
+  // The container's direct /run and /result HTTP response is a path of its
+  // own, separate from the R2-PUT outbound-handler.ts already redacts --
+  // this is the one place THIS path gets the same treatment, on the leg's
+  // actual result only (an infra description is Worker-generated text,
+  // never leg output).
+  const values = Object.values(secretValues);
+  return outcome.kind === "result"
+    ? { kind: "result", result: redactLegResultFields(outcome.result, values) }
+    : outcome;
 }
 
 async function waitUntilRunning(

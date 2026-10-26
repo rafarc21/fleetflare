@@ -41,17 +41,43 @@ function encodedForms(value: string): string[] {
   return [...forms].filter((f) => f !== "");
 }
 
+/** #1346 security review r2: container/gate-server.ts keeps only the LAST
+ *  OUTPUT_TAIL_CHARS (32k) of stdout/stderr before this ever reaches the
+ *  Worker -- that cut can land in the MIDDLE of a granted secret, leaving
+ *  just its trailing fragment sitting at the very START of the kept text.
+ *  encodedForms' own full-value matching (below) never finds a fragment
+ *  shorter than the whole value, so that leading fragment would otherwise
+ *  leak untouched. This is a Worker-side-only fix (no container/image
+ *  change): checked once per value, longest candidate first -- if `text`'s
+ *  own prefix equals some SUFFIX of `value` at least MIN_LEADING_PARTIAL_CHARS
+ *  long, that leading fragment is redacted too. The threshold exists so a
+ *  short, coincidental overlap (two or three characters any real text could
+ *  share with any secret) never triggers a redaction that would read like a
+ *  bug rather than a fix. */
+const MIN_LEADING_PARTIAL_CHARS = 8;
+
+function redactLeadingPartial(text: string, value: string): string {
+  const maxLen = Math.min(value.length, text.length);
+  for (let len = maxLen; len >= MIN_LEADING_PARTIAL_CHARS; len--) {
+    if (text.startsWith(value.slice(value.length - len))) {
+      return `«redacted»${text.slice(len)}`;
+    }
+  }
+  return text;
+}
+
 /** Exact-value (and common-encoding) substring redaction for ONE string
- *  field's own text. Never applied to a whole JSON blob -- see
- *  redactLegResultFields, below, which is what every real call site in this
- *  codebase uses. Exported on its own for direct testing of the encoding
- *  forms, and as the fallback when a result body is not parseable JSON at
- *  all (outbound-handler.ts). */
+ *  field's own text, plus a tail-cut-safe leading-partial check (above).
+ *  Never applied to a whole JSON blob -- see redactLegResultFields, below,
+ *  which is what every real call site in this codebase uses. Exported on its
+ *  own for direct testing of the encoding forms, and as the fallback when a
+ *  result body is not parseable JSON at all (outbound-handler.ts). */
 export function redactKnownSecretValues(text: string, values: readonly string[]): string {
   let out = text;
   for (const value of values) {
     if (value === "") continue;
     for (const form of encodedForms(value)) out = out.split(form).join("«redacted»");
+    out = redactLeadingPartial(out, value);
   }
   return out;
 }

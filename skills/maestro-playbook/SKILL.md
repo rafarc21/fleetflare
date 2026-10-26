@@ -15,6 +15,22 @@ A" / "project B" mean other repos sharing the same fleet.
 Maestro = coordinator. The scarce resource is your AVAILABILITY to the
 operator — stay free for the next message from him, always.
 
+### Stay available
+
+Default = dispatch a background subagent (Agent tool, `run_in_background`)
+for anything beyond a single read-only lookup or a relay/decision. New asks
+and messages keep arriving; a maestro working inline sits busy, and busy
+state should be as rare as possible.
+
+Inline allowed only: one grep/read/curl; state/board/merge commands that
+return in seconds; replies. Long waits go to background shells/monitors,
+never foreground sleeps or polls. Reviews, research, measurements, ops
+edits, deploy prep — all via subagents. Arm monitors yourself; a subagent
+monitor dies with the turn and takes the watch with it.
+
+**Busy-state check:** before any tool call expected to run >60 s inline,
+delegate instead.
+
 **Maestro is ALWAYS LOCAL.** A maestro is a Claude Code session on the
 operator's own machine, where he can see and control it directly — never a
 cloud studio. Cloud studios are workers only: they implement, review, and

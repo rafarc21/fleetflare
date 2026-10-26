@@ -1,0 +1,40 @@
+{
+  "source": "maestro local run (Mac, wrangler OAuth, throwaway Worker, @cloudflare/playwright@1.3.6, browser colo MAD). Host reboot cut the run short; raw per-run samples lost, only aggregates posted on #1347.",
+  "posted": "https://github.com/rafarc21/fleetflare/issues/1347#issuecomment-6413360970",
+  "note": "batch-1 Worker-fixture leg row is a variance anomaly (newPage p50 383ms vs ~80ms elsewhere); interleaved rerun 213-547ms. Not root-caused before reboot.",
+  "metrics_ms": [
+    {"metric": "leg, in-Worker driver, Worker-served fixture (interleaved)", "n": 18, "p50": 272, "p95": 547, "flakes": 0},
+    {"metric": "leg, in-Worker driver, tunnel bridge (interleaved)", "n": 18, "p50": 446, "p95": 796, "flakes": 0},
+    {"metric": "leg, in-Worker driver, Worker fixture (batch 1, anomaly)", "n": 24, "p50": 1840, "p95": 2089, "flakes": 0},
+    {"metric": "leg, in-Worker driver, tunnel bridge (batch 1)", "n": 24, "p50": 406, "p95": 761, "flakes": 0},
+    {"metric": "cold session start (acquire+connect)", "n": 12, "p50": 613, "p95": 1127, "flakes": 0},
+    {"metric": "acquire", "n": 12, "p50": 493, "p95": 989},
+    {"metric": "connect", "n": 12, "p50": 124, "p95": 325},
+    {"metric": "cold start, Mac wall incl RTT", "n": 12, "p50": 839, "p95": 2045},
+    {"metric": "leg, Mac-side stock playwright CDP driver, Worker fixture", "n": 24, "p50": 873, "p95": 1098, "flakes": 0},
+    {"metric": "leg, Mac-side CDP driver, tunnel bridge", "n": 12, "p50": 1412, "p95": 2391, "flakes": 0},
+    {"metric": "CDP connect from Mac (via Worker proxy)", "n": 3, "p50": 1450, "p95": 1467}
+  ],
+  "rtt_ms": {
+    "mac_to_cf_tcp_connect_p50": 22,
+    "mac_to_worker_http_p50": 76,
+    "mac_to_tunnel_p50": 49,
+    "cf_mad_to_tunnel_to_mac_p50": 26
+  },
+  "playwright_test_runner": {
+    "connectOverCDP_browser_fixture_override_worker_scope": {"works": true, "n": 12, "pass": 12, "per_test_ms": "1.0-2.4s, one outlier 12.2s"},
+    "native_connectOptions": {"works": false, "error": "browserType.connect: Error: Cannot find object to \"undefined\": undefined"}
+  },
+  "reachability": {
+    "browser_run_to_trycloudflare_quick_tunnel": "403 'Your request was blocked' at CF edge (UA override no help)",
+    "worker_fetch_to_tunnel_p50_ms": 26,
+    "workaround": "browser -> bench Worker /t/* proxy -> quick tunnel -> Mac fixture"
+  },
+  "cost_estimate": {
+    "browser_time_per_leg": "1-1.5s",
+    "free_legs_per_10h_monthly_inclusion": "24k-36k",
+    "usd_per_leg_after_inclusion": "0.00003-0.00004",
+    "billing_granularity": "not verified",
+    "limits_seen": "maxConcurrentSessions 200, allowedBrowserAcquisitions 10 (window)"
+  }
+}

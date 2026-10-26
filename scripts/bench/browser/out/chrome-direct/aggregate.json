@@ -1,0 +1,11 @@
+{
+  "name": "chrome-direct",
+  "runs": 24,
+  "ok": 24,
+  "flakeRate": 0,
+  "legP50": 136,
+  "legP95": 201,
+  "legMin": 99,
+  "legMax": 208,
+  "legMean": 141
+}

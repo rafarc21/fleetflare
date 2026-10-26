@@ -1,0 +1,11 @@
+{
+  "name": "chrome-tunnel",
+  "runs": 12,
+  "ok": 12,
+  "flakeRate": 0,
+  "legP50": 180,
+  "legP95": 209,
+  "legMin": 164,
+  "legMax": 209,
+  "legMean": 182
+}

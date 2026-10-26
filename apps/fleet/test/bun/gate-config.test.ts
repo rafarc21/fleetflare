@@ -279,11 +279,14 @@ describe("parseGateBlock: per-repo image key", () => {
     expect(cfg).not.toBeNull();
     expect(Object.hasOwn(cfg ?? {}, "image")).toBe(false);
   });
-  it("the allowlist is exactly gate and desktop", () => {
-    expect([...GATE_IMAGES].sort()).toEqual(["desktop", "gate"]);
+  it("the allowlist is exactly gate, desktop and e2e", () => {
+    expect([...GATE_IMAGES].sort()).toEqual(["desktop", "e2e", "gate"]);
   });
   it("null on a key outside the allowlist", () => {
     expect(parseGateBlock({ ...BLOCK, image: "evil" })).toBeNull();
+  });
+  it("keeps the e2e image key (#1342)", () => {
+    expect(parseGateBlock({ ...BLOCK, image: "e2e" })?.image).toBe("e2e");
   });
   it("null on a registry ref, which is never a key", () => {
     expect(parseGateBlock({ ...BLOCK, image: "ghcr.io/acme/desktop:latest" })).toBeNull();
