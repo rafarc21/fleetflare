@@ -12,8 +12,10 @@ Board issue #250 (operator ruling, 2026-10-06): **maestro is ALWAYS LOCAL.**
 A maestro is a Claude Code session on the operator's own machine, where he
 can see and control it directly, never a cloud container. Cloud studios are
 workers only — they implement, review, gate, and deploy under a release
-gate; they never coordinate, dispatch, or hold the merge gate. Full rule and
-rationale: the `maestro-playbook` skill's Role section.
+gate; they never coordinate, dispatch, or hold the merge gate. A local
+maestro stays available: subagents do the long work, the maestro only relays
+and decides inline (see `maestro-playbook` Role → "Stay available"). Full
+rule and rationale: the `maestro-playbook` skill's Role section.
 
 If you are reading this prompt, a CLOUD studio was provisioned with the
 `maestro` role. That should never happen — stop here, do nothing else, and
