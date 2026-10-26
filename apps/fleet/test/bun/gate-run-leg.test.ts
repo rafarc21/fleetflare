@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { runLegInContainer, legResponse, NO_INSTANCE_DESCRIPTION, type GateContainer, type OutboundBinding } from "../../src/gate/run-leg";
+import {
+  runLegInContainer, runLegWithSecrets, legResponse, NO_INSTANCE_DESCRIPTION, type GateContainer, type OutboundBinding,
+  type LegOutcome,
+} from "../../src/gate/run-leg";
 import { buildLegEnvVars, type GateLegRequest } from "../../src/gate/leg-env";
 
 // #715: GateRunnerDO drives the native ctx.container API. These tests run the
@@ -156,6 +159,34 @@ describe("runLegInContainer: container start", () => {
     expect(outcome.kind).toBe("infra");
     if (outcome.kind === "infra") expect(outcome.description).toContain("image pull failed");
     expect(c.destroyCount).toBe(1);
+  });
+});
+
+// #1346 correctness review r1 item 1: reverting the `deps.secretValues` plumb-
+// through in run-leg.ts (buildLegEnvVars(req, deps.secretValues) back to
+// buildLegEnvVars(req)) passed every test that existed before this one --
+// nothing exercised runLegInContainer's OWN wiring of secretValues into the
+// real container start() call, only buildLegEnvVars as a pure function in
+// isolation (gate-secrets-leg-env.test.ts). This closes that gap.
+describe("runLegInContainer: gate-scoped secrets reach the container's env (#1346)", () => {
+  test("deps.secretValues becomes GATE_SECRET_* on the real start() call", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [okResponse("success")];
+    await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c), secretValues: { "staging-login": "sup3r-s3cret" },
+    });
+
+    expect(c.starts).toHaveLength(1);
+    expect(c.starts[0]?.env.GATE_SECRET_STAGING_LOGIN).toBe("sup3r-s3cret");
+  });
+
+  test("no deps.secretValues means no GATE_SECRET_* env vars at all", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [okResponse("success")];
+    await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    const env = c.starts[0]?.env ?? {};
+    expect(Object.keys(env).some((k) => k.startsWith("GATE_SECRET_"))).toBe(false);
   });
 });
 
@@ -606,5 +637,56 @@ describe("runLegInContainer: R2 result after transport loss (#1122)", () => {
     });
 
     expect(outcome).toEqual({ kind: "result", result: { state: "failure" } });
+  });
+});
+
+// #1346 security review r2: do.ts can never be loaded under bun test
+// (cloudflare:workers), so BOTH "an unresolved granted secret never runs"
+// and "redact the leg's own result" moved here, into one pure function a
+// test can call directly with a fake `run`, with no container at all.
+describe("runLegWithSecrets", () => {
+  test("every granted name resolved: run() is called, and its result is redacted", async () => {
+    let ran = false;
+    const run = async (): Promise<LegOutcome> => {
+      ran = true;
+      return { kind: "result", result: { state: "failure", description: "login as sup3r-s3cret failed" } };
+    };
+    const outcome = await runLegWithSecrets(["staging-login"], { "staging-login": "sup3r-s3cret" }, run);
+
+    expect(ran).toBe(true);
+    expect(outcome).toEqual({ kind: "result", result: { state: "failure", description: "login as «redacted» failed" } });
+  });
+
+  test("an unresolved granted name: run() is NEVER called, and the leg goes RED", async () => {
+    let ran = false;
+    const run = async (): Promise<LegOutcome> => {
+      ran = true;
+      return { kind: "result", result: { state: "success" } };
+    };
+    const outcome = await runLegWithSecrets(["staging-login"], {}, run);
+
+    expect(ran).toBe(false);
+    expect(outcome).toEqual({ kind: "result", result: { state: "error", description: 'DID-NOT-RUN: secret "staging-login" unresolved' } });
+  });
+
+  test("no granted names at all: run() is called, nothing is redacted", async () => {
+    const run = async (): Promise<LegOutcome> => ({ kind: "result", result: { state: "success", description: "all good" } });
+    const outcome = await runLegWithSecrets([], {}, run);
+
+    expect(outcome).toEqual({ kind: "result", result: { state: "success", description: "all good" } });
+  });
+
+  test("an infra outcome from run() passes through untouched, never redacted", async () => {
+    const run = async (): Promise<LegOutcome> => ({ kind: "infra", description: "gate container did not start within 180 s" });
+    const outcome = await runLegWithSecrets(["staging-login"], { "staging-login": "sup3r-s3cret" }, run);
+
+    expect(outcome).toEqual({ kind: "infra", description: "gate container did not start within 180 s" });
+  });
+
+  test("redacts summary too, and never touches state even when the value equals it", async () => {
+    const run = async (): Promise<LegOutcome> => ({ kind: "result", result: { state: "success", summary: "1 fail (success)" } });
+    const outcome = await runLegWithSecrets(["staging-login"], { "staging-login": "success" }, run);
+
+    expect(outcome).toEqual({ kind: "result", result: { state: "success", summary: "1 fail («redacted»)" } });
   });
 });
