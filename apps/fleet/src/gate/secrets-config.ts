@@ -28,15 +28,32 @@ function isStringArray(v: unknown): v is string[] {
  *  returns an empty allowlist (every leg gets nothing), a bad per-repo value
  *  drops that repo, a bad per-leg value drops that leg -- one broken entry
  *  never widens into "grant everything" and never throws, mirroring
- *  leak-gate.ts's own parseDenylist rule for the sibling OPS file. */
+ *  leak-gate.ts's own parseDenylist rule for the sibling OPS file. Every drop
+ *  is logged (the repo/leg NAME only, never the malformed value itself) so a
+ *  typo in a hand-edited OPS file is visible, not silently eaten.
+ *
+ *  Built with `Object.create(null)`, not `{}`: the allowlist's own keys come
+ *  from an external file, and a plain object literal's inherited
+ *  Object.prototype would let a key literally named "__proto__" pollute it on
+ *  assignment (`out[repo] = ...` is a normal property SET, unlike
+ *  Object.entries' own read, which only sees own-enumerable JSON properties
+ *  safely). A null-prototype object has no such setter to trigger. */
 export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
-  const out: Record<string, Record<string, string[]>> = {};
+  const empty: GateSecretsAllowlist = Object.create(null);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return empty;
+  const out: Record<string, Record<string, string[]>> = Object.create(null);
   for (const [repo, legs] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof legs !== "object" || legs === null || Array.isArray(legs)) continue;
-    const perLeg: Record<string, string[]> = {};
+    if (typeof legs !== "object" || legs === null || Array.isArray(legs)) {
+      console.warn(`gate-secrets allowlist: repo "${repo}" entry is not an object -- dropped`);
+      continue;
+    }
+    const perLeg: Record<string, string[]> = Object.create(null);
     for (const [leg, names] of Object.entries(legs as Record<string, unknown>)) {
-      if (isStringArray(names)) perLeg[leg] = names;
+      if (isStringArray(names)) {
+        perLeg[leg] = names;
+      } else {
+        console.warn(`gate-secrets allowlist: ${repo}/"${leg}" is not a string array -- dropped`);
+      }
     }
     out[repo] = perLeg;
   }
@@ -51,4 +68,27 @@ export function gateSecretsRepoEntry(
 ): Readonly<Record<string, readonly string[]>> | undefined {
   const key = repo.toLowerCase();
   return Object.entries(allowlist).find(([name]) => name.toLowerCase() === key)?.[1];
+}
+
+/**
+ * #1346 security review r1 item 3 / correctness review r1 item 1: whether a
+ * trusted PR's unreadable OPS allowlist should fail the WHOLE run, pulled out
+ * as its own pure function (rather than an inline `if` in workflow.ts, which
+ * `cloudflare:workers` keeps bun test from ever loading) so a future revert
+ * of this guard fails a real test, not just a manual re-check.
+ *
+ * `allowlist === null` means the fetch or parse itself failed -- distinct
+ * from a deliberately absent/empty file, which parses to `{}`
+ * (parseGateSecretsAllowlist's own rule) and is never a failure: "the
+ * operator never turned this on" is not the same thing as "we don't know
+ * what the operator configured." An untrusted PR never fails here either --
+ * it was never going to receive a grant regardless of what the file says.
+ *
+ * Returns the failure description to post and return, or null when the run
+ * should proceed as normal.
+ */
+export function gateSecretsAllowlistFailure(trusted: boolean, allowlist: GateSecretsAllowlist | null): string | null {
+  if (!trusted) return null;
+  if (allowlist !== null) return null;
+  return "gate-secrets: OPS allowlist unavailable";
 }

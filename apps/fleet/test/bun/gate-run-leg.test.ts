@@ -159,6 +159,34 @@ describe("runLegInContainer: container start", () => {
   });
 });
 
+// #1346 correctness review r1 item 1: reverting the `deps.secretValues` plumb-
+// through in run-leg.ts (buildLegEnvVars(req, deps.secretValues) back to
+// buildLegEnvVars(req)) passed every test that existed before this one --
+// nothing exercised runLegInContainer's OWN wiring of secretValues into the
+// real container start() call, only buildLegEnvVars as a pure function in
+// isolation (gate-secrets-leg-env.test.ts). This closes that gap.
+describe("runLegInContainer: gate-scoped secrets reach the container's env (#1346)", () => {
+  test("deps.secretValues becomes GATE_SECRET_* on the real start() call", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [okResponse("success")];
+    await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c), secretValues: { "staging-login": "sup3r-s3cret" },
+    });
+
+    expect(c.starts).toHaveLength(1);
+    expect(c.starts[0]?.env.GATE_SECRET_STAGING_LOGIN).toBe("sup3r-s3cret");
+  });
+
+  test("no deps.secretValues means no GATE_SECRET_* env vars at all", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [okResponse("success")];
+    await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    const env = c.starts[0]?.env ?? {};
+    expect(Object.keys(env).some((k) => k.startsWith("GATE_SECRET_"))).toBe(false);
+  });
+});
+
 describe("runLegInContainer: outbound interceptor", () => {
   test("registers the outbound binding before start", async () => {
     const c = new FakeContainer();

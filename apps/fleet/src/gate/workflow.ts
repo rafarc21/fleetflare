@@ -15,12 +15,15 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getPullRequest, listOpenPulls, listRepoTree,
+  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getDefaultBranch, getPullRequest, listOpenPulls, listRepoTree,
 } from "../github/api";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
 import { resolveOpsRepo } from "../ops-repo";
-import { GATE_SECRETS_ALLOWLIST_PATH, parseGateSecretsAllowlist, type GateSecretsAllowlist } from "./secrets-config";
+import {
+  GATE_SECRETS_ALLOWLIST_PATH, gateSecretsAllowlistFailure, parseGateSecretsAllowlist, type GateSecretsAllowlist,
+} from "./secrets-config";
+import { trustedForSecrets } from "./secrets-scope";
 import { capStatusDescription, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
@@ -34,7 +37,10 @@ import {
   type CarryGreen, type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
-import { bundleStepEnabled, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, RETRY_LEG_JITTER_MS, type LegRunResult } from "./leg-run";
+import {
+  bundleStepEnabled, gateRunnerName, legRequest, legRequestContext, legResultReader, runBundleStep, runLegStep,
+  RETRY_LEG_JITTER_MS, type LegRequestContext, type LegRunResult,
+} from "./leg-run";
 import { markRunProgress } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import {
@@ -111,43 +117,79 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // non-default branch must be gated against that branch.
       const baseSha = await getBranchSha(token, repo, pull.baseRef);
       const compare = await compareFiles(token, repo, baseSha, headSha);
+      // #1346 security review r1: the repo's ACTUAL default branch, asked
+      // rather than assumed -- one of trustedForSecrets' own four guards is
+      // that the PR's base IS that branch, never one the PR author could
+      // have created themselves. Only fetched when sameRepo could otherwise
+      // matter (a fork PR is never trusted regardless, so this call is pure
+      // waste for the by-far most common case, a public repo's fork PRs).
+      const defaultBranch = pull.sameRepo ? await getDefaultBranch(token, repo) : "";
       // A private base repo clones through the git proxy in its leg.
       return {
         headSha, baseSha, mergeBaseSha: compare.mergeBaseSha, baseRef: pull.baseRef,
         changedFiles: compare.files, truncated: compare.truncated, private: pull.baseRepoPrivate,
         title: pull.title, body: pull.body,
-        // #1346: gate-scoped secrets gate on this -- never a value the PR
-        // itself can influence, read straight off GitHub's own head/base
-        // repo identity on the same GET as everything else above.
-        sameRepo: pull.sameRepo,
+        // #1346: gate-scoped secrets gate on these -- none of them a value
+        // the PR itself can influence. sameRepo/authorAssociation/authorIsBot
+        // read straight off GitHub's own PR identity on the same GET as
+        // everything else above; defaultBranch is the repo's own setting.
+        sameRepo: pull.sameRepo, authorAssociation: pull.authorAssociation, authorIsBot: pull.authorIsBot, defaultBranch,
       };
+    });
+
+    // #1346 security review r1: sameRepo alone let any same-repo pusher
+    // through (including one who created their own base branch). The real
+    // gate is trustedForSecrets' four conditions together.
+    const trustedForSecretsFlag = trustedForSecrets({
+      sameRepo: resolved.sameRepo, authorAssociation: resolved.authorAssociation, authorIsBot: resolved.authorIsBot,
+      baseRef: resolved.baseRef, defaultBranch: resolved.defaultBranch,
     });
 
     // #1346: the OPS-repo allowlist for gate-scoped secrets, read the same
     // way leak-gate.ts's denylist already is -- never from the PR's own
-    // repo, at any sha. Skipped entirely for a fork PR (resolved.sameRepo is
-    // already false, so every leg's grantedSecretNames would be [] anyway):
-    // one fewer network call on the by-far most common case, a public repo's
-    // fork PRs, and a fork PR never causes an OPS-repo read at all.
-    const secretsAllowlist: GateSecretsAllowlist | undefined = resolved.sameRepo
+    // repo, at any sha. Skipped entirely for an untrusted PR (every leg's
+    // grantedSecretNames would be [] regardless of what the file says): one
+    // fewer network call on the by-far most common case, and an untrusted PR
+    // never causes an OPS-repo read at all.
+    //
+    // null (not {}) means the fetch or parse itself failed -- distinct from a
+    // genuinely empty/absent file, which is a deliberate "nothing granted"
+    // and parses to {} (secrets-config.ts's own parseGateSecretsAllowlist).
+    // null propagates to a whole-run failure below (#1346 security review r1
+    // item 3: "allowlist fetch error on a trusted PR -> RED," never a silent
+    // fall-through to "grant nothing" when we don't actually know that).
+    const secretsAllowlist: GateSecretsAllowlist | null = trustedForSecretsFlag
       ? await step.do("gate-secrets-allowlist", async () => {
         const opsRepo = resolveOpsRepo(this.env);
         if (opsRepo === null) return {};
-        // Fail closed on anything: a missing file, a network error, or JSON
-        // that doesn't even parse all resolve to "grant nothing" rather than
-        // failing the run -- the same rule leak-gate.ts's own OPS file read
-        // already follows (workflow.ts's "precheck" step, below).
         try {
           const raw = await fetchRepoFile(
             await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }),
             opsRepo, GATE_SECRETS_ALLOWLIST_PATH, "HEAD",
           );
           return parseGateSecretsAllowlist(JSON.parse(raw));
-        } catch {
-          return {};
+        } catch (err) {
+          console.warn(`gate-secrets: allowlist fetch/parse failed for ${opsRepo}/${GATE_SECRETS_ALLOWLIST_PATH}: ${err instanceof Error ? err.message : String(err)}`);
+          return null;
         }
       })
-      : undefined;
+      : {};
+
+    // #1346 security review r1 item 3: a trusted PR whose allowlist we could
+    // not read is NOT "nothing granted" -- it is "we don't know," and this
+    // run's legs could silently run without a secret they were meant to get.
+    // Fail the whole run red, the same shape a bad/absent gate config already
+    // does (decideGateRun's own "fail," below), never a quiet pending-as-if-fine.
+    // The decision itself lives in secrets-config.ts's gateSecretsAllowlistFailure
+    // (correctness review r1 item 1): this file imports cloudflare:workers, so
+    // bun test can never load it to catch a future revert of this `if` directly.
+    const allowlistFailure = gateSecretsAllowlistFailure(trustedForSecretsFlag, secretsAllowlist);
+    if (allowlistFailure !== null) {
+      await step.do("post-secrets-allowlist-failure", STATUS_POST_STEP_CONFIG, async () =>
+        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: allowlistFailure }));
+      return { state: "failure", description: allowlistFailure, statusPostFailed: false, legs: [] };
+    }
+    const legSecretsAllowlist: GateSecretsAllowlist = secretsAllowlist ?? {};
 
     // Whether the repo's own fleet.json changed is decided on CONTENT (#1091
     // review round 2), never on the file list: a rename shows only its new path.
@@ -311,10 +353,10 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         const stub = this.env.GATE_RUNNER.get(this.env.GATE_RUNNER.idFromName(gateRunnerName(event.instanceId, planned.leg, crypto.randomUUID())));
         return stub.fetch("https://gate-runner/run-leg", {
           method: "POST",
-          body: JSON.stringify(legRequest(owner, repoName, planned, {
-            baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, bundleKey, mergeBase: resolved.mergeBaseSha,
-            sameRepo: resolved.sameRepo, secretsAllowlist,
-          })),
+          body: JSON.stringify(legRequest(owner, repoName, planned, legRequestContext(
+            { baseRef: resolved.baseRef, sameRepo: resolved.sameRepo, authorAssociation: resolved.authorAssociation, authorIsBot: resolved.authorIsBot, defaultBranch: resolved.defaultBranch },
+            resolved.private, legSecretsAllowlist, { pr: String(pr), bundleKey, mergeBase: resolved.mergeBaseSha },
+          ))),
           signal,
         });
       },
@@ -332,11 +374,11 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         const carried = carriedByLeg.get(planned.leg);
         if (carried !== undefined) return Promise.resolve(carried as LegRunResult);
         return runLeg(this.env, step, event.instanceId, owner, repoName,
-          {
-            baseRef: resolved.baseRef, pr: String(pr), private: resolved.private,
-            bundleKey: bundled ? bundleKey : undefined, mergeBase: bundled ? resolved.mergeBaseSha : undefined,
-            sameRepo: resolved.sameRepo, secretsAllowlist,
-          }, planned, touch);
+          legRequestContext(
+            { baseRef: resolved.baseRef, sameRepo: resolved.sameRepo, authorAssociation: resolved.authorAssociation, authorIsBot: resolved.authorIsBot, defaultBranch: resolved.defaultBranch },
+            resolved.private, legSecretsAllowlist,
+            { pr: String(pr), bundleKey: bundled ? bundleKey : undefined, mergeBase: bundled ? resolved.mergeBaseSha : undefined },
+          ), planned, touch);
       }),
     );
 
@@ -458,10 +500,7 @@ function bunLaneFiles(tree: Parameters<typeof laneFilesFromTree>[0], cfg: GateCo
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
   owner: string, repoName: string,
-  pr: {
-    baseRef: string; pr: string; private: boolean; bundleKey?: string; mergeBase?: string;
-    sameRepo?: boolean; secretsAllowlist?: GateSecretsAllowlist;
-  },
+  pr: LegRequestContext,
   planned: PlannedLeg,
   touch: () => Promise<void>,
 ): Promise<LegRunResult> {

@@ -1165,6 +1165,15 @@ interface PullRequestInfo {
    *  GitHub itself treats `owner/name`. Gate-scoped secrets (secrets-scope.ts)
    *  are the one thing this flag gates; nothing else in this repo reads it. */
   sameRepo: boolean;
+  /** #1346 security review r1: GitHub's own author_association for this PR
+   *  ("OWNER"/"MEMBER"/"COLLABORATOR"/"CONTRIBUTOR"/"FIRST_TIME_CONTRIBUTOR"/
+   *  "NONE"/...), read off the same GET. "NONE" when GitHub sends none at all
+   *  (never seen in practice, but fail closed rather than guess trusted). */
+  authorAssociation: string;
+  /** #1346 security review r1: the PR author's GitHub account type is "Bot"
+   *  (dependabot[bot] and friends) — sameRepo alone does not distinguish a
+   *  human collaborator's branch from an automated one. */
+  authorIsBot: boolean;
 }
 
 export async function getPullRequest(token: string, repo: string, number: number): Promise<PullRequestInfo> {
@@ -1174,6 +1183,8 @@ export async function getPullRequest(token: string, repo: string, number: number
     base: { ref: string; repo?: { full_name?: string; private?: boolean } };
     head: { ref: string; sha?: string; repo?: { full_name?: string } | null };
     title?: string; body?: string | null;
+    author_association?: string;
+    user?: { type?: string } | null;
   }>(
     token,
     `https://api.github.com/repos/${repo}/pulls/${number}`,
@@ -1195,6 +1206,8 @@ export async function getPullRequest(token: string, repo: string, number: number
     open: raw.state === "open",
     headSha: raw.head.sha ?? "",
     sameRepo: headFullName !== undefined && headFullName.toLowerCase() === baseFullName.toLowerCase(),
+    authorAssociation: raw.author_association ?? "NONE",
+    authorIsBot: raw.user?.type === "Bot",
   };
 }
 

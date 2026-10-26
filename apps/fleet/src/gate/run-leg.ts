@@ -40,7 +40,14 @@ const NO_INSTANCE_RE = /no container instance|container instance that can be pro
  *  classifies it as infra (its INFRA_CAUSE matches "no container instance"). */
 export const NO_INSTANCE_DESCRIPTION = "gate capacity: no container instance available";
 
-export type LegResult = { state: "success" | "failure" | "error"; description?: string };
+// #1346 correctness review r1: gate-server.ts's runGate actually returns
+// { state, description, summary } (container/gate-server.ts's own RunOutcome,
+// `return { state: body.state, description: body.description, summary: body.summary }`)
+// -- summary was missing from this type even though it was already flowing
+// through at runtime (res.json() as LegResult does not strip it, just hides
+// it from the type checker). Declaring it here is what let do.ts's redaction
+// (secrets-redact.ts's redactLegResultFields) see and scrub it.
+export type LegResult = { state: "success" | "failure" | "error"; description?: string; summary?: string };
 
 /** A leg run ends in exactly one of two things: a real gate-server body
  *  (success/failure/error — data, 200) or an infra failure (container never

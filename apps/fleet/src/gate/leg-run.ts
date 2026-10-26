@@ -9,7 +9,7 @@ import type { GateLegRequest } from "./leg-env";
 import { normalizeLegResult, type LegRunMeta, type PlannedLeg } from "./fanout";
 import { legTimeoutMin } from "./config";
 import type { LegResult } from "./verdict";
-import { grantedSecretNames } from "./secrets-scope";
+import { grantedSecretNames, trustedForSecrets } from "./secrets-scope";
 import type { GateSecretsAllowlist } from "./secrets-config";
 
 /** A leg's result as the step returns it: the DO's LegResult plus wall time and summary. */
@@ -366,19 +366,21 @@ export function legRequest(
   owner: string, repo: string, planned: PlannedLeg,
   pr: {
     baseRef: string; pr: string; private: boolean; image?: string; bundleKey?: string; mergeBase?: string;
-    /** #1346: whether this PR's head repo is the SAME repo as its base
-     *  (never a fork). Absent is treated as false -- fail closed. */
-    sameRepo?: boolean;
+    /** #1346 security review r1: already-computed trust (sameRepo AND a
+     *  trusted collaborator AND a human AND the PR's base is the repo's
+     *  actual default branch -- secrets-scope.ts's trustedForSecrets).
+     *  Absent is treated as false -- fail closed. */
+    trusted?: boolean;
     /** #1346: the OPS repo's gate-secrets.json, already parsed. Absent grants
      *  nothing, same as an allowlist with no entry for this repo. */
     secretsAllowlist?: GateSecretsAllowlist;
   },
 ): GateLegRequest {
   // #1346: the ONLY place a secret grant is decided for this leg. Every
-  // guard (fork, repo, leg, registry) lives in grantedSecretNames itself.
+  // guard (trust, repo, leg, registry) lives in grantedSecretNames itself.
   const secretNames = pr.secretsAllowlist === undefined
     ? []
-    : grantedSecretNames(pr.secretsAllowlist, `${owner}/${repo}`, planned.leg, pr.sameRepo === true);
+    : grantedSecretNames(pr.secretsAllowlist, `${owner}/${repo}`, planned.leg, pr.trusted === true);
   return {
     owner, repo, commit: planned.commit, leg: planned.leg,
     installCmd: planned.installCmd, legCmd: planned.legCmd,
@@ -389,6 +391,47 @@ export function legRequest(
     ...(pr.bundleKey === undefined ? {} : { bundleKey: pr.bundleKey }),
     ...(pr.mergeBase === undefined ? {} : { mergeBase: pr.mergeBase }),
     ...(secretNames.length === 0 ? {} : { secretNames }),
+  };
+}
+
+/** The inputs trustedForSecrets itself needs, read off the Workflow's own
+ *  resolve-pr step result. Named separately from LegRequestContext so a
+ *  caller (workflow.ts) can compute `trusted` once, outside any leg loop,
+ *  from fields it already has. */
+export interface TrustContextInput {
+  baseRef: string;
+  sameRepo: boolean;
+  authorAssociation: string;
+  authorIsBot: boolean;
+  defaultBranch: string;
+}
+
+/** legRequest's own `pr` parameter shape, minus the per-leg `image` override
+ *  (runLeg, below, applies that itself from each PlannedLeg). */
+export interface LegRequestContext {
+  baseRef: string; pr: string; private: boolean; bundleKey?: string; mergeBase?: string;
+  trusted: boolean; secretsAllowlist: GateSecretsAllowlist;
+}
+
+/**
+ * #1346 correctness review r1 item 1: workflow.ts imports `cloudflare:workers`
+ * at module scope, so bun test can never load it to exercise its own glue
+ * code directly -- which is exactly how "drop the sameRepo/trusted
+ * pass-through" could survive every existing test. Pulling the trust
+ * computation AND the legRequest-context construction out here, into a file
+ * bun test CAN load, closes that gap: workflow.ts's own two call sites now do
+ * nothing but call this function and spread its result, leaving as little
+ * logic in the untested glue as possible.
+ */
+export function legRequestContext(
+  trust: TrustContextInput, priv: boolean, secretsAllowlist: GateSecretsAllowlist,
+  extra: { pr: string; bundleKey?: string; mergeBase?: string },
+): LegRequestContext {
+  const trusted = trustedForSecrets(trust);
+  return {
+    baseRef: trust.baseRef, pr: extra.pr, private: priv, trusted, secretsAllowlist,
+    ...(extra.bundleKey === undefined ? {} : { bundleKey: extra.bundleKey }),
+    ...(extra.mergeBase === undefined ? {} : { mergeBase: extra.mergeBase }),
   };
 }
 

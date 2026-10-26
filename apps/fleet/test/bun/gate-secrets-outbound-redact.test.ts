@@ -57,4 +57,30 @@ describe("gate-scoped secrets are redacted from a leg's own result before R2", (
     await handleGateOutbound(req("PUT", `/${RUN_KEY}`, body), bucket, props);
     expect(store.get(RUN_KEY)).toBe(body);
   });
+
+  // #1346 correctness review r1 item 3: a short/common granted value must
+  // never corrupt the result's own `state` field.
+  it("a granted value equal to the literal word 'success' never corrupts the state field", async () => {
+    const { bucket, store } = fakeBucket();
+    const props: GateOutboundProps = { resultKey: RUN_KEY, secretValues: ["success"] };
+    const body = JSON.stringify({ state: "success", stdout: "login returned success" });
+    const res = await handleGateOutbound(req("PUT", `/${RUN_KEY}`, body), bucket, props);
+    expect(res.status).toBe(201);
+    const stored = JSON.parse(store.get(RUN_KEY) ?? "{}");
+    expect(stored.state).toBe("success");
+    expect(stored.stdout).toBe("login returned «redacted»");
+  });
+
+  // A body that isn't valid JSON at all (should never happen via
+  // gate-server.ts's own putResult, but the container's outbound traffic is
+  // otherwise untrusted) still gets the blunter whole-text fallback -- never
+  // stored with the secret value intact.
+  it("falls back to whole-text redaction for a non-JSON body, never storing the raw value", async () => {
+    const { bucket, store } = fakeBucket();
+    const props: GateOutboundProps = { resultKey: RUN_KEY, secretValues: ["sup3r-s3cret"] };
+    const body = "not json at all: sup3r-s3cret";
+    const res = await handleGateOutbound(req("PUT", `/${RUN_KEY}`, body), bucket, props);
+    expect(res.status).toBe(201);
+    expect(store.get(RUN_KEY)).toBe("not json at all: «redacted»");
+  });
 });

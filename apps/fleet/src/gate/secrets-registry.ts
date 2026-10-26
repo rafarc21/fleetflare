@@ -1,8 +1,10 @@
 // #1346: the Worker-side registry a gate-secret NAME resolves to. The OPS
 // repo's allowlist (secrets-config.ts) may only GRANT a name from here to a
 // (repo, leg) pair -- it can never invent one. Adding a new named secret is
-// a code change + deploy (this file, plus `wrangler secret put` for its
-// envVar), the same cost as adding any other Worker secret today.
+// a code change + deploy (this file, plus `apps/fleet/scripts/deploy.sh
+// secret put <envVar>` -- never a bare `wrangler secret put`, see
+// scripts/deploy.sh's own header for why), the same cost as adding any other
+// Worker secret today.
 //
 // A name with no envVar (workers-ai) has no stored value at all: its secret
 // is a run-scoped token minted per leg (secrets-ai-token.ts), never a Worker
@@ -25,8 +27,8 @@ export interface SecretDef {
 }
 
 /** Operator: add one entry per staging credential a browser/AI leg needs,
- *  plus a matching `wrangler secret put <envVar>` (scripts/deploy.sh secret
- *  put, never a bare `wrangler secret put`). The name is a label the OPS
+ *  plus a matching `apps/fleet/scripts/deploy.sh secret put <envVar>` (never
+ *  a bare `wrangler secret put`). The name is a label the OPS
  *  repo's allowlist grants to a (repo, leg) pair -- never the value, never
  *  the env var name itself, so an OPS-file read never discloses where the
  *  real value lives. Staging-only, by discipline: nothing here can verify
@@ -71,4 +73,27 @@ export async function resolveGrantedSecrets(
     if (value !== undefined && value !== "") out[name] = value;
   }
   return out;
+}
+
+/**
+ * #1346 security review r1 item 3: "missing secret fails open." A granted
+ * name resolving to nothing (an OPS allowlist entry naming a Worker secret
+ * that was never `wrangler secret put`, a signing key absent so the AI token
+ * cannot mint, a registry entry quietly removed) must never let the leg run
+ * anyway as if nothing had been granted -- that silently degrades a
+ * misconfigured deploy into "looks green, ran without its secret," exactly
+ * the failure mode a browser/AI leg whose whole point IS the secret would
+ * never surface on its own.
+ *
+ * Returns the first requested name (request order) with no resolved value, or
+ * null when every requested name resolved. do.ts turns a non-null result into
+ * an immediate RED leg, before the container ever starts.
+ */
+export function firstUnresolvedSecret(
+  names: readonly string[], resolved: Readonly<Record<string, string>>,
+): string | null {
+  for (const name of names) {
+    if (!Object.hasOwn(resolved, name)) return name;
+  }
+  return null;
 }

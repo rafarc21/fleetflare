@@ -8,9 +8,9 @@
 // cloudflare:workers import, so this file stays pure.
 //
 // "Expires with run": `exp` is the mint time plus a TTL the caller passes in
-// (do.ts uses the leg's own hard timeout ceiling, MAX_LEG_TIMEOUT_MIN in
-// config.ts, plus the container-start margin run-leg.ts already budgets for
-// an infra retry) -- by the time a human could read a leaked token out of a
+// (do.ts uses the leg's own hard timeout ceiling -- config.ts's legTimeoutMin,
+// which clamps to MAX_LEG_TIMEOUT_MIN -- plus a container-start margin) --
+// by the time a human could read a leaked token out of a
 // log, the run it was minted for is already over. There is no revocation
 // list: a short, fixed TTL is the whole mechanism, same as every other
 // short-lived credential in this gate (legGitToken's installation token is

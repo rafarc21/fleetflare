@@ -394,7 +394,7 @@ describe("getPullRequest", () => {
     expect(await getPullRequest("tok", "o/r", 7)).toEqual({
       number: 7, merged: true, mergeCommitSha: "deadbeef", baseRef: "staging", headRef: "feat/x",
       title: "feat: x", body: "Closes #3", repoFullName: "O/R", open: true, baseRepoPrivate: false,
-      headSha: "aaa111", sameRepo: false,
+      headSha: "aaa111", sameRepo: false, authorAssociation: "NONE", authorIsBot: false,
     });
   });
 
@@ -439,6 +439,40 @@ describe("getPullRequest", () => {
         base: { ref: "main", repo: { full_name: "o/r" } }, head: { ref: "feat/x" },
       });
       expect((await getPullRequest("tok", "o/r", 7)).sameRepo).toBe(false);
+    });
+  });
+
+  // #1346 security review r1: sameRepo alone does not distinguish a trusted
+  // collaborator's branch from an automated one on the same repo.
+  describe("authorAssociation / authorIsBot (#1346)", () => {
+    it("reads author_association off the same GET", async () => {
+      respond = () => Response.json({
+        number: 7, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" },
+        author_association: "COLLABORATOR",
+      });
+      expect((await getPullRequest("tok", "o/r", 7)).authorAssociation).toBe("COLLABORATOR");
+    });
+
+    it("defaults to NONE, fail closed, when GitHub sends no author_association", async () => {
+      respond = () => Response.json({ number: 7, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" } });
+      expect((await getPullRequest("tok", "o/r", 7)).authorAssociation).toBe("NONE");
+    });
+
+    it("authorIsBot true when user.type is Bot (dependabot[bot] and friends)", async () => {
+      respond = () => Response.json({
+        number: 7, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" },
+        user: { type: "Bot" },
+      });
+      expect((await getPullRequest("tok", "o/r", 7)).authorIsBot).toBe(true);
+    });
+
+    it("authorIsBot false for a human account, and when GitHub sends no user at all", async () => {
+      respond = () => Response.json({
+        number: 7, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" }, user: { type: "User" },
+      });
+      expect((await getPullRequest("tok", "o/r", 7)).authorIsBot).toBe(false);
+      respond = () => Response.json({ number: 8, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" } });
+      expect((await getPullRequest("tok", "o/r", 8)).authorIsBot).toBe(false);
     });
   });
 
