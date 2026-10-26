@@ -56,9 +56,6 @@ export const ALLOWLIST: Record<string, string> = {
   "apps/fleet/test/bun/english-only.test.ts": "the check's own test needs Portuguese samples to prove it flags them",
   "apps/fleet/test/bun/repo-check-runner.test.ts": "pins english-check's CLI bytes with Portuguese samples it must flag",
   "apps/fleet/test/fixtures/rate-limit-panes.ts": "captured real tmux panes, verbatim; the failover tests need the exact bytes",
-  "apps/fleet/container/gate/browser/ai/harness.ts": "the AI-leg red-chip detectors hold the literal \"Não consegui\" the task names as a refusal phrase to catch; it is the detector's input, not prose",
-  "apps/fleet/test/bun/gate-ai-harness.test.ts": "the AI-leg harness test feeds \"Não consegui\" to its own chip detectors to prove they fire; a real scan would flag its own fixture",
-  "apps/fleet/docs/ai-leg-harness.md": "documents the AI-leg red-chip example \"Não consegui\" the task itself names; it is an example, not prose",
 };
 
 /**

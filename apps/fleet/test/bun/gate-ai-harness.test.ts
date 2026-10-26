@@ -1,8 +1,8 @@
 // apps/fleet/test/bun/gate-ai-harness.test.ts
 // AI-leg harness guards (board #1345): N/N repeats, red-chip detectors,
-// missing-secret DID-NOT-RUN, floor-mode stand-in. Each guard's unit here is
-// the RED/GREEN source for its mutation report. Pure injected runner + env —
-// no real model, no secret, no network.
+// negative-control self-test, throw/timeout=red, missing-secret DID-NOT-RUN,
+// floor-mode stand-in. Each guard's unit here is the RED/GREEN source for its
+// mutation report. Pure injected runner + env — no real model, no secret.
 import { describe, expect, test } from "bun:test";
 import {
   defaultRedChipDetectors,
@@ -10,29 +10,38 @@ import {
   evaluateAsserts,
   floorStandIn,
   ModelUnavailable,
+  normalizeRepeat,
   runAICase,
   type AICase,
   type ModelRunner,
+  type RunContext,
   type RunModel,
 } from "../../container/gate/browser/ai/harness";
 
 /** A stub runner that returns a fixed model response; a per-call queue lets a
- *  test vary one attempt from the next. */
-function stubRunner(...responses: RunModel[]): ModelRunner {
+ *  test vary one run from the next. */
+function stubRunner(...responses: RunModel[]): ModelRunner & { calls: Array<{ input: unknown; ctx: RunContext }> } {
+  const calls: Array<{ input: unknown; ctx: RunContext }> = [];
   let i = 0;
-  return { run: async () => responses[Math.min(i++, responses.length - 1)] };
+  return {
+    calls,
+    run: async (input, ctx) => {
+      calls.push({ input, ctx });
+      return responses[Math.min(i++, responses.length - 1)];
+    },
+  };
 }
 
 function throwingRunner(err: Error): ModelRunner {
   return { run: async () => { throw err; } };
 }
 
-const realEnv = { realModelSecret: "present" };
+const realEnv = { realModelId: "real-model", realModelSecret: "present" };
 
 function goodCase(over: Partial<AICase> = {}): AICase {
   return {
     name: "weather",
-    input: { city: "Paris" },
+    inputs: [{ city: "Paris" }, { city: "Lisbon" }, { city: "Berlin" }],
     asserts: [{ path: "toolCalls", check: (m) => (m.toolCalls ?? []).length > 0, reason: "one tool call" }],
     ...over,
   };
@@ -40,12 +49,26 @@ function goodCase(over: Partial<AICase> = {}): AICase {
 
 const modelWithCall: RunModel = { text: "Getting weather now.", toolCalls: [{ name: "get_weather", input: { city: "Paris" } }] };
 
+describe("normalizeRepeat", () => {
+  test("integer >= 1 passes", () => {
+    expect(normalizeRepeat(3)).toBe(3);
+    expect(normalizeRepeat(1)).toBe(1);
+  });
+  test("NaN, fractional, zero, negative, non-number all null", () => {
+    expect(normalizeRepeat(NaN)).toBeNull();
+    expect(normalizeRepeat(2.5)).toBeNull();
+    expect(normalizeRepeat(0)).toBeNull();
+    expect(normalizeRepeat(-1)).toBeNull();
+    expect(normalizeRepeat("three")).toBeNull();
+  });
+});
+
 describe("floorStandIn", () => {
-  test("unblocked route uses the real model, never the stand-in", () => {
-    expect(floorStandIn({ realModelSecret: "x", standInModel: "s" })).toEqual({ useStandIn: false, reason: null });
+  test("unblocked route uses the real model", () => {
+    expect(floorStandIn({ realModelSecret: "x", standInModel: "s" })).toEqual({ floor: false, modelId: null, reason: null });
   });
   test("blocked route with a stand-in switches to it", () => {
-    expect(floorStandIn({ standInModel: "s", realRouteBlocked: true })).toEqual({ useStandIn: true, reason: null });
+    expect(floorStandIn({ standInModel: "s", realRouteBlocked: true })).toEqual({ floor: true, modelId: "s", reason: null });
   });
   test("blocked route with no stand-in is unavailable", () => {
     expect(floorStandIn({ realRouteBlocked: true }).reason).toBe("real route blocked and no stand-in model configured");
@@ -56,11 +79,17 @@ describe("detectChips", () => {
   const detectors = defaultRedChipDetectors();
   test("hits the example chips", () => {
     expect(detectChips("I couldn't do that.", detectors)).toContain("couldnt");
-    expect(detectChips("Não consegui completar.", detectors)).toContain("nao-consegui");
     expect(detectChips("Something went wrong here.", detectors)).toContain("something-went-wrong");
+  });
+  test("couldn't without 'I' still matches", () => {
+    expect(detectChips("couldn't save the file", detectors)).toContain("couldnt");
   });
   test("clean text has no chips", () => {
     expect(detectChips("Here is the weather for Paris.", detectors)).toEqual([]);
+  });
+  test("default detectors include the Portuguese nao-consegui chip", () => {
+    const dets = defaultRedChipDetectors();
+    expect(detectChips("Não consegui completar.", dets)).toContain("nao-consegui"); // english-check: allow
   });
 });
 
@@ -72,78 +101,159 @@ describe("evaluateAsserts", () => {
 });
 
 describe("runAICase guards", () => {
-  test("2/3 pass -> red (N/N requires every attempt)", async () => {
-    const res = await runAICase(goodCase({ repeat: 3 }), stubRunner(modelWithCall, { text: "" }, modelWithCall), realEnv);
+  test("2/3 pass -> red (N/N requires every run)", async () => {
+    const res = await runAICase(
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1 }),
+      stubRunner(modelWithCall, { text: "" }, modelWithCall),
+      realEnv,
+    );
     expect(res.status).toBe("red");
-    if (res.status === "red") {
-      expect(res.attempts).toHaveLength(1);
-      expect(res.attempts[0].attempt).toBe(2);
-    }
+    expect(res.didNotRun).toBe(false);
+    expect(res.passed).toBe(2);
+    expect(res.totalRuns).toBe(3);
   });
 
-  test("3/3 pass -> green", async () => {
-    const res = await runAICase(goodCase({ repeat: 3 }), stubRunner(modelWithCall), realEnv);
-    expect(res).toEqual({ status: "green", attempts: 3 });
+  test("all runs pass -> green", async () => {
+    const res = await runAICase(
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 2 }),
+      stubRunner(modelWithCall),
+      realEnv,
+    );
+    expect(res).toMatchObject({ status: "green", totalRuns: 6, attempts: 6, passed: 6, floor: false });
+    expect(res.turns).toHaveLength(6);
   });
 
   test("chip hit -> red even when structure passes", async () => {
     const res = await runAICase(
-      goodCase({ repeat: 1 }),
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1 }),
       stubRunner({ text: "Something went wrong", toolCalls: [{ name: "get_weather" }] }),
       realEnv,
     );
     expect(res.status).toBe("red");
-    if (res.status === "red") expect(res.description).toContain("something-went-wrong");
+    expect(res.description).toContain("something-went-wrong");
   });
 
-  test("chip is checked before asserts: chip hit but assert also fails -> red, not double-counted", async () => {
+  test("chip and assert both fail on one run -> both recorded", async () => {
     const res = await runAICase(
-      goodCase({ repeat: 1 }),
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1 }),
       stubRunner({ text: "I couldn't do that.", toolCalls: [] }),
       realEnv,
     );
     expect(res.status).toBe("red");
-    if (res.status === "red") {
-      expect(res.attempts[0].chipsHit).toEqual(["couldnt"]);
-      expect(res.attempts[0].failedAsserts).toEqual(["toolCalls"]);
-    }
+    expect(res.failed?.[0].chipsHit).toEqual(["couldnt"]);
+    expect(res.failed?.[0].failedAsserts).toEqual(["toolCalls"]);
   });
 
-  test("missing real-model secret -> DID-NOT-RUN, never green", async () => {
+  test("custom/localized detectors are used when configured", async () => {
+    const custom = [{ name: "boom", match: (t: string) => /boom/.test(t) }];
+    const res = await runAICase(
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1, redChips: custom }),
+      stubRunner({ text: "boom", toolCalls: [{ name: "x" }] }),
+      realEnv,
+    );
+    expect(res.status).toBe("red");
+    expect(res.description).toContain("boom");
+  });
+
+  test("expectRedChip fires -> green (negative-control self-test)", async () => {
+    const res = await runAICase(
+      goodCase({
+        inputs: [{ a: 1 }, { b: 2 }, { c: 3 }],
+        repeat: 1,
+        expectRedChip: "couldnt",
+        asserts: [],
+      }),
+      stubRunner({ text: "I couldn't do that." }),
+      realEnv,
+    );
+    expect(res.status).toBe("green");
+  });
+
+  test("expectRedChip does not fire -> red, missing expected chip", async () => {
+    const res = await runAICase(
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1, expectRedChip: "couldnt", asserts: [] }),
+      stubRunner({ text: "All done." }),
+      realEnv,
+    );
+    expect(res.status).toBe("red");
+    expect(res.failed?.[0].missingRedChip).toBe("couldnt");
+  });
+
+  test("missing real-model secret -> DID-NOT-RUN red, not green", async () => {
     const res = await runAICase(goodCase(), stubRunner(modelWithCall), {});
-    expect(res).toEqual({ status: "did-not-run", description: "AI DID-NOT-RUN: no real-model secret in the leg environment" });
-  });
-
-  test("empty-string secret -> DID-NOT-RUN", async () => {
-    const res = await runAICase(goodCase(), stubRunner(modelWithCall), { realModelSecret: "" });
-    expect(res.status).toBe("did-not-run");
+    expect(res.status).toBe("red");
+    expect(res.didNotRun).toBe(true);
+    expect(res.description).toContain("AI DID-NOT-RUN");
   });
 
   test("blocked route with no stand-in -> DID-NOT-RUN", async () => {
     const res = await runAICase(goodCase(), stubRunner(modelWithCall), { realModelSecret: "x", realRouteBlocked: true });
-    expect(res.status).toBe("did-not-run");
-    if (res.status === "did-not-run") expect(res.description).toContain("AI DID-NOT-RUN");
+    expect(res.status).toBe("red");
+    expect(res.didNotRun).toBe(true);
   });
 
-  test("blocked route with stand-in -> floor switch picks stand-in input", async () => {
-    let seen: unknown;
-    const runner: ModelRunner = { run: async (input) => { seen = input; return modelWithCall; } };
+  test("floor works WITHOUT a real secret and passes stand-in model id", async () => {
+    const runner = stubRunner(modelWithCall);
     const res = await runAICase(
-      goodCase({ standInInput: { city: "Lisbon" } }),
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1 }),
       runner,
-      { realModelSecret: "x", standInModel: "stand-in", realRouteBlocked: true },
+      { standInModel: "stand-in-model", realRouteBlocked: true },
     );
     expect(res.status).toBe("green");
-    expect(seen).toEqual({ city: "Lisbon" });
+    expect(res.floor).toBe(true);
+    expect(runner.calls.every((c) => c.ctx.floor && c.ctx.modelId === "stand-in-model")).toBe(true);
   });
 
-  test("ModelUnavailable mid-run -> DID-NOT-RUN, not a throw", async () => {
+  test("floor result is visibly distinct: floor:true vs real floor:false", async () => {
+    const real = await runAICase(goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1 }), stubRunner(modelWithCall), realEnv);
+    const floor = await runAICase(
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1 }),
+      stubRunner(modelWithCall),
+      { standInModel: "s", realRouteBlocked: true },
+    );
+    expect(real.floor).toBe(false);
+    expect(floor.floor).toBe(true);
+  });
+
+  test("generic throw -> red run, not DID-NOT-RUN", async () => {
+    const res = await runAICase(goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1 }), throwingRunner(new Error("boom")), realEnv);
+    expect(res.status).toBe("red");
+    expect(res.didNotRun).toBe(false);
+    expect(res.failed?.[0].thrown).toBe("boom");
+  });
+
+  test("ModelUnavailable -> DID-NOT-RUN", async () => {
     const res = await runAICase(goodCase(), throwingRunner(new ModelUnavailable("route blocked")), realEnv);
-    expect(res).toEqual({ status: "did-not-run", description: "AI DID-NOT-RUN: route blocked" });
+    expect(res.status).toBe("red");
+    expect(res.didNotRun).toBe(true);
+    expect(res.description).toContain("route blocked");
   });
 
-  test("repeat clamps to at least 1", async () => {
-    const res = await runAICase(goodCase({ repeat: 0 }), stubRunner(modelWithCall), realEnv);
-    expect(res).toEqual({ status: "green", attempts: 1 });
+  test("per-attempt timeout -> red with timedOut", async () => {
+    const slow: ModelRunner = { run: async () => { await new Promise((r) => setTimeout(r, 50)); return modelWithCall; } };
+    const res = await runAICase(goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1, timeoutMs: 1 }), slow, realEnv);
+    expect(res.status).toBe("red");
+    expect(res.failed?.[0].timedOut).toBe(true);
+  });
+
+  test("NaN repeat -> config error red, never green", async () => {
+    const res = await runAICase(goodCase({ repeat: NaN }), stubRunner(modelWithCall), realEnv);
+    expect(res.status).toBe("red");
+    expect(res.description).toContain("invalid repeat");
+  });
+
+  test("fewer than 3 distinct inputs -> config error red", async () => {
+    const res = await runAICase(goodCase({ inputs: [{ a: 1 }, { a: 1 }] }), stubRunner(modelWithCall), realEnv);
+    expect(res.status).toBe("red");
+    expect(res.description).toContain("3 distinct");
+  });
+
+  test("turns evidence matches consumer schema: prompt, reply, chips[], floor", async () => {
+    const res = await runAICase(
+      goodCase({ inputs: [{ a: 1 }, { b: 2 }, { c: 3 }], repeat: 1 }),
+      stubRunner(modelWithCall),
+      realEnv,
+    );
+    expect(res.turns[0]).toEqual({ prompt: { a: 1 }, reply: "Getting weather now.", chips: [], floor: false });
   });
 });
