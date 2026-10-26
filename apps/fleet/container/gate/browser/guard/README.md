@@ -91,6 +91,43 @@ Zero tests executed in a browser leg -> RED `[guard] DID-NOT-RUN: zero
 tests executed`, recorded as a `did-not-run` evidence file with empty
 buckets.
 
+## Manifest contract
+
+The fleet reads `manifest.json` at the root of a browser leg's evidence dir
+to decide whether the leg really ran (#1381). `executed` alone is not proof:
+an early harness wrote the SCHEDULED count there (317) while only 221 ran.
+The manifest must carry the full outcome breakdown — all six counts required,
+non-negative integers:
+
+```json
+{
+  "executed": 221,
+  "passed": 2,
+  "failed": 219,
+  "flaky": 0,
+  "skipped": 0,
+  "didNotRun": 52
+}
+```
+
+The fleet verdict from those counts:
+
+- `passed + failed + flaky == 0` -> RED `DID-NOT-RUN` (nothing reached an
+  outcome).
+- `didNotRun > 0` -> RED `DID-NOT-RUN` even when some tests passed.
+- A manifest missing any count (the old `{executed}` alone) -> RED
+  `manifest lacks counts`, never green.
+- All counts present, `passed + failed + flaky > 0`, `didNotRun == 0` ->
+  the only shape that greens the leg.
+
+A count that is not a non-negative integer (`null`, a boolean, a numeric
+string, a fraction, negative, `NaN`) is malformed and reads RED, never
+coerced. `executed` less than `passed + failed + flaky` is inconsistent and
+reads RED.
+
+A harness writes `manifest.json` into the evidence dir; the counts are what
+the fleet reads, not the scheduled test count.
+
 ## Multi-user specs
 
 Two-account flows force a second account via `BROWSER_GUARD_AUTH_FORCE=on`
