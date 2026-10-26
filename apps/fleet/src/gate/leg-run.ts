@@ -331,6 +331,13 @@ const BUNDLE_STEP_CONFIG: LegStepConfig = {
   timeout: "30 minutes",
 };
 
+/** The bundle dispatch's per-attempt deadline (#1313 review). The bundle leg's
+ *  own timeout is 5 min (BUNDLE_LEG_TIMEOUT_MIN); add the container start wait
+ *  (180 s) plus a margin, so a hung DO call ends well under the 30-min step
+ *  timeout. Three such attempts (2 retries) plus their 15 s backoff stay far
+ *  under the 35-min watchdog stall, unlike three 30-min step timeouts. */
+const BUNDLE_ATTEMPT_DEADLINE_MS = 9 * 60_000;
+
 /** The slice of Workflows' WorkflowStep the bundle step uses. The step's return
  *  value is the built/not-built boolean, so a Workflow replay returns the
  *  recorded verdict instead of recomputing it. */
@@ -353,11 +360,17 @@ export function bundleStepEnabled(fleetFlag: string | undefined, repoOptIn: bool
  *  each leg, as before. */
 export async function runBundleStep(
   step: BundleStepRunner,
-  dispatch: (planned: PlannedLeg) => Promise<Response>,
+  dispatch: (planned: PlannedLeg, signal: AbortSignal) => Promise<Response>,
   planned: PlannedLeg,
+  attemptDeadlineMs: number = BUNDLE_ATTEMPT_DEADLINE_MS,
 ): Promise<boolean> {
   return step.do("build-bundle", BUNDLE_STEP_CONFIG, async () => {
-    const res = await dispatch(planned);
+    // A hung DO call is aborted at the per-attempt deadline, so it cannot hold
+    // the step (and the run) open past the watchdog's stall window (#1313).
+    const signal = AbortSignal.timeout(attemptDeadlineMs);
+    const res = await withStepDeadline(
+      dispatch(planned, signal), attemptDeadlineMs, "bundle leg: no progress past its deadline",
+    );
     // A non-2xx (infra, 503) throws, so the step's retries re-run it on a fresh
     // attempt (#1313). A 200 with a non-success state is data: return false, so
     // the legs clone and the step never retries a genuine leg error.

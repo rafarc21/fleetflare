@@ -32,7 +32,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 
 /** A host with no spare container instance refuses start() (or the port fetch)
  *  with this wording. It is account capacity, not a leg defect: fail fast and
- *  back off, never spend the 240 s port-retry budget thrashing a saturated host. */
+ *  back off, never spend the port-retry budget thrashing a saturated host. */
 const NO_INSTANCE_RE = /no container instance|container instance that can be provided|no instances? available/i;
 
 /** The infra description a no-instance leg returns. Named so the step's
@@ -179,8 +179,8 @@ async function runOnServer(
   const minutes = legTimeoutMin(req.timeoutMin);
 
   // The server may bind a moment after `running` turns true. A refused
-  // connection is retried every 500 ms for at most 60 s. Its first failure reads
-  // the leg's R2 result before any retry spends the budget (#1122).
+  // connection is retried every 500 ms for at most PORT_RETRY_BUDGET_MS. Its
+  // first failure reads the leg's R2 result before any retry spends the budget (#1122).
   const postStarted = now();
   let checkedR2 = false;
   for (;;) {

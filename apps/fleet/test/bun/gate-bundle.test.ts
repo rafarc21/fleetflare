@@ -232,7 +232,9 @@ describe("runBundleStep: the bundle step never fails the run (#1080)", () => {
           try {
             return await fn();
           } catch (err) {
-            if (attempt >= limit) return false;
+            // Workflows REJECTS once retries are spent; only runBundleStep's own
+            // .catch(() => false) turns that into "the legs clone".
+            if (attempt >= limit) throw err;
           }
         }
       },
@@ -291,6 +293,24 @@ describe("runBundleStep: the bundle step never fails the run (#1080)", () => {
     const { step } = fakeStep();
     const built = await runBundleStep(step, async () => { throw new Error("DO unreachable"); }, PLANNED);
     expect(built).toBe(false);
+  });
+
+  it("a hung dispatch ends at the per-attempt deadline: three attempts, each signal aborted, never a throw (#1313 review)", async () => {
+    const { step } = fakeStep();
+    const signals: AbortSignal[] = [];
+    const dispatch = async (_p: PlannedLeg, signal: AbortSignal) => {
+      signals.push(signal);
+      // A DO call that never answers but honors the signal it was given.
+      return new Promise<Response>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason)));
+    };
+    const started = Date.now();
+    const built = await runBundleStep(step, dispatch, PLANNED, 5);
+    expect(built).toBe(false);
+    expect(signals).toHaveLength(3); // 1 + 2 retries
+    expect(signals.every((s) => s.aborted)).toBe(true);
+    // The deadline ended each attempt quickly, so the whole step stays far
+    // under the watchdog's 35 min stall.
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
 
