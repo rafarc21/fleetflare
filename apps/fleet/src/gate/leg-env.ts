@@ -30,13 +30,25 @@ export interface GateLegRequest {
   bundleKey?: string;
   /** #1080 HIGH 1: the PR's merge base. Sent only with a bundle key: a snapshot leg merges with it. */
   mergeBase?: string;
+  /** #1346: the secret NAMEs this leg is granted — already fully gated by
+   *  secrets-scope.ts's grantedSecretNames in workflow.ts (fork guard +
+   *  OPS-repo allowlist + registry membership) before this request is ever
+   *  built. Names only, never a value: do.ts is where each name resolves to
+   *  a real value (secrets-registry.ts, or a minted run token), exactly as
+   *  legGitToken mints the git token outside this request body rather than
+   *  carrying it in. Absent or empty means no secrets for this leg. */
+  secretNames?: string[];
 }
 
 /** No token field, no URL field: the R2 keys below are plain keys, not
  *  credentials — the Worker-side outbound handler is what authorizes a plain
  *  fetch to one of these keys. GATE_PRIVATE is a switch, not a credential: it
- *  picks which host the container clones from, and the Worker holds the token. */
-export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
+ *  picks which host the container clones from, and the Worker holds the token.
+ *  `secretValues` (name -> resolved value) is a SEPARATE parameter, never a
+ *  field read off `req`, for the same reason `gateOutboundProps` takes
+ *  `gitToken` as a separate parameter below: the request body only ever
+ *  carries names (`req.secretNames`), resolved outside this request by do.ts. */
+export function buildLegEnvVars(req: GateLegRequest, secretValues?: Record<string, string>): Record<string, string> {
   return {
     GATE_REPO: `${req.owner}/${req.repo}`,
     GATE_COMMIT: req.commit,
@@ -50,7 +62,30 @@ export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
     GATE_PR: req.pr,
     ...(req.bundleKey === undefined ? {} : { GATE_BUNDLE_KEY: req.bundleKey }),
     ...(req.bundleKey === undefined || req.mergeBase === undefined ? {} : { GATE_MERGE_BASE: req.mergeBase }),
+    ...buildSecretEnvVars(secretValues),
   };
+}
+
+/** #1346: a granted secret name's own container env var, e.g.
+ *  "staging-login" -> "GATE_SECRET_STAGING_LOGIN". Every non-alnum run
+ *  becomes one underscore, so a name with a hyphen (the only punctuation
+ *  secrets-config.schema.json's examples use) maps predictably. */
+export function secretEnvVarName(name: string): string {
+  return `GATE_SECRET_${name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+}
+
+/** The container env vars for this leg's granted secrets. `secretValues` is
+ *  name -> resolved value, built by do.ts (secrets-registry.ts lookups, plus
+ *  the minted AI token) — never derived from the request body itself, which
+ *  only ever carries names. A name with no resolved value (an unset Worker
+ *  secret, a registry entry removed after the OPS file still lists it) is
+ *  silently skipped, never an empty-string env var. */
+export function buildSecretEnvVars(secretValues: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(secretValues ?? {})) {
+    if (value !== "") out[secretEnvVarName(name)] = value;
+  }
+  return out;
 }
 
 /** #715: the one git token this leg's proxy uses, minted at leg start. Only a
@@ -66,12 +101,20 @@ export async function legGitToken(
 /** The interceptor's props for this leg: its own result key. A private leg with
  *  a minted token also gets the one repo the git proxy will serve and that token.
  *  A public leg, or a private leg with no token, gets no repo and no token, so
- *  the git proxy 403s for it. Nothing else is granted to the container. */
-export function gateOutboundProps(req: GateLegRequest, gitToken?: string): GateOutboundProps {
+ *  the git proxy 403s for it. `secretValues`' own VALUES (never its names) ride
+ *  along as `props.secretValues` (#1346): the one thing the outbound handler's
+ *  PUT path needs to redact a granted secret out of this leg's own result
+ *  before it reaches R2 — see secrets-redact.ts. Nothing else is granted to
+ *  the container. */
+export function gateOutboundProps(
+  req: GateLegRequest, gitToken?: string, secretValues?: Record<string, string>,
+): GateOutboundProps {
   const bundle = {
     ...(req.bundleKey === undefined ? {} : { bundleKey: req.bundleKey }),
     ...(req.bundleKey !== undefined && req.leg === BUNDLE_LEG ? { bundleWriter: true } : {}),
   };
-  if (req.private !== true || gitToken === undefined) return { resultKey: req.resultKey, ...bundle };
-  return { resultKey: req.resultKey, repo: `${req.owner}/${req.repo}`, gitToken, ...bundle };
+  const values = Object.values(secretValues ?? {}).filter((v) => v !== "");
+  const secrets = values.length === 0 ? {} : { secretValues: values };
+  if (req.private !== true || gitToken === undefined) return { resultKey: req.resultKey, ...bundle, ...secrets };
+  return { resultKey: req.resultKey, repo: `${req.owner}/${req.repo}`, gitToken, ...bundle, ...secrets };
 }

@@ -92,6 +92,12 @@ export interface RunLegDeps {
   readResult?: (resultKey: string) => Promise<StoredLegResult | undefined>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** #1346: this leg's granted secrets, name -> resolved value -- do.ts
+   *  builds this from req.secretNames (never read off `req` itself, same
+   *  split as gateOutboundProps' own gitToken parameter). Fed straight into
+   *  buildLegEnvVars below, so the container's GATE_SECRET_* env vars are set
+   *  before start(), never after. */
+  secretValues?: Record<string, string>;
 }
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -125,7 +131,7 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
       image,
       enableInternet: true,
       instance: GATE_INSTANCE,
-      env: buildLegEnvVars(req),
+      env: buildLegEnvVars(req, deps.secretValues),
     });
     if (!(await waitUntilRunning(c, now, sleep))) {
       return { kind: "infra", description: "gate container did not start within 180 s" };

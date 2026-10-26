@@ -91,11 +91,14 @@ gets today is none at all beyond its own PR ref).
 branch, or a compromised collaborator account): the value is staging-only
 by the operator's own discipline (§"Operator responsibility"), so the worst
 case is staging-data tampering, never a production credential or a deploy
-credential — this fleet's existing invariant that no studio or gate
-container ever holds a Cloudflare deploy credential
-(`apps/fleet/CLAUDE.md`'s house rule, same shape) extends naturally to gate
-secrets: no gate secret is ever a deploy credential either, enforced the
-same way — by never putting one in the registry.
+credential. This fleet's operator already runs a separate, stricter
+invariant for Cloudflare deploy credentials specifically — no studio or
+gate container ever holds one, deploys run Worker-side only — and the same
+shape applies here by the operator's own discipline: no gate secret is ever
+a deploy credential either, enforced the same way — by never putting one in
+the registry (repo-verifiable: `grep -rn "secrets_store\|SecretsStore"`
+across this repo returns nothing, and `wrangler.example.jsonc` shows no such
+binding on `GateRunnerDO`'s container).
 
 ## Design
 
@@ -302,10 +305,11 @@ than inventing a third.
   value is a staging credential rather than a production one — that is
   decided the moment the operator runs `wrangler secret put
   GATE_SECRET_STAGING_LOGIN` with a particular value. The registry's own doc
-  comment says so; this is a process control, not a code control, same as
-  "no Cloudflare deploy credential in a studio container" is a process rule
-  this repo's own CLAUDE.md states rather than something enforceable from
-  inside a container.
+  comment says so; this is a process control, not a code control, the same
+  kind of operator discipline that already keeps Cloudflare deploy
+  credentials out of every container this fleet runs — a rule enforced by
+  what the operator chooses never to put in a container's env, not by
+  anything this code could check.
 - **`FLEET_OPS_REPO` must itself stay private**, same precondition
   `leak-gate.ts`'s denylist already depends on — a public ops repo would
   make the allowlist attacker-readable (not attacker-writable, which is the

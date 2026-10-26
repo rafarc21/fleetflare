@@ -9,6 +9,8 @@ import type { GateLegRequest } from "./leg-env";
 import { normalizeLegResult, type LegRunMeta, type PlannedLeg } from "./fanout";
 import { legTimeoutMin } from "./config";
 import type { LegResult } from "./verdict";
+import { grantedSecretNames } from "./secrets-scope";
+import type { GateSecretsAllowlist } from "./secrets-config";
 
 /** A leg's result as the step returns it: the DO's LegResult plus wall time and summary. */
 export type LegRunResult = LegResult & LegRunMeta & {
@@ -362,8 +364,21 @@ function sumMs(...parts: (number | undefined)[]): number | undefined {
  *  private flag and the PR's own owner/repo reach the DO by a tested path. */
 export function legRequest(
   owner: string, repo: string, planned: PlannedLeg,
-  pr: { baseRef: string; pr: string; private: boolean; image?: string; bundleKey?: string; mergeBase?: string },
+  pr: {
+    baseRef: string; pr: string; private: boolean; image?: string; bundleKey?: string; mergeBase?: string;
+    /** #1346: whether this PR's head repo is the SAME repo as its base
+     *  (never a fork). Absent is treated as false -- fail closed. */
+    sameRepo?: boolean;
+    /** #1346: the OPS repo's gate-secrets.json, already parsed. Absent grants
+     *  nothing, same as an allowlist with no entry for this repo. */
+    secretsAllowlist?: GateSecretsAllowlist;
+  },
 ): GateLegRequest {
+  // #1346: the ONLY place a secret grant is decided for this leg. Every
+  // guard (fork, repo, leg, registry) lives in grantedSecretNames itself.
+  const secretNames = pr.secretsAllowlist === undefined
+    ? []
+    : grantedSecretNames(pr.secretsAllowlist, `${owner}/${repo}`, planned.leg, pr.sameRepo === true);
   return {
     owner, repo, commit: planned.commit, leg: planned.leg,
     installCmd: planned.installCmd, legCmd: planned.legCmd,
@@ -373,6 +388,7 @@ export function legRequest(
     ...(pr.image === undefined ? {} : { image: pr.image }),
     ...(pr.bundleKey === undefined ? {} : { bundleKey: pr.bundleKey }),
     ...(pr.mergeBase === undefined ? {} : { mergeBase: pr.mergeBase }),
+    ...(secretNames.length === 0 ? {} : { secretNames }),
   };
 }
 

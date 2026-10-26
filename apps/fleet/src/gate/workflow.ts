@@ -20,6 +20,7 @@ import {
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
 import { resolveOpsRepo } from "../ops-repo";
+import { GATE_SECRETS_ALLOWLIST_PATH, parseGateSecretsAllowlist, type GateSecretsAllowlist } from "./secrets-config";
 import { capStatusDescription, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
@@ -115,8 +116,38 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         headSha, baseSha, mergeBaseSha: compare.mergeBaseSha, baseRef: pull.baseRef,
         changedFiles: compare.files, truncated: compare.truncated, private: pull.baseRepoPrivate,
         title: pull.title, body: pull.body,
+        // #1346: gate-scoped secrets gate on this -- never a value the PR
+        // itself can influence, read straight off GitHub's own head/base
+        // repo identity on the same GET as everything else above.
+        sameRepo: pull.sameRepo,
       };
     });
+
+    // #1346: the OPS-repo allowlist for gate-scoped secrets, read the same
+    // way leak-gate.ts's denylist already is -- never from the PR's own
+    // repo, at any sha. Skipped entirely for a fork PR (resolved.sameRepo is
+    // already false, so every leg's grantedSecretNames would be [] anyway):
+    // one fewer network call on the by-far most common case, a public repo's
+    // fork PRs, and a fork PR never causes an OPS-repo read at all.
+    const secretsAllowlist: GateSecretsAllowlist | undefined = resolved.sameRepo
+      ? await step.do("gate-secrets-allowlist", async () => {
+        const opsRepo = resolveOpsRepo(this.env);
+        if (opsRepo === null) return {};
+        // Fail closed on anything: a missing file, a network error, or JSON
+        // that doesn't even parse all resolve to "grant nothing" rather than
+        // failing the run -- the same rule leak-gate.ts's own OPS file read
+        // already follows (workflow.ts's "precheck" step, below).
+        try {
+          const raw = await fetchRepoFile(
+            await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }),
+            opsRepo, GATE_SECRETS_ALLOWLIST_PATH, "HEAD",
+          );
+          return parseGateSecretsAllowlist(JSON.parse(raw));
+        } catch {
+          return {};
+        }
+      })
+      : undefined;
 
     // Whether the repo's own fleet.json changed is decided on CONTENT (#1091
     // review round 2), never on the file list: a rename shows only its new path.
@@ -282,6 +313,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
           method: "POST",
           body: JSON.stringify(legRequest(owner, repoName, planned, {
             baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, bundleKey, mergeBase: resolved.mergeBaseSha,
+            sameRepo: resolved.sameRepo, secretsAllowlist,
           })),
           signal,
         });
@@ -303,6 +335,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
           {
             baseRef: resolved.baseRef, pr: String(pr), private: resolved.private,
             bundleKey: bundled ? bundleKey : undefined, mergeBase: bundled ? resolved.mergeBaseSha : undefined,
+            sameRepo: resolved.sameRepo, secretsAllowlist,
           }, planned, touch);
       }),
     );
@@ -424,7 +457,12 @@ function bunLaneFiles(tree: Parameters<typeof laneFilesFromTree>[0], cfg: GateCo
 /** One leg: a start-<leg> step, and a retry-<leg> step when it fails red. The step's return value is the DO's LegResult. */
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
-  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean; bundleKey?: string; mergeBase?: string }, planned: PlannedLeg,
+  owner: string, repoName: string,
+  pr: {
+    baseRef: string; pr: string; private: boolean; bundleKey?: string; mergeBase?: string;
+    sameRepo?: boolean; secretsAllowlist?: GateSecretsAllowlist;
+  },
+  planned: PlannedLeg,
   touch: () => Promise<void>,
 ): Promise<LegRunResult> {
   return runLegStep(

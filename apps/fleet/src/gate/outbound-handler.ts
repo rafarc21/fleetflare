@@ -14,6 +14,9 @@
 // handler never mints. The container never holds the token.
 //
 // Pure on purpose: no cloudflare:workers import, so bun test can load it.
+// secrets-redact.ts is pure the same way, so this stays true after #1346.
+
+import { redactKnownSecretValues } from "./secrets-redact";
 
 export const GATE_R2_HOST = "gate-r2.internal";
 
@@ -141,6 +144,13 @@ export interface GateOutboundProps {
   bundleKey?: string;
   /** #1080: set on the bundle leg alone. It may PUT `bundleKey`, and no other key. */
   bundleWriter?: boolean;
+  /** #1346: the plain VALUES (never names) of every gate-scoped secret this
+   *  leg was granted — leg-env.ts's gateOutboundProps builds this from
+   *  do.ts's resolved secrets. The leg's own result PUT (below) redacts each
+   *  of these out of the body before it reaches R2, so a granted secret
+   *  echoed into a leg's stdout/stderr never persists in a form
+   *  `fleet gate log` (log.ts) would later print back out. */
+  secretValues?: string[];
 }
 
 /** The Worker's side of the git proxy: the upstream fetch. Injected so the
@@ -436,8 +446,17 @@ export async function handleGateOutbound(
     if (declared > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
     const body = await req.arrayBuffer();
     if (body.byteLength > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
+    // #1346: a granted secret can end up echoed into this leg's own
+    // stdout/stderr (a failing test that dumps its env, a debug print) --
+    // scrub every value this leg was granted before it ever reaches R2, the
+    // one place a later `fleet gate log` read (log.ts) would print it back
+    // out. A leg with no grants (props.secretValues absent/empty) pays
+    // nothing extra: the write goes through untouched, as before #1346.
+    const toStore: ArrayBuffer = props?.secretValues && props.secretValues.length > 0
+      ? (new TextEncoder().encode(redactKnownSecretValues(new TextDecoder().decode(body), props.secretValues)).buffer as ArrayBuffer)
+      : body;
     // write-once: a leg's result key may be created once, never replaced.
-    const stored = await bucket.put(target.key, body, { onlyIf: { etagDoesNotMatch: "*" } });
+    const stored = await bucket.put(target.key, toStore, { onlyIf: { etagDoesNotMatch: "*" } });
     if (stored === null) return new Response("already written", { status: 412 });
     return new Response(null, { status: 201 });
   }

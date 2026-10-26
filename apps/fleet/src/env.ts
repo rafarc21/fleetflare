@@ -437,6 +437,18 @@ export interface Env {
   GATE_WARM_POOL_SIZE?: string;
   /** #1080: "1" turns on the one-bundle-per-run step. Absent or any other value: off, every leg clones. */
   GATE_BUNDLE?: string;
+  /** #1346: gate-scoped secrets. The signing key for the Workers AI proxy
+   *  route's run-scoped bearer token (secrets-ai-token.ts) -- absent means
+   *  that route's token can never be minted, so a leg granted "workers-ai"
+   *  simply gets no GATE_SECRET_WORKERS_AI env var, never an error. Never the
+   *  same value as any other signing/auth secret in this Worker. */
+  GATE_SECRET_SIGNING_KEY?: string;
+  /** #1346: example gate-scoped secret, registered in secrets-registry.ts
+   *  under the name "staging-login". Operator: add one such field, one
+   *  registry entry, and one `wrangler secret put` per staging credential a
+   *  browser/AI gate leg needs -- MUST be a staging-only credential, never
+   *  production or deploy (see the design doc's "Operator responsibility"). */
+  GATE_SECRET_STAGING_LOGIN?: string;
   /**
    * Board #350 — THREE secrets, all optional here and ALL THREE MUST be set
    * together before this feature does anything: install-cache.ts's
