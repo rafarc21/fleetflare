@@ -420,6 +420,7 @@ describe("legResponse: /run-leg status mapping", () => {
 // hostile keys are infra, never a start and never a silent fallback to gate.
 describe("runLegInContainer: per-repo image key", () => {
   const DESKTOP_IMAGES = { gate: "gate-image:v1", desktop: "desktop-image:v1" };
+  const E2E_IMAGES = { gate: "gate-image:v1", e2e: "e2e-image:v1" };
 
   test("a desktop key starts the image bound as images.desktop", async () => {
     const c = new FakeContainer();
@@ -438,6 +439,26 @@ describe("runLegInContainer: per-repo image key", () => {
     await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
     expect(c.starts[0]?.image).toBe("gate-image:v1");
+  });
+
+  test("an e2e key starts the image bound as images.e2e (#1342)", async () => {
+    const c = new FakeContainer();
+    c.images = { ...E2E_IMAGES };
+    c.portOutcomes = [okResponse("success")];
+    const outcome = await runLegInContainer({ ...LEG, image: "e2e" }, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(outcome).toEqual({ kind: "result", result: { state: "success" } });
+    expect(c.starts[0]?.image).toBe("e2e-image:v1");
+  });
+
+  test("an allowlisted e2e key with no binding is infra, names the key, never starts (#1342)", async () => {
+    const c = new FakeContainer();
+    c.images = { gate: "gate-image:v1" };
+    const outcome = await runLegInContainer({ ...LEG, image: "e2e" }, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(outcome).toEqual({ kind: "infra", description: "gate image not bound (images.e2e)" });
+    expect(c.starts).toHaveLength(0);
+    expect(c.destroyCount).toBe(1);
   });
 
   test("an allowlisted key with no binding is infra, names the key, never starts", async () => {

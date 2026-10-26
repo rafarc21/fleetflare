@@ -22,8 +22,10 @@ export const DEFAULT_VITEST_SHARDS = 8;
 export const DEFAULT_BUN_SHARDS = 6;
 
 /** The gate images a block may name, by key (#1066). A key is a lookup into the
- *  operator's deployed `images` map: a repo never names an image ref. */
-export const GATE_IMAGES: ReadonlySet<string> = new Set(["gate", "desktop"]);
+ *  operator's deployed `images` map: a repo never names an image ref.
+ *  `e2e` (#1342) names the browser-capable image: Chromium + Playwright, so a
+ *  leg opts in via `"image": "e2e"` and runs a Playwright spec headless. */
+export const GATE_IMAGES: ReadonlySet<string> = new Set(["gate", "desktop", "e2e"]);
 /** The image a run uses when its block names none. */
 export const DEFAULT_GATE_IMAGE = "gate";
 
