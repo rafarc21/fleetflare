@@ -15,13 +15,16 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getDefaultBranch, getPullRequest, listOpenPulls, listRepoTree,
+  compareFiles, comparePrecheckData, fetchRepoFile, getAuthenticatedAppSlug, getBranchSha, getDefaultBranch,
+  getPullRequest, listOpenPulls, listRepoTree,
 } from "../github/api";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
+import { appJwt } from "../github/app";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
 import { resolveOpsRepo } from "../ops-repo";
 import {
-  GATE_SECRETS_ALLOWLIST_PATH, gateSecretsAllowlistFailure, parseGateSecretsAllowlist, type GateSecretsAllowlist,
+  GATE_SECRETS_ALLOWLIST_PATH, gateSecretsAllowlistFailure, parseGateSecretsAllowlist, parseTrustOwnApp,
+  type GateSecretsAllowlist,
 } from "./secrets-config";
 import { trustedForSecrets } from "./secrets-scope";
 import { capStatusDescription, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
@@ -132,28 +135,33 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         headSha, baseSha, mergeBaseSha: compare.mergeBaseSha, baseRef: pull.baseRef,
         changedFiles: compare.files, truncated: compare.truncated, private: pull.baseRepoPrivate,
         title: pull.title, body: pull.body,
-        // #1346: gate-scoped secrets gate on these -- none of them a value
-        // the PR itself can influence. sameRepo/authorAssociation/authorIsBot
-        // read straight off GitHub's own PR identity on the same GET as
-        // everything else above; defaultBranch is the repo's own setting.
-        sameRepo: pull.sameRepo, authorAssociation: pull.authorAssociation, authorIsBot: pull.authorIsBot, defaultBranch,
+        // #1346/#1380: gate-scoped secrets gate on these -- none of them a
+        // value the PR itself can influence. sameRepo/authorAssociation/
+        // authorIsBot/authorLogin read straight off GitHub's own PR identity
+        // on the same GET as everything else above; defaultBranch is the
+        // repo's own setting.
+        sameRepo: pull.sameRepo, authorAssociation: pull.authorAssociation, authorIsBot: pull.authorIsBot,
+        authorLogin: pull.authorLogin, defaultBranch,
       };
     });
 
-    // #1346 security review r1: sameRepo alone let any same-repo pusher
-    // through (including one who created their own base branch). The real
-    // gate is trustedForSecrets' four conditions together.
-    const trustedForSecretsFlag = trustedForSecrets({
-      sameRepo: resolved.sameRepo, authorAssociation: resolved.authorAssociation, authorIsBot: resolved.authorIsBot,
-      baseRef: resolved.baseRef, defaultBranch: resolved.defaultBranch,
-    });
+    // #1380: the two checks that do NOT depend on the OPS file at all --
+    // same-repo and default-base -- decide whether EITHER trust path could
+    // ever succeed. Unlike before #1380, the file must now be fetched for
+    // this check alone too: the bot-app path's own trust decision depends on
+    // `trustOwnApp`, which lives in that same file, so "is this PR trusted"
+    // can no longer be answered before reading it the way the human-only
+    // path could.
+    const couldBeTrustedAtAll = resolved.sameRepo && resolved.baseRef === resolved.defaultBranch;
 
-    // #1346: the OPS-repo allowlist for gate-scoped secrets, read the same
-    // way leak-gate.ts's denylist already is -- never from the PR's own
-    // repo, at any sha. Skipped entirely for an untrusted PR (every leg's
-    // grantedSecretNames would be [] regardless of what the file says): one
-    // fewer network call on the by-far most common case, and an untrusted PR
-    // never causes an OPS-repo read at all.
+    // #1346: the OPS-repo allowlist (and, #1380, the fleet-wide trustOwnApp
+    // opt-in) for gate-scoped secrets, read the same way leak-gate.ts's
+    // denylist already is -- never from the PR's own repo, at any sha.
+    // Skipped entirely when neither trust path could ever succeed (every
+    // leg's grantedSecretNames would be [] regardless of what the file
+    // says): one fewer network call on the by-far most common case, and a
+    // fork PR (or one against a self-created base) never causes an OPS-repo
+    // read at all.
     //
     // null (not {}) means the fetch or parse itself failed -- distinct from a
     // genuinely empty/absent file, which is a deliberate "nothing granted"
@@ -161,22 +169,60 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // null propagates to a whole-run failure below (#1346 security review r1
     // item 3: "allowlist fetch error on a trusted PR -> RED," never a silent
     // fall-through to "grant nothing" when we don't actually know that).
-    const secretsAllowlist: GateSecretsAllowlist | null = trustedForSecretsFlag
+    const opsSecrets: { allowlist: GateSecretsAllowlist; trustOwnApp: boolean } | null = couldBeTrustedAtAll
       ? await step.do("gate-secrets-allowlist", async () => {
         const opsRepo = resolveOpsRepo(this.env);
-        if (opsRepo === null) return {};
+        if (opsRepo === null) return { allowlist: {}, trustOwnApp: false };
         try {
           const raw = await fetchRepoFile(
             await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }),
             opsRepo, GATE_SECRETS_ALLOWLIST_PATH, "HEAD",
           );
-          return parseGateSecretsAllowlist(JSON.parse(raw));
+          const parsed = JSON.parse(raw);
+          return { allowlist: parseGateSecretsAllowlist(parsed), trustOwnApp: parseTrustOwnApp(parsed) };
         } catch (err) {
           console.warn(`gate-secrets: allowlist fetch/parse failed for ${opsRepo}/${GATE_SECRETS_ALLOWLIST_PATH}: ${err instanceof Error ? err.message : String(err)}`);
           return null;
         }
       })
-      : {};
+      : { allowlist: {}, trustOwnApp: false };
+    const trustOwnApp = opsSecrets !== null && opsSecrets.trustOwnApp;
+    const secretsAllowlist = opsSecrets === null ? null : opsSecrets.allowlist;
+
+    // #1380 security review r1 MED: this Worker's OWN App slug, from `GET
+    // /app` -- fetched ONLY when it could actually change the outcome: the
+    // author is a bot, the opt-in is on, and this Worker has its own App
+    // configured. Any failure here (no App configured, the JWT mint failing,
+    // the API call failing) degrades to "slug unknown," which fails CLOSED
+    // (deny) in secrets-scope.ts's trustedAppBot, never open.
+    const ownAppSlug = couldBeTrustedAtAll && resolved.authorIsBot && trustOwnApp
+      && this.env.GITHUB_APP_ID !== undefined
+      ? await step.do("gate-secrets-own-app-slug", async () => {
+        if (this.env.GITHUB_APP_PRIVATE_KEY === undefined) return undefined;
+        try {
+          const jwt = await appJwt(this.env.GITHUB_APP_ID!, this.env.GITHUB_APP_PRIVATE_KEY, Date.now());
+          return (await getAuthenticatedAppSlug(jwt)) ?? undefined;
+        } catch {
+          return undefined;
+        }
+      })
+      : undefined;
+
+    // #1346 security review r1 / #1380: sameRepo and default-base alone let
+    // any same-repo pusher through (including one who created their own base
+    // branch) -- the real gate is trustedForSecrets' full set of conditions,
+    // one of two paths depending on whether the author is human or this
+    // fleet's own opted-in App.
+    // Built once and reused for both legRequestContext call sites below, so
+    // the #1380 fields (authorLogin/trustOwnApp/ownAppSlug plus the
+    // pre-existing four) are never duplicated out of sync between the
+    // bundle-leg dispatch and the ordinary leg dispatch.
+    const trustContext = {
+      sameRepo: resolved.sameRepo, authorAssociation: resolved.authorAssociation, authorIsBot: resolved.authorIsBot,
+      authorLogin: resolved.authorLogin, baseRef: resolved.baseRef, defaultBranch: resolved.defaultBranch,
+      trustOwnApp, ownAppSlug,
+    };
+    const trustedForSecretsFlag = trustedForSecrets(trustContext);
 
     // #1346 security review r1 item 3: a trusted PR whose allowlist we could
     // not read is NOT "nothing granted" -- it is "we don't know," and this
@@ -357,7 +403,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         return stub.fetch("https://gate-runner/run-leg", {
           method: "POST",
           body: JSON.stringify(legRequest(owner, repoName, planned, legRequestContext(
-            { baseRef: resolved.baseRef, sameRepo: resolved.sameRepo, authorAssociation: resolved.authorAssociation, authorIsBot: resolved.authorIsBot, defaultBranch: resolved.defaultBranch },
+            trustContext,
             resolved.private, legSecretsAllowlist, { pr: String(pr), bundleKey, mergeBase: resolved.mergeBaseSha },
           ))),
           signal,
@@ -378,7 +424,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         if (carried !== undefined) return Promise.resolve(carried as LegRunResult);
         return runLeg(this.env, step, event.instanceId, owner, repoName,
           legRequestContext(
-            { baseRef: resolved.baseRef, sameRepo: resolved.sameRepo, authorAssociation: resolved.authorAssociation, authorIsBot: resolved.authorIsBot, defaultBranch: resolved.defaultBranch },
+            trustContext,
             resolved.private, legSecretsAllowlist,
             { pr: String(pr), bundleKey: bundled ? bundleKey : undefined, mergeBase: bundled ? resolved.mergeBaseSha : undefined },
           ), planned, touch);

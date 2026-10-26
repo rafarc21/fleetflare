@@ -416,6 +416,39 @@ export async function getDefaultBranch(token: string, repo: string): Promise<str
   return body.default_branch;
 }
 
+/**
+ * #1380 security review r1 MED: this Worker's OWN GitHub App slug (e.g.
+ * "fleetflare-bot"), for the gate-scoped secrets trust filter's `trustOwnApp`
+ * opt-in. `GET /app` is a JWT-only endpoint that returns the IDENTITY of
+ * whichever App's own JWT authenticated the call -- so it can only ever name
+ * THIS Worker's own App, never any other. (This replaces an earlier, DEAD
+ * design: `GET /repos/{owner}/{repo}/installation` authenticated with this
+ * same JWT could only ever confirm "this Worker's own App is installed on
+ * `repo`," which is always true whenever the call succeeds at all -- it
+ * never told us anything about which App actually opened a given PR, so
+ * comparing its `app_id` to our own `GITHUB_APP_ID` was comparing this
+ * Worker to itself. `GET /app` has no such problem: it names an identity
+ * (`slug`), and `trustedForSecrets` compares THAT, not an id, against the
+ * PR's own `user.login`.) `jwt` must be minted with this Worker's own App
+ * credentials (`github/app.ts`'s `appJwt`). Returns null on any error (no
+ * App configured, a network error) rather than throwing: the caller treats
+ * a null slug as "the App-bot trust path cannot be evaluated," which fails
+ * CLOSED (deny), never open.
+ */
+export async function getAuthenticatedAppSlug(jwt: string): Promise<string | null> {
+  try {
+    const body = await ghJson<{ slug?: string }>(
+      jwt,
+      "https://api.github.com/app",
+      { method: "GET" },
+      "read authenticated app",
+    );
+    return typeof body.slug === "string" && body.slug !== "" ? body.slug : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The required-status state of a branch's protection rule, or null when the
  *  branch has no rule at all (404). `hasRequiredStatusChecks` distinguishes a
  *  rule that has no required-status-check block (contexts POST would 404) from
@@ -1174,6 +1207,15 @@ interface PullRequestInfo {
    *  (dependabot[bot] and friends) — sameRepo alone does not distinguish a
    *  human collaborator's branch from an automated one. */
   authorIsBot: boolean;
+  /** #1380: the PR author's own GitHub login, exactly as GitHub returns it
+   *  (e.g. "fleetflare-bot[bot]" for a GitHub App's own PRs). Read off the
+   *  same GET as everything else here. Gate-scoped secrets (secrets-scope.ts's
+   *  trustedForSecrets) is the one thing this field gates: an opt-in,
+   *  EXACT-match comparison against an OPS-configured trusted App slug,
+   *  never a prefix or substring check. "" when GitHub sends no user at all
+   *  (never seen in practice; fails every exact-match comparison, same as
+   *  authorAssociation's "NONE" fallback). */
+  authorLogin: string;
 }
 
 export async function getPullRequest(token: string, repo: string, number: number): Promise<PullRequestInfo> {
@@ -1184,7 +1226,7 @@ export async function getPullRequest(token: string, repo: string, number: number
     head: { ref: string; sha?: string; repo?: { full_name?: string } | null };
     title?: string; body?: string | null;
     author_association?: string;
-    user?: { type?: string } | null;
+    user?: { type?: string; login?: string } | null;
   }>(
     token,
     `https://api.github.com/repos/${repo}/pulls/${number}`,
@@ -1208,6 +1250,7 @@ export async function getPullRequest(token: string, repo: string, number: number
     sameRepo: headFullName !== undefined && headFullName.toLowerCase() === baseFullName.toLowerCase(),
     authorAssociation: raw.author_association ?? "NONE",
     authorIsBot: raw.user?.type === "Bot",
+    authorLogin: raw.user?.login ?? "",
   };
 }
 

@@ -8,7 +8,7 @@ import {
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
   setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict, setBranchProtectionRequiredStatusChecks, disableBranchProtectionEnforceAdmins,
-  getBranchProtection, findPullRequestsReferencingTask,
+  getBranchProtection, findPullRequestsReferencingTask, getAuthenticatedAppSlug,
 } from "../src/github/api";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
 
@@ -394,7 +394,7 @@ describe("getPullRequest", () => {
     expect(await getPullRequest("tok", "o/r", 7)).toEqual({
       number: 7, merged: true, mergeCommitSha: "deadbeef", baseRef: "staging", headRef: "feat/x",
       title: "feat: x", body: "Closes #3", repoFullName: "O/R", open: true, baseRepoPrivate: false,
-      headSha: "aaa111", sameRepo: false, authorAssociation: "NONE", authorIsBot: false,
+      headSha: "aaa111", sameRepo: false, authorAssociation: "NONE", authorIsBot: false, authorLogin: "",
     });
   });
 
@@ -473,6 +473,24 @@ describe("getPullRequest", () => {
       expect((await getPullRequest("tok", "o/r", 7)).authorIsBot).toBe(false);
       respond = () => Response.json({ number: 8, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" } });
       expect((await getPullRequest("tok", "o/r", 8)).authorIsBot).toBe(false);
+    });
+  });
+
+  // #1380: the fleet's own GitHub App opens studio PRs as a Bot login this
+  // Worker must match EXACTLY (never a prefix/substring) against an
+  // OPS-opted-in trusted App slug.
+  describe("authorLogin (#1380)", () => {
+    it("reads user.login off the same GET", async () => {
+      respond = () => Response.json({
+        number: 7, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" },
+        user: { type: "Bot", login: "fleetflare-bot[bot]" },
+      });
+      expect((await getPullRequest("tok", "o/r", 7)).authorLogin).toBe("fleetflare-bot[bot]");
+    });
+
+    it("defaults to \"\" when GitHub sends no user at all", async () => {
+      respond = () => Response.json({ number: 7, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" } });
+      expect((await getPullRequest("tok", "o/r", 7)).authorLogin).toBe("");
     });
   });
 
@@ -1345,5 +1363,32 @@ describe("ghRequest's merge order (#311 finding 3)", () => {
     }, "read o/r");
     expect(calls[0].headers["content-type"]).toBeUndefined();
     expect(Object.hasOwn(calls[0].headers, "content-type")).toBe(false);
+  });
+});
+
+// #1380 security review r1 MED: this Worker's OWN App identity, for the
+// gate-scoped secrets trustOwnApp opt-in. GET /app names whichever App's own
+// JWT authenticated the call -- it can only ever be THIS Worker's own App,
+// never any other, unlike the (removed) installation-endpoint check this
+// replaces. Never throws: the caller treats null as "cannot evaluate," fails
+// closed.
+describe("getAuthenticatedAppSlug", () => {
+  it("reads slug off GET /app, using the JWT as the bearer token", async () => {
+    respond = () => Response.json({ id: 999, slug: "fleetflare-bot" });
+    expect(await getAuthenticatedAppSlug("jwt-value")).toBe("fleetflare-bot");
+    expect(calls[0].url).toBe("https://api.github.com/app");
+    expect(calls[0].headers.authorization).toBe("Bearer jwt-value");
+  });
+
+  it("null when GitHub sends no slug, or an empty one", async () => {
+    respond = () => Response.json({ id: 999 });
+    expect(await getAuthenticatedAppSlug("jwt-value")).toBeNull();
+    respond = () => Response.json({ id: 999, slug: "" });
+    expect(await getAuthenticatedAppSlug("jwt-value")).toBeNull();
+  });
+
+  it("null, never throws, when the request fails (no App configured, network error)", async () => {
+    respond = () => new Response("not found", { status: 404 });
+    expect(await getAuthenticatedAppSlug("jwt-value")).toBeNull();
   });
 });

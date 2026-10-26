@@ -7,7 +7,9 @@
 // entry this file hands back, after parsing, is always the normalized object
 // form, so nothing downstream ever branches on which shape the file used.
 import { describe, it, expect } from "bun:test";
-import { parseGateSecretsAllowlist, gateSecretsRepoEntry, gateSecretsAllowlistFailure } from "../../src/gate/secrets-config";
+import {
+  parseGateSecretsAllowlist, gateSecretsRepoEntry, gateSecretsAllowlistFailure, parseTrustOwnApp,
+} from "../../src/gate/secrets-config";
 
 describe("parseGateSecretsAllowlist: array form (back-compat)", () => {
   it("parses a well-formed file, normalizing the array form to { secrets }", () => {
@@ -133,5 +135,78 @@ describe("gateSecretsAllowlistFailure", () => {
 
   it("does not fail an untrusted PR with a successful empty read either", () => {
     expect(gateSecretsAllowlistFailure(false, {})).toBeNull();
+  });
+});
+
+// #1380 security review r1 MED: the fleet-wide App opt-in, read from the SAME
+// raw JSON parseGateSecretsAllowlist itself parses -- a top-level field,
+// never a per-repo one, since "the fleet's own GitHub App" is one identity
+// across every gated repo. A boolean, not a free-form slug list: there is no
+// slug for an OPS typo to mistype into trusting the wrong App (the earlier
+// `trustApps: string[]` design's companion "App id matches" cross-check was
+// found dead -- it could only ever compare this Worker to itself -- so a
+// config mistake naming any other bot's slug would have granted it trust
+// with nothing left to catch the error).
+describe("parseTrustOwnApp", () => {
+  it("true when explicitly set", () => {
+    expect(parseTrustOwnApp({ trustOwnApp: true })).toBe(true);
+  });
+
+  it("false when explicitly set", () => {
+    expect(parseTrustOwnApp({ trustOwnApp: false })).toBe(false);
+  });
+
+  it("absent -> false (feature off, the default)", () => {
+    expect(parseTrustOwnApp({ "acme/example": { "browser-e2e": ["staging-login"] } })).toBe(false);
+  });
+
+  it("a non-boolean value -> false, WARNED, never throws", () => {
+    const warnings: unknown[][] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args); };
+    let result: boolean;
+    try {
+      result = parseTrustOwnApp({ trustOwnApp: "true" });
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(result).toBe(false);
+    expect(warnings.some((w) => String(w[0]).includes("trustOwnApp"))).toBe(true);
+  });
+
+  it("a non-object top level -> false, never throws", () => {
+    expect(parseTrustOwnApp("nope")).toBe(false);
+    expect(parseTrustOwnApp(null)).toBe(false);
+    expect(parseTrustOwnApp(42)).toBe(false);
+  });
+
+  it("coexists with repo entries in the same file, read from the same raw value", () => {
+    const raw = { trustOwnApp: true, "acme/example": { "browser-e2e": ["staging-login"] } };
+    expect(parseTrustOwnApp(raw)).toBe(true);
+    expect(parseGateSecretsAllowlist(raw)).toEqual({ "acme/example": { "browser-e2e": { secrets: ["staging-login"] } } });
+  });
+});
+
+describe("parseGateSecretsAllowlist: trustOwnApp is never mistaken for a repo entry (#1380)", () => {
+  it("a top-level trustOwnApp key is skipped, not warned about or parsed as a malformed repo", () => {
+    const warnings: unknown[][] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args); };
+    let parsed: ReturnType<typeof parseGateSecretsAllowlist>;
+    try {
+      parsed = parseGateSecretsAllowlist({
+        trustOwnApp: true,
+        "acme/example": { "browser-e2e": ["staging-login"] },
+      });
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(parsed).toEqual({ "acme/example": { "browser-e2e": { secrets: ["staging-login"] } } });
+    expect(Object.hasOwn(parsed, "trustOwnApp")).toBe(false);
+    // The dropped-entry warning path (for a genuinely malformed repo) must
+    // never fire for the reserved trustOwnApp key -- it is a known, valid
+    // shape at this level, not a malformed repo entry that happens to be a
+    // boolean.
+    expect(warnings.some((w) => String(w[0]).includes("trustOwnApp"))).toBe(false);
   });
 });

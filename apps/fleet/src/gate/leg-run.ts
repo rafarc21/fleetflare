@@ -404,7 +404,13 @@ export interface TrustContextInput {
   sameRepo: boolean;
   authorAssociation: string;
   authorIsBot: boolean;
+  authorLogin: string;
   defaultBranch: string;
+  /** #1380 security review r1 MED: fleet-wide OPS boolean opt-in. false = off. */
+  trustOwnApp: boolean;
+  /** #1380 security review r1 MED: this Worker's own App slug, from `GET
+   *  /app` -- see secrets-scope.ts's SecretsTrustInput for the full contract. */
+  ownAppSlug?: string;
 }
 
 /** legRequest's own `pr` parameter shape, minus the per-leg `image` override

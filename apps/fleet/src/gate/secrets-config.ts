@@ -44,6 +44,10 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === "string");
 }
 
+/** #1380: the reserved top-level key `parseTrustOwnApp` reads. Never a repo
+ *  slug (every real repo key contains "/"). */
+const TRUST_OWN_APP_KEY = "trustOwnApp";
+
 /** The only keys the object form (`{secrets, head?}`) ever reads. */
 const LEG_ENTRY_KEYS: ReadonlySet<string> = new Set(["secrets", "head"]);
 
@@ -92,6 +96,10 @@ export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return empty;
   const out: Record<string, Record<string, GateSecretsLegEntry>> = Object.create(null);
   for (const [repo, legs] of Object.entries(raw as Record<string, unknown>)) {
+    // #1380: the one reserved top-level key that is never a repo slug (every
+    // real repo key contains "/"; this one never does) -- parseTrustOwnApp,
+    // below, reads it from this SAME raw value instead.
+    if (repo === TRUST_OWN_APP_KEY) continue;
     if (typeof legs !== "object" || legs === null || Array.isArray(legs)) {
       console.warn(`gate-secrets allowlist: repo "${repo}" entry is not an object -- dropped`);
       continue;
@@ -108,6 +116,46 @@ export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
     out[repo] = perLeg;
   }
   return out;
+}
+
+/**
+ * #1380 security review r1 MED: fleet-wide (never per-repo) boolean opt-in,
+ * trusting ONLY this Worker's own configured GitHub App for gate-scoped
+ * secrets, on top of the ordinary human-collaborator trust path. Top-level,
+ * not per-repo: "the fleet's own GitHub App" is one identity across every
+ * repo this fleet gates, and studios across every gated repo open PRs
+ * through the SAME App. A top-level `trustOwnApp` key never collides with a
+ * repo entry: every repo key is an `owner/repo` slug, which always contains
+ * "/", while "trustOwnApp" never does.
+ *
+ * Originally a free-form list of trusted App slugs (`trustApps: string[]`) --
+ * replaced after security review r1 found the companion "App id matches"
+ * cross-check was dead code (the only JWT-authenticated endpoint available,
+ * `GET /repos/{owner}/{repo}/installation`, can only ever confirm THIS
+ * Worker's own App is installed on a repo, never verify which App actually
+ * authored a given PR) and, worse, that an operator naming any OTHER real
+ * bot's slug in that list (even by a config mistake, e.g. "dependabot")
+ * would grant it trust with nothing left to catch the error. A boolean has
+ * no such failure mode: there is no slug to mistype, and the one slug this
+ * code ever compares against (secrets-scope.ts's `trustedForSecrets`) is
+ * this Worker's OWN, read fresh from `GET /app` -- never operator input.
+ *
+ * Absent -> false (feature OFF, the #1346/#1376 default, unchanged). Present
+ * but not a boolean -> false, WARNED (security review r1 LOW: a typo like
+ * `"trustOwnApp": "true"` must be visible, not a silent no-op) -- same
+ * fail-closed rule every other malformed shape in this file follows. Read
+ * from the SAME raw JSON `parseGateSecretsAllowlist` itself parses
+ * (workflow.ts parses both from one fetch), never a second file or fetch.
+ */
+export function parseTrustOwnApp(raw: unknown): boolean {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+  const value = (raw as Record<string, unknown>)[TRUST_OWN_APP_KEY];
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    console.warn(`gate-secrets allowlist: "${TRUST_OWN_APP_KEY}" is ${JSON.stringify(value)}, not a boolean -- treated as false`);
+    return false;
+  }
+  return value;
 }
 
 /** `allowlist[repo]`, matched case-insensitively -- the same rule

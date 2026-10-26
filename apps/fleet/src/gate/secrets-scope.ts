@@ -44,42 +44,94 @@ export interface SecretsTrustInput {
   authorAssociation: string;
   /** The PR author's GitHub account type is "Bot" (dependabot[bot] etc). */
   authorIsBot: boolean;
+  /** #1380: the PR author's own GitHub login, exactly as GitHub returns it
+   *  (e.g. "fleetflare-bot[bot]"). The ONLY thing this gates is the app-bot
+   *  trust path, below -- compared via EXACT match against
+   *  `${ownAppSlug}[bot]`, never a prefix or substring check. */
+  authorLogin: string;
   /** The PR's own base ref name. */
   baseRef: string;
   /** The repo's actual default branch name (read fresh, never assumed). */
   defaultBranch: string;
+  /** #1380 security review r1 MED: fleet-wide (never per-repo) boolean
+   *  opt-in (secrets-config.ts's parseTrustOwnApp). false = this whole
+   *  feature is OFF, the default: every bot-authored PR (including the
+   *  fleet's own App) is denied exactly as before #1380. */
+  trustOwnApp: boolean;
+  /** #1380 security review r1 MED: this Worker's OWN GitHub App slug, read
+   *  fresh from `GET /app` (github/api.ts's getAuthenticatedAppSlug) -- never
+   *  operator input, so there is no slug for an OPS typo to mistype into
+   *  trusting the wrong App. Undefined when this Worker has no GitHub App
+   *  configured, or the `GET /app` call failed -- in which case the app-bot
+   *  path fails CLOSED (deny), never open. */
+  ownAppSlug?: string;
+}
+
+/** #1380 security review r1 MED: whether a bot-authored PR is this fleet's
+ *  OWN GitHub App, opted in. A SINGLE check now, not two: `trustOwnApp` must
+ *  be on, `ownAppSlug` must be known (this Worker's own App, from `GET
+ *  /app`), and the PR author's login must match `${ownAppSlug}[bot]`
+ *  EXACTLY -- never a prefix or substring match, so a lookalike login
+ *  ("<slug>-x[bot]", the bare "<slug>" with no "[bot]" suffix, or a
+ *  DIFFERENT app's own "[bot]" login) never matches. No other App can ever
+ *  be named here -- there is no free-form list left to mistype.
+ *
+ *  An earlier design (free-form `trustApps: string[]` plus an "if available"
+ *  cross-check against the installation's numeric App id) was removed after
+ *  security review r1 found that cross-check dead: the only JWT-authenticated
+ *  endpoint available, `GET /repos/{owner}/{repo}/installation`, can only
+ *  ever confirm THIS Worker's own App is installed on a repo -- it never
+ *  verifies which App actually authored a given PR, so comparing its app_id
+ *  to this Worker's own configured id was comparing this Worker to itself. */
+function trustedAppBot(input: SecretsTrustInput): boolean {
+  if (!input.trustOwnApp) return false;
+  if (input.ownAppSlug === undefined || input.ownAppSlug === "") return false;
+  return input.authorLogin === `${input.ownAppSlug}[bot]`;
 }
 
 /**
- * Four independent guards, checked in this order on purpose -- cheapest and
- * most load-bearing first. All four must hold, or nothing is granted:
- *   1. same-repo guard   -- never a fork, unconditionally.
- *   2. association guard -- only OWNER/MEMBER/COLLABORATOR; a same-repo PR
- *                            from anyone with lesser standing (CONTRIBUTOR,
- *                            FIRST_TIME_CONTRIBUTOR, NONE) is refused the
- *                            same as a fork.
- *   3. bot guard          -- never an automated account (dependabot etc).
- *   4. default-base guard -- the PR's base must be the repo's actual default
- *                            branch, never a branch the PR author could have
- *                            created themselves. Without this, a same-repo
- *                            collaborator could open a PR against a
- *                            self-created base branch -- fully
- *                            self-controlled on both ends -- and still pass
- *                            every other check here.
+ * Independent guards, checked in this order on purpose -- cheapest and most
+ * load-bearing first. The first two are shared by BOTH trust paths below;
+ * all must hold, or nothing is granted:
+ *   1. same-repo guard     -- never a fork, unconditionally.
+ *   2. default-base guard  -- the PR's base must be the repo's actual
+ *                             default branch, never a branch the PR author
+ *                             could have created themselves. Without this, a
+ *                             same-repo collaborator (or the fleet's own App,
+ *                             #1380) could open a PR against a self-created
+ *                             base branch -- fully self-controlled on both
+ *                             ends -- and still pass every other check here.
+ *   3a. association guard  -- for a HUMAN author: only OWNER/MEMBER/
+ *                             COLLABORATOR; a same-repo PR from anyone with
+ *                             lesser standing (CONTRIBUTOR,
+ *                             FIRST_TIME_CONTRIBUTOR, NONE) is refused the
+ *                             same as a fork.
+ *   3b. app-bot guard      -- for a BOT author (#1380): OFF by default
+ *                             (`trustOwnApp` false) -- every bot, including
+ *                             this fleet's own App, is refused exactly as
+ *                             before #1380. When opted in, trusted ONLY for
+ *                             an EXACT login match against THIS Worker's own
+ *                             App slug, read fresh from `GET /app` (never a
+ *                             prefix/substring, never any other bot --
+ *                             dependabot etc stay denied unconditionally,
+ *                             there is no slug list left for an OPS typo to
+ *                             widen).
  *
  * This is NOT a defense against a malicious collaborator's PR code running
  * inside the leg that gets a secret -- that PR code always runs (that is the
  * gate's whole job). It only narrows WHO can ever reach a grant at all, down
  * from "anyone who can open a same-repo PR" to "someone GitHub itself already
- * calls a trusted collaborator, on the repo's own default branch." See the
- * design doc's "Residual risk" for what this does and does not contain.
+ * calls a trusted collaborator, on the repo's own default branch" -- or, when
+ * explicitly opted in, "this fleet's own GitHub App, on the repo's own
+ * default branch" (#1380: this trusts EVERY studio-authored PR, including one
+ * from a prompt-injected studio -- see the design doc's "Residual risk" for
+ * what this does and does not contain).
  */
 export function trustedForSecrets(input: SecretsTrustInput): boolean {
   if (!input.sameRepo) return false;
-  if (!TRUSTED_ASSOCIATIONS.has(input.authorAssociation)) return false;
-  if (input.authorIsBot) return false;
   if (input.baseRef !== input.defaultBranch) return false;
-  return true;
+  if (input.authorIsBot) return trustedAppBot(input);
+  return TRUSTED_ASSOCIATIONS.has(input.authorAssociation);
 }
 
 /** A leg's own OPS-allowlist entry, looked up prototype-safely. #1346 security
