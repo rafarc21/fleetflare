@@ -91,6 +91,80 @@ describe("grantedSecretNames: prototype-safe leg lookup (#1346 security review r
   });
 });
 
+// #1376: a PR that ADDS a secret-needing leg to its own fleet.json runs it as
+// `<leg>@head` under the union plan -- a different NAME from whatever the OPS
+// file grants, so with no opt-in it is DID-NOT-RUN forever. `head: true` on
+// the BASE leg's own OPS entry opts its `@head`/`@head-<n>` copy into sharing
+// the SAME grant, under the exact same trust filter -- never a looser one.
+const HEAD_ALLOWLIST = parseGateSecretsAllowlist({
+  "acme/example": {
+    "ai-smoke": { secrets: ["workers-ai"], head: true },
+    "browser-e2e": ["staging-login"], // array form: head stays unset/false (back-compat)
+    "no-head-flag": { secrets: ["staging-login"] }, // object form, head omitted: same as false
+  },
+});
+
+describe("grantedSecretNames: head opt-in on (#1376)", () => {
+  it("an ordinary @head copy of an opted-in leg gets the same grant as its base", () => {
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "ai-smoke@head", true)).toEqual(["workers-ai"]);
+  });
+
+  it("a sharded @head-<n> copy of an opted-in leg gets the same grant too", () => {
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "ai-smoke@head-3", true)).toEqual(["workers-ai"]);
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "ai-smoke@head-12", true)).toEqual(["workers-ai"]);
+  });
+
+  it("still goes through the registry guard: an unknown name under head:true grants nothing", () => {
+    const allowlist = parseGateSecretsAllowlist({ "acme/example": { "leg": { secrets: ["not-a-real-secret"], head: true } } });
+    expect(grantedSecretNames(allowlist, "acme/example", "leg@head", true)).toEqual([]);
+  });
+});
+
+describe("grantedSecretNames: head opt-in off / absent, back-compat (#1376)", () => {
+  it("the array form (head implicitly false) denies the @head copy -- this is the pre-#1376 default, unchanged", () => {
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "browser-e2e@head", true)).toEqual([]);
+    // the base leg itself (no @head suffix) is completely unaffected by any of this:
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "browser-e2e", true)).toEqual(["staging-login"]);
+  });
+
+  it("the object form with head omitted denies the @head copy the same as head: false", () => {
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "no-head-flag@head", true)).toEqual([]);
+  });
+
+  it("explicit head: false denies the @head copy", () => {
+    const allowlist = parseGateSecretsAllowlist({ "acme/example": { "leg": { secrets: ["staging-login"], head: false } } });
+    expect(grantedSecretNames(allowlist, "acme/example", "leg@head", true)).toEqual([]);
+  });
+
+  it("a base leg with no entry at all denies its @head copy (no entry to opt in)", () => {
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "never-configured@head", true)).toEqual([]);
+  });
+});
+
+describe("grantedSecretNames: head opt-in still requires trust (#1376)", () => {
+  it("an untrusted PR (fork / bot / non-default-base, collapsed to trusted: false) gets nothing from an opted-in leg's @head copy either", () => {
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "ai-smoke@head", false)).toEqual([]);
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "ai-smoke@head-3", false)).toEqual([]);
+  });
+});
+
+describe("grantedSecretNames: head opt-in prototype-safe lookup (#1376)", () => {
+  it("a leg named 'constructor@head' or '__proto__@head' never resolves through Object.prototype", () => {
+    expect(() => grantedSecretNames(RAW_ALLOWLIST, "acme/example", "constructor@head", true)).not.toThrow();
+    expect(grantedSecretNames(RAW_ALLOWLIST, "acme/example", "constructor@head", true)).toEqual([]);
+    expect(() => grantedSecretNames(RAW_ALLOWLIST, "acme/example", "__proto__@head", true)).not.toThrow();
+    expect(grantedSecretNames(RAW_ALLOWLIST, "acme/example", "__proto__@head", true)).toEqual([]);
+  });
+
+  it("the base-leg name extracted from a @head suffix is itself looked up prototype-safely, via the real parsed allowlist", () => {
+    // "constructor" and "__proto__" are never real base legs in HEAD_ALLOWLIST,
+    // so their @head copies resolve to nothing -- proving the lookup never
+    // silently falls through to an inherited Object.prototype member instead.
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "constructor@head", true)).toEqual([]);
+    expect(grantedSecretNames(HEAD_ALLOWLIST, "acme/example", "__proto__@head", true)).toEqual([]);
+  });
+});
+
 describe("grantedSecretNames: malformed/empty allowlist fails closed", () => {
   it("an empty allowlist grants nothing to anyone", () => {
     expect(grantedSecretNames(parseGateSecretsAllowlist({}), "acme/example", "browser-e2e", true)).toEqual([]);

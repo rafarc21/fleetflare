@@ -14,7 +14,11 @@ redaction now also catches a secret split by `gate-server.ts`'s own 32k tail
 cut (§6). Extended by https://github.com/rafarc21/fleetflare/issues/1367
 (§4, registered labels table) to register three consumer-maestro-owned
 labels in `SECRET_REGISTRY` — no mechanism change, registry entries only.
-Every section below describes the FINAL design, not an
+Extended by https://github.com/rafarc21/fleetflare/issues/1376 (§1/§3a) to
+let an OPS entry opt a leg's own `@head`/`@head-<n>` union-plan copy into
+sharing its grant — the one way a PR that ADDS a secret-needing leg to its
+own `fleet.json` can ever reach a green gate, still under the exact same
+trust filter. Every section below describes the FINAL design, not an
 intermediate one.
 
 ## Non-goals
@@ -162,7 +166,7 @@ way `leak-gate.ts`'s denylist already is — `fetchRepoFile` +
 {
   "rafarc21/fleetflare": {
     "browser-e2e": ["staging-login"],
-    "ai-smoke": ["workers-ai"]
+    "ai-smoke": { "secrets": ["workers-ai"], "head": true }
   }
 }
 ```
@@ -171,13 +175,22 @@ Top-level keys are `owner/repo` (case-insensitive, matched the same way
 `gateMapEntry` already matches fleet.json's `gates` map,
 `apps/fleet/src/gate/config.ts:201-207`). Each value is a map from leg name
 (the same string a repo's own `fleet.json` names in its `legs` array,
-`GateLeg.name`, `LEG_NAME_PATTERN`) to the list of secret NAMES that leg may
-receive. A secret NAME here is an opaque label — never a value, never an env
-var name, never a Worker secret binding name. Malformed JSON, a non-object
-top level, or an entry whose value isn't `Record<string, string[]>` parses
-to an empty allowlist (fail closed — same rule `parseDenylist` already
-follows for the leak-scan file, `leak-gate.ts`): a run never crashes over a
-bad ops file, it just grants nothing.
+`GateLeg.name`, `LEG_NAME_PATTERN`) to that leg's grant, in EITHER of two
+shapes (#1376): a plain array of secret NAMES (back-compat — every entry
+written before #1376 parses exactly as before, with no head opt-in), or an
+object `{secrets, head?}` — `secrets` the same array, `head` an explicit,
+OPS-only opt-in (§3a) for the leg's own `@head`/`@head-<n>` union-plan copy
+to share the same grant. `parseGateSecretsAllowlist` normalizes BOTH shapes
+into the same internal `GateSecretsLegEntry` (`{secrets, head?}`), so nothing
+downstream (`secrets-scope.ts`) ever branches on which shape the file used.
+A secret NAME here is an opaque label — never a value, never an env var
+name, never a Worker secret binding name. Malformed JSON, a non-object top
+level, a per-repo or per-leg entry in neither shape, a non-string-array
+`secrets`, or a non-boolean `head` each drop just that one entry (fail closed
+— same rule `parseDenylist` already follows for the leak-scan file,
+`leak-gate.ts`): a run never crashes over a bad ops file, it just grants
+nothing for the broken entry, logged (names only, never values) so a typo is
+visible rather than silently eaten.
 
 ### 2. Trust detection (new): `github/api.ts` + `gate/secrets-scope.ts`
 
@@ -233,26 +246,70 @@ export function grantedSecretNames(
   if (!trusted) return [];                          // guard 1: an untrusted PR gets nothing, ever
   const forRepo = gateSecretsRepoEntry(allowlist, repo);  // case-insensitive, like gateMapEntry
   if (forRepo === undefined) return [];             // guard 2: repo not in the OPS allowlist
-  if (!Object.hasOwn(forRepo, leg)) return [];       // guard 3: leg not named for this repo (prototype-safe lookup)
-  const names = forRepo[leg];
-  if (!Array.isArray(names)) return [];
-  return names.filter((name) => isKnownSecretName(name)); // guard 4: unknown name, never passed through (warns)
+  const direct = ownLegEntry(forRepo, leg);          // prototype-safe lookup (Object.hasOwn + shape check)
+  if (direct !== undefined) return direct.secrets.filter(isKnownSecretName); // guard 3: unknown name, never passed through (warns)
+  // #1376: no direct entry for `leg` itself -- if it's a @head/@head-<n>
+  // union-plan copy (fanout.ts's headLegName) of a leg the OPS file opted
+  // into sharing its grant (`head: true`), fall back to THAT leg's entry.
+  const headMatch = /^(.+)@head(?:-\d+)?$/.exec(leg);
+  if (headMatch === null) return [];                // guard 4: leg isn't a @head copy of anything
+  const base = ownLegEntry(forRepo, headMatch[1]);
+  if (base === undefined || base.head !== true) return []; // guard 5: no opt-in on the base leg
+  return base.secrets.filter(isKnownSecretName);
 }
 ```
 
-Eight independent guards across the two functions, in the order a reviewer
+Nine independent guards across the two functions, in the order a reviewer
 should read them: trust first (cheapest, most load-bearing, and the one a
 same-repo PR from a non-collaborator or against a self-created base branch
-never clears), then OPS-allowlist repo/leg lookups (prototype-safe —
-`Object.hasOwn`, never a bare `forRepo[leg]`, so a leg literally named
-`constructor` or `__proto__` cannot resolve through the object's own
-prototype chain instead of "nothing granted"), then the registry membership
-check (defense in depth: even an OPS typo naming a secret this Worker never
-defined grants nothing, rather than leaking `undefined` through to an env
-var — logged, name only, never a value, so the typo is visible to the
-operator). Pure — no fetch, no binding — so `bun test` exercises both
-directly, and they are the functions every mutation below targets
-(§"Mutation testing," below).
+never clears — identical for a leg's base name and its `@head` copy, #1376
+adds no second, looser trust check), then OPS-allowlist repo/leg lookups
+(prototype-safe — `Object.hasOwn` plus a shape check, never a bare
+`forRepo[leg]`, so a leg literally named `constructor` or `__proto__`, OR its
+`@head` copy, cannot resolve through the object's own prototype chain
+instead of "nothing granted"), then the `@head` opt-in fallback (#1376,
+below), then the registry membership check (defense in depth: even an OPS
+typo naming a secret this Worker never defined grants nothing, rather than
+leaking `undefined` through to an env var — logged, name only, never a
+value, so the typo is visible to the operator). Pure — no fetch, no binding
+— so `bun test` exercises both directly, and they are the functions every
+mutation below targets (§"Mutation testing," below).
+
+### 3a. `@head` opt-in (new, #1376): a PR's own new leg must still be able to go green
+
+**Problem.** A PR that ADDS a secret-needing leg to its own `fleet.json`
+changes the gate config, so `load-config.ts`'s union-plan path runs it under
+a DIFFERENT name — `<leg>@head` (or `<lane>@head-<n>` for a sharded lane,
+`fanout.ts`'s `headLegName`) — never the plain `<leg>` name the OPS file's
+allowlist names. Before this change, an `@head` leg NEVER matched any OPS
+entry (guard 3's `ownLegEntry` lookup is exact-name), so it got nothing,
+always ran `DID-NOT-RUN`, and the PR that introduced it could never reach a
+green gate — a real usability dead end, not a security property: the trust
+filter was never the thing refusing it, the NAME MISMATCH was.
+
+**Fix.** The OPS file's per-leg entry gains an explicit, opt-in `head: true`
+field (`secrets-config.ts`'s `GateSecretsLegEntry`, below) — absent or
+`false` keeps today's behavior (no head grants) exactly, the pre-#1376
+default, unchanged. When set, `<leg>@head` and `<leg>@head-<n>` receive the
+SAME grant as `<leg>` itself, resolved by stripping the suffix and looking
+up the base leg's own entry (guard 4/5, above) — still gated by guard 1
+(`trusted`) FIRST, exactly the same trust filter, never a separate or looser
+one for the `@head` path.
+
+**Threat model note.** The PR fully controls the `@head` leg's own command —
+it's the PR's own `fleet.json` that named it. This is **not a new risk**:
+it is the EXACT SAME risk this design's own threat model already states for
+every base leg ("Everything that container can read or do, the PR's own
+code can read or do — that is the gate's whole job"). `head: true` does not
+broaden WHO can ever reach a grant (guard 1 is identical either way) or
+loosen WHAT code runs in the leg that receives one (PR-controlled code
+already runs in every leg, named-and-OPS-granted or not) — it only lets an
+ALREADY-authorized leg's union-plan name variant share a grant its base name
+already had. The egress-allowlist gap named in "Residual risk," above
+(https://github.com/rafarc21/fleetflare/issues/1355, filed from that
+residual-risk note, still open) is unchanged by this PR either way: an
+`@head` leg with a granted secret has exactly the same open HTTPS egress a
+base leg with one already does.
 
 ### 4. The registry (new, static): `gate/secrets-registry.ts`
 
@@ -562,6 +619,15 @@ than inventing a third.
    resolved value turns into an immediate RED leg before the container
    starts; a trusted PR whose OPS allowlist read failed fails the whole run,
    never falling through to "grant nothing."
+6. **`@head` opt-in (#1376).** `head: true` on a leg's OPS entry grants its
+   `@head` and `@head-<n>` union-plan copies the same secrets as the base
+   leg; `head` absent, `false`, or the plain array form all deny the `@head`
+   copy exactly as before #1376 (back-compat); an untrusted PR (fork, bot,
+   non-default-base — all collapsed to `trusted: false`) gets nothing from an
+   opted-in leg's `@head` copy either, the same trust filter applying
+   unchanged; a leg named `constructor@head`/`__proto__@head` resolves
+   safely, never through `Object.prototype`, for the base-leg lookup the
+   same way the direct lookup already does.
 
 Per the task's own mutation-testing instruction, every guard this PR adds is
 hand-mutated (condition flip, off-by-one on the expiry boundary, operator

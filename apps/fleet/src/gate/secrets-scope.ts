@@ -3,8 +3,14 @@
 // Pure: no fetch, no binding, no secret value -- this file only ever decides
 // a boolean and a list of NAMEs, never resolves one to a value
 // (secrets-registry.ts/do.ts do that, after both of these already ran).
-import { gateSecretsRepoEntry, type GateSecretsAllowlist } from "./secrets-config";
+import { gateSecretsRepoEntry, type GateSecretsAllowlist, type GateSecretsLegEntry } from "./secrets-config";
 import { isKnownSecretName } from "./secrets-registry";
+
+/** #1376: a leg name that is the `@head` or `@head-<n>` union-plan copy of
+ *  `<base>` (fanout.ts's own headLegName: `<leg>@head` for an ordinary leg,
+ *  `<lane>@head-<n>` for a sharded vitest/bun lane) -- captures `<base>` so
+ *  grantedSecretNames can look up ITS entry when `leg` itself has none. */
+const HEAD_LEG_RE = /^(.+)@head(?:-\d+)?$/;
 
 /** #1346 security review r1: author_association values trusted enough to
  *  receive a gate-scoped secret. CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR and NONE
@@ -58,20 +64,64 @@ export function trustedForSecrets(input: SecretsTrustInput): boolean {
   return true;
 }
 
+/** A leg's own OPS-allowlist entry, looked up prototype-safely. #1346 security
+ *  review r1 LOW: a leg literally named "constructor" or "__proto__" must not
+ *  resolve through the object's own prototype chain. Belt and suspenders,
+ *  both load-bearing against a DIFFERENT construction of `allowlist` than
+ *  this file's own parseGateSecretsAllowlist produces (which already uses
+ *  Object.create(null) containers, making a bare bracket lookup safe on its
+ *  own): Object.hasOwn refuses an inherited property outright, and the
+ *  `secrets`-array check refuses whatever that property turns out to be (a
+ *  function, `Object.prototype` itself) when it isn't a real entry -- see
+ *  gate-secrets-scope.test.ts's own RAW_ALLOWLIST fixture, built as a plain
+ *  object specifically to exercise both of these independently of the
+ *  parser's own hardening. Undefined for anything that isn't a well-formed
+ *  `GateSecretsLegEntry`, never a thrown error. */
+function ownLegEntry(
+  forRepo: Readonly<Record<string, GateSecretsLegEntry>>, leg: string,
+): GateSecretsLegEntry | undefined {
+  if (!Object.hasOwn(forRepo, leg)) return undefined;
+  const entry = forRepo[leg];
+  if (typeof entry !== "object" || entry === null || !Array.isArray(entry.secrets)) return undefined;
+  return entry;
+}
+
+function filterKnownNames(repo: string, leg: string, names: readonly string[]): string[] {
+  return names.filter((name) => {
+    const known = isKnownSecretName(name);
+    if (!known) console.warn(`gate-secrets: ${repo} leg "${leg}" grants unknown secret name "${name}" -- ignored`);
+    return known;
+  });
+}
+
 /**
- * Four independent guards, checked in this order on purpose -- cheapest and
- * most load-bearing first:
+ * Independent guards, checked in this order on purpose -- cheapest and most
+ * load-bearing first:
  *   1. trust guard     -- `trusted === false` (see trustedForSecrets, above)
  *                         grants nothing, unconditionally, whatever the
- *                         allowlist says.
+ *                         allowlist says. Identical for a leg's base name and
+ *                         its @head copy -- #1376 adds no second, looser gate.
  *   2. repo guard      -- the OPS allowlist has no entry for this repo.
- *   3. leg guard       -- this repo's entry does not name this leg.
+ *   3. leg guard       -- neither this leg's own name, nor (#1376) its base
+ *                         leg's name with `head: true` when `leg` is a
+ *                         `@head`/`@head-<n>` union-plan copy, has an entry.
  *   4. registry guard  -- a name the OPS file lists but this Worker's own
  *                         registry never defined grants nothing (defense in
  *                         depth against an OPS-file typo or a stale entry
  *                         left behind after a registry entry was removed).
  *                         Logged (name only, never a value) so a stale OPS
  *                         entry is visible to the operator, not silent.
+ *
+ * #1376: a PR that ADDS a secret-needing leg to its own fleet.json runs it as
+ * `<leg>@head` under the union plan (fanout.ts's planUnionLegs) -- with no
+ * opt-in, that leg would always be a different NAME from the one the OPS file
+ * grants, so it would never match guard 3 and would run DID-NOT-RUN forever,
+ * never able to land on a green gate. An explicit `head: true` on the BASE
+ * leg's own entry (never settable by the PR, same OPS-file-only reach as
+ * every other grant here) opts a repo's leg into sharing its grant with its
+ * own head copy -- still gated by the exact same trust filter, never a looser
+ * one: the risk is unchanged from a base leg running PR-controlled code,
+ * because that is exactly what a `@head` leg already is.
  */
 export function grantedSecretNames(
   allowlist: GateSecretsAllowlist, repo: string, leg: string, trusted: boolean,
@@ -79,23 +129,11 @@ export function grantedSecretNames(
   if (!trusted) return [];
   const forRepo = gateSecretsRepoEntry(allowlist, repo);
   if (forRepo === undefined) return [];
-  // #1346 security review r1 LOW: a leg literally named "constructor" or
-  // "__proto__" must not resolve through the object's own prototype chain.
-  // Belt and suspenders, both load-bearing against a DIFFERENT construction
-  // of `allowlist` than this file's own parseGateSecretsAllowlist produces
-  // (which already uses Object.create(null) containers, making a bare
-  // bracket lookup safe on its own): Object.hasOwn refuses an inherited
-  // property outright, and Array.isArray refuses whatever that property
-  // turns out to be (a function, `Object.prototype` itself) when it isn't
-  // actually an array -- see gate-secrets-scope.test.ts's own RAW_ALLOWLIST
-  // fixture, built as a plain object specifically to exercise both of these
-  // independently of the parser's own hardening.
-  if (!Object.hasOwn(forRepo, leg)) return [];
-  const names = forRepo[leg];
-  if (!Array.isArray(names)) return [];
-  return names.filter((name) => {
-    const known = isKnownSecretName(name);
-    if (!known) console.warn(`gate-secrets: ${repo} leg "${leg}" grants unknown secret name "${name}" -- ignored`);
-    return known;
-  });
+  const direct = ownLegEntry(forRepo, leg);
+  if (direct !== undefined) return filterKnownNames(repo, leg, direct.secrets);
+  const headMatch = HEAD_LEG_RE.exec(leg);
+  if (headMatch === null) return [];
+  const base = ownLegEntry(forRepo, headMatch[1]);
+  if (base === undefined || base.head !== true) return [];
+  return filterKnownNames(repo, headMatch[1], base.secrets);
 }
