@@ -6,7 +6,7 @@
 import { describe, it, expect } from "bun:test";
 import { GATE_STALL_MS, type GateRunIndex, type GateRunInstance, type GateRunRecord } from "../../src/gate/auto-run";
 import {
-  GATE_WATCHDOG_FINAL_AGE_MS, GATE_WATCHDOG_LOOKBACK_MS, hasRedResult, sweepStalledRuns, type WatchdogDeps, type WatchdogIndex,
+  GATE_WATCHDOG_FINAL_AGE_MS, GATE_WATCHDOG_LOOKBACK_MS, hasRedResult, redResultPrefix, sweepStalledRuns, type WatchdogDeps, type WatchdogIndex,
 } from "../../src/gate/watchdog";
 
 const REPO = "acme/example";
@@ -517,5 +517,15 @@ describe("sweepStalledRuns: an errored run that never posted its own verdict is 
     expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
     expect(h.posts).toEqual([]);
     expect(h.head()?.progressedAt).toBe(-1);
+  });
+});
+
+// #1343 MED6: the watchdog lists a run's results under the `shard-` prefix,
+// so an evidence .json (PR-controlled) is never read as a result, and
+// evidence volume never crowds results out of one listing page.
+describe("redResultPrefix (#1343 MED6)", () => {
+  it("scopes the listing to shard- result keys, never the whole run prefix", () => {
+    expect(redResultPrefix("acme/example", 7, "run-a")).toBe("gate/acme/example/runs/7/run-a/shard-");
+    expect(redResultPrefix("acme/example", 7, "run-a")).not.toContain("evidence");
   });
 });

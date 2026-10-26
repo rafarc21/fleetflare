@@ -4106,7 +4106,7 @@ async function main(): Promise<void> {
     case "gate-protect":
       return cmdGateProtect(creds, parsed.repo);
     case "gate-log":
-      return cmdGateLog(creds, parsed.pr, parsed.leg, { runId: parsed.runId, full: parsed.full, all: parsed.all });
+      return cmdGateLog(creds, parsed.pr, parsed.leg, { runId: parsed.runId, full: parsed.full, all: parsed.all, evidence: parsed.evidence });
   }
 }
 

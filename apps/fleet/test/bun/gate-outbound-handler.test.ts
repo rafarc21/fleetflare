@@ -34,6 +34,10 @@ function fakeBucket(seed: Record<string, string> = {}) {
       const v = store.get(key);
       return v === undefined ? null : { size: v.length };
     },
+    async list({ prefix }) {
+      calls.push({ op: "list", key: prefix });
+      return { objects: [...store.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key })) };
+    },
     async put(key, value, opts) {
       calls.push({ op: "put", key, opts });
       if (opts?.onlyIf?.etagDoesNotMatch === "*" && store.has(key)) return null;
@@ -279,5 +283,157 @@ describe("PUT is scoped to the leg's own result key (GateOutbound props)", () =>
     const { bucket } = fakeBucket({ [BASELINE_KEY]: "TARBYTES" });
     const res = await handleGateOutbound(req("GET", `/${BASELINE_KEY}`), bucket, undefined);
     expect(res.status).toBe(200);
+  });
+});
+
+// #1343: a browser leg's spec evidence is written under its own evidence dir,
+// and only by a browser leg (props.evidenceKey). Plain legs deny every
+// evidence PUT; a browser leg never writes another leg's dir.
+describe("evidence PUT: scoped to the browser leg's own evidence dir (#1343)", () => {
+  const EVIDENCE = "gate/acme/example/runs/715/run-a/evidence/shard-e2e/console.json";
+  const OTHER_EVIDENCE = "gate/acme/example/runs/715/run-a/evidence/shard-other/console.json";
+  const EVIDENCE_DIR = "gate/acme/example/runs/715/run-a/evidence/shard-e2e/";
+
+  it("an evidence key resolves to STUDIO_ARCHIVE, alongside results and baselines", () => {
+    expect(resolveOutboundTarget(`/${EVIDENCE}`)).toEqual({ bucket: "STUDIO_ARCHIVE", key: EVIDENCE });
+  });
+
+  it("a browser leg PUTs its own evidence write-once (201), then 412", async () => {
+    const { bucket, store } = fakeBucket();
+    const props: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: EVIDENCE_DIR };
+    const first = await handleGateOutbound(req("PUT", `/${EVIDENCE}`, { body: "{}" }), bucket, props);
+    expect(first.status).toBe(201);
+    expect(store.has(EVIDENCE)).toBe(true);
+    const second = await handleGateOutbound(req("PUT", `/${EVIDENCE}`, { body: "{}" }), bucket, props);
+    expect(second.status).toBe(412);
+  });
+
+  it("a browser leg cannot PUT another leg's evidence dir (403)", async () => {
+    const { bucket, calls } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${OTHER_EVIDENCE}`, { body: "{}" }), bucket, { resultKey: RUN_KEY, evidenceKey: EVIDENCE_DIR });
+    expect(res.status).toBe(403);
+    expect(calls.length).toBe(0);
+  });
+
+  it("a plain leg (no evidenceKey) denies every evidence PUT (403)", async () => {
+    const { bucket, calls } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${EVIDENCE}`, { body: "{}" }), bucket, OWN);
+    expect(res.status).toBe(403);
+    expect(calls.length).toBe(0);
+  });
+
+  it("an evidence key with traversal or a non-shard name is refused", () => {
+    expect(resolveOutboundTarget("/gate/acme/example/runs/715/run-a/evidence/../x.json")).toBeNull();
+    expect(resolveOutboundTarget("/gate/acme/example/runs/715/run-a/evidence/shard-e2e.json/x")).toBeNull();
+    expect(resolveOutboundTarget("/gate/acme/example/runs/715/run-a/evidence/x.json")).toBeNull();
+  });
+
+  it("GET of a stored evidence file streams it, independent of props", async () => {
+    const { bucket } = fakeBucket({ [EVIDENCE]: "SCREENCAP" });
+    const res = await handleGateOutbound(req("GET", `/${EVIDENCE}`), bucket, undefined);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("SCREENCAP");
+  });
+});
+
+// #1343 HIGH3: a granted secret echoed into TEXT evidence is scrubbed before
+// it reaches R2. Screenshots (binary) are never scanned.
+describe("evidence PUT: text redaction (#1343 HIGH3)", () => {
+  const DIR = "gate/acme/example/runs/715/run-a/evidence/shard-e2e/";
+  const props: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: DIR, secretValues: ["sup3r-s3cret"] };
+
+  it("redacts a secret value out of console JSON evidence before R2", async () => {
+    const { bucket, store } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${DIR}console.json`, { body: '{"stdout":"token sup3r-s3cret leaked"}' }), bucket, props);
+    expect(res.status).toBe(201);
+    expect(store.get(`${DIR}console.json`)).toContain("«redacted»");
+    expect(store.get(`${DIR}console.json`)).not.toContain("sup3r-s3cret");
+  });
+
+  it("a leg with no secretValues stores text evidence untouched", async () => {
+    const { bucket, store } = fakeBucket();
+    const plain: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: DIR };
+    await handleGateOutbound(req("PUT", `/${DIR}console.json`, { body: '{"stdout":"ok"}' }), bucket, plain);
+    expect(store.get(`${DIR}console.json`)).toBe('{"stdout":"ok"}');
+  });
+
+  it("image evidence is never text-scanned (screenshots cannot be redacted)", async () => {
+    const { bucket, store } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${DIR}screenshot.png`, { body: "PNGBYTES" }), bucket, props);
+    expect(res.status).toBe(201);
+    expect(store.get(`${DIR}screenshot.png`)).toBe("PNGBYTES");
+  });
+});
+
+// #1343 MED6: image evidence gets a larger cap than the 1 MiB result cap, and
+// a leg may write at most MAX_EVIDENCE_FILES_PER_LEG per attempt dir.
+describe("evidence PUT: size + file-count caps (#1343 MED6)", () => {
+  const DIR = "gate/acme/example/runs/715/run-a/evidence/shard-e2e/";
+  const props: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: DIR };
+
+  it("a PNG over the 1 MiB result cap but under the image cap is accepted", async () => {
+    const { bucket, store } = fakeBucket();
+    // The image cap is 8 MiB; a 2 MiB declared body clears the image cap but
+    // would exceed the 1 MiB text cap.
+    const res = await handleGateOutbound(
+      req("PUT", `/${DIR}shot.png`, { headers: { "content-length": String(2 * 1024 * 1024) } }),
+      bucket, props,
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("a text file over 1 MiB is refused (413)", async () => {
+    const { bucket, calls } = fakeBucket();
+    const res = await handleGateOutbound(
+      req("PUT", `/${DIR}console.json`, { headers: { "content-length": String(2 * 1024 * 1024) } }),
+      bucket, props,
+    );
+    expect(res.status).toBe(413);
+    // The file-cap list may have run, but no PUT ever reaches the bucket.
+    expect(calls.some((c) => c.op === "put")).toBe(false);
+  });
+
+  it("a leg at the file cap is refused (413)", async () => {
+    const seeded: Record<string, string> = {};
+    for (let i = 0; i < 64; i++) seeded[`${DIR}file-${i}.txt`] = "x";
+    const { bucket } = fakeBucket(seeded);
+    const res = await handleGateOutbound(req("PUT", `/${DIR}one-more.txt`, { body: "y" }), bucket, props);
+    expect(res.status).toBe(413);
+  });
+});
+
+// #1343 r2 blocker 1: evidence JSON is walked whole — every string value,
+// arrays kept as arrays, nested objects scrubbed, shape preserved.
+describe("evidence PUT: deep JSON redaction (#1343 r2)", () => {
+  const DIR = "gate/acme/example/runs/715/run-a/evidence/shard-e2e/";
+  const props: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: DIR, secretValues: ["sup3r-s3cret"] };
+
+  it("redacts a console probe array entry's text, keeping it an array", async () => {
+    const { bucket, store } = fakeBucket();
+    const body = JSON.stringify([{ type: "log", text: "token sup3r-s3cret leaked" }]);
+    await handleGateOutbound(req("PUT", `/${DIR}console.json`, { body }), bucket, props);
+    const stored = JSON.parse(store.get(`${DIR}console.json`)!);
+    expect(Array.isArray(stored)).toBe(true);
+    expect(stored[0].type).toBe("log");
+    expect(stored[0].text).toContain("«redacted»");
+    expect(stored[0].text).not.toContain("sup3r-s3cret");
+  });
+
+  it("redacts a nested object's text, shape preserved", async () => {
+    const { bucket, store } = fakeBucket();
+    const body = JSON.stringify({ messages: [{ text: "secret is sup3r-s3cret" }], count: 2 });
+    await handleGateOutbound(req("PUT", `/${DIR}console.json`, { body }), bucket, props);
+    const stored = JSON.parse(store.get(`${DIR}console.json`)!);
+    expect(stored.messages[0].text).toContain("«redacted»");
+    expect(stored.messages[0].text).not.toContain("sup3r-s3cret");
+    expect(stored.count).toBe(2); // number untouched
+    expect(Array.isArray(stored.messages)).toBe(true); // nested array stays array
+  });
+
+  it("preserves non-string scalars and null exactly", async () => {
+    const { bucket, store } = fakeBucket();
+    const body = JSON.stringify({ a: true, b: 5, c: null, d: [1, 2, 3] });
+    await handleGateOutbound(req("PUT", `/${DIR}console.json`, { body }), bucket, props);
+    expect(JSON.parse(store.get(`${DIR}console.json`)!)).toEqual({ a: true, b: 5, c: null, d: [1, 2, 3] });
   });
 });

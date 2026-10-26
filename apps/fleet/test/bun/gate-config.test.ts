@@ -498,3 +498,23 @@ describe("parseGateBlock: lane timeouts (#1319)", () => {
     expect(parseGateBlock({ ...BLOCK, vitestTimeoutMin: null })).toBeNull();
   });
 });
+
+// #1343: a gate leg may be flagged `browser: true`. Its result is a real
+// verdict only when spec evidence exists; the flag must be a boolean, never
+// a silent plain leg on a typo.
+describe("parseGateBlock: browser flag (#1343)", () => {
+  it("reads browser:true onto the leg; a string leg has none", () => {
+    const cfg = parseGateBlock({ ...BLOCK, legs: [{ name: "e2e", cmd: "bun run e2e", browser: true }] });
+    expect(cfg?.legs).toEqual([{ name: "e2e", cmd: "bun run e2e", browser: true }]);
+    expect(parseGateBlock({ ...BLOCK, legs: ["e2e"] })?.legs[0]).toEqual({ name: "e2e", cmd: "bun run e2e" });
+  });
+  it("browser:false is read as absent (a plain leg)", () => {
+    const cfg = parseGateBlock({ ...BLOCK, legs: [{ name: "e2e", cmd: "c", browser: false }] });
+    expect(Object.hasOwn(cfg?.legs[0] ?? {}, "browser")).toBe(false);
+  });
+  it("null on a non-boolean browser flag", () => {
+    for (const browser of ["true", 1, null]) {
+      expect(parseGateBlock({ ...BLOCK, legs: [{ name: "e2e", cmd: "c", browser }] })).toBeNull();
+    }
+  });
+});

@@ -49,6 +49,9 @@ import {
 import { postGateStatus, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
 import { realStatusPort } from "./status-post-env";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
+import { browserLegsToCheck, enforceBrowserLegs, manifestProvesExecution, verdictEvidenceUrl } from "./browser-leg";
+import { evidenceKeyFor } from "./leg-env";
+import { finalLegKey } from "./log";
 
 export interface GateWorkflowParams {
   repo: string;
@@ -382,7 +385,52 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       }),
     );
 
-    const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
+    // #1343: a browser leg's result is a real verdict only when spec evidence
+    // exists. Zero specs (success, no evidence) or a skipped leg (no report at
+    // all) downgrade to RED DID-NOT-RUN. Evidence detection is one R2 list per
+    // browser leg, wrapped in a step so a Workflow replay returns the recorded
+    // set instead of re-listing.
+    // A CARRIED green browser leg (from a prior run, #1230) already passed its
+    // own run's enforcement, so its evidence lives under that run's prefix —
+    // re-checking it under THIS run's prefix would flip green->red DID-NOT-RUN
+    // on every infra/--failed-only rerun. Carried legs are exempt: enforcement
+    // (and the link decision) cover only browser legs this run dispatches.
+    const browserLegs = new Set(browserLegsToCheck(legs, carriedByLeg));
+    const evidenceByLeg = new Set<string>();
+    if (browserLegs.size > 0) {
+      const found = await step.do("list-browser-evidence", async () => {
+        const seen = new Set<string>();
+        // One list over the run prefix gives every result key, from which each
+        // browser leg's FINAL attempt key is resolved — evidence is keyed per
+        // attempt, so the final attempt's dir is the one that must hold the
+        // manifest (an earlier attempt's files never green a zero-spec retry).
+        const runKeys = (await this.env.STUDIO_ARCHIVE.list({ prefix: `gate/${owner}/${repoName}/runs/${pr}/${event.instanceId}/` }))
+          .objects.map((o) => o.key);
+        for (const planned of legs) {
+          if (planned.browser !== true || carriedByLeg.get(planned.leg)?.state === "success") continue;
+          const finalKey = finalLegKey(runKeys, planned.leg);
+          const dir = finalKey === null ? null : evidenceKeyFor(finalKey);
+          if (dir === null) continue;
+          // #1343 MED4: one stray screenshot is not proof specs ran. The leg's
+          // reporter must write a manifest.json declaring `executed > 0`; any
+          // other file (or a manifest with executed 0) does not green the leg.
+          const manifest = await this.env.STUDIO_ARCHIVE.get(`${dir}manifest.json`);
+          if (manifest === null) continue;
+          let proves = false;
+          try {
+            proves = manifestProvesExecution(await manifest.json());
+          } catch {
+            continue;
+          }
+          if (proves) seen.add(planned.leg);
+        }
+        return [...seen];
+      });
+      for (const leg of found) evidenceByLeg.add(leg);
+    }
+    const expectedLegs = legs.map((l) => l.leg);
+    const enforced = enforceBrowserLegs(expectedLegs, results, browserLegs, evidenceByLeg);
+    const verdict = aggregateVerdict(expectedLegs, enforced);
     const final: Exclude<Verdict, { state: "pending" }> =
       verdict.state === "pending" ? { state: "error", description: "no legs reported" } : verdict;
 
@@ -390,7 +438,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // ending red. Its pending status goes up first, so the rerun's own status
     // cannot be overwritten by this run's. A failed start falls through to the
     // final error verdict below.
-    if (final.state === "error" && infraRerunDecision(results, event.payload.rerunOf)) {
+    if (final.state === "error" && infraRerunDecision(enforced, event.payload.rerunOf)) {
       const rerunId = rerunInstanceId(event.instanceId);
       // The progress stamp goes first, so the watchdog never reads this run as stalled mid-start (#1148 review).
       await step.do("post-infra-rerun", STATUS_POST_STEP_CONFIG, async () => announceInfraRerun({
@@ -408,7 +456,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
             // rerun only dispatches the infra-failed ones.
             carryGreen: {
               headSha: resolved.headSha, baseSha: resolved.baseSha, planFingerprint: fingerprint,
-              legs: greenLegsOf(results),
+              legs: greenLegsOf(enforced),
             },
           },
         }),
@@ -426,7 +474,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // A step result cached before the outcome became a string replays as `true` (#1150 review).
       if (rerunStarted(started)) {
         return {
-          rerun: rerunId, statusPostFailed: false, legs: outcomeLegs(results),
+          rerun: rerunId, statusPostFailed: false, legs: outcomeLegs(enforced),
           baseSha: resolved.baseSha, planFingerprint: fingerprint, headSha: resolved.headSha,
         };
       }
@@ -445,7 +493,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // with a different base. The guard runs before the post; a failure or error
     // verdict posts as-is.
     const verdictArgs = verdictToStatusArgs(final, {
-      expected: legs.map((l) => l.leg), results, runId: event.instanceId,
+      expected: expectedLegs, results: enforced, runId: event.instanceId,
     });
     const shared = await step.do("shared-head-guard-verdict", async () =>
       sharedHeadLookup(mintToken, repo, resolved.headSha))
@@ -455,13 +503,18 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         { state: "success", description: verdictArgs.description })
       : verdictArgs;
     await step.do("post-verdict", STATUS_POST_STEP_CONFIG, async () =>
-      postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
+      postGateStatus(this.statusPort(), repo, resolved.headSha, {
+        ...guarded,
+        // #1343: the verdict carries a target_url to the run's evidence
+        // overview whenever any browser leg ran. A plain run posts no link.
+        ...(browserLegs.size === 0 ? {} : { targetUrl: verdictEvidenceUrl(this.env.WORKER_PUBLIC_URL, repo, pr, event.instanceId) }),
+      }));
     // Per-leg output (#1049) rides in the final result, in plan order. #1214
     // round 2: `guarded` (not `final`) rides, so a downgraded success reports
     // failure here exactly as GitHub sees it. #1230: baseSha/planFingerprint ride
     // too, so a later `--failed-only` rerun can validate its own carry against them.
     return {
-      ...guarded, statusPostFailed: false, legs: outcomeLegs(results),
+      ...guarded, statusPostFailed: false, legs: outcomeLegs(enforced),
       baseSha: resolved.baseSha, planFingerprint: fingerprint, headSha: resolved.headSha,
     };
   }

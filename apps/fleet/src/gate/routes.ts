@@ -20,7 +20,8 @@ import { isGateRunnerRepo } from "./config";
 import { gateDraining } from "./drain";
 import { greenLegsOf, type CarryGreen, type OutcomeLeg } from "./fanout";
 import { rerunInstanceId, statusFollowingRerun } from "./infra-rerun";
-import { finalLegKey, failingLines, firstFailingTest, legAttemptKeys, type LegOutput } from "./log";
+import { finalLegKey, failingLines, firstFailingTest, legAttemptKeys, resultKeysPrefix, type LegOutput } from "./log";
+import { evidenceKeyFor } from "./leg-env";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
 // Env; until then this cast keeps this module typechecking. Drop it then.
@@ -127,7 +128,7 @@ async function gateRunStatusSafe(env: Env, runId: string): Promise<Response> {
  *  extracted. A bare throw must never reach the caller: it maps to JSON 404
  *  (no run / no leg) or 500, the same shape gateRunStatusSafe uses. */
 async function gateLegLogSafe(
-  env: Env, repo: string, pr: number, leg: string, runId?: string, all = false,
+  env: Env, repo: string, pr: number, leg: string, runId?: string, all = false, evidence = false,
 ): Promise<Response> {
   try {
     const index = d1RunIndex(env.DB);
@@ -136,8 +137,21 @@ async function gateLegLogSafe(
     const token = await repoTokenMinter(env)(repo);
     const canonical = (await getPullRequest(token, repo, pr)).repoFullName;
     const prefix = `gate/${canonical}/runs/${pr}/${run.runId}/`;
-    const listed = await env.STUDIO_ARCHIVE.list({ prefix });
+    // #1343 MED6: result keys live under the `shard-` prefix, evidence under
+    // `evidence/`. Listing the whole run prefix would let >1000 evidence files
+    // (one page) crowd out the result keys the leg-log logic reads. List the
+    // result prefix so evidence volume never hides a result.
+    const listed = await env.STUDIO_ARCHIVE.list({ prefix: resultKeysPrefix(prefix) });
     const keys = listed.objects.map((o) => o.key);
+    if (evidence) {
+      // #1343: the leg's evidence files, listed for `fleet gate log --evidence`.
+      // The evidence dir is derived from the leg's FINAL result key, so the
+      // try/retry variant does not change where evidence lives (evidence is
+      // per-leg, keyed by run+leg). No result at all -> no evidence dir.
+      const finalKey = finalLegKey(keys, leg);
+      const evidenceKeys = finalKey === null ? [] : await listEvidenceKeys(env.STUDIO_ARCHIVE, evidenceKeyFor(finalKey));
+      return j({ repo, pr, leg, runId: run.runId, evidence: evidenceKeys.map(evidenceLine) });
+    }
     const key = finalLegKey(keys, leg);
     if (key === null) return j({ error: `no result for leg ${leg}`, runId: run.runId }, 404);
     if (all) {
@@ -182,6 +196,32 @@ async function gateLegLogSafe(
     if (/not[ _.-]?found/i.test(message)) return j({ error: `no such gate run or leg`, pr, leg }, 404);
     return j({ error: `gate log unavailable: ${redactSecrets(message)}` }, 500);
   }
+}
+
+/** The minimal R2 shape evidence listing needs. The real R2Bucket satisfies it. */
+interface EvidenceBucket {
+  list(opts: { prefix: string }): Promise<{ objects: { key: string }[] }>;
+  get(key: string): Promise<{ body: ReadableStream | null; size: number } | null>;
+}
+
+/** #1343: every evidence key under a prefix, sorted for stable output. */
+async function listEvidenceKeys(bucket: EvidenceBucket, prefix: string | null): Promise<string[]> {
+  if (prefix === null) return [];
+  const listed = await bucket.list({ prefix });
+  return listed.objects.map((o) => o.key).sort();
+}
+
+/** One evidence file as `fleet gate log --evidence` prints it: its R2 key and
+ *  the Worker's own serve URL (Access-gated, no credential). */
+function evidenceLine(key: string): { key: string; url: string } {
+  return { key, url: `/studio/gate/evidence/${key.split("/").map(encodeURIComponent).join("/")}` };
+}
+
+/** The evidence overview for a run: every evidence file under the run's
+ *  evidence prefix, each with its serve URL. The verdict's target_url points
+ *  here, so the operator opens one link and sees every leg's screens. */
+async function evidenceLinesFor(bucket: EvidenceBucket, prefix: string): Promise<{ key: string; url: string }[]> {
+  return (await listEvidenceKeys(bucket, prefix)).map(evidenceLine);
 }
 
 /** #1230: the carry for a `--failed-only` rerun, built from the PR's latest
@@ -232,6 +272,70 @@ async function carryGreenFromLatestRun(
       { leg: l.leg, state: "success" as const, description: l.description, ms: l.ms, summary: l.summary }
     )),
   };
+}
+
+/** The R2 key a /studio/gate/evidence file path names, or null when it is not
+ *  an evidence key (the same shape outbound-handler.ts's EVIDENCE_RE pins for
+ *  the container's writes — a serve path outside it is never read). */
+const EVIDENCE_FILE_RE = /^gate\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/runs\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/evidence\/shard-[a-z0-9-]+(?:@head)?(?:-try\d+)?(?:\.retry)?\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+
+/** #1343 LOW: the content type of one evidence file by extension, with
+ *  `nosniff` on every serve so a browser never guesses a type the bytes do not
+ *  declare (a JSON file must never be sniffed as HTML). */
+function evidenceContentType(key: string): string {
+  if (/\.json$/i.test(key)) return "application/json";
+  if (/\.png$/i.test(key)) return "image/png";
+  if (/\.jpe?g$/i.test(key)) return "image/jpeg";
+  if (/\.webp$/i.test(key)) return "image/webp";
+  if (/\.txt$/i.test(key)) return "text/plain";
+  if (/\.md$/i.test(key)) return "text/markdown";
+  return "application/octet-stream";
+}
+
+/** Serve one evidence file, or list a run's evidence when no file is named.
+ *  The run overview (the verdict target_url) lists every evidence file under
+ *  the run's evidence prefix; the file path serves one blob. Both Access-gated
+ *  like the rest of the gate route, so the operator's browser opens them. */
+async function gateEvidenceSafe(env: Env, url: URL, file: string): Promise<Response> {
+  try {
+    // Same runner switch as /status and /log: off, or the target repo not
+    // gated in, is a 404 — never a read of evidence the runner does not back.
+    if (env.FLEET_GATE_RUNNER !== "on") return j({ error: "gate runner not enabled for this repo" }, 404);
+    // #1343 MED5: the CLI encodes `@` as `%40` in evidence links. Decode the
+    // file path before the shape match, so a @head leg's dir resolves; the
+    // match itself then re-pins the exact evidence shape (traversal, a result
+    // JSON, a baseline) as a 404, never a read.
+    const decoded = file === "" ? "" : decodeURIComponent(file);
+    const key = decoded === "" ? "" : EVIDENCE_FILE_RE.test(decoded) ? decoded : "";
+    if (decoded !== "" && key === "") return j({ error: "not found" }, 404);
+    if (key !== "") {
+      const obj = await env.STUDIO_ARCHIVE.get(key);
+      if (obj === null) return j({ error: "not found" }, 404);
+      return new Response(obj.body, {
+        headers: {
+          "content-length": String(obj.size), "content-type": evidenceContentType(key), "x-content-type-options": "nosniff",
+        },
+      });
+    }
+    const repo = url.searchParams.get("repo");
+    const pr = Number(url.searchParams.get("pr"));
+    const run = url.searchParams.get("run");
+    if (!repo || !Number.isInteger(pr) || pr <= 0 || !run) {
+      return j({ error: "repo, pr and run required" }, 400);
+    }
+    if (!isGateRunnerRepo(env.GATE_RUNNER_REPOS, repo)) return j({ error: "gate runner not enabled for this repo" }, 404);
+    // Evidence overview: list under the run's evidence prefix, resolved
+    // canonical-repo-first so keys match R2's case-sensitive store (#1119).
+    const token = await repoTokenMinter(env)(repo);
+    const canonical = (await getPullRequest(token, repo, pr)).repoFullName;
+    const prefix = `gate/${canonical}/runs/${pr}/${run}/evidence/`;
+    const lines = await evidenceLinesFor(env.STUDIO_ARCHIVE, prefix);
+    return j({ repo, pr, run, evidence: lines });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/not[ _.-]?found/i.test(message)) return j({ error: `no such gate run or evidence` }, 404);
+    return j({ error: `gate evidence unavailable: ${redactSecrets(message)}` }, 500);
+  }
 }
 
 export async function handleGateRoute(
@@ -324,10 +428,19 @@ export async function handleGateRoute(
     if (!Number.isInteger(pr) || pr <= 0) return j({ error: "pr required as a positive integer" }, 400);
     if (!/^[a-z0-9][a-z0-9-]{0,39}(?:@head(?:-\d+)?)?$/.test(leg)) return j({ error: "leg required" }, 400);
     // Only all=1 / all=true means --all; any other value (or none) is the
-    // single-key final-try read (#1318 r1).
+    // single-key final-try read (#1318 r1). evidence=1 lists the leg's
+    // evidence files instead (for `fleet gate log --evidence`, #1343).
     const allParam = url.searchParams.get("all");
     const all = allParam === "1" || allParam === "true";
-    return await gateLegLogSafe(env, repo, pr, leg, url.searchParams.get("run") ?? undefined, all);
+    const evidenceParam = url.searchParams.get("evidence");
+    const evidence = evidenceParam === "1" || evidenceParam === "true";
+    return await gateLegLogSafe(env, repo, pr, leg, url.searchParams.get("run") ?? undefined, all, evidence);
+  }
+
+  // #1343: serve one evidence file (a screenshot, a console JSON), and list the
+  // run's evidence when no file is named (the verdict target_url lands here).
+  if (url.pathname.startsWith("/studio/gate/evidence") && req.method === "GET") {
+    return await gateEvidenceSafe(env, url, url.pathname.slice("/studio/gate/evidence".length).replace(/^\/+/, ""));
   }
 
   return j({ error: "not found" }, 404);

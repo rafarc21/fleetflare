@@ -105,6 +105,14 @@ export function legAttemptKeys(keys: string[], leg: string): string[] {
   return own.sort((a, b) => rank(a) - rank(b));
 }
 
+/** #1343 MED6: the listing prefix for a run's RESULT keys (its `shard-` files),
+ *  never the whole run prefix. Evidence lives under `evidence/`, so scoping to
+ *  `shard-` keeps a flood of evidence files from crowding a result out of one
+ *  listing page. Pure, so a test pins it. */
+export function resultKeysPrefix(runPrefix: string): string {
+  return `${runPrefix}shard-`;
+}
+
 /** The first named failing test in one attempt's output (#1318): vitest's
  *  "FAIL <file> > <suite> > <name>" (or its "✕ <name>" line), or bun test's
  *  "(fail) <name>". Null when the tail names none — a hung leg writes no

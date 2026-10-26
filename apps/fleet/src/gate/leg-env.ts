@@ -30,6 +30,10 @@ export interface GateLegRequest {
   bundleKey?: string;
   /** #1080 HIGH 1: the PR's merge base. Sent only with a bundle key: a snapshot leg merges with it. */
   mergeBase?: string;
+  /** #1343: this leg is a browser leg. Its result is a real verdict only when
+   *  spec evidence (screens, console JSON) exists under the evidence prefix.
+   *  Absent: a plain leg, no evidence contract. */
+  browser?: boolean;
   /** #1346: the secret NAMEs this leg is granted — already fully gated by
    *  secrets-scope.ts's grantedSecretNames in workflow.ts (fork guard +
    *  OPS-repo allowlist + registry membership) before this request is ever
@@ -63,6 +67,9 @@ export function buildLegEnvVars(req: GateLegRequest, secretValues?: Record<strin
     ...(req.bundleKey === undefined ? {} : { GATE_BUNDLE_KEY: req.bundleKey }),
     ...(req.bundleKey === undefined || req.mergeBase === undefined ? {} : { GATE_MERGE_BASE: req.mergeBase }),
     ...buildSecretEnvVars(secretValues),
+    // #1343: a browser leg's evidence dir. Absent on a plain leg, so a plain
+    // leg's container never learns an evidence path to write.
+    ...(req.browser === true && evidenceKeyFor(req.resultKey) !== null ? { GATE_EVIDENCE_DIR: evidenceKeyFor(req.resultKey)! } : {}),
   };
 }
 
@@ -98,14 +105,26 @@ export async function legGitToken(
   return mint(`${req.owner}/${req.repo}`);
 }
 
-/** The interceptor's props for this leg: its own result key. A private leg with
- *  a minted token also gets the one repo the git proxy will serve and that token.
- *  A public leg, or a private leg with no token, gets no repo and no token, so
- *  the git proxy 403s for it. `secretValues`' own VALUES (never its names) ride
- *  along as `props.secretValues` (#1346): the one thing the outbound handler's
- *  PUT path needs to redact a granted secret out of this leg's own result
- *  before it reaches R2 — see secrets-redact.ts. Nothing else is granted to
- *  the container. */
+/** #1343: the evidence dir one browser leg writes its spec evidence under,
+ *  derived from the leg's own result key — same run+leg keying, sibling path
+ *  to the result JSON. The ATTEMPT variant (`.retry`, `-tryN`) is part of the
+ *  dir, so an earlier attempt's files never green a later zero-spec retry and
+ *  a retry's re-upload never hits the first attempt's write-once key (MED4).
+ *  Pure so it is pinned by a test and shared by every caller (the container
+ *  env, the outbound props and the verdict link). */
+export function evidenceKeyFor(resultKey: string): string | null {
+  const m = /^(gate\/[^/]+\/[^/]+\/runs\/[^/]+\/[^/]+\/)(shard-[a-z0-9-]+(?:@head)?(?:-try\d+)?(?:\.retry)?)\.json$/.exec(resultKey);
+  if (m === null) return null;
+  return `${m[1]}evidence/${m[2]}/`;
+}
+
+/** The interceptor's props for this leg: its own result key, and (for a
+ *  browser leg) its own evidence dir. A private leg with a minted token also
+ *  gets the one repo the git proxy will serve and that token. A public leg, or
+ *  a private leg with no token, gets no repo and no token, so the git proxy
+ *  403s for it. `secretValues`' own VALUES (never names) ride along as
+ *  props.secretValues (#1346): the outbound handler's PUT paths redact each
+ *  out of this leg's own result and evidence before either reaches R2. */
 export function gateOutboundProps(
   req: GateLegRequest, gitToken?: string, secretValues?: Record<string, string>,
 ): GateOutboundProps {
@@ -113,8 +132,10 @@ export function gateOutboundProps(
     ...(req.bundleKey === undefined ? {} : { bundleKey: req.bundleKey }),
     ...(req.bundleKey !== undefined && req.leg === BUNDLE_LEG ? { bundleWriter: true } : {}),
   };
+  const evidenceKey = req.browser === true ? evidenceKeyFor(req.resultKey) : null;
+  const evidence = evidenceKey === null ? {} : { evidenceKey };
   const values = Object.values(secretValues ?? {}).filter((v) => v !== "");
   const secrets = values.length === 0 ? {} : { secretValues: values };
-  if (req.private !== true || gitToken === undefined) return { resultKey: req.resultKey, ...bundle, ...secrets };
-  return { resultKey: req.resultKey, repo: `${req.owner}/${req.repo}`, gitToken, ...bundle, ...secrets };
+  if (req.private !== true || gitToken === undefined) return { resultKey: req.resultKey, ...evidence, ...bundle, ...secrets };
+  return { resultKey: req.resultKey, repo: `${req.owner}/${req.repo}`, gitToken, ...evidence, ...bundle, ...secrets };
 }

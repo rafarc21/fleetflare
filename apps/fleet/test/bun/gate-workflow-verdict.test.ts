@@ -63,3 +63,17 @@ describe("verdictToStatusArgs: the roster description", () => {
     expect(args.description).toMatch(/^0\/60 green; red: vitest-1, .*, \+\d+ more \(run 0123456789abcdef\)$/);
   });
 });
+
+// #1343 LOW: a DID-NOT-RUN browser leg is named in the roster, not just "red".
+describe("verdictToStatusArgs: DID-NOT-RUN roster text (#1343 LOW)", () => {
+  it("names a DID-NOT-RUN leg with its marker", () => {
+    const args = verdictToStatusArgs({ state: "failure", description: "DID-NOT-RUN: e2e (no spec evidence)" }, {
+      expected: ["merge-tree", "e2e"], runId: RUN_ID,
+      results: [
+        green("merge-tree"),
+        { leg: "e2e", state: "failure", description: "DID-NOT-RUN: e2e (no spec evidence)" },
+      ],
+    });
+    expect(args.description).toContain("e2e (DID-NOT-RUN)");
+  });
+});
