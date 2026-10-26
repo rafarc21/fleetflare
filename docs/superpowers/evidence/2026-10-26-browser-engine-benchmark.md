@@ -5,19 +5,26 @@ Refs #1134.
 
 ## Verdict up front
 
-**In-container Chrome stays the engine for a real e2e leg. CF Browser Run is
-not a drop-in replacement today, and the data that exists says the
-decoupling it offers does not pay for itself on the leg wall it adds.**
+**In-container Chrome stays the engine for a real e2e leg. Browser Run is
+viable, but slower on every axis measured and needs a driver co-located on
+Cloudflare plus non-quick-tunnel reachability.**
 
-Two independent reasons, only one of which needed measuring:
+Measured, same 9-step suite on both:
 
-1. **CF Browser Run still does not run this repo's e2e suites.** Playwright's
-   Test runner is, in CF's own words, "not yet fully supported" (only
-   Assertions are) — https://developers.cloudflare.com/browser-run/playwright/.
-   A gate e2e leg runs `playwright test`, so Browser Run cannot back it as-is.
-   This is a product gap, not a performance number.
-2. **Measured (this spike): in-container Chrome is fast and stable, and the
-   reachability a remote engine needs adds real latency to the leg wall.**
+| axis | in-container Chrome | Browser Run (best set) | ratio |
+|---|---|---|---|
+| leg wall p50 | 136 ms | 272 ms | 2.0× |
+| leg wall p95 | 201 ms | 547 ms | 2.7× |
+| cold start p50 | 512 ms | 613 ms | 1.2× |
+| bridge reachability p50 | +44 ms | +~170 ms | ~4× |
+| flake rate | 0/24 | 0 | tie |
+
+Browser Run is also subject to a batch-level variance anomaly (one 24-run
+batch at 1840 ms p50 vs 272 ms elsewhere, unexplained — see below), which
+Chrome did not exhibit. The decoupling Browser Run offers does not pay for
+itself on the leg wall: the browser process moves off-container, but the
+app-under-test and test orchestration stay in a container, and every
+assertion still crosses the reachability hop.
 
 ## What was measured
 
@@ -60,19 +67,56 @@ The tunnel adds ~44 ms p50 to the leg wall. A remote engine pays this on
 EVERY assertion that touches the app, not once — the per-step latency, not the
 boot latency, is the tax. Per-PR preview deploy would add deploy wall on top.
 
-### CF Browser Run (NOT measured live)
+### CF Browser Run (measured by maestro, PARTIAL — host reboot cut the run short)
 
-The `browser-run` driver is committed and type-correct against
-playwright-core 1.63 (`connectOverCDP` with the `headers` option), ready to
-run the instant an account id + Bearer token exist. It was not run because a
-studio container holds no Cloudflare credential by design (house rule), and
-`fleet creds get browser-*` is not allowlisted for this repo. See
-"Credential gap," below.
+Run by the maestro locally (Mac, wrangler OAuth, throwaway Worker with a
+`browser` binding, `@cloudflare/playwright@1.3.6`, browser colo MAD), same
+9-step suite. Raw per-run samples were lost to the reboot; only the
+aggregates below survived, recorded in
+`scripts/bench/browser/out/browser-run/results.json`.
 
-Recon facts carried into the driver (task-provided, CF-doc-confirmed):
-endpoint `wss://api.cloudflare.com/client/v4/accounts/{accountId}/browser-run/devtools/browser`,
-Bearer auth, `keep_alive` ≤ 1200000 ms, limits 200 concurrent / 3 new/s /
-60 s idle close.
+| metric (ms) | n | p50 | p95 | flakes |
+|---|---|---|---|---|
+| leg, in-Worker driver, Worker-served fixture (interleaved) | 18 | 272 | 547 | 0 |
+| leg, in-Worker driver, tunnel bridge (interleaved) | 18 | 446 | 796 | 0 |
+| leg, in-Worker driver, Worker fixture (batch 1 — ANOMALY) | 24 | 1840 | 2089 | 0 |
+| leg, in-Worker driver, tunnel bridge (batch 1) | 24 | 406 | 761 | 0 |
+| cold session start (acquire + connect) | 12 | 613 | 1127 | 0 |
+| — acquire / connect | 12 | 493 / 124 | 989 / 325 | |
+| cold start, Mac wall incl RTT | 12 | 839 | 2045 | |
+| leg, Mac-side stock playwright CDP driver, Worker fixture | 24 | 873 | 1098 | 0 |
+| leg, Mac-side CDP driver, tunnel bridge | 12 | 1412 | 2391 | 0 |
+
+**Batch-1 Worker-fixture anomaly:** one batch shows newPage p50 383 ms where
+everywhere else it is ~80 ms, and the interleaved rerun lands 213–547 ms.
+Not root-caused before the reboot — treated as variance evidence: the same
+config spans 4× across sessions. Best-set Browser Run leg (interleaved,
+in-Worker) is 272/547; the honest spread is 272–1840 p50.
+
+**Reachability finding (hard blocker for the tunnel option):** Browser Run →
+`*.trycloudflare.com` quick tunnel is **403 "Your request was blocked"** at
+the CF edge, UA override no help. A Worker `fetch()` to the same tunnel works
+(p50 26 ms). Workaround: browser → bench Worker `/t/*` proxy → quick tunnel →
+fixture. So a real Browser Run gate leg needs a real per-PR preview deploy
+(or a named tunnel), not a quick tunnel.
+
+**RTT / confounders:** Mac→CF TCP p50 22 ms, Mac→Worker HTTP p50 76 ms,
+Mac→tunnel p50 49 ms, CF(MAD)→tunnel→Mac p50 26 ms. The Mac-side CDP driver
+pays Mac→CF RTT per step; the in-Worker driver does not. A gate container
+sits closer to CF than the Mac, so the Mac-side rows are an upper bound, not
+the gate's own number.
+
+**Playwright Test runner — corrected finding:** with a `connectOverCDP`
+browser-fixture override at worker scope, the stock `@playwright/test` runner
+**does work**: 12/12 pass, 1.0–2.4 s per test (one 12.2 s outlier). Native
+`use.connectOptions` (playwright server protocol) does **not**: `browserType.connect:
+Error: Cannot find object to "undefined": undefined`. So the earlier
+"runner not yet fully supported" phrasing means the native connect path, not
+`connectOverCDP`.
+
+**Auth:** wrangler OAuth token gets 401 on the Browser Run REST endpoint; a
+scoped API token could not be minted (9109), so the binding path (option a)
+was used, not the direct wss endpoint.
 
 ## Cost model (USD per run)
 
@@ -88,64 +132,63 @@ other gate leg. One standard-4 instance, 10 min active, is ≈ **$0.066/run**
 (the spec's own upper-bound figure). The browser adds its ~0.5 s cold boot to
 that, not a separate billing line.
 
-**CF Browser Run — $0.09/h after a 10 h/mo inclusion.** A browser leg that
-holds a session for a 10-min leg pays ≈ **$0.015** in Browser Run time, and
-$0 while under the monthly inclusion. But it does not remove the container:
-the app-under-test (dev server) and the test orchestration still run in a
-container, so the container cost does not go away. Browser Run replaces only
-the browser process, at the price of the reachability hop above plus a remote
-connect (typically 1–3 s) per leg.
+**CF Browser Run — $0.09/h after a 10 h/mo inclusion, ~$0.00003–0.00004/leg.**
+Maestro's estimate: one leg ≈ 1–1.5 s of browser time (start + leg + close),
+so the 10 h/mo inclusion covers ~24k–36k legs free, then ~$0.00004/leg.
+Billing granularity not verified. It does not remove the container: the
+app-under-test (dev server) and test orchestration still run in a container,
+so the container cost does not go away. Browser Run replaces only the browser
+process, at the price of the reachability hop plus a remote cold start
+(~613 ms p50 in-Worker, ~839 ms Mac-wall).
 
-**The decoupling does not obviously pay.** The operator's own note in the
-task ("decoupling may lose efficiency; data decides") is what the tunnel
-measurement bears out: moving the browser off-container costs ~44 ms p50 per
-suite pass in added hop latency and still keeps the container for the app,
-while saving only the ~0.5 s browser boot and the chromium memory/CPU inside
-that container. For a smoke check on a public URL (no app-in-container to
-reach), Browser Run is a real win — zero container, zero tunnel. For a gate
-e2e leg against an in-container dev server, it is not.
+**The decoupling does not pay.** The operator's note in the task
+("decoupling may lose efficiency; data decides") is what the data bears out:
+Browser Run's best leg wall is 2.0× Chrome's (272 vs 136 ms p50), its cold
+start is 1.2× (613 vs 512 ms), its bridge cost is ~4× (+170 vs +44 ms p50),
+and it still keeps the container for the app. Where Browser Run wins outright
+is a smoke check on a public URL — no app-in-container, no tunnel, no
+container vCPU spend.
 
-## Playwright Test runner support (current)
+## Playwright Test runner support (measured, corrected)
 
-Per https://developers.cloudflare.com/browser-run/playwright/: "The following
-capabilities are not yet fully supported, but we're actively working on
-them" — first item "Playwright Test except Assertions." `connectOverCDP` from
-any Node environment works; a full `playwright test` run over CDP does not.
-This alone forecloses Browser Run for this repo's e2e suites today, whatever
-the latency numbers say.
+The docs' "Playwright Test except Assertions" limitation is about the native
+`use.connectOptions` path, not `connectOverCDP`:
+
+- **`connectOverCDP` browser-fixture override at worker scope: works.** 12/12
+  tests pass, 1.0–2.4 s per test (one 12.2 s outlier). A gate e2e leg could
+  run this repo's `playwright test` suites over Browser Run today via a
+  fixture override — no runner support blocker.
+- **Native `use.connectOptions` (playwright server protocol): does not work.**
+  `browserType.connect: Error: Cannot find object to "undefined": undefined`.
+
+So the deciding factor is latency, not the runner.
 
 ## Recommendation
 
 1. **Real e2e leg: in-container Chromium.** Proven (this repo's own
    `bun-test` lane already drives it through `ego-browser`), measured
-   (~140 ms p50, 0 flake), and it runs the actual `playwright test` runner.
+   (~140 ms p50, 0 flake, no batch-level variance), and it runs the actual
+   `playwright test` runner with no fixture override.
 2. **Smoke check on a public URL: CF Browser Run.** No app-in-container, no
    tunnel, no container vCPU spend — the one shape where decoupling is a
    straight win. Config-gated, not a hard-coded switch, same posture as the
    existing `fleet.json` gate block.
-3. **Re-evaluate when Browser Run ships the Test runner.** The blocker is the
-   runner gap, not the numbers; if it closes, re-run this harness
-   (`bun scripts/bench/browser/run.ts browser-run --runs 12 --target …`) and
-   the latency question becomes the deciding one.
+3. **Do not treat Browser Run as the e2e path unless a rerun closes the
+   gaps.** The partial data is enough to keep Chrome primary; the two open
+   questions below (batch-1 4× variance root cause, and n=24 interleaved per
+   config) are what a rerun should answer before any re-evaluation.
 
-## Credential gap — needs operator
+## Open — a full rerun would close these
 
-The one piece this spike could not measure live is Browser Run's own leg wall
-and boot overhead, because no Cloudflare credential exists in this container
-and `fleet creds get` does not allowlist a browser token for this repo. To
-close it, one of:
-
-- operator allowlists a `fleet cred` (account id + Bearer token) for this
-  repo, or
-- operator runs the two browser-run commands below from their own session
-  (a throwaway Worker on the CF account is fine; delete after).
-
-```sh
-CF_BROWSER_ACCOUNT_ID=… CF_BROWSER_TOKEN=… \
-  bun scripts/bench/browser/run.ts browser-run --runs 12 --target https://<tunnel-or-preview>/
-CF_BROWSER_ACCOUNT_ID=… CF_BROWSER_TOKEN=… \
-  bun scripts/bench/browser/cold-boot.ts browser-run
-```
+1. **Root-cause the batch-1 4× variance** (1840 ms vs 272 ms p50, same
+   config). If that is a slow-browser-instance draw, it is a real tail risk
+   Chrome does not show.
+2. **n=24 interleaved per config, cold n≥24, per-step breakdown** — the
+   partial run's n=18 interleaved and n=12 cold are below the task's ≥10 but
+   the reboot truncated the interleaved sets before they reached 24.
+3. **Browser Run reachability for a real gate leg** — quick tunnel is 403 from
+   Browser Run; the workaround is a bench Worker proxy. A per-PR preview
+   deploy (or a named tunnel) needs a live test, not the quick-tunnel proxy.
 
 ## Reproduction
 
