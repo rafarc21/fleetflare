@@ -610,16 +610,11 @@ function runLeg(
 ): Promise<LegRunResult> {
   return runLegStep(
     { do: (name, config, fn) => step.do(name, config, fn) },
-    async (leg, attemptId, signal, tryNo) => {
+    async (leg, attemptId, signal) => {
       // Scoped by run instance, leg AND attempt: two PRs gating the same leg name
       // must never share one container, one leg per container is the DO's
       // contract, and a retry must never reuse a DO a prior attempt is tearing down (#1068).
       const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(gateRunnerName(instanceId, leg.leg, attemptId)));
-      // #1387: only a leg's FIRST attempt on a step is real progress. An infra
-      // retry of the same step re-runs the same work on a fresh container, so it
-      // must not stamp the run — the watchdog has to see a retry loop for the
-      // hang it is, not a live run that keeps "progressing".
-      if (tryNo === 1) await touch();
       // The signal ends a hung DO call at the attempt deadline, so it cannot hold the step open (#1135).
       return stub.fetch("https://gate-runner/run-leg", {
         method: "POST",
@@ -633,6 +628,9 @@ function runLeg(
       readResult: legResultReader(env.STUDIO_ARCHIVE),
       // #1321: desync the retry-<leg> steps so N red legs do not clone in lockstep.
       retryJitterMs: RETRY_LEG_JITTER_MS,
+      // #1387: stamp progress only on a step's first attempt (runLegStep calls
+      // this on tryNo === 1). An infra retry of the same step does not stamp.
+      touch,
     },
   );
 }

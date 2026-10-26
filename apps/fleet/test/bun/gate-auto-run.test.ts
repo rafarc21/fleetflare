@@ -6,7 +6,7 @@
 // decisions themselves are pure.
 import { describe, it, expect } from "bun:test";
 import { MAX_LEG_TIMEOUT_MIN } from "../../src/gate/config";
-import { legStepDeadlineMs } from "../../src/gate/leg-run";
+import { legStepDeadlineMs, totalLegWallMs } from "../../src/gate/leg-run";
 import {
   autoRunPullRequest, gateRunId, GATE_STALL_MS, markRunProgress, pullRequestAutoRun, startGateRun, startManualGateRun, startEditedGateRun, startEditedGateRunIdempotent,
   type GateRunIndex, type GateRunInstance, type GateRunRecord, type GateRunStarter, type PullRequestAutoRun,
@@ -440,6 +440,14 @@ describe("startManualGateRun: a live run with no progress is hung, so it is ende
   it("the gate's stall window is longer than one leg attempt (the default leg's step deadline + retry delay), so a healthy run is never ended", () => {
     expect(GATE_STALL_MS).toBeGreaterThan(legStepDeadlineMs(MAX_LEG_TIMEOUT_MIN) + 15_000);
     expect(GATE_STALL_MS).toBeGreaterThan(legStepDeadlineMs(undefined) + 15_000);
+  });
+
+  it("the stall window exceeds the WHOLE leg's worst case (#1387): a legit infra retry after a container exit is never stall-killed", () => {
+    // totalLegWallMs(MAX) is the leg's total wall-time cap at the largest
+    // timeout: 25 min + 10 min grace = 35 min. A retry that still stamps
+    // progress inside that window keeps the run alive.
+    expect(GATE_STALL_MS).toBeGreaterThan(totalLegWallMs(MAX_LEG_TIMEOUT_MIN));
+    expect(GATE_STALL_MS).toBeGreaterThan(totalLegWallMs(undefined));
   });
 
   it("a live run with no progress for the stall window is ended, and a fresh run starts under a new id", async () => {

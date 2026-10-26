@@ -102,6 +102,11 @@ export interface LegRunDeps {
    *  pass a small value to reach the cap without real waiting. Default:
    *  totalLegWallMs(planned.timeoutMin). */
   totalDeadlineMs?: number;
+  /** #1387: stamps the run's progress on a step's FIRST attempt only. An infra
+   *  retry of the same step re-runs the same work on a fresh container, so it
+   *  must not stamp — the watchdog has to see a retry loop, not a run that
+   *  keeps "progressing". Never throws (markRunProgress). */
+  touch?: () => Promise<void>;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
 }
@@ -171,7 +176,7 @@ export const R2_PREFIX = "result read from R2 after transport loss: ";
  *  this leg's LegResult, so the other legs still finish. */
 export async function runLegStep(
   step: LegStepRunner,
-  dispatch: (planned: PlannedLeg, attemptId: string, signal: AbortSignal, tryNo: number) => Promise<Response>,
+  dispatch: (planned: PlannedLeg, attemptId: string, signal: AbortSignal) => Promise<Response>,
   planned: PlannedLeg,
   deps: LegRunDeps = {},
 ): Promise<LegRunResult> {
@@ -198,6 +203,11 @@ export async function runLegStep(
       // omits the context falls back to 1 (the old single-key behavior) rather
       // than a fleet-wide TypeError on the first leg.
       const tryNo = ctx?.attempt ?? 1;
+      // #1387: only a step's FIRST attempt stamps the run's progress. An infra
+      // retry of the same step re-runs the same work on a fresh container, so
+      // it must not stamp — the watchdog has to see a retry loop, not a run
+      // that keeps "progressing".
+      if (tryNo === 1) await deps.touch?.();
       // #1321: retry-<leg> steps all dispatch in one Promise.all, so every red
       // leg would clone at once and burst the shared token. A random wait on the
       // step's FIRST attempt (only) desyncs the clones.
@@ -211,19 +221,30 @@ export async function runLegStep(
       // Timed inside the callback (after any jitter): a Workflow replay returns
       // the recorded ms instead of timing the replay.
       const started = Date.now();
-      // #1387: the whole leg is capped, not just this attempt. A leg whose
-      // infra retries cycle past its timeout + grace is ended with the same red
-      // deadline result the container itself reports, never left to run another
-      // fresh container.
-      if (Date.now() - legStarted >= totalDeadlineMs) {
-        return { leg: planned.leg, state: "error", description: `${planned.leg} exceeded ${legTimeoutMin(planned.timeoutMin)} min without a result` };
+      // #1387: the whole leg is capped, not just this attempt. An infra retry
+      // that would start past the cap is ended with the causes already earned —
+      // still an infra-class error, so the run takes its one auto-rerun, never a
+      // false red on healthy code. Only a hung attempt that hits its OWN leg
+      // deadline (inside runOnServer) is the final red.
+      const elapsed = Date.now() - legStarted;
+      if (elapsed >= totalDeadlineMs) {
+        return {
+          leg: planned.leg, state: "error",
+          description: causes.length > 0
+            ? combineCauses(causes)
+            : `${planned.leg} exceeded ${legTimeoutMin(planned.timeoutMin)} min without a result`,
+        };
       }
+      // This attempt's own deadline: the per-attempt deadline, capped so the
+      // WHOLE leg never runs past totalDeadlineMs (#1387). Worst case =
+      // timeoutMin + grace, never ~63 min of cycling fresh containers.
+      const attemptDeadlineMs = Math.min(deadlineMs, totalDeadlineMs - elapsed);
       // The dispatch call carries its own signal, so a hung DO call is aborted
       // at the deadline, not just abandoned by the race below (#1135).
-      const signal = AbortSignal.timeout(deadlineMs);
+      const signal = AbortSignal.timeout(attemptDeadlineMs);
       try {
         const res = await withStepDeadline(
-          dispatch(target, attemptId, signal, tryNo), deadlineMs, `${planned.leg}: no progress past its deadline`,
+          dispatch(target, attemptId, signal), attemptDeadlineMs, `${planned.leg}: no progress past its deadline`,
         );
         if (!res.ok) {
           // A non-2xx (infra, 503) carries its cause in the body's `error`

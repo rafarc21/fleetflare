@@ -50,9 +50,12 @@ export interface GateRunIndex {
   progress(repo: string, pr: number, runId: string, at: number): Promise<void>;
 }
 
-/** A live run with no progress for this long is hung (#1135). Longer than one
- *  leg attempt: the 28 min attempt deadline plus the step's 15 s retry delay. */
-export const GATE_STALL_MS = 35 * 60_000;
+/** A live run with no progress for this long is hung (#1135). #1387: longer than
+ *  the WHOLE leg's worst case — its total wall-time cap (timeout + grace, 35 min
+ *  at the default 25 min timeout) plus the step's 15 s retry delay. A legit
+ *  infra retry after a ~20 min container exit still stamps progress and lands
+ *  inside the window, so it is never stall-killed. */
+export const GATE_STALL_MS = 37 * 60_000;
 
 /** Stamps a leg's progress on the run's index row. Never throws: a failed stamp
  *  must not fail the leg that reports it. */
