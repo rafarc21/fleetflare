@@ -59,6 +59,15 @@ describe("Dockerfile.gate runs the real lanes", () => {
     expect(code).toMatch(/rustc --version && cargo --version && python3 --version && pgrep --version/);
   });
 
+  test("ships container/gate/browser/ to /opt/fleet-gate/browser via FLEET_GATE_BROWSER (#1342)", () => {
+    // The guard (#1344) + AI harness (#1345) land under container/gate/browser/.
+    // The Dockerfile must COPY that dir through the normalized src stage and
+    // expose its runtime path so a consumer spec can resolve it.
+    expect(code).toMatch(/^COPY gate\/browser\/ \/src\/gate-browser\//m);
+    expect(code).toMatch(/cp -R \/src\/gate-browser\/\. \/src\/base\/opt\/fleet-gate\/browser\//);
+    expect(code).toMatch(/^ENV FLEET_GATE_BROWSER=\/opt\/fleet-gate\/browser /m);
+  });
+
   test("every install step in the final stage stays inside repro-seal begin/end", () => {
     // The src stage only lays out files (no install), as in Dockerfile.deploy. A RUN runs until the next column-0 instruction.
     const final = code.slice(code.lastIndexOf("\nFROM "));

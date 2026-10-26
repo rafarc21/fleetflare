@@ -16,10 +16,15 @@ ARG SOURCE_DATE_EPOCH=1790640000
 FROM oven/bun:1.3-debian@sha256:9dba1a1b43ce28c9d7931bfc4eb00feb63b0114720a0277a8f939ae4dfc9db6f AS src
 ARG SOURCE_DATE_EPOCH
 COPY repro-seal.sh gate-server.ts gate-merge-tree.ts /src/
-RUN mkdir -p /src/base/etc /src/base/usr/local/bin /src/base/workspace /src/app/app \
+# #1342: the browser-leg harness dir (guard #1344 + ai #1345) ships to
+# /opt/fleet-gate/browser. It goes through the normalized src stage like
+# everything else (reproducible-images: final stage takes no context file).
+COPY gate/browser/ /src/gate-browser/
+RUN mkdir -p /src/base/etc /src/base/usr/local/bin /src/base/workspace /src/app/app /src/base/opt/fleet-gate/browser \
     && printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n' > /src/base/etc/hosts \
     && mv /src/repro-seal.sh /src/base/usr/local/bin/repro-seal \
     && mv /src/gate-server.ts /src/gate-merge-tree.ts /src/app/app/ \
+    && cp -R /src/gate-browser/. /src/base/opt/fleet-gate/browser/ \
     && chmod -R u=rwX,go=rX /src && chmod 0755 /src/base/usr/local/bin/repro-seal \
     && find /src -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 
@@ -76,6 +81,8 @@ RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
     && repro-seal end
 
 COPY --from=src /src/app/ /
-ENV PORT=8080
+# #1342: consumer specs resolve the harness with FLEET_GATE_BROWSER.
+ENV FLEET_GATE_BROWSER=/opt/fleet-gate/browser \
+    PORT=8080
 EXPOSE 8080
 CMD ["bun", "run", "/app/gate-server.ts"]
