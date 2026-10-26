@@ -404,7 +404,14 @@ export interface TrustContextInput {
   sameRepo: boolean;
   authorAssociation: string;
   authorIsBot: boolean;
+  authorLogin: string;
   defaultBranch: string;
+  /** #1380: fleet-wide OPS opt-in list of trusted App slugs. Empty = off. */
+  trustApps: readonly string[];
+  /** #1380: optional cross-check inputs, "if available" -- see
+   *  secrets-scope.ts's SecretsTrustInput for the full contract. */
+  installationAppId?: number;
+  configuredAppId?: string;
 }
 
 /** legRequest's own `pr` parameter shape, minus the per-leg `image` override

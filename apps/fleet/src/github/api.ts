@@ -416,6 +416,31 @@ export async function getDefaultBranch(token: string, repo: string): Promise<str
   return body.default_branch;
 }
 
+/**
+ * #1380: the numeric GitHub App id of whichever App is installed on `repo`,
+ * for the optional cross-check in gate-scoped secrets' trust filter ("the App
+ * id matches the Worker's own configured App id"). `GET /repos/{owner}/{repo}/installation`
+ * is a JWT-only endpoint (an installation token cannot read it) — `jwt` must
+ * be minted with this Worker's own App credentials (github/app.ts's own JWT
+ * signer). Returns null on any error (repo not accessible to this App, App
+ * not installed, a network error) rather than throwing: this check is
+ * explicitly optional ("if available") everywhere it is used, so a failure
+ * here degrades to "cross-check skipped," never a hard failure.
+ */
+export async function getRepoInstallationAppId(jwt: string, repo: string): Promise<number | null> {
+  try {
+    const body = await ghJson<{ app_id?: number }>(
+      jwt,
+      `https://api.github.com/repos/${repo}/installation`,
+      { method: "GET" },
+      `read ${repo} installation`,
+    );
+    return typeof body.app_id === "number" ? body.app_id : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The required-status state of a branch's protection rule, or null when the
  *  branch has no rule at all (404). `hasRequiredStatusChecks` distinguishes a
  *  rule that has no required-status-check block (contexts POST would 404) from
@@ -1174,6 +1199,15 @@ interface PullRequestInfo {
    *  (dependabot[bot] and friends) — sameRepo alone does not distinguish a
    *  human collaborator's branch from an automated one. */
   authorIsBot: boolean;
+  /** #1380: the PR author's own GitHub login, exactly as GitHub returns it
+   *  (e.g. "fleetflare-bot[bot]" for a GitHub App's own PRs). Read off the
+   *  same GET as everything else here. Gate-scoped secrets (secrets-scope.ts's
+   *  trustedForSecrets) is the one thing this field gates: an opt-in,
+   *  EXACT-match comparison against an OPS-configured trusted App slug,
+   *  never a prefix or substring check. "" when GitHub sends no user at all
+   *  (never seen in practice; fails every exact-match comparison, same as
+   *  authorAssociation's "NONE" fallback). */
+  authorLogin: string;
 }
 
 export async function getPullRequest(token: string, repo: string, number: number): Promise<PullRequestInfo> {
@@ -1184,7 +1218,7 @@ export async function getPullRequest(token: string, repo: string, number: number
     head: { ref: string; sha?: string; repo?: { full_name?: string } | null };
     title?: string; body?: string | null;
     author_association?: string;
-    user?: { type?: string } | null;
+    user?: { type?: string; login?: string } | null;
   }>(
     token,
     `https://api.github.com/repos/${repo}/pulls/${number}`,
@@ -1208,6 +1242,7 @@ export async function getPullRequest(token: string, repo: string, number: number
     sameRepo: headFullName !== undefined && headFullName.toLowerCase() === baseFullName.toLowerCase(),
     authorAssociation: raw.author_association ?? "NONE",
     authorIsBot: raw.user?.type === "Bot",
+    authorLogin: raw.user?.login ?? "",
   };
 }
 

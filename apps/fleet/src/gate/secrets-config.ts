@@ -44,6 +44,10 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === "string");
 }
 
+/** #1380: the reserved top-level key `parseTrustApps` reads. Never a repo
+ *  slug (every real repo key contains "/"). */
+const TRUST_APPS_KEY = "trustApps";
+
 /** The only keys the object form (`{secrets, head?}`) ever reads. */
 const LEG_ENTRY_KEYS: ReadonlySet<string> = new Set(["secrets", "head"]);
 
@@ -92,6 +96,10 @@ export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return empty;
   const out: Record<string, Record<string, GateSecretsLegEntry>> = Object.create(null);
   for (const [repo, legs] of Object.entries(raw as Record<string, unknown>)) {
+    // #1380: the one reserved top-level key that is never a repo slug (every
+    // real repo key contains "/"; this one never does) -- parseTrustApps,
+    // below, reads it from this SAME raw value instead.
+    if (repo === TRUST_APPS_KEY) continue;
     if (typeof legs !== "object" || legs === null || Array.isArray(legs)) {
       console.warn(`gate-secrets allowlist: repo "${repo}" entry is not an object -- dropped`);
       continue;
@@ -108,6 +116,30 @@ export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
     out[repo] = perLeg;
   }
   return out;
+}
+
+/**
+ * #1380: the fleet-wide list of trusted GitHub App SLUGS (e.g.
+ * "fleetflare-bot" -- never the full "<slug>[bot]" login, never a value) this
+ * OPS file opts into trusting for gate-scoped secrets, on top of the
+ * ordinary human-collaborator trust path. Top-level, not per-repo: "the
+ * fleet's own GitHub App" is one identity across every repo this fleet
+ * gates, not a per-repo concept, and studios across every gated repo open
+ * PRs through the SAME App. A top-level `trustApps` key never collides with
+ * a repo entry: every repo key is an `owner/repo` slug, which always
+ * contains "/", while "trustApps" never does.
+ *
+ * Absent, not an array, or not all strings -> empty (feature OFF, the
+ * #1346/#1376 default, unchanged) -- same fail-closed rule every other
+ * malformed shape in this file follows. Read from the SAME raw JSON
+ * `parseGateSecretsAllowlist` itself parses (workflow.ts parses both from one
+ * fetch), never a second file or a second fetch.
+ */
+export function parseTrustApps(raw: unknown): readonly string[] {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
+  const value = (raw as Record<string, unknown>)[TRUST_APPS_KEY];
+  if (!isStringArray(value)) return [];
+  return value.filter((slug) => slug !== "");
 }
 
 /** `allowlist[repo]`, matched case-insensitively -- the same rule

@@ -25,8 +25,16 @@ resolution (§3a) is the EXACT inverse of `fanout.ts`'s own `headLegName`
 `bun`/`vitest` lanes against an unrelated custom leg of the same name; the
 threat-model note also now states explicitly that `head: true` lets a
 trusted PR change the granted leg's own `install`/`cmd`/`image`/`timeoutMin`,
-not only add a brand-new leg. Every section below describes the FINAL
-design, not an intermediate one.
+not only add a brand-new leg. Extended by
+https://github.com/rafarc21/fleetflare/issues/1380 (§2a) to let the OPS file
+opt the fleet's own GitHub App into the trust filter — measured 2026-10-26:
+every studio-authored PR carries `user.type=Bot`/`author_association=NONE`,
+so the pre-#1380 filter denied ALL of them, meaning a consumer repo's AI leg
+gated on a studio PR never received its secret. Default OFF; stated honestly
+in the threat model (§2a) that opting in trusts every studio-authored PR,
+including a prompt-injected one, the same way `head: true` already trusts a
+human collaborator's own PR content. Every section below describes the
+FINAL design, not an intermediate one.
 
 ## Non-goals
 
@@ -75,19 +83,22 @@ own deployed source, nor its Worker secrets.
 
 > A secret reaches a leg's container only when ALL of (a) the PR is
 > **trusted** — its head repo is the SAME repo as its base (never a fork),
-> its author's `author_association` is OWNER/MEMBER/COLLABORATOR, its author
-> is not a bot account, AND its base ref is the repo's own actual default
-> branch (never one the PR author could have created themselves); (b) the
-> leg's name appears in the OPS repo's allowlist for this target repo, under
-> a secret name this Worker's own registry recognizes; and (c) the value is a
-> staging-only credential, never a production or deploy one.
+> its base ref is the repo's own actual default branch (never one the PR
+> author could have created themselves), AND EITHER its author's
+> `author_association` is OWNER/MEMBER/COLLABORATOR and it is not a bot
+> account, OR (#1380, default OFF) its author is this fleet's own
+> OPS-opted-in GitHub App, by exact login match; (b) the leg's name appears
+> in the OPS repo's allowlist for this target repo, under a secret name this
+> Worker's own registry recognizes; and (c) the value is a staging-only
+> credential, never a production or deploy one.
 > Any PR — including one that edits `fleet.json`, adds a leg, or edits the
 > OPS repo's own file if it could — changes NOTHING under (a)-(c): (a) is
 > read from GitHub's own PR identity and the repo's own setting, none of
 > which the PR can spoof (`head.repo.full_name`, `author_association`,
-> `user.type`, all on the SAME `/pulls` GET this Worker already makes; the
-> default branch from a `GET /repos/{repo}` this Worker already has a
-> function for, §2 below); (b) lives in a repo the PR author has no write
+> `user.type`, `user.login`, all on the SAME `/pulls` GET this Worker
+> already makes; the default branch from a `GET /repos/{repo}` this Worker
+> already has a function for, §2 below; `trustApps` from the OPS repo, §2a
+> below — never the PR's own repo); (b) lives in a repo the PR author has no write
 > access to by construction (a different GitHub repo, `FLEET_OPS_REPO`); (c)
 > is an operational discipline on what the operator ever puts in the
 > registry/Worker secrets, not a thing this code can enforce by itself —
@@ -222,6 +233,10 @@ export interface PullRequestInfo {
   authorAssociation: string;
   /** The PR author's GitHub account type is "Bot" (dependabot[bot] etc). */
   authorIsBot: boolean;
+  /** #1380: the PR author's own GitHub login, exactly as GitHub returns it
+   *  (e.g. "fleetflare-bot[bot]"). Gates ONLY the app-bot trust path (§2a) —
+   *  compared by EXACT match, never a prefix or substring check. */
+  authorLogin: string;
 }
 ```
 
@@ -236,14 +251,93 @@ any same-repo pusher through, including one who opened a PR against a base
 branch they created themselves. `trustedForSecrets` (`gate/secrets-scope.ts`)
 is the real gate now — see §3 for its four conditions.
 
+### 2a. Opt-in trust for the fleet's own GitHub App (new, #1380)
+
+**Problem, measured 2026-10-26.** Every studio PR is opened by the fleet's
+own GitHub App, never by a human account — so on GitHub's own PR data,
+`user.type` is `"Bot"` and `author_association` is `"NONE"` (the App's bot
+account is never a collaborator; it just has write access via the App
+installation). The pre-#1380 trust filter (§3, guards 1-3a) denies EVERY
+bot, including this one — by design, the same way it denies dependabot. The
+measured consequence: a consumer repo's AI leg, gated on a studio-authored
+PR, NEVER receives its granted secret — the trust filter was never built to
+distinguish "the fleet's own App, which only ever runs code this fleet's own
+studios wrote" from "an arbitrary automated account."
+
+**Fix: an explicit, fleet-wide, default-OFF opt-in.** `gate-secrets.json`
+gains one more top-level field (sibling to the per-repo allowlist entries,
+distinguished the same way: every repo key contains `/`, `trustApps` never
+does):
+
+```json
+{ "trustApps": ["fleetflare-bot"] }
+```
+
+`trustApps` names App SLUGS (never the full `<slug>[bot]` login, never a
+value) — fleet-wide, not per-repo, because "the fleet's own GitHub App" is
+one identity across every repo this fleet gates; every studio across every
+gated repo opens PRs through the SAME App. Absent or empty: the feature is
+OFF, and every bot-authored PR (including this fleet's own) is denied
+exactly as before #1380 — the default this design has held since #1346.
+
+When opted in, a bot-authored PR is trusted under
+`trustedForSecrets`'s app-bot path (`gate/secrets-scope.ts`'s
+`trustedAppBot`) when ALL of:
+- `sameRepo` and the PR's base is the repo's own actual default branch —
+  the SAME two guards the human path already enforces (§3), never a looser
+  version for the App path.
+- `user.login` EXACTLY equals `<slug>[bot]` for some slug in `trustApps` —
+  never a prefix, suffix or substring match. A lookalike
+  (`<slug>-x[bot]`, the bare `<slug>` with no `[bot]` suffix, or a
+  DIFFERENT App's own `[bot]` login) is refused. This alone is already a
+  strong, structural signal: GitHub reserves a `<slug>[bot]` login uniquely
+  to the one App that registered that slug — no other App, and no human
+  account, can ever present it.
+- **"(if available)"**: when BOTH this Worker's own configured App id
+  (`env.GITHUB_APP_ID`) AND the installation's own App id for this repo
+  (`github/api.ts`'s `getRepoInstallationAppId`, a JWT-only
+  `GET /repos/{owner}/{repo}/installation` call, made ONLY when the login
+  already matched — one extra API call per PR at most, never per leg) are
+  present, they must match too. Either id missing (no App configured at
+  all, the JWT mint failing, the API call failing) skips this cross-check
+  entirely rather than refusing — it is explicit defense in depth on top of
+  an already-sufficient login match, never the primary mechanism.
+
+**Threat model, stated honestly (the task's own words, kept rather than
+softened): this trusts every studio-authored PR, including one from a
+prompt-injected studio.** A studio is itself an autonomous agent working
+inside this very fleet; `trustedForSecrets`'s whole job is deciding WHO can
+reach a grant, never WHAT code runs once granted (§ "Threat model," above,
+already states this for the human path — opting in the fleet's own App does
+not change that boundary, it only adds one more identity on the trusted
+side of it). If a studio's own context were ever compromised by a
+prompt-injection in, say, a reviewed PR's content or a fetched web page, its
+own PRs are — by construction, the same construction `head: true` already
+relies on for a human collaborator (§3a) — exactly as privileged as a
+human collaborator's own PR. The mitigation is the same one this design has
+relied on from the start, restated because opting this in widens who
+reaches it: every gate-scoped secret is a **staging-only, rotatable**
+credential (§ "Operator responsibility"), and the open-HTTPS-egress gap
+(https://github.com/rafarc21/fleetflare/issues/1355, "Residual risk," above)
+remains the one unbuilt mitigation that would meaningfully narrow this
+further — unchanged, still open, by this PR either way.
+
 ### 3. The trust + granted-secrets guards (new, pure): `gate/secrets-scope.ts`
 
 ```ts
 export function trustedForSecrets(input: SecretsTrustInput): boolean {
-  if (!input.sameRepo) return false;                             // guard 1: never a fork
-  if (!TRUSTED_ASSOCIATIONS.has(input.authorAssociation)) return false; // guard 2: OWNER/MEMBER/COLLABORATOR only
-  if (input.authorIsBot) return false;                            // guard 3: never an automated account
-  if (input.baseRef !== input.defaultBranch) return false;        // guard 4: never a self-created base branch
+  if (!input.sameRepo) return false;                      // guard 1: never a fork
+  if (input.baseRef !== input.defaultBranch) return false; // guard 2: never a self-created base branch
+  if (input.authorIsBot) return trustedAppBot(input);      // guard 3b (#1380): the app-bot path, below
+  return TRUSTED_ASSOCIATIONS.has(input.authorAssociation); // guard 3a: OWNER/MEMBER/COLLABORATOR only
+}
+
+// #1380: exact login match (required) + an optional App-id cross-check.
+function trustedAppBot(input: SecretsTrustInput): boolean {
+  if (!trustedAppLogin(input.authorLogin, input.trustApps)) return false;
+  if (input.installationAppId !== undefined && input.configuredAppId !== undefined) {
+    if (String(input.installationAppId) !== input.configuredAppId) return false;
+  }
   return true;
 }
 
@@ -255,22 +349,28 @@ export function grantedSecretNames(
   if (forRepo === undefined) return [];             // guard 2: repo not in the OPS allowlist
   const direct = ownLegEntry(forRepo, leg);          // prototype-safe lookup (Object.hasOwn + shape check)
   if (direct !== undefined) return direct.secrets.filter(isKnownSecretName); // guard 3: unknown name, never passed through (warns)
-  // #1376: no direct entry for `leg` itself -- if it's a @head/@head-<n>
-  // union-plan copy (fanout.ts's headLegName) of a leg the OPS file opted
-  // into sharing its grant (`head: true`), fall back to THAT leg's entry.
-  const headMatch = /^(.+)@head(?:-\d+)?$/.exec(leg);
-  if (headMatch === null) return [];                // guard 4: leg isn't a @head copy of anything
-  const base = ownLegEntry(forRepo, headMatch[1]);
+  // #1376 security review r1: headLegBaseName is the EXACT inverse of
+  // fanout.ts's own headLegName -- `<leg>@head` -> `<leg>`, and ONLY
+  // `vitest@head-<n>`/`bun@head-<n>` -> `vitest-<n>`/`bun-<n>` (never a
+  // generic strip-the-suffix regex, which would leak a custom leg literally
+  // named "bun"/"vitest" into the unrelated auto-sharded lanes).
+  const baseName = headLegBaseName(leg);
+  if (baseName === null) return [];                 // guard 4: leg isn't a @head copy of anything real
+  const base = ownLegEntry(forRepo, baseName);
   if (base === undefined || base.head !== true) return []; // guard 5: no opt-in on the base leg
   return base.secrets.filter(isKnownSecretName);
 }
 ```
 
-Nine independent guards across the two functions, in the order a reviewer
-should read them: trust first (cheapest, most load-bearing, and the one a
-same-repo PR from a non-collaborator or against a self-created base branch
-never clears — identical for a leg's base name and its `@head` copy, #1376
-adds no second, looser trust check), then OPS-allowlist repo/leg lookups
+Ten independent guards across the three functions, in the order a reviewer
+should read them: same-repo and default-base first (cheapest, most
+load-bearing, and shared by BOTH trust paths below — identical for a leg's
+base name and its `@head` copy, #1376 adds no second, looser trust check),
+then ONE of two branches depending on the author (#1380): a human needs a
+trusted `author_association`; a bot needs an exact, OPS-opted-in App login
+match plus an optional App-id cross-check (`trustedAppBot`) — every other
+bot, opted-in slug or not, is refused by the login-match guard alone. Then
+OPS-allowlist repo/leg lookups
 (prototype-safe — `Object.hasOwn` plus a shape check, never a bare
 `forRepo[leg]`, so a leg literally named `constructor` or `__proto__`, OR its
 `@head` copy, cannot resolve through the object's own prototype chain
@@ -669,6 +769,19 @@ than inventing a third.
    unchanged; a leg named `constructor@head`/`__proto__@head` resolves
    safely, never through `Object.prototype`, for the base-leg lookup the
    same way the direct lookup already does.
+7. **Opt-in trust for the fleet's own GitHub App (#1380).** The fleet's own
+   App, exact login match, is trusted ONLY when `trustApps` opts it in —
+   with `trustApps` empty (the default), the identical bot-authored PR is
+   refused, same as before #1380. Lookalike logins
+   (`<slug>-x[bot]`, the bare `<slug>` with no `[bot]` suffix, a DIFFERENT
+   app's own `[bot]` login, a slug that is a prefix/suffix of the real one)
+   are all denied by `trustedAppLogin`'s exact-match check. A fork PR, and a
+   PR against a non-default base, are both still refused even from the
+   opted-in App's own login — the same two shared guards every trust path
+   goes through. Every OTHER bot (dependabot etc) stays denied even when
+   `trustApps` opts a DIFFERENT app in. The optional App-id cross-check is
+   skipped (never a refusal) when either id is unavailable, and refuses on
+   an actual mismatch when both are present.
 
 Per the task's own mutation-testing instruction, every guard this PR adds is
 hand-mutated (condition flip, off-by-one on the expiry boundary, operator

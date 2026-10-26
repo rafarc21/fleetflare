@@ -8,7 +8,7 @@ import {
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
   setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict, setBranchProtectionRequiredStatusChecks, disableBranchProtectionEnforceAdmins,
-  getBranchProtection, findPullRequestsReferencingTask,
+  getBranchProtection, findPullRequestsReferencingTask, getRepoInstallationAppId,
 } from "../src/github/api";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
 
@@ -394,7 +394,7 @@ describe("getPullRequest", () => {
     expect(await getPullRequest("tok", "o/r", 7)).toEqual({
       number: 7, merged: true, mergeCommitSha: "deadbeef", baseRef: "staging", headRef: "feat/x",
       title: "feat: x", body: "Closes #3", repoFullName: "O/R", open: true, baseRepoPrivate: false,
-      headSha: "aaa111", sameRepo: false, authorAssociation: "NONE", authorIsBot: false,
+      headSha: "aaa111", sameRepo: false, authorAssociation: "NONE", authorIsBot: false, authorLogin: "",
     });
   });
 
@@ -473,6 +473,24 @@ describe("getPullRequest", () => {
       expect((await getPullRequest("tok", "o/r", 7)).authorIsBot).toBe(false);
       respond = () => Response.json({ number: 8, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" } });
       expect((await getPullRequest("tok", "o/r", 8)).authorIsBot).toBe(false);
+    });
+  });
+
+  // #1380: the fleet's own GitHub App opens studio PRs as a Bot login this
+  // Worker must match EXACTLY (never a prefix/substring) against an
+  // OPS-opted-in trusted App slug.
+  describe("authorLogin (#1380)", () => {
+    it("reads user.login off the same GET", async () => {
+      respond = () => Response.json({
+        number: 7, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" },
+        user: { type: "Bot", login: "fleetflare-bot[bot]" },
+      });
+      expect((await getPullRequest("tok", "o/r", 7)).authorLogin).toBe("fleetflare-bot[bot]");
+    });
+
+    it("defaults to \"\" when GitHub sends no user at all", async () => {
+      respond = () => Response.json({ number: 7, merged: false, state: "open", base: { ref: "main" }, head: { ref: "feat/x" } });
+      expect((await getPullRequest("tok", "o/r", 7)).authorLogin).toBe("");
     });
   });
 
@@ -1345,5 +1363,27 @@ describe("ghRequest's merge order (#311 finding 3)", () => {
     }, "read o/r");
     expect(calls[0].headers["content-type"]).toBeUndefined();
     expect(Object.hasOwn(calls[0].headers, "content-type")).toBe(false);
+  });
+});
+
+// #1380: the optional cross-check in gate-scoped secrets' trust filter ("the
+// App id matches the Worker's own configured App id"). Never throws: this
+// check is explicitly optional everywhere it is used.
+describe("getRepoInstallationAppId", () => {
+  it("reads app_id off GET /repos/{repo}/installation, using the JWT as the bearer token", async () => {
+    respond = () => Response.json({ id: 999, app_id: 123456 });
+    expect(await getRepoInstallationAppId("jwt-value", "o/r")).toBe(123456);
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/installation");
+    expect(calls[0].headers.authorization).toBe("Bearer jwt-value");
+  });
+
+  it("null when GitHub sends no app_id", async () => {
+    respond = () => Response.json({ id: 999 });
+    expect(await getRepoInstallationAppId("jwt-value", "o/r")).toBeNull();
+  });
+
+  it("null, never throws, when the request fails (App not installed, network error)", async () => {
+    respond = () => new Response("not found", { status: 404 });
+    expect(await getRepoInstallationAppId("jwt-value", "o/r")).toBeNull();
   });
 });

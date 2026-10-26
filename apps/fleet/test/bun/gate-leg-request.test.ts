@@ -141,7 +141,10 @@ describe("legRequest: gate-scoped secrets (#1346)", () => {
 // sameRepo/trusted pass-through survives every test" gap.
 describe("legRequestContext (#1346)", () => {
   const ALLOWLIST = parseGateSecretsAllowlist({ "acme/example": { lint: ["staging-login"] } });
-  const TRUSTED_INPUT = { baseRef: "main", sameRepo: true, authorAssociation: "COLLABORATOR", authorIsBot: false, defaultBranch: "main" };
+  const TRUSTED_INPUT = {
+    baseRef: "main", sameRepo: true, authorAssociation: "COLLABORATOR", authorIsBot: false, authorLogin: "a-human",
+    defaultBranch: "main", trustApps: [],
+  };
 
   it("computes trusted: true for a same-repo collaborator PR on the default branch, and carries it to legRequest", () => {
     const ctx = legRequestContext(TRUSTED_INPUT, false, ALLOWLIST, { pr: "7" });
@@ -171,5 +174,25 @@ describe("legRequestContext (#1346)", () => {
     const ctx = legRequestContext(TRUSTED_INPUT, false, ALLOWLIST, { pr: "7" });
     expect(Object.hasOwn(ctx, "bundleKey")).toBe(false);
     expect(Object.hasOwn(ctx, "mergeBase")).toBe(false);
+  });
+
+  // #1380: a studio PR (opened by the fleet's own GitHub App) reaches the
+  // same secretNames decision as a human collaborator's PR, once opted in.
+  it("computes trusted: true for the fleet's own opted-in App, and carries it to legRequest's secretNames", () => {
+    const ctx = legRequestContext(
+      { baseRef: "main", sameRepo: true, authorAssociation: "NONE", authorIsBot: true, authorLogin: "fleetflare-bot[bot]", defaultBranch: "main", trustApps: ["fleetflare-bot"] },
+      false, ALLOWLIST, { pr: "7" },
+    );
+    expect(ctx.trusted).toBe(true);
+    const body = legRequest("acme", "example", PLANNED, ctx);
+    expect(body.secretNames).toEqual(["staging-login"]);
+  });
+
+  it("computes trusted: false for the SAME App login when trustApps is empty (default off)", () => {
+    const ctx = legRequestContext(
+      { baseRef: "main", sameRepo: true, authorAssociation: "NONE", authorIsBot: true, authorLogin: "fleetflare-bot[bot]", defaultBranch: "main", trustApps: [] },
+      false, ALLOWLIST, { pr: "7" },
+    );
+    expect(ctx.trusted).toBe(false);
   });
 });
