@@ -53,13 +53,14 @@ export type LegResult = { state: "success" | "failure" | "error"; description?: 
 
 /** A leg run ends in exactly one of two things: a real gate-server body
  *  (success/failure/error — data, 200) or an infra failure (container never
- *  started, server unreachable, timeout — 503 so the Workflow step retries). */
+ *  started, server unreachable, exited mid-leg — 503 so the Workflow step
+ *  retries). A leg past its own deadline is a real red body, never infra (#1387). */
 export type LegOutcome =
   | { kind: "result"; result: LegResult }
   | { kind: "infra"; description: string };
 
 /** The /run-leg reply: infra failures answer 503 so leg-run.ts's non-2xx
- *  check retries them once; a real leg body is 200 and carried as data. */
+ *  check retries them twice; a real leg body is 200 and carried as data. */
 export function legResponse(outcome: LegOutcome): Response {
   if (outcome.kind === "infra") {
     return new Response(JSON.stringify({ error: outcome.description }), { status: 503 });
@@ -113,7 +114,7 @@ const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTim
 
 /** Starts the gate container for one leg, posts /run, and always destroys the
  *  container afterwards. Every infra failure returns an infra outcome (503,
- *  retried once by the Workflow step); a real gate-server body returns as a
+ *  retried twice by the Workflow step); a real gate-server body returns as a
  *  result. Never a throw. */
 export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): Promise<LegOutcome> {
   const c = deps.container;
@@ -214,10 +215,10 @@ async function waitUntilRunning(
  *  answers at once, so no request is held for the whole leg: the container
  *  runs the leg once, and a repeat POST never starts a second run.
  *
- *  Two ways a polled leg ends early, both infra (503, the step retries once on a
- *  fresh container): a container that stopped running, and a leg past its own
- *  deadline. Live 10-16: a typecheck leg hung to the deadline and its retry on a
- *  fresh container passed in 108 s, so a deadline is a host hang, not a verdict. */
+ *  A container that stops running ends the leg early as infra (503, the step
+ *  retries twice on fresh containers). A leg past its own deadline ends as a
+ *  REAL red body (200, state error): a deadline is the leg's verdict, never a
+ *  host hang to retry (#1387). */
 async function runOnServer(
   c: GateContainer,
   req: GateLegRequest,
@@ -270,7 +271,7 @@ async function runOnServer(
       return stored !== undefined ? { kind: "result", result: stored } : { kind: "infra", description: "gate container exited mid-leg" };
     }
     if (now() - legStarted >= minutes * 60_000) {
-      return { kind: "infra", description: `${req.leg} exceeded ${minutes} min without a result` };
+      return { kind: "result", result: { state: "error", description: `${req.leg} exceeded ${minutes} min without a result` } };
     }
     try {
       const res = await port.fetch("http://container/result", { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });

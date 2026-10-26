@@ -4,6 +4,7 @@
 // bun test cannot load.
 import { describe, it, expect, spyOn } from "bun:test";
 import { combineCauses, gateRunnerName, legResultReader, MAX_COMBINED_CAUSE_CHARS, runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
+import { isInfraLegFailure } from "../../src/gate/infra-rerun";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
 
@@ -845,5 +846,102 @@ describe("runLegStep: install failure retries once (#1092)", () => {
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result).toMatchObject({ state: "error", description });
     expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+  });
+});
+
+// #1387: a leg deadline is a real red verdict, never infra. The DO answers
+// 200 with state "error", so the step returns it once and never infra-retries
+// or flaky-retries it. Real infra (503) is still retried.
+describe("runLegStep: a deadline is final, infra still retries (#1387)", () => {
+  it("a 200 deadline result is red once, no infra retry, no flaky retry", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; return reply({ state: "error", description: "lint exceeded 25 min without a result" }); };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "error", description: "lint exceeded 25 min without a result" });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+    expect(sent).toBe(1);
+  });
+
+  it("the deadline result is never infra-class: no auto-rerun", async () => {
+    const step = fakeStep();
+    const dispatch = async () => reply({ state: "error", description: "lint exceeded 25 min without a result" });
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toMatchObject({ leg: "lint", state: "error" });
+    expect(isInfraLegFailure({ leg: "lint", state: "error", description: result.description })).toBe(false);
+  });
+
+  it("real infra (503) is still retried twice, then errors", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; return reply({ error: "gate container did not start within 180 s" }, 503); };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result.state).toBe("error");
+    expect(sent).toBe(3);
+  });
+});
+
+// #1387: the WHOLE leg (all attempts) is capped at timeout + grace. A leg that
+// keeps failing infra past the cap ends red, never left to cycle fresh
+// containers forever.
+describe("runLegStep: total wall-time cap (#1387)", () => {
+  it("every attempt dispatches with its try number, 1-based per step", async () => {
+    const step = fakeStep();
+    const tryNos: number[] = [];
+    let sent = 0;
+    const dispatch = async (_p: PlannedLeg, _id: string, _s: AbortSignal, tryNo: number) => {
+      tryNos.push(tryNo);
+      sent++;
+      return reply({ error: "gate container did not start within 180 s" }, 503);
+    };
+    await runLegStep(step, dispatch, PLANNED);
+    expect(tryNos).toEqual([1, 2, 3]);
+    expect(sent).toBe(3);
+  });
+
+  it("a flaky retry is a NEW step, so its first attempt is try 1 again", async () => {
+    const step = fakeStep();
+    const tryNos: number[] = [];
+    let sent = 0;
+    const dispatch = async (_p: PlannedLeg, _id: string, _s: AbortSignal, tryNo: number) => {
+      tryNos.push(tryNo);
+      sent++;
+      return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" });
+    };
+    await runLegStep(step, dispatch, PLANNED);
+    expect(tryNos).toEqual([1, 1]);
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+  });
+
+  it("a leg whose infra retries cycle past the cap ends red with the deadline result", async () => {
+    let now = 0;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const step = fakeStep();
+      const dispatch = async () => {
+        now += 500; // each attempt costs wall time
+        return reply({ error: "gate container did not start within 180 s" }, 503);
+      };
+      // Total cap 1 ms: the first attempt already starts past it.
+      const result = await runLegStep(step, dispatch, PLANNED, { totalDeadlineMs: 1 });
+      expect(result).toEqual({
+        leg: "lint", state: "error",
+        description: "lint exceeded 25 min without a result",
+      });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("an in-budget infra retry that then succeeds is the leg's success", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      return sent <= 2 ? reply({ error: "gate container did not start within 180 s" }, 503) : reply({ state: "success" });
+    };
+    const result = await runLegStep(step, dispatch, PLANNED, { totalDeadlineMs: 1_000_000 });
+    expect(result).toMatchObject({ leg: "lint", state: "success" });
+    expect(sent).toBe(3);
   });
 });

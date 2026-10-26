@@ -98,6 +98,10 @@ export interface LegRunDeps {
   /** Upper bound of the random wait before a retry-<leg> dispatch (#1321). 0
    *  disables the jitter (tests). Default: 0; the live caller passes a real cap. */
   retryJitterMs?: number;
+  /** Overrides the total wall-time cap for the WHOLE leg (all attempts). Tests
+   *  pass a small value to reach the cap without real waiting. Default:
+   *  totalLegWallMs(planned.timeoutMin). */
+  totalDeadlineMs?: number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
 }
@@ -120,6 +124,15 @@ export function legStepDeadlineMs(timeoutMin: number | undefined): number {
     legTimeoutMin(timeoutMin) * 60_000 + LEG_STEP_GRACE_MS,
     LEG_STEP_TIMEOUT_MS - STEP_DEADLINE_MARGIN_MS,
   );
+}
+
+/** #1387: the total wall time the WHOLE leg may spend across every attempt —
+ *  the start step, its infra retries, and the retry-<leg> step. The leg's own
+ *  timeout plus the step grace. Not clamped to the per-attempt step timeout:
+ *  the total spans two steps (start + retry), so it may legitimately exceed one
+ *  step's 30 min while still ending well short of the old 3x25 min retry loop. */
+export function totalLegWallMs(timeoutMin: number | undefined): number {
+  return legTimeoutMin(timeoutMin) * 60_000 + LEG_STEP_GRACE_MS;
 }
 
 /** Ends a step whose work has no progress past its deadline (#1119): the work is
@@ -158,7 +171,7 @@ export const R2_PREFIX = "result read from R2 after transport loss: ";
  *  this leg's LegResult, so the other legs still finish. */
 export async function runLegStep(
   step: LegStepRunner,
-  dispatch: (planned: PlannedLeg, attemptId: string, signal: AbortSignal) => Promise<Response>,
+  dispatch: (planned: PlannedLeg, attemptId: string, signal: AbortSignal, tryNo: number) => Promise<Response>,
   planned: PlannedLeg,
   deps: LegRunDeps = {},
 ): Promise<LegRunResult> {
@@ -167,6 +180,11 @@ export async function runLegStep(
   // durable per-attempt counter (1-based, survives an engine restart), never a
   // closure counter that an engine restart would reset (#1321).
   const deadlineMs = deps.stepDeadlineMs ?? legStepDeadlineMs(planned.timeoutMin);
+  // #1387: the total wall time the WHOLE leg (start step + retry-<leg> step +
+  // every infra attempt) may spend: the leg's own timeout plus the step grace.
+  // A leg that keeps failing infra past this is ended, never left to cycle.
+  const totalDeadlineMs = deps.totalDeadlineMs ?? totalLegWallMs(planned.timeoutMin);
+  const legStarted = Date.now();
   const jitterMs = deps.retryJitterMs ?? 0;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const random = deps.random ?? Math.random;
@@ -193,12 +211,19 @@ export async function runLegStep(
       // Timed inside the callback (after any jitter): a Workflow replay returns
       // the recorded ms instead of timing the replay.
       const started = Date.now();
+      // #1387: the whole leg is capped, not just this attempt. A leg whose
+      // infra retries cycle past its timeout + grace is ended with the same red
+      // deadline result the container itself reports, never left to run another
+      // fresh container.
+      if (Date.now() - legStarted >= totalDeadlineMs) {
+        return { leg: planned.leg, state: "error", description: `${planned.leg} exceeded ${legTimeoutMin(planned.timeoutMin)} min without a result` };
+      }
       // The dispatch call carries its own signal, so a hung DO call is aborted
       // at the deadline, not just abandoned by the race below (#1135).
       const signal = AbortSignal.timeout(deadlineMs);
       try {
         const res = await withStepDeadline(
-          dispatch(target, attemptId, signal), deadlineMs, `${planned.leg}: no progress past its deadline`,
+          dispatch(target, attemptId, signal, tryNo), deadlineMs, `${planned.leg}: no progress past its deadline`,
         );
         if (!res.ok) {
           // A non-2xx (infra, 503) carries its cause in the body's `error`
