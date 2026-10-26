@@ -1,69 +1,75 @@
-// #1348: pure evidence shaping — R2 keys, the stub-v0 item/sweep shape, and
-// sweep-state aggregation. No I/O; see runner.ts for the dependency-injected
-// control flow that calls these.
-import { redact } from "./redact";
-import type { WalkItemEvidence, WalkState, WalkSweepEvidence } from "./types";
+// #1348: pure evidence shaping against the v1 walk-evidence schema — R2 key
+// segment validation, the item evidence builder, and this runner's own
+// WalkRunState aggregation (not a v1 field; see types.ts). No I/O; see
+// runner.ts for the dependency-injected control flow that calls these.
+import type { WalkAttempt, WalkItem, WalkItemEvidence, WalkRunState, WalkSweepEvidence } from "./types";
 
-export function itemEvidenceKey(sweepId: string, itemId: string): string {
-  return `walk/${sweepId}/items/${itemId}.json`;
+/** Same charset test-creds.ts's NAME_RE/KEY_RE already use for a secret
+ *  name/key: leading alnum, then alnum/`_`/`.`/`-`. An item's role/id are
+ *  schema-supplied (the consumer maestro's checklist), never trusted
+ *  verbatim into an R2 key path — #1348 review r1 item 5. */
+const SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+
+function assertSafeSegment(label: string, value: string): void {
+  if (!SEGMENT_RE.test(value)) {
+    throw new Error(`walk: ${label} "${value}" is not a safe R2 key segment`);
+  }
 }
 
-export function sweepEvidenceKey(sweepId: string): string {
-  return `walk/${sweepId}/sweep.json`;
+export function sweepEvidenceKey(fingerprint: string): string {
+  assertSafeSegment("fingerprint", fingerprint);
+  return `walk/${fingerprint}/sweep.json`;
 }
 
-export interface MakeItemEvidenceInput {
-  sweepId: string;
-  itemId: string;
-  url: string;
-  state: WalkState;
-  description?: string;
-  startedAt: string;
-  finishedAt: string;
-  /** The live storage state, if one was used for this attempt. Scrubbed out
-   *  of `description` before it is returned — never stored. */
-  secret?: string;
+export function itemEvidenceKey(fingerprint: string, item: WalkItem): string {
+  assertSafeSegment("fingerprint", fingerprint);
+  assertSafeSegment("role", item.role);
+  assertSafeSegment("id", item.id);
+  if (!Number.isInteger(item.idx) || item.idx < 0) {
+    throw new Error(`walk: idx ${item.idx} is not a non-negative integer`);
+  }
+  return `walk/${fingerprint}/item-${item.role}-${item.idx}-${item.id}.json`;
 }
 
-export function makeItemEvidence(input: MakeItemEvidenceInput): WalkItemEvidence {
-  const description = input.secret === undefined ? input.description : redact(input.description, input.secret);
+export function makeItemEvidence(
+  fingerprint: string,
+  verifier: string,
+  at: string,
+  attempt: WalkAttempt,
+): WalkItemEvidence {
   return {
-    schemaVersion: "stub-v0",
-    sweepId: input.sweepId,
-    itemId: input.itemId,
-    url: input.url,
-    state: input.state,
-    ...(description === undefined ? {} : { description }),
-    startedAt: input.startedAt,
-    finishedAt: input.finishedAt,
+    fingerprint,
+    verifier,
+    at,
+    result: attempt.result,
+    steps: attempt.steps,
+    console: attempt.console,
+    ai: attempt.ai,
+    accounts: attempt.accounts,
+    ...(attempt.failReason === undefined ? {} : { failReason: attempt.failReason }),
   };
 }
 
-/** Same precedence gate/verdict.ts already uses for legs (error > failure),
- *  extended with did-not-run ranked above success: a sweep that never ran is
- *  not a passing sweep. */
-const STATE_RANK: Record<WalkState, number> = { error: 3, failure: 2, "did-not-run": 1, success: 0 };
+/** sweep.json's shape when the walk never produced real route evidence — no
+ *  v1 field for that, so this is this runner's own minimal record. */
+export function makeAbnormalSweepEvidence(
+  fingerprint: string,
+  at: string,
+  state: "did-not-run" | "error",
+  reason: string,
+): WalkSweepEvidence {
+  return { fingerprint, at, state, reason };
+}
 
-export function aggregateSweepState(states: WalkState[]): WalkState {
-  let worst: WalkState = "success";
+/** error > failure > did-not-run > success. #1348 review r1 item 1: an
+ *  empty item list is did-not-run (nothing ran), never a vacuous success. */
+const STATE_RANK: Record<WalkRunState, number> = { error: 3, failure: 2, "did-not-run": 1, success: 0 };
+
+export function aggregateSweepState(states: WalkRunState[]): WalkRunState {
+  if (states.length === 0) return "did-not-run";
+  let worst: WalkRunState = "success";
   for (const s of states) {
     if (STATE_RANK[s] > STATE_RANK[worst]) worst = s;
   }
   return worst;
-}
-
-export function makeSweepEvidence(
-  sweepId: string,
-  items: WalkItemEvidence[],
-  startedAt: string,
-  finishedAt: string,
-): WalkSweepEvidence {
-  return {
-    schemaVersion: "stub-v0",
-    sweepId,
-    state: aggregateSweepState(items.map((i) => i.state)),
-    startedAt,
-    finishedAt,
-    items: items.map((i) => ({ itemId: i.itemId, state: i.state, key: itemEvidenceKey(sweepId, i.itemId) })),
-  };
 }
