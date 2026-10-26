@@ -11,9 +11,12 @@ against a small fixture app, three configs.
   no credential.
 - **B — N gate-style shards (containers).** `model-b.ts` folds config A's
   measured per-shard time with gate boot/overhead constants. Arithmetic only.
-- **C — preview deploy + 50 Browser Run sessions in parallel.**
+- **C — preview deploy + Browser Run sessions in parallel.**
   `run-c.ts` (connectOverCDP, one session per spec). Needs a CF credential —
-  run from the maestro's session, exact steps below.
+  run from the maestro's session. Measured: k=50 loses (18.5 s suite wall, the
+  3 new/s acquisition ramp IS the wall after the 10-session burst bucket);
+  k=10 burst wins suite wall (2.8 s) but loses per-PR end-to-end once the
+  13.7 s preview deploy is paid. C fits only post-deploy checks, k≤10.
 
 ## Run it
 

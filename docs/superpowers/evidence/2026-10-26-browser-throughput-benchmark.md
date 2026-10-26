@@ -8,12 +8,27 @@ spec with isolated data) + a harness that targets any base URL.
 
 ## Verdict up front
 
-**One container at k=4 workers is the answer for a 50-spec browser suite.
-Gate sharding (B) buys nothing — boot dominates. Browser Run fan-out (C) pays
-a 50-session acquisition wall and only wins when the suite is large enough to
-hide it; it does not win for this suite.**
+**One container at k=4 workers is the default for a 50-spec browser suite.
+Gate sharding (B) buys nothing — boot dominates. Browser Run fan-out (C) at
+k=50 loses outright (4.6× A); only C at k≤10 inside the burst bucket beats A
+on suite wall alone, and it still loses per-PR end-to-end once the 13.7 s
+preview deploy is paid. Keep A k=4; use C only where a deploy already
+happens (post-deploy check), k≤10 sessions.**
 
-Measured config A (5 suite runs each, 50 specs, 0 flake):
+Side by side (A measured, B modeled, C measured by maestro — full C raw in
+issue #1364 comment 6416784180):
+
+| config | n | suite wall p50 | p95 | per-spec p50 | flakes | setup | $/suite |
+|---|---|---|---|---|---|---|---|
+| A k=4 (in-container) | 5 | 3997 ms (+497 boot) | 4446 ms | 80 ms | 0/250 | 0 (gate container already up) | ~$0.066 (1 container leg) |
+| B N=1..8 shards (modeled) | — | 69.5–73 s @60 s cold | 99.5–103 s @90 s | — | — | 39–99 s per shard | $0.066 × N |
+| C k=50, 334 ms stagger | 5 | 18515 ms | 19804 ms | 433 ms | 0/250 | 13.7 s preview deploy | $0.0011 browser-h + $80/mo concurrency |
+| C k=50, no stagger (burst) | 1 | 12934 ms | — | 422 ms | 5/50 (429 launch fail) | 13.7 s | same |
+| C k=20, 334 ms stagger | 1 | 9673 ms | — | 308 ms | 0/50 | 13.7 s | ~$0.0008 + $20/mo |
+| C k=10, 334 ms stagger | 1 | 7939 ms | — | 340 ms | 0/50 | 13.7 s | ~$0.0006 |
+| C k=10, no stagger | 3 | 2835 ms | 5319 ms | 277 ms | 0/150 | 13.7 s | ~$0.0005, $0 concurrency |
+
+Config A (5 suite runs each, 50 specs, 0 flake):
 
 | k (workers, one container) | suite wall p50 | p95 | boot p50 | flake |
 |---|---|---|---|---|
@@ -34,13 +49,13 @@ compute against 39–99 s of new overhead, at 8× cost. Sharding pays only when
 compute >> boot — true for the 674 s bun-test lane, false for a 4 s browser
 suite.
 
-Config C (driver + runner committed, maestro to measure): 50 Browser Run
-sessions in parallel, one connectOverCDP per spec. The acquisition wall
-(3 new/s, so 50 sessions ≈ 17 s serialized at the account limit before the
-first spec finishes) plus v1's 2.0× per-run Browser Run latency means C only
-breaks even when the suite is big enough to amortize that fixed fan-out cost.
-For a 50-spec suite, C's floor is the 50-session acquisition wall, not the
-suite wall.
+Config C (measured, not just modeled): the 3 new/s acquisition floor is real
+and is the whole story. `limits()` reports `allowedBrowserAcquisitions 10`
+(a burst bucket) then ~3 new/s. A 50-session fan-out pays a ~17 s ramp to
+acquire the sessions; bursting past the 10-session bucket turns the ramp into
+429 flakes (5/50 specs failed in the burst run). Per-spec work is also
+3.5–5.4× slower than A (277–433 ms vs 80 ms) because every step crosses
+browser → app Worker → Durable Object. So k=50 is 4.6× A on suite wall.
 
 ## What was measured (config A, in-container)
 
@@ -98,36 +113,58 @@ paid per container and dominates every row. More shards = 8× cost for ~3.5 s
 of wall. Sharding is the right shape for the 674 s bun-test lane (compute >>>
 boot); it is the wrong shape for a browser suite whose whole compute is 4 s.
 
-## Config C — preview deploy + Browser Run fan-out (driver + runner committed, maestro to measure)
+## Config C — preview deploy + Browser Run fan-out (measured by maestro)
+
+Measured 2026-10-26 ~13:00Z by the maestro (Mac, browser colo MAD, throwaway
+Workers — both deleted, URLs 404 verified). The fixture app was ported 1:1 to
+a Worker with state in ONE Durable Object — a per-isolate in-memory Map would
+break POST-then-GET across isolates. Runner Worker holds the `browser`
+binding (`@cloudflare/playwright@1.3.6`); one runner request = one Browser
+Run session, session runs its round-robin share of the same 50 `specs.ts`,
+driver in-Worker (not Mac-side CDP). `/reset` before each suite, 15 s gap
+between suites. Suite wall = first launch request → last session closed.
 
 The suite is engine-agnostic (same `SpecPage` surface), so config C runs the
-IDENTICAL 50 specs over `connectOverCDP`, one session per spec, k=50 by
-default. `drivers/browser-run.ts` connects `wss://api.cloudflare.com/
-client/v4/accounts/{id}/browser-run/devtools/browser` with Bearer auth
-(`connectOverCDP`, `keep_alive` up to 20 min); `run-c.ts` opens all k
-sessions lazily in parallel and records suite wall + boot + flake.
+IDENTICAL 50 specs over `connectOverCDP`, one session per spec. The committed
+`drivers/browser-run.ts` + `run-c.ts` are the studio-side repro of this same
+shape (a studio holds no CF credential, so the maestro ran it).
 
-**The binding limits (from v1's doc reading):** 200 concurrent sessions,
-3 new/s acquisition, 60 s idle close. 3 new/s means 50 sessions take ≈ 17 s
-just to acquire at the account ceiling — that serialized acquisition is C's
-floor, paid BEFORE the parallel run starts. Add v1's measured 2.0× per-run
-Browser Run latency (272 vs 136 ms p50) and the reachability hop (~+170 ms
-p50, quick tunnel is 403 from Browser Run — a real per-PR preview deploy is
-required, not a quick tunnel), and C's wall is dominated by fan-out
-acquisition + per-run slowness, not by the suite.
+**The binding limits, now measured, not doc-read:** `limits()` reports
+`maxConcurrentSessions 200` and `allowedBrowserAcquisitions 10` (burst
+bucket), then ~3 new/s. So 50 sessions cost a ~17 s acquisition ramp AFTER the
+first 10 go through instantly; launch p50 531–599 ms (max 1.0–1.8 s). The
+ramp is C's floor for k>10, and it is the wall:
 
-**Why C does not beat A for a 50-spec suite:** A's whole-suite wall at k=4 is
-~4 s. C pays ~17 s of session acquisition plus a per-spec Browser Run tax
-before its parallelism helps. C wins only when the suite is large enough that
-the fan-out wall amortizes — a 200-spec suite, not 50. And C keeps the
-preview deploy (app-under-test) cost on top, which A does not pay.
+- **k=50, staggered (334 ms):** wall p50 18515 ms, ramp p50 16869 ms, 0/250
+  flakes. The ramp IS the suite wall — 4.6× A.
+- **k=50, burst (no stagger):** 172 launch retries (429 "Rate limit
+  exceeded"), 5 sessions never launched → 5/50 specs failed. Bursting does
+  NOT beat the 3/s floor; it converts ramp into flakes.
+- **k=20, staggered:** 9673 ms, 0/50 flakes.
+- **k=10, staggered:** 7939 ms, 0/50 flakes.
+- **k=10, burst:** wall p50 2835 ms (p95 5319 ms), ramp 734–783 ms, 0 retries,
+  0/150 flakes. Beats A on suite wall alone — but only because 10 ≤ the burst
+  bucket, so no ramp.
+
+Per-spec in-Worker is 277–433 ms vs A's 80 ms = 3.5–5.4× slower; every step
+crosses browser → app Worker → Durable Object. Billed session time:
+k=50 ≈ 44 s/suite (~0.9 s/session), k=10 burst 16.1/22.1/18.7 s, k=20 31.5 s.
+
+**Data-isolation under C:** the isolation spec (iso-w writes, iso-r reads 0)
+passed in all 11 suites at every k — single shared DO store, no cross-account
+leak. So C's isolation risk is equal to A's, not higher.
+
+**Preview deploy (setup cost):** app Worker `wrangler deploy` 13.7 s wall
+(upload 6.1 s + triggers 2.6 s), first request 200 at 280 ms (no warm-up
+gap). Runner Worker deploy 26.8 s, but that is one-time (playwright bundle),
+not per-PR.
 
 **Exact repro steps (maestro runs this — a studio holds no CF credential):**
 
 ```sh
 # 1. Deploy the fixture as a throwaway preview Worker (maestro, operator cred):
-#    bun scripts/bench/browser-throughput/fixture/app.ts is a Bun server; for
-#    a preview deploy, wrap it or use the same bench Worker pattern v1 used.
+#    fixture/app.ts ported to a Worker with a single Durable Object store
+#    (in-memory Map breaks POST-then-GET across isolates).
 
 # 2. Run the fan-out:
 CF_BROWSER_ACCOUNT_ID=... CF_BROWSER_TOKEN=... \
@@ -135,9 +172,6 @@ CF_BROWSER_ACCOUNT_ID=... CF_BROWSER_TOKEN=... \
     --target https://<preview-deploy>/ --k 50 --runs 5 \
     --out scripts/bench/browser-throughput/out/config-c
 ```
-
-Post the raw `out/config-c/{runs.csv,aggregate.json}` numbers here; they fold
-into this doc's C section.
 
 ## Cost model (USD per suite)
 
@@ -151,35 +185,36 @@ $0.000020/vCPU-s active-only, disk $0.00000007/GB-s; re-check the live page).
   suite to that, not a separate billing line. Cost is ~1 container.
 - **B — N shards:** N × $0.066, wall barely moves. **$0.528 at N=8 for
   ~3.5 s of wall.** Strictly worse than A on both axes.
-- **C — Browser Run fan-out:** $0.09/h after 10 h/mo inclusion; 50 sessions ×
-  a few seconds each ≈ well inside inclusion, so ~$0 marginal browser cost.
-  BUT it still needs the preview deploy (a Worker) and does not remove the
-  app's own serving cost; the fan-out acquisition wall is latency, not
-  dollars. C is cheap in browser dollars and expensive in wall time at this
-  suite size.
+- **C — Browser Run fan-out:** $0.09/browser-h beyond 10 h/mo inclusion.
+  Concurrency is **$2.00/browser beyond 10**, billed as monthly average of the
+  DAILY PEAK. So a k=50 fan-out costs ~$80/mo fixed the moment any day peaks
+  at 50 sessions; k≤10 costs $0 concurrency. Browser-h stays inside the 10 h
+  inclusion until ~800 k=50 suites/mo. k=50 ≈ $0.0011 browser-h/suite, k=10
+  ≈ $0.0005, k=20 ≈ $0.0008. C does NOT remove the app's serving cost (the
+  preview deploy Worker + its Durable Object).
 
 ## Recommendation (by data)
 
 1. **50-spec-class browser suite: one container, k=4.** Measured 3997 ms p50,
-   0 flake, cheapest ($0.066), and it runs the real `playwright test` runner
-   with no fixture override. The CPU knee is k=4 on a 4-vCPU container.
+   0 flake, cheapest ($0.066), runs the real `playwright test` runner with no
+   fixture override. The CPU knee is k=4 on a 4-vCPU container.
 2. **Do not gate-shard a browser suite.** Boot+setup per container (39–99 s)
    swamps the 4 s compute; sharding is for the 674 s bun-test lane, not this.
-3. **Browser Run fan-out (C) only if the suite grows well past ~200 specs.**
-   The 3 new/s acquisition + 2.0× per-run latency + preview-deploy cost beat
-   A's numbers at 50 specs. Re-measure C for the actual suite size before
-   committing; the committed driver makes that one command.
+3. **Browser Run fan-out (C) loses at k=50 and end-to-end.** k=50 is 4.6× A
+   on suite wall (18.5 s, the ~17 s acquisition ramp IS the wall); bursting
+   past the 10-session bucket flakes (5/50). k=10 burst beats A on suite wall
+   alone (2.8 s vs 4.5 s wall+boot) but still loses per-PR end-to-end once
+   the 13.7 s preview deploy is added (~16.5 s vs ~4.5 s). **C fits only where
+   a deploy already happens — a post-deploy check on a real preview/staging
+   URL — with k≤10 sessions, no container.** Keep A as the gate default.
 
-## Open — a C run would close these
+## Open
 
-1. **C's actual fan-out wall** — the 3 new/s acquisition is from CF's doc,
-   not a measured number; a 50-session C run measures the real acquisition +
-   connect wall, which this doc bounds but does not claim.
-2. **C's data-isolation risk under 50 concurrent sessions** — the fixture
-   isolates by account id, and C hits the same disjoint ids, so the model
-   says equal risk; the real proof is a C run with 0 flake on the isolation
-   spec.
-3. **Measured CF-container cold start** — B spans 30–90 s because the design
+1. **C's account-wide shared launch budget under real gate concurrency.** The
+   10-session burst bucket is per account, shared — two PR suites in the same
+   ~3 s window means the second is rate-limited. k=10 burst is reliable solo
+   and unproven under concurrent PRs.
+2. **Measured CF-container cold start** — B spans 30–90 s because the design
    doc still says "unmeasured." A measured cold-start number would collapse
    that span; the B model takes `BENCH_B_COLD_MS` to re-run with it.
 
