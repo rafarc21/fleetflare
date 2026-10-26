@@ -1,0 +1,11 @@
+{
+  "k": 8,
+  "n": 5,
+  "wall_p50_ms": 3730,
+  "wall_p95_ms": 4070,
+  "wall_min_ms": 3492,
+  "wall_max_ms": 4070,
+  "boot_p50_ms": 1073,
+  "flake_rate": 0,
+  "per_spec_median_ms": 75
+}
