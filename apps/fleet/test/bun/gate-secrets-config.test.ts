@@ -1,13 +1,18 @@
 // #1346: parseGateSecretsAllowlist fails closed on every malformed shape --
 // this is the OPS-repo file no PR can ever write to, but a Worker must never
 // crash a gate run over a hand-edited JSON file either.
+//
+// #1376: a leg's OPS-file value may be the original plain array (back-compat,
+// normalizes to { secrets }) or the new { secrets, head? } object -- every
+// entry this file hands back, after parsing, is always the normalized object
+// form, so nothing downstream ever branches on which shape the file used.
 import { describe, it, expect } from "bun:test";
 import { parseGateSecretsAllowlist, gateSecretsRepoEntry, gateSecretsAllowlistFailure } from "../../src/gate/secrets-config";
 
-describe("parseGateSecretsAllowlist", () => {
-  it("parses a well-formed file", () => {
+describe("parseGateSecretsAllowlist: array form (back-compat)", () => {
+  it("parses a well-formed file, normalizing the array form to { secrets }", () => {
     const parsed = parseGateSecretsAllowlist({ "acme/example": { "browser-e2e": ["staging-login"] } });
-    expect(parsed).toEqual({ "acme/example": { "browser-e2e": ["staging-login"] } });
+    expect(parsed).toEqual({ "acme/example": { "browser-e2e": { secrets: ["staging-login"] } } });
   });
 
   it("a non-object top level parses to an empty allowlist", () => {
@@ -22,14 +27,78 @@ describe("parseGateSecretsAllowlist", () => {
       "acme/example": { "browser-e2e": ["staging-login"] },
       "acme/broken": "not an object",
     });
-    expect(parsed).toEqual({ "acme/example": { "browser-e2e": ["staging-login"] } });
+    expect(parsed).toEqual({ "acme/example": { "browser-e2e": { secrets: ["staging-login"] } } });
   });
 
-  it("a leg entry that isn't a string array is dropped, not fatal to its own repo's other legs", () => {
+  it("a leg entry that isn't a string array (and isn't {secrets, head?} either) is dropped, not fatal to its own repo's other legs", () => {
     const parsed = parseGateSecretsAllowlist({
       "acme/example": { "browser-e2e": ["staging-login"], "broken-leg": "staging-login", "mixed-leg": ["ok", 7] },
     });
-    expect(parsed).toEqual({ "acme/example": { "browser-e2e": ["staging-login"] } });
+    expect(parsed).toEqual({ "acme/example": { "browser-e2e": { secrets: ["staging-login"] } } });
+  });
+});
+
+// #1376: the new object form, the only way an ops entry opts a leg's @head
+// union-plan copy into sharing its grant (secrets-scope.ts's own guard).
+describe("parseGateSecretsAllowlist: {secrets, head?} object form (#1376)", () => {
+  it("parses { secrets, head: true }", () => {
+    const parsed = parseGateSecretsAllowlist({ "acme/example": { "ai-smoke": { secrets: ["workers-ai"], head: true } } });
+    expect(parsed).toEqual({ "acme/example": { "ai-smoke": { secrets: ["workers-ai"], head: true } } });
+  });
+
+  it("parses { secrets } with head omitted -- normalizes the SAME as the array form (head: false default)", () => {
+    const parsed = parseGateSecretsAllowlist({ "acme/example": { "ai-smoke": { secrets: ["workers-ai"] } } });
+    expect(parsed).toEqual({ "acme/example": { "ai-smoke": { secrets: ["workers-ai"] } } });
+  });
+
+  it("parses { secrets, head: false } the same as head omitted (head stays unset, never a stray `head: false` key)", () => {
+    const parsed = parseGateSecretsAllowlist({ "acme/example": { "ai-smoke": { secrets: ["workers-ai"], head: false } } });
+    expect(parsed).toEqual({ "acme/example": { "ai-smoke": { secrets: ["workers-ai"] } } });
+    expect(Object.hasOwn(parsed["acme/example"]["ai-smoke"], "head")).toBe(false);
+  });
+
+  it("drops an object entry whose secrets field is missing or not a string array", () => {
+    const parsed = parseGateSecretsAllowlist({
+      "acme/example": {
+        "ok-leg": ["staging-login"],
+        "no-secrets": { head: true },
+        "bad-secrets": { secrets: "not-an-array", head: true },
+        "mixed-secrets": { secrets: ["ok", 7], head: true },
+      },
+    });
+    expect(parsed).toEqual({ "acme/example": { "ok-leg": { secrets: ["staging-login"] } } });
+  });
+
+  it("drops an object entry whose head field is present but not a boolean", () => {
+    const parsed = parseGateSecretsAllowlist({
+      "acme/example": { "ai-smoke": { secrets: ["workers-ai"], head: "true" } },
+    });
+    expect(parsed).toEqual({ "acme/example": {} });
+  });
+
+  it("an array and an object entry coexist fine in the same repo", () => {
+    const parsed = parseGateSecretsAllowlist({
+      "acme/example": {
+        "browser-e2e": ["staging-login"],
+        "ai-smoke": { secrets: ["workers-ai"], head: true },
+      },
+    });
+    expect(parsed).toEqual({
+      "acme/example": {
+        "browser-e2e": { secrets: ["staging-login"] },
+        "ai-smoke": { secrets: ["workers-ai"], head: true },
+      },
+    });
+  });
+
+  // #1376 security review r1 LOW: the schema says additionalProperties:
+  // false, but an unknown key is a typo to surface, not a reason to drop an
+  // otherwise well-formed grant.
+  it("warns on an unknown key but keeps the entry and its grant unchanged", () => {
+    const parsed = parseGateSecretsAllowlist({
+      "acme/example": { "ai-smoke": { secrets: ["workers-ai"], head: true, heads: true } },
+    });
+    expect(parsed).toEqual({ "acme/example": { "ai-smoke": { secrets: ["workers-ai"], head: true } } });
   });
 });
 
@@ -37,7 +106,7 @@ describe("gateSecretsRepoEntry", () => {
   const allowlist = parseGateSecretsAllowlist({ "Acme/Example": { "browser-e2e": ["staging-login"] } });
 
   it("matches case-insensitively", () => {
-    expect(gateSecretsRepoEntry(allowlist, "acme/example")).toEqual({ "browser-e2e": ["staging-login"] });
+    expect(gateSecretsRepoEntry(allowlist, "acme/example")).toEqual({ "browser-e2e": { secrets: ["staging-login"] } });
   });
 
   it("undefined for a repo with no entry", () => {

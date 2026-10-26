@@ -14,14 +14,63 @@
  *  secrets-config.schema.json, next to this file. */
 export const GATE_SECRETS_ALLOWLIST_PATH = "gate-secrets.json";
 
-/** repo (owner/name) -> leg name -> the secret NAMEs that leg may receive.
- *  A name is an opaque label here -- never a value, an env var, or a binding
- *  name; secrets-registry.ts is the only place a name resolves to anything
- *  real, and secrets-scope.ts is the only place this type is read. */
-export type GateSecretsAllowlist = Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
+/** One leg's OPS-allowlist entry, normalized. The OPS file may write either
+ *  shape (see parseGateSecretsAllowlist's own per-entry parsing) -- a plain
+ *  array (back-compat, `head` absent) or `{secrets, head}`; every entry this
+ *  type ever describes, after parsing, is this normalized object, so nothing
+ *  downstream (secrets-scope.ts) ever branches on which shape the file used. */
+export interface GateSecretsLegEntry {
+  /** The secret NAMEs this leg may receive. */
+  secrets: readonly string[];
+  /** #1376: when true, this leg's own `@head`/`@head-<n>` union-plan copy
+   *  (fanout.ts's headLegName -- the name a leg a PR ADDS to its own
+   *  fleet.json runs under) receives the SAME grants as this leg, under the
+   *  exact same trust filter (secrets-scope.ts's trustedForSecrets) -- never
+   *  a separate or looser check. Absent/false: no head grants at all, the
+   *  #1346 default, unchanged. Explicit ops opt-in ONLY: a PR cannot set
+   *  this itself, the same reason it cannot add its own allowlist entry --
+   *  this file never lives in the PR's own repo. */
+  head?: boolean;
+}
+
+/** repo (owner/name) -> leg name -> that leg's normalized OPS-allowlist
+ *  entry. A name inside `secrets` is an opaque label here -- never a value,
+ *  an env var, or a binding name; secrets-registry.ts is the only place a
+ *  name resolves to anything real, and secrets-scope.ts is the only place
+ *  this type is read. */
+export type GateSecretsAllowlist = Readonly<Record<string, Readonly<Record<string, GateSecretsLegEntry>>>>;
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+
+/** The only keys the object form (`{secrets, head?}`) ever reads. */
+const LEG_ENTRY_KEYS: ReadonlySet<string> = new Set(["secrets", "head"]);
+
+/** One leg's raw OPS-file value, normalized to `GateSecretsLegEntry`, or null
+ *  on anything malformed (a bad `secrets` field, a non-boolean `head`, or a
+ *  shape that is neither a string array nor `{secrets, head?}`).
+ *  `context` (e.g. "acme/example/\"leg\"") names the entry in a warning only
+ *  -- it changes no parsed value. #1376 security review r1 LOW: the schema
+ *  (`secrets-config.schema.json`) declares `additionalProperties: false` for
+ *  the object form, but the parser itself silently ignored any extra key
+ *  instead of saying so -- an operator typo (`"heads": true` instead of
+ *  `"head"`) would otherwise parse as a quiet no-grant with no signal why.
+ *  Warned, never dropped: an unknown key changes nothing about the grant
+ *  itself, so it is not treated as malformed the way a bad `secrets`/`head`
+ *  value is. */
+function parseLegEntry(raw: unknown, context: string): GateSecretsLegEntry | null {
+  if (isStringArray(raw)) return { secrets: raw };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (!isStringArray(r.secrets)) return null;
+  if (r.head !== undefined && typeof r.head !== "boolean") return null;
+  for (const key of Object.keys(r)) {
+    if (!LEG_ENTRY_KEYS.has(key)) {
+      console.warn(`gate-secrets allowlist: ${context} has an unknown key "${key}" -- ignored, no grant change`);
+    }
+  }
+  return r.head === true ? { secrets: r.secrets, head: true } : { secrets: r.secrets };
 }
 
 /** The OPS file, parsed. Fail closed on anything malformed: a bad top level
@@ -41,18 +90,19 @@ function isStringArray(v: unknown): v is string[] {
 export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
   const empty: GateSecretsAllowlist = Object.create(null);
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return empty;
-  const out: Record<string, Record<string, string[]>> = Object.create(null);
+  const out: Record<string, Record<string, GateSecretsLegEntry>> = Object.create(null);
   for (const [repo, legs] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof legs !== "object" || legs === null || Array.isArray(legs)) {
       console.warn(`gate-secrets allowlist: repo "${repo}" entry is not an object -- dropped`);
       continue;
     }
-    const perLeg: Record<string, string[]> = Object.create(null);
-    for (const [leg, names] of Object.entries(legs as Record<string, unknown>)) {
-      if (isStringArray(names)) {
-        perLeg[leg] = names;
+    const perLeg: Record<string, GateSecretsLegEntry> = Object.create(null);
+    for (const [leg, value] of Object.entries(legs as Record<string, unknown>)) {
+      const entry = parseLegEntry(value, `${repo}/"${leg}"`);
+      if (entry !== null) {
+        perLeg[leg] = entry;
       } else {
-        console.warn(`gate-secrets allowlist: ${repo}/"${leg}" is not a string array -- dropped`);
+        console.warn(`gate-secrets allowlist: ${repo}/"${leg}" is not a string array or {secrets, head?} -- dropped`);
       }
     }
     out[repo] = perLeg;
@@ -65,7 +115,7 @@ export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
  *  gateMapEntry). Undefined when the repo has no entry at all. */
 export function gateSecretsRepoEntry(
   allowlist: GateSecretsAllowlist, repo: string,
-): Readonly<Record<string, readonly string[]>> | undefined {
+): Readonly<Record<string, GateSecretsLegEntry>> | undefined {
   const key = repo.toLowerCase();
   return Object.entries(allowlist).find(([name]) => name.toLowerCase() === key)?.[1];
 }
