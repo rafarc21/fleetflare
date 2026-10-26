@@ -11,7 +11,10 @@ https://github.com/rafarc21/fleetflare/pull/1354 — r1: the trust filter
 unresolved-secret guard and result redaction moved into `runLegWithSecrets`
 (§4a/§6, since do.ts itself can never be loaded under `bun test`), and
 redaction now also catches a secret split by `gate-server.ts`'s own 32k tail
-cut (§6). Every section below describes the FINAL design, not an
+cut (§6). Extended by https://github.com/rafarc21/fleetflare/issues/1367
+(§4, registered labels table) to register three consumer-maestro-owned
+labels in `SECRET_REGISTRY` — no mechanism change, registry entries only.
+Every section below describes the FINAL design, not an
 intermediate one.
 
 ## Non-goals
@@ -280,8 +283,29 @@ export const SECRET_REGISTRY: Readonly<Record<string, SecretDef>> = {
   // #1346 Workers AI proxy route (floor mode, T4): no stored value at all —
   // see "AI route" below.
   "workers-ai": { minted: true },
+  // #1367: consumer AI legs' own labels (values stored by the consumer
+  // maestro's own deploy, never by this repo).
+  "appcheck-debug-token": { envVar: "GATE_SECRET_APPCHECK_DEBUG_TOKEN" },
+  "staging-minter-sa": { envVar: "GATE_SECRET_STAGING_MINTER_SA" },
+  "gemini-gate-key": { envVar: "GATE_SECRET_GEMINI_GATE_KEY" },
 };
 ```
+
+**Registered labels (operator reference, kept current as entries are added):**
+
+| Name (OPS-file-facing) | Env var (Worker secret) | Set with | Owner |
+|---|---|---|---|
+| `staging-login` | `GATE_SECRET_STAGING_LOGIN` | `apps/fleet/scripts/deploy.sh secret put GATE_SECRET_STAGING_LOGIN` | this repo (example) |
+| `workers-ai` | *(none — minted per run)* | `apps/fleet/scripts/deploy.sh secret put GATE_SECRET_SIGNING_KEY` (signs the minted token, not the secret itself) | this repo |
+| `appcheck-debug-token` | `GATE_SECRET_APPCHECK_DEBUG_TOKEN` | `apps/fleet/scripts/deploy.sh secret put GATE_SECRET_APPCHECK_DEBUG_TOKEN` | consumer maestro (#1367) |
+| `staging-minter-sa` | `GATE_SECRET_STAGING_MINTER_SA` | `apps/fleet/scripts/deploy.sh secret put GATE_SECRET_STAGING_MINTER_SA` | consumer maestro (#1367) |
+| `gemini-gate-key` | `GATE_SECRET_GEMINI_GATE_KEY` | `apps/fleet/scripts/deploy.sh secret put GATE_SECRET_GEMINI_GATE_KEY` | consumer maestro (#1367) |
+
+"Owner" names who actually stores the value (which maestro/operator runs the
+`secret put`) — this repo's `SECRET_REGISTRY` entry and `env.ts` typing are
+the same regardless of owner; only who holds the credential differs. A label
+with no row here is not registered and `grantedSecretNames` drops it
+(secrets-scope.ts's registry guard), logged as an unknown name.
 
 ### 4a. Fail-closed, never silently degraded (new, security review r1 item 3)
 
