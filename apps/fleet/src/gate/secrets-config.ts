@@ -85,16 +85,22 @@ function parseLegEntry(raw: unknown, context: string): GateSecretsLegEntry | nul
  *  is logged (the repo/leg NAME only, never the malformed value itself) so a
  *  typo in a hand-edited OPS file is visible, not silently eaten.
  *
- *  Built with `Object.create(null)`, not `{}`: the allowlist's own keys come
- *  from an external file, and a plain object literal's inherited
- *  Object.prototype would let a key literally named "__proto__" pollute it on
- *  assignment (`out[repo] = ...` is a normal property SET, unlike
- *  Object.entries' own read, which only sees own-enumerable JSON properties
- *  safely). A null-prototype object has no such setter to trigger. */
+ *  Built with plain `{}`, not `Object.create(null)`: this parsed allowlist is
+ *  the RETURN VALUE of the "gate-secrets-allowlist" workflow step
+ *  (workflow.ts), and Workflows serializes every step result with a structured
+ *  clone -- which throws `DataCloneError: Could not serialize object of type
+ *  Object` on any null-prototype container, the exact regression #1382 was.
+ *  The proto-pollution safety those null-prototype containers used to buy at
+ *  build time now lives at READ time instead: every reader looks up own keys
+ *  only (secrets-scope.ts's ownLegEntry via Object.hasOwn, gateSecretsRepoEntry
+ *  via Object.entries), so a key literally named "__proto__" -- which a
+ *  plain-object SET turns into the object's prototype rather than an own key --
+ *  is simply never seen, the same fail-closed result the null-prototype
+ *  container produced. */
 export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
-  const empty: GateSecretsAllowlist = Object.create(null);
+  const empty: GateSecretsAllowlist = {};
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return empty;
-  const out: Record<string, Record<string, GateSecretsLegEntry>> = Object.create(null);
+  const out: Record<string, Record<string, GateSecretsLegEntry>> = {};
   for (const [repo, legs] of Object.entries(raw as Record<string, unknown>)) {
     // #1380: the one reserved top-level key that is never a repo slug (every
     // real repo key contains "/"; this one never does) -- parseTrustOwnApp,
@@ -104,7 +110,7 @@ export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
       console.warn(`gate-secrets allowlist: repo "${repo}" entry is not an object -- dropped`);
       continue;
     }
-    const perLeg: Record<string, GateSecretsLegEntry> = Object.create(null);
+    const perLeg: Record<string, GateSecretsLegEntry> = {};
     for (const [leg, value] of Object.entries(legs as Record<string, unknown>)) {
       const entry = parseLegEntry(value, `${repo}/"${leg}"`);
       if (entry !== null) {
