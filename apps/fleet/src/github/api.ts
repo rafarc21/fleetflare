@@ -417,25 +417,33 @@ export async function getDefaultBranch(token: string, repo: string): Promise<str
 }
 
 /**
- * #1380: the numeric GitHub App id of whichever App is installed on `repo`,
- * for the optional cross-check in gate-scoped secrets' trust filter ("the App
- * id matches the Worker's own configured App id"). `GET /repos/{owner}/{repo}/installation`
- * is a JWT-only endpoint (an installation token cannot read it) — `jwt` must
- * be minted with this Worker's own App credentials (github/app.ts's own JWT
- * signer). Returns null on any error (repo not accessible to this App, App
- * not installed, a network error) rather than throwing: this check is
- * explicitly optional ("if available") everywhere it is used, so a failure
- * here degrades to "cross-check skipped," never a hard failure.
+ * #1380 security review r1 MED: this Worker's OWN GitHub App slug (e.g.
+ * "fleetflare-bot"), for the gate-scoped secrets trust filter's `trustOwnApp`
+ * opt-in. `GET /app` is a JWT-only endpoint that returns the IDENTITY of
+ * whichever App's own JWT authenticated the call -- so it can only ever name
+ * THIS Worker's own App, never any other. (This replaces an earlier, DEAD
+ * design: `GET /repos/{owner}/{repo}/installation` authenticated with this
+ * same JWT could only ever confirm "this Worker's own App is installed on
+ * `repo`," which is always true whenever the call succeeds at all -- it
+ * never told us anything about which App actually opened a given PR, so
+ * comparing its `app_id` to our own `GITHUB_APP_ID` was comparing this
+ * Worker to itself. `GET /app` has no such problem: it names an identity
+ * (`slug`), and `trustedForSecrets` compares THAT, not an id, against the
+ * PR's own `user.login`.) `jwt` must be minted with this Worker's own App
+ * credentials (`github/app.ts`'s `appJwt`). Returns null on any error (no
+ * App configured, a network error) rather than throwing: the caller treats
+ * a null slug as "the App-bot trust path cannot be evaluated," which fails
+ * CLOSED (deny), never open.
  */
-export async function getRepoInstallationAppId(jwt: string, repo: string): Promise<number | null> {
+export async function getAuthenticatedAppSlug(jwt: string): Promise<string | null> {
   try {
-    const body = await ghJson<{ app_id?: number }>(
+    const body = await ghJson<{ slug?: string }>(
       jwt,
-      `https://api.github.com/repos/${repo}/installation`,
+      "https://api.github.com/app",
       { method: "GET" },
-      `read ${repo} installation`,
+      "read authenticated app",
     );
-    return typeof body.app_id === "number" ? body.app_id : null;
+    return typeof body.slug === "string" && body.slug !== "" ? body.slug : null;
   } catch {
     return null;
   }

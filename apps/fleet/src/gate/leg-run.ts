@@ -406,12 +406,11 @@ export interface TrustContextInput {
   authorIsBot: boolean;
   authorLogin: string;
   defaultBranch: string;
-  /** #1380: fleet-wide OPS opt-in list of trusted App slugs. Empty = off. */
-  trustApps: readonly string[];
-  /** #1380: optional cross-check inputs, "if available" -- see
-   *  secrets-scope.ts's SecretsTrustInput for the full contract. */
-  installationAppId?: number;
-  configuredAppId?: string;
+  /** #1380 security review r1 MED: fleet-wide OPS boolean opt-in. false = off. */
+  trustOwnApp: boolean;
+  /** #1380 security review r1 MED: this Worker's own App slug, from `GET
+   *  /app` -- see secrets-scope.ts's SecretsTrustInput for the full contract. */
+  ownAppSlug?: string;
 }
 
 /** legRequest's own `pr` parameter shape, minus the per-leg `image` override

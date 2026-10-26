@@ -15,18 +15,18 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, comparePrecheckData, fetchRepoFile, getBranchSha, getDefaultBranch, getPullRequest,
-  getRepoInstallationAppId, listOpenPulls, listRepoTree,
+  compareFiles, comparePrecheckData, fetchRepoFile, getAuthenticatedAppSlug, getBranchSha, getDefaultBranch,
+  getPullRequest, listOpenPulls, listRepoTree,
 } from "../github/api";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { appJwt } from "../github/app";
 import { OPS_DENYLIST_PATH, parseDenylist } from "../leak-gate";
 import { resolveOpsRepo } from "../ops-repo";
 import {
-  GATE_SECRETS_ALLOWLIST_PATH, gateSecretsAllowlistFailure, parseGateSecretsAllowlist, parseTrustApps,
+  GATE_SECRETS_ALLOWLIST_PATH, gateSecretsAllowlistFailure, parseGateSecretsAllowlist, parseTrustOwnApp,
   type GateSecretsAllowlist,
 } from "./secrets-config";
-import { trustedAppLogin, trustedForSecrets } from "./secrets-scope";
+import { trustedForSecrets } from "./secrets-scope";
 import { capStatusDescription, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
@@ -149,12 +149,12 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // same-repo and default-base -- decide whether EITHER trust path could
     // ever succeed. Unlike before #1380, the file must now be fetched for
     // this check alone too: the bot-app path's own trust decision depends on
-    // `trustApps`, which lives in that same file, so "is this PR trusted"
+    // `trustOwnApp`, which lives in that same file, so "is this PR trusted"
     // can no longer be answered before reading it the way the human-only
     // path could.
     const couldBeTrustedAtAll = resolved.sameRepo && resolved.baseRef === resolved.defaultBranch;
 
-    // #1346: the OPS-repo allowlist (and, #1380, the fleet-wide trustApps
+    // #1346: the OPS-repo allowlist (and, #1380, the fleet-wide trustOwnApp
     // opt-in) for gate-scoped secrets, read the same way leak-gate.ts's
     // denylist already is -- never from the PR's own repo, at any sha.
     // Skipped entirely when neither trust path could ever succeed (every
@@ -169,39 +169,39 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // null propagates to a whole-run failure below (#1346 security review r1
     // item 3: "allowlist fetch error on a trusted PR -> RED," never a silent
     // fall-through to "grant nothing" when we don't actually know that).
-    const opsSecrets: { allowlist: GateSecretsAllowlist; trustApps: readonly string[] } | null = couldBeTrustedAtAll
+    const opsSecrets: { allowlist: GateSecretsAllowlist; trustOwnApp: boolean } | null = couldBeTrustedAtAll
       ? await step.do("gate-secrets-allowlist", async () => {
         const opsRepo = resolveOpsRepo(this.env);
-        if (opsRepo === null) return { allowlist: {}, trustApps: [] };
+        if (opsRepo === null) return { allowlist: {}, trustOwnApp: false };
         try {
           const raw = await fetchRepoFile(
             await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }),
             opsRepo, GATE_SECRETS_ALLOWLIST_PATH, "HEAD",
           );
           const parsed = JSON.parse(raw);
-          return { allowlist: parseGateSecretsAllowlist(parsed), trustApps: parseTrustApps(parsed) };
+          return { allowlist: parseGateSecretsAllowlist(parsed), trustOwnApp: parseTrustOwnApp(parsed) };
         } catch (err) {
           console.warn(`gate-secrets: allowlist fetch/parse failed for ${opsRepo}/${GATE_SECRETS_ALLOWLIST_PATH}: ${err instanceof Error ? err.message : String(err)}`);
           return null;
         }
       })
-      : { allowlist: {}, trustApps: [] };
-    const trustApps = opsSecrets === null ? [] : opsSecrets.trustApps;
+      : { allowlist: {}, trustOwnApp: false };
+    const trustOwnApp = opsSecrets !== null && opsSecrets.trustOwnApp;
     const secretsAllowlist = opsSecrets === null ? null : opsSecrets.allowlist;
 
-    // #1380: the installation's own App id, fetched ONLY when it could
-    // actually change the outcome -- the login already matches an
-    // OPS-opted-in slug, and this Worker has its own App configured to
-    // compare against. "If available": any failure here (no App configured,
-    // the JWT mint failing, the API call failing) degrades to "cross-check
-    // skipped," never a hard failure -- see secrets-scope.ts's trustedAppBot.
-    const installationAppId = couldBeTrustedAtAll && resolved.authorIsBot
-      && trustedAppLogin(resolved.authorLogin, trustApps) && this.env.GITHUB_APP_ID !== undefined
-      ? await step.do("gate-secrets-app-id", async () => {
+    // #1380 security review r1 MED: this Worker's OWN App slug, from `GET
+    // /app` -- fetched ONLY when it could actually change the outcome: the
+    // author is a bot, the opt-in is on, and this Worker has its own App
+    // configured. Any failure here (no App configured, the JWT mint failing,
+    // the API call failing) degrades to "slug unknown," which fails CLOSED
+    // (deny) in secrets-scope.ts's trustedAppBot, never open.
+    const ownAppSlug = couldBeTrustedAtAll && resolved.authorIsBot && trustOwnApp
+      && this.env.GITHUB_APP_ID !== undefined
+      ? await step.do("gate-secrets-own-app-slug", async () => {
         if (this.env.GITHUB_APP_PRIVATE_KEY === undefined) return undefined;
         try {
           const jwt = await appJwt(this.env.GITHUB_APP_ID!, this.env.GITHUB_APP_PRIVATE_KEY, Date.now());
-          return (await getRepoInstallationAppId(jwt, repo)) ?? undefined;
+          return (await getAuthenticatedAppSlug(jwt)) ?? undefined;
         } catch {
           return undefined;
         }
@@ -214,13 +214,13 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // one of two paths depending on whether the author is human or this
     // fleet's own opted-in App.
     // Built once and reused for both legRequestContext call sites below, so
-    // the five #1380 fields (authorLogin/trustApps/installationAppId/
-    // configuredAppId plus the pre-existing four) are never duplicated out of
-    // sync between the bundle-leg dispatch and the ordinary leg dispatch.
+    // the #1380 fields (authorLogin/trustOwnApp/ownAppSlug plus the
+    // pre-existing four) are never duplicated out of sync between the
+    // bundle-leg dispatch and the ordinary leg dispatch.
     const trustContext = {
       sameRepo: resolved.sameRepo, authorAssociation: resolved.authorAssociation, authorIsBot: resolved.authorIsBot,
       authorLogin: resolved.authorLogin, baseRef: resolved.baseRef, defaultBranch: resolved.defaultBranch,
-      trustApps, installationAppId, configuredAppId: this.env.GITHUB_APP_ID,
+      trustOwnApp, ownAppSlug,
     };
     const trustedForSecretsFlag = trustedForSecrets(trustContext);
 

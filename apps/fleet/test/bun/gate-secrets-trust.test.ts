@@ -4,11 +4,11 @@
 // PR's base is the repo's actual default branch -- OR (#1380) same-repo AND
 // this fleet's own opted-in GitHub App AND the PR's base is the default branch.
 import { describe, it, expect } from "bun:test";
-import { trustedAppLogin, trustedForSecrets, type SecretsTrustInput } from "../../src/gate/secrets-scope";
+import { trustedForSecrets, type SecretsTrustInput } from "../../src/gate/secrets-scope";
 
 const TRUSTED: SecretsTrustInput = {
   sameRepo: true, authorAssociation: "COLLABORATOR", authorIsBot: false, authorLogin: "a-human",
-  baseRef: "main", defaultBranch: "main", trustApps: [],
+  baseRef: "main", defaultBranch: "main", trustOwnApp: false,
 };
 
 describe("trustedForSecrets: the trusted case", () => {
@@ -34,7 +34,7 @@ describe("trustedForSecrets: association guard", () => {
 });
 
 describe("trustedForSecrets: bot guard (default off, #1346)", () => {
-  it("a bot account (dependabot[bot] etc) is never trusted when trustApps is empty, even as a COLLABORATOR", () => {
+  it("a bot account (dependabot[bot] etc) is never trusted when trustOwnApp is off, even as a COLLABORATOR", () => {
     expect(trustedForSecrets({ ...TRUSTED, authorIsBot: true, authorLogin: "dependabot[bot]" })).toBe(false);
   });
 });
@@ -47,12 +47,22 @@ describe("trustedForSecrets: default-base guard", () => {
 
 // #1380: measured 10-26 -- every studio PR is opened by the fleet's own
 // GitHub App (user.type=Bot, author_association=NONE), so the pre-#1380
-// trust filter denied ALL studio PRs. This opt-in (default off) lets an
-// OPS-configured App slug through, under the exact same same-repo/default-
-// base checks, never a looser filter.
+// trust filter denied ALL studio PRs. This opt-in (default off) lets THIS
+// Worker's own App (its slug read fresh from `GET /app`, never operator
+// input) through, under the exact same same-repo/default-base checks, never
+// a looser filter.
+//
+// #1380 security review r1 MED: an earlier design took a free-form OPS slug
+// list (`trustApps: string[]`) plus an "if available" App-id cross-check.
+// That cross-check was dead code -- the only JWT-authenticated endpoint
+// available could only ever confirm this Worker's own App id, never verify
+// which App opened a given PR -- so a config mistake naming any other real
+// bot's slug (e.g. "dependabot") would have granted it trust with nothing to
+// catch it. Replaced with a boolean `trustOwnApp` plus `ownAppSlug` sourced
+// ONLY from `GET /app`: there is no slug left for an OPS typo to mistype.
 const TRUSTED_BOT: SecretsTrustInput = {
   sameRepo: true, authorAssociation: "NONE", authorIsBot: true, authorLogin: "fleetflare-bot[bot]",
-  baseRef: "main", defaultBranch: "main", trustApps: ["fleetflare-bot"],
+  baseRef: "main", defaultBranch: "main", trustOwnApp: true, ownAppSlug: "fleetflare-bot",
 };
 
 describe("trustedForSecrets: app-bot opt-in trusted when configured (#1380)", () => {
@@ -60,8 +70,12 @@ describe("trustedForSecrets: app-bot opt-in trusted when configured (#1380)", ()
     expect(trustedForSecrets(TRUSTED_BOT)).toBe(true);
   });
 
-  it("default off: the SAME bot is refused when trustApps is empty (the #1346 default, unchanged)", () => {
-    expect(trustedForSecrets({ ...TRUSTED_BOT, trustApps: [] })).toBe(false);
+  it("default off: the SAME bot is refused when trustOwnApp is false (the #1346 default, unchanged)", () => {
+    expect(trustedForSecrets({ ...TRUSTED_BOT, trustOwnApp: false })).toBe(false);
+  });
+
+  it("refused when trustOwnApp is on but ownAppSlug could not be read (GET /app failed -- fails closed)", () => {
+    expect(trustedForSecrets({ ...TRUSTED_BOT, ownAppSlug: undefined })).toBe(false);
   });
 });
 
@@ -76,58 +90,43 @@ describe("trustedForSecrets: app-bot opt-in still requires same-repo and default
 });
 
 describe("trustedForSecrets: app-bot opt-in denies every OTHER bot (#1380)", () => {
-  it("dependabot[bot] stays denied even when trustApps opts a DIFFERENT app in", () => {
+  it("dependabot[bot] stays denied even when trustOwnApp opts THIS Worker's own App in", () => {
     expect(trustedForSecrets({ ...TRUSTED_BOT, authorLogin: "dependabot[bot]" })).toBe(false);
   });
 });
 
+// #1380 security review r1 LOW item 2: the author-type branch must actually
+// be selected by `authorIsBot`, not an accidental OR -- a human-typed account
+// whose login merely LOOKS like the bot's must never slip through the app-bot
+// path. (Mutant "authorIsBot || <app-bot check>" survives without this test.)
+describe("trustedForSecrets: a non-bot author is never evaluated on the app-bot path (#1380)", () => {
+  it("authorIsBot: false with a bot-shaped login and association NONE is refused", () => {
+    expect(trustedForSecrets({
+      ...TRUSTED_BOT, authorIsBot: false, authorAssociation: "NONE",
+    })).toBe(false);
+  });
+});
+
 // #1380 lookalike logins: exact match only, never a prefix/substring check.
-describe("trustedAppLogin / trustedForSecrets: lookalike logins are denied (#1380)", () => {
+describe("trustedForSecrets: lookalike logins are denied (#1380)", () => {
   it("'<slug>-x[bot]' is denied", () => {
-    expect(trustedAppLogin("fleetflare-bot-x[bot]", ["fleetflare-bot"])).toBe(false);
     expect(trustedForSecrets({ ...TRUSTED_BOT, authorLogin: "fleetflare-bot-x[bot]" })).toBe(false);
   });
 
   it("the bare slug with no [bot] suffix at all is denied", () => {
-    expect(trustedAppLogin("fleetflare-bot", ["fleetflare-bot"])).toBe(false);
     expect(trustedForSecrets({ ...TRUSTED_BOT, authorLogin: "fleetflare-bot" })).toBe(false);
   });
 
   it("a different app's own [bot] login is denied", () => {
-    expect(trustedAppLogin("other-app[bot]", ["fleetflare-bot"])).toBe(false);
     expect(trustedForSecrets({ ...TRUSTED_BOT, authorLogin: "other-app[bot]" })).toBe(false);
   });
 
   it("a slug that is a prefix or suffix of the real one is denied", () => {
-    expect(trustedAppLogin("fleetflare[bot]", ["fleetflare-bot"])).toBe(false);
-    expect(trustedAppLogin("flare-bot[bot]", ["fleetflare-bot"])).toBe(false);
+    expect(trustedForSecrets({ ...TRUSTED_BOT, authorLogin: "fleetflare[bot]" })).toBe(false);
+    expect(trustedForSecrets({ ...TRUSTED_BOT, authorLogin: "flare-bot[bot]" })).toBe(false);
   });
 
-  it("an empty-string slug in trustApps matches nothing", () => {
-    expect(trustedAppLogin("[bot]", [""])).toBe(false);
-  });
-});
-
-// #1380 "(if available)" App-id cross-check: skipped (never a refusal) when
-// either id is missing; refuses on an actual mismatch when both are present.
-describe("trustedForSecrets: optional App-id cross-check (#1380)", () => {
-  it("trusted when both ids are present and match", () => {
-    expect(trustedForSecrets({ ...TRUSTED_BOT, installationAppId: 123456, configuredAppId: "123456" })).toBe(true);
-  });
-
-  it("refused when both ids are present and DO NOT match", () => {
-    expect(trustedForSecrets({ ...TRUSTED_BOT, installationAppId: 999999, configuredAppId: "123456" })).toBe(false);
-  });
-
-  it("the cross-check is skipped (still trusted) when installationAppId alone is missing", () => {
-    expect(trustedForSecrets({ ...TRUSTED_BOT, installationAppId: undefined, configuredAppId: "123456" })).toBe(true);
-  });
-
-  it("the cross-check is skipped (still trusted) when configuredAppId alone is missing", () => {
-    expect(trustedForSecrets({ ...TRUSTED_BOT, installationAppId: 123456, configuredAppId: undefined })).toBe(true);
-  });
-
-  it("the cross-check is skipped (still trusted) when NEITHER id is available", () => {
-    expect(trustedForSecrets({ ...TRUSTED_BOT, installationAppId: undefined, configuredAppId: undefined })).toBe(true);
+  it("an empty-string ownAppSlug matches nothing", () => {
+    expect(trustedForSecrets({ ...TRUSTED_BOT, ownAppSlug: "", authorLogin: "[bot]" })).toBe(false);
   });
 });

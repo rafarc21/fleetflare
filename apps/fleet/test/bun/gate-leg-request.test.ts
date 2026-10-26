@@ -143,7 +143,7 @@ describe("legRequestContext (#1346)", () => {
   const ALLOWLIST = parseGateSecretsAllowlist({ "acme/example": { lint: ["staging-login"] } });
   const TRUSTED_INPUT = {
     baseRef: "main", sameRepo: true, authorAssociation: "COLLABORATOR", authorIsBot: false, authorLogin: "a-human",
-    defaultBranch: "main", trustApps: [],
+    defaultBranch: "main", trustOwnApp: false,
   };
 
   it("computes trusted: true for a same-repo collaborator PR on the default branch, and carries it to legRequest", () => {
@@ -180,7 +180,10 @@ describe("legRequestContext (#1346)", () => {
   // same secretNames decision as a human collaborator's PR, once opted in.
   it("computes trusted: true for the fleet's own opted-in App, and carries it to legRequest's secretNames", () => {
     const ctx = legRequestContext(
-      { baseRef: "main", sameRepo: true, authorAssociation: "NONE", authorIsBot: true, authorLogin: "fleetflare-bot[bot]", defaultBranch: "main", trustApps: ["fleetflare-bot"] },
+      {
+        baseRef: "main", sameRepo: true, authorAssociation: "NONE", authorIsBot: true, authorLogin: "fleetflare-bot[bot]",
+        defaultBranch: "main", trustOwnApp: true, ownAppSlug: "fleetflare-bot",
+      },
       false, ALLOWLIST, { pr: "7" },
     );
     expect(ctx.trusted).toBe(true);
@@ -188,9 +191,12 @@ describe("legRequestContext (#1346)", () => {
     expect(body.secretNames).toEqual(["staging-login"]);
   });
 
-  it("computes trusted: false for the SAME App login when trustApps is empty (default off)", () => {
+  it("computes trusted: false for the SAME App login when trustOwnApp is off (default)", () => {
     const ctx = legRequestContext(
-      { baseRef: "main", sameRepo: true, authorAssociation: "NONE", authorIsBot: true, authorLogin: "fleetflare-bot[bot]", defaultBranch: "main", trustApps: [] },
+      {
+        baseRef: "main", sameRepo: true, authorAssociation: "NONE", authorIsBot: true, authorLogin: "fleetflare-bot[bot]",
+        defaultBranch: "main", trustOwnApp: false,
+      },
       false, ALLOWLIST, { pr: "7" },
     );
     expect(ctx.trusted).toBe(false);

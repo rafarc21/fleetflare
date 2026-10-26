@@ -8,7 +8,7 @@
 // form, so nothing downstream ever branches on which shape the file used.
 import { describe, it, expect } from "bun:test";
 import {
-  parseGateSecretsAllowlist, gateSecretsRepoEntry, gateSecretsAllowlistFailure, parseTrustApps,
+  parseGateSecretsAllowlist, gateSecretsRepoEntry, gateSecretsAllowlistFailure, parseTrustOwnApp,
 } from "../../src/gate/secrets-config";
 
 describe("parseGateSecretsAllowlist: array form (back-compat)", () => {
@@ -138,62 +138,75 @@ describe("gateSecretsAllowlistFailure", () => {
   });
 });
 
-// #1380: the fleet-wide App-slug opt-in, read from the SAME raw JSON
-// parseGateSecretsAllowlist itself parses -- a top-level field, never a
-// per-repo one, since "the fleet's own GitHub App" is one identity across
-// every gated repo.
-describe("parseTrustApps", () => {
-  it("parses a well-formed trustApps list", () => {
-    expect(parseTrustApps({ trustApps: ["fleetflare-bot"] })).toEqual(["fleetflare-bot"]);
+// #1380 security review r1 MED: the fleet-wide App opt-in, read from the SAME
+// raw JSON parseGateSecretsAllowlist itself parses -- a top-level field,
+// never a per-repo one, since "the fleet's own GitHub App" is one identity
+// across every gated repo. A boolean, not a free-form slug list: there is no
+// slug for an OPS typo to mistype into trusting the wrong App (the earlier
+// `trustApps: string[]` design's companion "App id matches" cross-check was
+// found dead -- it could only ever compare this Worker to itself -- so a
+// config mistake naming any other bot's slug would have granted it trust
+// with nothing left to catch the error).
+describe("parseTrustOwnApp", () => {
+  it("true when explicitly set", () => {
+    expect(parseTrustOwnApp({ trustOwnApp: true })).toBe(true);
   });
 
-  it("absent -> empty (feature off, the default)", () => {
-    expect(parseTrustApps({ "acme/example": { "browser-e2e": ["staging-login"] } })).toEqual([]);
+  it("false when explicitly set", () => {
+    expect(parseTrustOwnApp({ trustOwnApp: false })).toBe(false);
   });
 
-  it("a non-array, or an array with a non-string element, -> empty, never throws", () => {
-    expect(parseTrustApps({ trustApps: "fleetflare-bot" })).toEqual([]);
-    expect(parseTrustApps({ trustApps: { slug: "fleetflare-bot" } })).toEqual([]);
-    expect(parseTrustApps({ trustApps: ["fleetflare-bot", 7] })).toEqual([]);
+  it("absent -> false (feature off, the default)", () => {
+    expect(parseTrustOwnApp({ "acme/example": { "browser-e2e": ["staging-login"] } })).toBe(false);
   });
 
-  it("a non-object top level -> empty, never throws", () => {
-    expect(parseTrustApps("nope")).toEqual([]);
-    expect(parseTrustApps(null)).toEqual([]);
-    expect(parseTrustApps(42)).toEqual([]);
+  it("a non-boolean value -> false, WARNED, never throws", () => {
+    const warnings: unknown[][] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args); };
+    let result: boolean;
+    try {
+      result = parseTrustOwnApp({ trustOwnApp: "true" });
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(result).toBe(false);
+    expect(warnings.some((w) => String(w[0]).includes("trustOwnApp"))).toBe(true);
   });
 
-  it("drops an empty-string slug", () => {
-    expect(parseTrustApps({ trustApps: ["fleetflare-bot", ""] })).toEqual(["fleetflare-bot"]);
+  it("a non-object top level -> false, never throws", () => {
+    expect(parseTrustOwnApp("nope")).toBe(false);
+    expect(parseTrustOwnApp(null)).toBe(false);
+    expect(parseTrustOwnApp(42)).toBe(false);
   });
 
   it("coexists with repo entries in the same file, read from the same raw value", () => {
-    const raw = { trustApps: ["fleetflare-bot"], "acme/example": { "browser-e2e": ["staging-login"] } };
-    expect(parseTrustApps(raw)).toEqual(["fleetflare-bot"]);
+    const raw = { trustOwnApp: true, "acme/example": { "browser-e2e": ["staging-login"] } };
+    expect(parseTrustOwnApp(raw)).toBe(true);
     expect(parseGateSecretsAllowlist(raw)).toEqual({ "acme/example": { "browser-e2e": { secrets: ["staging-login"] } } });
   });
 });
 
-describe("parseGateSecretsAllowlist: trustApps is never mistaken for a repo entry (#1380)", () => {
-  it("a top-level trustApps key is skipped, not warned about or parsed as a malformed repo", () => {
+describe("parseGateSecretsAllowlist: trustOwnApp is never mistaken for a repo entry (#1380)", () => {
+  it("a top-level trustOwnApp key is skipped, not warned about or parsed as a malformed repo", () => {
     const warnings: unknown[][] = [];
     const realWarn = console.warn;
     console.warn = (...args: unknown[]) => { warnings.push(args); };
     let parsed: ReturnType<typeof parseGateSecretsAllowlist>;
     try {
       parsed = parseGateSecretsAllowlist({
-        trustApps: ["fleetflare-bot"],
+        trustOwnApp: true,
         "acme/example": { "browser-e2e": ["staging-login"] },
       });
     } finally {
       console.warn = realWarn;
     }
     expect(parsed).toEqual({ "acme/example": { "browser-e2e": { secrets: ["staging-login"] } } });
-    expect(Object.hasOwn(parsed, "trustApps")).toBe(false);
+    expect(Object.hasOwn(parsed, "trustOwnApp")).toBe(false);
     // The dropped-entry warning path (for a genuinely malformed repo) must
-    // never fire for the reserved trustApps key -- it is a known, valid
-    // shape at this level, not a malformed repo entry that happens to be an
-    // array.
-    expect(warnings.some((w) => String(w[0]).includes("trustApps"))).toBe(false);
+    // never fire for the reserved trustOwnApp key -- it is a known, valid
+    // shape at this level, not a malformed repo entry that happens to be a
+    // boolean.
+    expect(warnings.some((w) => String(w[0]).includes("trustOwnApp"))).toBe(false);
   });
 });

@@ -8,7 +8,7 @@ import {
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
   setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict, setBranchProtectionRequiredStatusChecks, disableBranchProtectionEnforceAdmins,
-  getBranchProtection, findPullRequestsReferencingTask, getRepoInstallationAppId,
+  getBranchProtection, findPullRequestsReferencingTask, getAuthenticatedAppSlug,
 } from "../src/github/api";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
 
@@ -1366,24 +1366,29 @@ describe("ghRequest's merge order (#311 finding 3)", () => {
   });
 });
 
-// #1380: the optional cross-check in gate-scoped secrets' trust filter ("the
-// App id matches the Worker's own configured App id"). Never throws: this
-// check is explicitly optional everywhere it is used.
-describe("getRepoInstallationAppId", () => {
-  it("reads app_id off GET /repos/{repo}/installation, using the JWT as the bearer token", async () => {
-    respond = () => Response.json({ id: 999, app_id: 123456 });
-    expect(await getRepoInstallationAppId("jwt-value", "o/r")).toBe(123456);
-    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/installation");
+// #1380 security review r1 MED: this Worker's OWN App identity, for the
+// gate-scoped secrets trustOwnApp opt-in. GET /app names whichever App's own
+// JWT authenticated the call -- it can only ever be THIS Worker's own App,
+// never any other, unlike the (removed) installation-endpoint check this
+// replaces. Never throws: the caller treats null as "cannot evaluate," fails
+// closed.
+describe("getAuthenticatedAppSlug", () => {
+  it("reads slug off GET /app, using the JWT as the bearer token", async () => {
+    respond = () => Response.json({ id: 999, slug: "fleetflare-bot" });
+    expect(await getAuthenticatedAppSlug("jwt-value")).toBe("fleetflare-bot");
+    expect(calls[0].url).toBe("https://api.github.com/app");
     expect(calls[0].headers.authorization).toBe("Bearer jwt-value");
   });
 
-  it("null when GitHub sends no app_id", async () => {
+  it("null when GitHub sends no slug, or an empty one", async () => {
     respond = () => Response.json({ id: 999 });
-    expect(await getRepoInstallationAppId("jwt-value", "o/r")).toBeNull();
+    expect(await getAuthenticatedAppSlug("jwt-value")).toBeNull();
+    respond = () => Response.json({ id: 999, slug: "" });
+    expect(await getAuthenticatedAppSlug("jwt-value")).toBeNull();
   });
 
-  it("null, never throws, when the request fails (App not installed, network error)", async () => {
+  it("null, never throws, when the request fails (no App configured, network error)", async () => {
     respond = () => new Response("not found", { status: 404 });
-    expect(await getRepoInstallationAppId("jwt-value", "o/r")).toBeNull();
+    expect(await getAuthenticatedAppSlug("jwt-value")).toBeNull();
   });
 });

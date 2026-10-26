@@ -27,7 +27,7 @@ function b64urlStr(s: string): string {
 /** #1380: exported so a caller that needs the App's OWN identity (not an
  *  installation token scoped to one repo/owner) can mint the same JWT
  *  mintInstallationTokenDetail (below) already does internally -- e.g.
- *  getRepoInstallationAppId's JWT-only endpoint. */
+ *  getAuthenticatedAppSlug's JWT-only `GET /app` endpoint. */
 export async function appJwt(appId: string, privateKeyPem: string, now: number): Promise<string> {
   const key = await crypto.subtle.importKey(
     "pkcs8",
