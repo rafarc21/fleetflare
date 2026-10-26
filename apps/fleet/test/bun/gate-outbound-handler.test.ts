@@ -281,3 +281,53 @@ describe("PUT is scoped to the leg's own result key (GateOutbound props)", () =>
     expect(res.status).toBe(200);
   });
 });
+
+// #1343: a browser leg's spec evidence is written under its own evidence dir,
+// and only by a browser leg (props.evidenceKey). Plain legs deny every
+// evidence PUT; a browser leg never writes another leg's dir.
+describe("evidence PUT: scoped to the browser leg's own evidence dir (#1343)", () => {
+  const EVIDENCE = "gate/acme/example/runs/715/run-a/evidence/shard-e2e/console.json";
+  const OTHER_EVIDENCE = "gate/acme/example/runs/715/run-a/evidence/shard-other/console.json";
+  const EVIDENCE_DIR = "gate/acme/example/runs/715/run-a/evidence/shard-e2e/";
+
+  it("an evidence key resolves to STUDIO_ARCHIVE, alongside results and baselines", () => {
+    expect(resolveOutboundTarget(`/${EVIDENCE}`)).toEqual({ bucket: "STUDIO_ARCHIVE", key: EVIDENCE });
+  });
+
+  it("a browser leg PUTs its own evidence write-once (201), then 412", async () => {
+    const { bucket, store } = fakeBucket();
+    const props: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: EVIDENCE_DIR };
+    const first = await handleGateOutbound(req("PUT", `/${EVIDENCE}`, { body: "{}" }), bucket, props);
+    expect(first.status).toBe(201);
+    expect(store.has(EVIDENCE)).toBe(true);
+    const second = await handleGateOutbound(req("PUT", `/${EVIDENCE}`, { body: "{}" }), bucket, props);
+    expect(second.status).toBe(412);
+  });
+
+  it("a browser leg cannot PUT another leg's evidence dir (403)", async () => {
+    const { bucket, calls } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${OTHER_EVIDENCE}`, { body: "{}" }), bucket, { resultKey: RUN_KEY, evidenceKey: EVIDENCE_DIR });
+    expect(res.status).toBe(403);
+    expect(calls.length).toBe(0);
+  });
+
+  it("a plain leg (no evidenceKey) denies every evidence PUT (403)", async () => {
+    const { bucket, calls } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${EVIDENCE}`, { body: "{}" }), bucket, OWN);
+    expect(res.status).toBe(403);
+    expect(calls.length).toBe(0);
+  });
+
+  it("an evidence key with traversal or a non-shard name is refused", () => {
+    expect(resolveOutboundTarget("/gate/acme/example/runs/715/run-a/evidence/../x.json")).toBeNull();
+    expect(resolveOutboundTarget("/gate/acme/example/runs/715/run-a/evidence/shard-e2e.json/x")).toBeNull();
+    expect(resolveOutboundTarget("/gate/acme/example/runs/715/run-a/evidence/x.json")).toBeNull();
+  });
+
+  it("GET of a stored evidence file streams it, independent of props", async () => {
+    const { bucket } = fakeBucket({ [EVIDENCE]: "SCREENCAP" });
+    const res = await handleGateOutbound(req("GET", `/${EVIDENCE}`), bucket, undefined);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("SCREENCAP");
+  });
+});

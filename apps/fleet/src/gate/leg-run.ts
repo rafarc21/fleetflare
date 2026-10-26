@@ -373,6 +373,7 @@ export function legRequest(
     ...(pr.image === undefined ? {} : { image: pr.image }),
     ...(pr.bundleKey === undefined ? {} : { bundleKey: pr.bundleKey }),
     ...(pr.mergeBase === undefined ? {} : { mergeBase: pr.mergeBase }),
+    ...(planned.browser === true ? { browser: true } : {}),
   };
 }
 

@@ -428,3 +428,24 @@ describe("planLegs: lane timeouts (#1319)", () => {
     expect(planned.find((l) => l.leg === "vitest-1")?.timeoutMin).toBeUndefined();
   });
 });
+
+// #1343: the browser flag rides the plan (per-leg), survives the union, and
+// is part of a leg's runnable identity (flipping it reruns the head copy).
+describe("planLegs / planUnionLegs: browser flag (#1343)", () => {
+  const legs = [{ name: "e2e", cmd: "bun run e2e", browser: true as const }, { name: "lint", cmd: "bun run lint" }];
+  it("a browser leg is planned with browser:true; a plain leg without", () => {
+    const planned = planLegs({ ...BASE, legs });
+    expect(planned.find((l) => l.leg === "e2e")?.browser).toBe(true);
+    expect(planned.find((l) => l.leg === "lint")?.browser).toBeUndefined();
+  });
+  it("a browser-only change still runs the head copy (identity differs)", () => {
+    const union = planUnionLegs(BASE, { ...BASE, legs: [{ name: "e2e", cmd: "bun run e2e", browser: true }] });
+    expect(union.map((l) => l.leg)).toContain("e2e@head");
+    expect(union.find((l) => l.leg === "e2e@head")?.browser).toBe(true);
+  });
+  it("the fingerprint differs when the browser flag flips", () => {
+    const a = planLegs({ ...BASE, legs });
+    const b = planLegs({ ...BASE, legs: [{ name: "e2e", cmd: "bun run e2e" }, { name: "lint", cmd: "bun run lint" }] });
+    expect(planFingerprint(a)).not.toBe(planFingerprint(b));
+  });
+});

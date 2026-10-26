@@ -45,6 +45,11 @@ const SEG = "[A-Za-z0-9._-]+";
 // Baselines: `<owner>/<repo>/baselines/<sha>-<lockhash>.tar` (baseline.ts baselineTarballKey).
 const RUN_RESULT_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/shard-[a-z0-9-]+(@head)?(\\.retry)?\\.json$`);
 const BASELINE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/baselines/(${SEG})\\.tar$`);
+// #1343: one browser leg's spec evidence, `.../evidence/shard-<leg>/<file>`.
+// The shard name is the STABLE leg name (no try/retry variant — evidence is
+// per-leg, keyed by run+leg, whatever try produced it). Files are safe
+// path-segment names; the traversal guard above still rejects "." / "..".
+const EVIDENCE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/evidence/shard-[a-z0-9-]+(@head)?/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$`);
 // #1080: one git bundle per run, `gate-bundles/<owner>/<repo>/<runId>/<headSha>.bundle`.
 // Only the bundle leg may write it (bundleWriter); every other leg reads its own run's.
 const BUNDLE_RE = new RegExp(`^gate-bundles/(${SEG})/(${SEG})/(${SEG})/([0-9a-f]{40})\\.bundle$`);
@@ -97,14 +102,21 @@ export interface OutboundTarget {
 }
 
 /** Allow-list resolver. Returns the R2 key for a container path that matches
- *  one of the two exact gate/ shapes, or null for everything else. Never a
+ *  one of the exact gate/ shapes, or null for everything else. Never a
  *  passthrough: a path that doesn't match is refused, not signed against an
  *  arbitrary key. */
 export function resolveOutboundTarget(path: string): OutboundTarget | null {
   const key = path.replace(/^\/+/, "");
   if (key.split("/").some((seg) => seg === "." || seg === "..")) return null;
-  if (RUN_RESULT_RE.test(key) || BASELINE_RE.test(key) || BUNDLE_RE.test(key)) return { bucket: "STUDIO_ARCHIVE", key };
+  if (RUN_RESULT_RE.test(key) || BASELINE_RE.test(key) || BUNDLE_RE.test(key) || EVIDENCE_RE.test(key)) return { bucket: "STUDIO_ARCHIVE", key };
   return null;
+}
+
+/** Whether a key is one browser leg's spec-evidence file (#1343). Distinct from
+ *  a result/baseline/bundle key: it is the only key shape a browser leg may
+ *  write under its evidence dir, and it is NEVER a result (no verdict JSON). */
+function isEvidenceKey(key: string): boolean {
+  return EVIDENCE_RE.test(key);
 }
 
 /** The container may write its own leg's result, never a baseline. A baseline
@@ -141,6 +153,10 @@ export interface GateOutboundProps {
   bundleKey?: string;
   /** #1080: set on the bundle leg alone. It may PUT `bundleKey`, and no other key. */
   bundleWriter?: boolean;
+  /** #1343: this browser leg's own evidence dir. The only evidence prefix this
+   *  container may write under; absent on a plain leg, which denies every
+   *  evidence PUT. */
+  evidenceKey?: string;
 }
 
 /** The Worker's side of the git proxy: the upstream fetch. Injected so the
@@ -429,6 +445,21 @@ export async function handleGateOutbound(
     if (isBundle) {
       if (!props?.bundleWriter) return new Response("forbidden", { status: 403 });
       return putBundle(req, bucket, target.key);
+    }
+    // #1343: a browser leg's spec evidence is written under its own evidence
+    // dir alone, and only by a browser leg. A plain leg (no evidenceKey in
+    // props) can never write evidence; a browser leg can never write another
+    // leg's dir. Evidence is write-once like a result: a rerun's rewrite must
+    // not silently replace the first run's screens.
+    if (isEvidenceKey(target.key)) {
+      if (!props?.evidenceKey || !target.key.startsWith(props.evidenceKey)) return new Response("forbidden", { status: 403 });
+      const declared = Number(req.headers.get("content-length") ?? "0");
+      if (declared > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
+      const body = await req.arrayBuffer();
+      if (body.byteLength > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
+      const stored = await bucket.put(target.key, body, { onlyIf: { etagDoesNotMatch: "*" } });
+      if (stored === null) return new Response("already written", { status: 412 });
+      return new Response(null, { status: 201 });
     }
     if (!isWritableByContainer(target.key)) return new Response("forbidden", { status: 403 });
     if (!props?.resultKey || props.resultKey !== target.key) return new Response("forbidden", { status: 403 });

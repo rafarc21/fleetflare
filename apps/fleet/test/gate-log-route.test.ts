@@ -286,3 +286,83 @@ describe("GET /studio/gate/log --all parsing + per-attempt errors (#1318 r1)", (
     expect(retry.state).toBe("success");
   });
 });
+
+// #1343: `fleet gate log --evidence` lists the leg's evidence files; the
+// evidence overview/serve route answers the verdict target_url.
+describe("GET /studio/gate/log --evidence + /studio/gate/evidence (#1343)", () => {
+  const EVIDENCE = `gate/${CANONICAL}/runs/${PR}/${RUN}/evidence/shard-e2e/console.json`;
+  const pulls = (): void => {
+    realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/pulls/")) {
+        return new Response(JSON.stringify({
+          number: PR, merged: false, merge_commit_sha: null, state: "open",
+          base: { ref: "main", repo: { full_name: CANONICAL, private: false } },
+          head: { ref: "feature", sha: "a".repeat(40) },
+          title: "t", body: "",
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+  };
+
+  it("--evidence lists the leg's evidence files with their serve URLs", async () => {
+    pulls();
+    await env.STUDIO_ARCHIVE.put(
+      `gate/${CANONICAL}/runs/${PR}/${RUN}/shard-e2e.json`,
+      JSON.stringify({ state: "success" }),
+    );
+    await env.STUDIO_ARCHIVE.put(EVIDENCE, "{}");
+
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=e2e&run=${RUN}&evidence=1`);
+    const res = await handleGateRoute(req, logEnv());
+    expect(res.status).toBe(200);
+    const body = await res.json() as { evidence: { key: string; url: string }[] };
+    expect(body.evidence).toHaveLength(1);
+    expect(body.evidence[0].key).toBe(EVIDENCE);
+    expect(body.evidence[0].url).toContain("console.json");
+  });
+
+  it("--evidence on a leg with no result lists nothing (an empty evidence set, not an error)", async () => {
+    pulls();
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=e2e&run=${RUN}&evidence=1`);
+    const res = await handleGateRoute(req, logEnv());
+    expect(res.status).toBe(200);
+    expect((await res.json() as { evidence: unknown[] }).evidence).toEqual([]);
+  });
+
+  it("the evidence overview lists every evidence file under the run", async () => {
+    pulls();
+    await env.STUDIO_ARCHIVE.put(EVIDENCE, "{}");
+    const req = new Request(`https://worker/studio/gate/evidence?repo=${REPO}&pr=${PR}&run=${RUN}`);
+    const res = await handleGateRoute(req, logEnv());
+    expect(res.status).toBe(200);
+    const body = await res.json() as { evidence: { key: string; url: string }[] };
+    expect(body.evidence).toHaveLength(1);
+    expect(body.evidence[0].key).toBe(EVIDENCE);
+  });
+
+  it("the evidence serve path serves a stored file, and 404s a path outside the shape", async () => {
+    pulls();
+    await env.STUDIO_ARCHIVE.put(EVIDENCE, "SCREENCAP");
+    const file = `https://worker/studio/gate/evidence/${EVIDENCE.split("/").map(encodeURIComponent).join("/")}`;
+    const res = await handleGateRoute(new Request(file), logEnv());
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("SCREENCAP");
+
+    const bad = new Request("https://worker/studio/gate/evidence/gate/acme/example/runs/7/run-a/shard-e2e.json");
+    expect((await handleGateRoute(bad, logEnv())).status).toBe(404);
+  });
+
+  it("a STORED result JSON is still 404 via the evidence path: the shape guard rejects it before any read", async () => {
+    pulls();
+    const RESULT = `gate/${CANONICAL}/runs/${PR}/${RUN}/shard-e2e.json`;
+    await env.STUDIO_ARCHIVE.put(RESULT, '{"state":"success"}');
+    // The result is present, but the path is not an evidence shape: the guard
+    // must 404 without reading it (proving the guard, not the absence, is the
+    // 404).
+    const bad = new Request(`https://worker/studio/gate/evidence/${RESULT}`);
+    expect((await handleGateRoute(bad, logEnv())).status).toBe(404);
+  });
+});

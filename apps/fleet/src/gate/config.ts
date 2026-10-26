@@ -63,6 +63,9 @@ export interface GateLeg {
   /** #1274: the container image THIS leg runs on, overriding the block's image.
    *  Absent means the block's image (or the default). */
   image?: string;
+  /** #1343: this leg is a browser leg — its result is a REAL verdict only when
+   *  spec evidence exists. Absent means a plain leg, no evidence contract. */
+  browser?: boolean;
 }
 
 export interface GateConfig {
@@ -117,11 +120,16 @@ export function parseLegs(raw: unknown): GateLeg[] | null {
       if (e.paths !== undefined && !isStringArray(e.paths)) return null;
       // #1274: an optional per-leg image. Fail-closed on any key outside GATE_IMAGES.
       if (e.image !== undefined && (typeof e.image !== "string" || !GATE_IMAGES.has(e.image))) return null;
+      // #1343: an optional browser flag. Must be a boolean; anything else is a
+      // malformed block, never a silent plain leg (a browser leg has a
+      // DID-NOT-RUN contract a plain leg must never inherit by typo).
+      if (e.browser !== undefined && typeof e.browser !== "boolean") return null;
       leg = {
         name: e.name, cmd: e.cmd,
         ...(e.timeoutMin === undefined ? {} : { timeoutMin: legTimeoutMin(e.timeoutMin) }),
         ...(e.paths === undefined ? {} : { paths: e.paths }),
         ...(e.image === undefined ? {} : { image: e.image }),
+        ...(e.browser === true ? { browser: true } : {}),
       };
     } else {
       return null;

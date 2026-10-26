@@ -834,4 +834,9 @@ describe("gate start / gate watch", () => {
     expect(parseCliArgs(["gate", "log", "--all", "715", "vitest-6"]))
       .toEqual({ cmd: "gate-log", pr: 715, leg: "vitest-6", all: true });
   });
+  // #1343: `fleet gate log --evidence` lists the leg's evidence links.
+  it("gate log --evidence parses alongside --run", () => {
+    expect(parseCliArgs(["gate", "log", "--evidence", "715", "vitest-6"]))
+      .toEqual({ cmd: "gate-log", pr: 715, leg: "vitest-6", evidence: true });
+  });
 });

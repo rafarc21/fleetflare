@@ -92,6 +92,9 @@ export interface PlannedLeg {
   timeoutMin?: number;
   /** The image key of the block that planned this leg (#1066). Absent: the default image. */
   image?: string;
+  /** #1343: the leg is a browser leg — its result is a real verdict only when
+   *  spec evidence exists. Absent: a plain leg, no evidence contract. */
+  browser?: boolean;
 }
 
 /** #1080: the R2 key of one run's git bundle. Keyed by run (the run id is
@@ -158,13 +161,14 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   const shards = Math.max(1, Math.min(vitestShards, MAX_LEGS_PER_PR - fixedLegs));
   // #1274: a per-leg image overrides the block image for that leg alone; lanes
   // (bun/vitest) and merge-tree always take the block's image.
-  const leg = (base: string, commit: string, installCmd: string, legCmd: string, keys: string[], timeoutMin?: number, legImage?: string): PlannedLeg => {
+  const leg = (base: string, commit: string, installCmd: string, legCmd: string, keys: string[], timeoutMin?: number, legImage?: string, browser?: boolean): PlannedLeg => {
     const name = legName(base);
     const imageForLeg = legImage ?? image;
     return {
       leg: name, commit, installCmd, legCmd, resultKey: keyFor(name), baselineKeys: keys,
       ...(timeoutMin === undefined ? {} : { timeoutMin }),
       ...(imageForLeg === undefined ? {} : { image: imageForLeg }),
+      ...(browser === true ? { browser: true } : {}),
     };
   };
   // Every leg commits to the base..head range: the container resolves the merge
@@ -173,7 +177,7 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   const range = `${baseSha}..${headSha}`;
   return [
     leg("merge-tree", range, "", "", []),
-    ...legs.map((l) => leg(l.name, range, install, l.cmd, baselineKeys, l.timeoutMin, l.image)),
+    ...legs.map((l) => leg(l.name, range, install, l.cmd, baselineKeys, l.timeoutMin, l.image, l.browser)),
     ...bunLegs(bunShards, bunLaneRoot).map((b) => leg(b.leg, range, install, b.legCmd, baselineKeys, bunTimeoutMin)),
     ...(vitestCmd === undefined ? [] : vitestLegs(vitestCmd, shards))
       .map((v) => leg(v.leg, range, install, v.legCmd, baselineKeys, vitestTimeoutMin)),
@@ -188,13 +192,15 @@ export function headLegName(name: string): string {
   return shard ? `${shard[1]}@head-${shard[2]}` : `${name}@head`;
 }
 
-/** A leg's runnable identity: the install, the command, the deadline and the
- *  image it runs on, each normalized to the value the leg actually runs with
- *  (#1091 review round 2; #1230 review: planFingerprint shares this so an
- *  unset `timeoutMin`/`image` and its explicit default fingerprint the same
- *  — they are the identical run, not a different one). */
-function legIdentity(l: PlannedLeg): [string, string, number, string] {
-  return [l.installCmd, l.legCmd, legTimeoutMin(l.timeoutMin), l.image ?? DEFAULT_GATE_IMAGE];
+/** A leg's runnable identity: the install, the command, the deadline, the
+ *  image it runs on and its browser contract, each normalized to the value the
+ *  leg actually runs with (#1091 review round 2; #1230 review: planFingerprint
+ *  shares this so an unset `timeoutMin`/`image` and its explicit default
+ *  fingerprint the same — they are the identical run, not a different one.
+ *  #1343: `browser` is part of the identity: flipping it changes the leg's
+ *  verdict contract (DID-NOT-RUN), so the head copy must rerun). */
+function legIdentity(l: PlannedLeg): [string, string, number, string, boolean] {
+  return [l.installCmd, l.legCmd, legTimeoutMin(l.timeoutMin), l.image ?? DEFAULT_GATE_IMAGE, l.browser === true];
 }
 
 /** A leg's runnable content (#1091 review round 2). Two legs with the same

@@ -361,12 +361,13 @@ interface GateLogAttempt {
   failingTest: string | null;
 }
 
-/** #1277/#1318: `fleet gate log <pr> <leg> [--run <runId>] [--full] [--all]`.
+/** #1277/#1318: `fleet gate log <pr> <leg> [--run <runId>] [--full] [--all] [--evidence]`.
  *  Reads the leg's final R2 output via the Worker (no Cloudflare creds needed
  *  in the CLI) and prints the failing-test lines first, the whole kept tail
- *  with `--full`, or every attempt of a flaky leg (first try + retry) with
- *  its first failing test under `--all`. */
-export async function cmdGateLog(creds: Credentials, pr: number, leg: string, opts: { runId?: string; full?: boolean; all?: boolean } = {}): Promise<void> {
+ *  with `--full`, every attempt of a flaky leg (first try + retry) with its
+ *  first failing test under `--all`, or the leg's evidence links under
+ *  `--evidence` (#1343). */
+export async function cmdGateLog(creds: Credentials, pr: number, leg: string, opts: { runId?: string; full?: boolean; all?: boolean; evidence?: boolean } = {}): Promise<void> {
   const repo = await gatedRepo();
   if (!repo) return;
   const url = new URL("/studio/gate/log", creds.workerUrl);
@@ -375,6 +376,7 @@ export async function cmdGateLog(creds: Credentials, pr: number, leg: string, op
   url.searchParams.set("leg", leg);
   if (opts.runId !== undefined) url.searchParams.set("run", opts.runId);
   if (opts.all) url.searchParams.set("all", "1");
+  if (opts.evidence) url.searchParams.set("evidence", "1");
   let res: Response;
   try {
     res = await fetch(url, { headers: accessHeaders(creds) });
@@ -382,7 +384,7 @@ export async function cmdGateLog(creds: Credentials, pr: number, leg: string, op
     throw new Error(`fleet gate log: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
   const text = await res.text();
-  let body: { error?: string; state?: string; summary?: string; failing?: string[]; stdout?: string; stderr?: string; runId?: string; key?: string; attempts?: GateLogAttempt[] };
+  let body: { error?: string; state?: string; summary?: string; failing?: string[]; stdout?: string; stderr?: string; runId?: string; key?: string; attempts?: GateLogAttempt[]; evidence?: { key: string; url: string }[] };
   try {
     body = JSON.parse(text) as typeof body;
   } catch {
@@ -393,6 +395,15 @@ export async function cmdGateLog(creds: Credentials, pr: number, leg: string, op
   if (!res.ok || body.error) {
     console.error(`fleet gate log: ${body.error ?? res.status}`);
     process.exitCode = 2;
+    return;
+  }
+  if (opts.evidence) {
+    const lines = body.evidence ?? [];
+    if (lines.length === 0) {
+      console.log("(no evidence)");
+    } else {
+      for (const e of lines) console.log(`${new URL(e.url, creds.workerUrl).href}\t${e.key}`);
+    }
     return;
   }
   console.log(gateLogHeader(repo, pr, leg, body));
