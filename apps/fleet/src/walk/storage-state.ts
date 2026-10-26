@@ -42,7 +42,11 @@ export function secretValues(raw: string): string[] {
   return values;
 }
 
-export function hasUsableAuth(raw: string | undefined): boolean {
+/** Type predicate, not just `boolean`: the one caller (runner.ts) narrows
+ *  `storageState` from `string | undefined` to `string` on this check, so
+ *  the engine call past it never carries a stale "possibly undefined"
+ *  type (TS2345 — review r2). */
+export function hasUsableAuth(raw: string | undefined): raw is string {
   if (raw === undefined) return false;
   return secretValues(raw).length > 0;
 }
