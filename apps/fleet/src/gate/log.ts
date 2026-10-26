@@ -105,6 +105,13 @@ export function legAttemptKeys(keys: string[], leg: string): string[] {
   return own.sort((a, b) => rank(a) - rank(b));
 }
 
+/** #1377: the attempt label for one result key — the shard name with its
+ *  attempt variant, e.g. `shard-browser@head.retry`. Pure, so a test pins it
+ *  and the evidence route shares one spelling with the result key's own dir. */
+export function attemptLabel(key: string): string {
+  return key.replace(/\.json$/, "").split("/").pop() ?? key;
+}
+
 /** #1343 MED6: the listing prefix for a run's RESULT keys (its `shard-` files),
  *  never the whole run prefix. Evidence lives under `evidence/`, so scoping to
  *  `shard-` keeps a flood of evidence files from crowding a result out of one
