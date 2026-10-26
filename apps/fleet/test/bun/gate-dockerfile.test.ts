@@ -64,8 +64,23 @@ describe("Dockerfile.gate runs the real lanes", () => {
     // The Dockerfile must COPY that dir through the normalized src stage and
     // expose its runtime path so a consumer spec can resolve it.
     expect(code).toMatch(/^COPY gate\/browser\/ \/src\/gate-browser\//m);
-    expect(code).toMatch(/cp -R \/src\/gate-browser\/\. \/src\/base\/opt\/fleet-gate\/browser\//);
-    expect(code).toMatch(/^ENV FLEET_GATE_BROWSER=\/opt\/fleet-gate\/browser /m);
+    expect(code).toMatch(/cp -R \/src\/gate-browser\/\. \/src\/app\/opt\/fleet-gate\/browser\//);
+    expect(code).toMatch(/^ENV FLEET_GATE_BROWSER=\/opt\/fleet-gate\/browser$/m);
+  });
+
+  test("the browser harness rides /src/app/, after the heavy base COPY (#1342)", () => {
+    // The final stage COPYs /src/base/ at line 34, BEFORE the apt/node/rust/
+    // chromium layers; /src/app/ lands at the end (COPY --from=src /src/app/).
+    // The harness must go into /src/app, or any gate/browser edit invalidates
+    // every heavy layer's cache and the image rebuild is not incremental.
+    const baseCopy = code.indexOf("COPY --from=src /src/base/ /");
+    const appCopy = code.indexOf("COPY --from=src /src/app/ /");
+    const harness = code.indexOf("cp -R /src/gate-browser/. /src/app/opt/fleet-gate/browser/");
+    expect(baseCopy).toBeGreaterThan(0);
+    expect(appCopy).toBeGreaterThan(baseCopy);
+    expect(harness).toBeGreaterThan(0);
+    // The src-stage copy into /src/app must sit before the final app COPY.
+    expect(code.indexOf("/src/app/opt/fleet-gate/browser")).toBeLessThan(appCopy);
   });
 
   test("every install step in the final stage stays inside repro-seal begin/end", () => {
