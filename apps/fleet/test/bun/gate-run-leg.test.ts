@@ -202,15 +202,15 @@ describe("runLegInContainer: readiness and port", () => {
     expect(c.destroyCount).toBe(1);
   });
 
-  test("a port refusal that outlasts the 240 s budget is an infra outcome and destroys (live: cold image pulls took over 60 s)", async () => {
+  test("a port refusal that outlasts the 90 s budget is an infra outcome and destroys (live: cold image pulls took over 60 s)", async () => {
     const c = new FakeContainer();
     c.portOutcomes = Array.from({ length: 1000 }, () => new Error("ECONNREFUSED"));
     const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
     expect(outcome.kind).toBe("infra");
-    if (outcome.kind === "infra") expect(outcome.description).toContain("ECONNREFUSED");
-    // 240 s of 500 ms retries: one attempt at t=0 through t=240000 inclusive.
-    expect(c.fetchCalls).toBe(481);
+    if (outcome.kind === "infra") expect(outcome.description).toContain("gate server unreachable after 90 s");
+    // 90 s of 500 ms retries: one attempt at t=0 through t=90000 inclusive.
+    expect(c.fetchCalls).toBe(181);
     expect(c.destroyCount).toBe(1);
   });
 
@@ -364,7 +364,7 @@ describe("runLegInContainer: no-instance fail-fast (#1278 ask 1)", () => {
     expect(c.clock.now).toBe(0);
   });
 
-  test("a port fetch that fails for lack of an instance fails fast: no 240 s budget spent", async () => {
+  test("a port fetch that fails for lack of an instance fails fast: no 90 s budget spent", async () => {
     const c = new FakeContainer();
     c.portOutcomes = [new Error("There is no container instance that can be provided")];
     const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
@@ -392,8 +392,8 @@ describe("runLegInContainer: no-instance fail-fast (#1278 ask 1)", () => {
     const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
     expect(outcome.kind).toBe("infra");
-    if (outcome.kind === "infra") expect(outcome.description).toContain("ECONNREFUSED");
-    expect(c.fetchCalls).toBe(481);
+    if (outcome.kind === "infra") expect(outcome.description).toContain("gate server unreachable after 90 s");
+    expect(c.fetchCalls).toBe(181);
   });
 });
 
@@ -527,7 +527,7 @@ describe("runLegInContainer: R2 result after transport loss (#1122)", () => {
     });
 
     expect(outcome.kind).toBe("infra");
-    expect(c.fetchCalls).toBe(481);
+    expect(c.fetchCalls).toBe(181);
     expect(reads).toBe(1);
   });
 

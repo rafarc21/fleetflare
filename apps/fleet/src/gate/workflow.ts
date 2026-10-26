@@ -276,13 +276,14 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     const bundleKey = bundleKeyFor(owner, repoName, event.instanceId, resolved.headSha);
     const bundled = bundleStepEnabled(this.env.GATE_BUNDLE, bundleOptedIn([base, head])) && await runBundleStep(
       { do: (name, config, fn) => step.do(name, config, fn) },
-      (planned) => {
+      (planned, signal) => {
         const stub = this.env.GATE_RUNNER.get(this.env.GATE_RUNNER.idFromName(gateRunnerName(event.instanceId, planned.leg, crypto.randomUUID())));
         return stub.fetch("https://gate-runner/run-leg", {
           method: "POST",
           body: JSON.stringify(legRequest(owner, repoName, planned, {
             baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, bundleKey, mergeBase: resolved.mergeBaseSha,
           })),
+          signal,
         });
       },
       planBundleLeg({ owner, repo: repoName, pr, runId: event.instanceId, headSha: resolved.headSha, baseSha: resolved.baseSha }),
