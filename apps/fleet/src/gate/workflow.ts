@@ -49,7 +49,7 @@ import {
 import { postGateStatus, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
 import { realStatusPort } from "./status-post-env";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
-import { browserLegsToCheck, enforceBrowserLegs, manifestProvesExecution, verdictEvidenceUrl } from "./browser-leg";
+import { browserLegsToCheck, classifyManifest, enforceBrowserLegs, type ManifestRead, verdictEvidenceUrl } from "./browser-leg";
 import { evidenceKeyFor } from "./leg-env";
 import { finalLegKey } from "./log";
 
@@ -396,10 +396,15 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // on every infra/--failed-only rerun. Carried legs are exempt: enforcement
     // (and the link decision) cover only browser legs this run dispatches.
     const browserLegs = new Set(browserLegsToCheck(legs, carriedByLeg));
-    const evidenceByLeg = new Set<string>();
+    // #1381: per-leg manifest classification, not a boolean "proved". The
+    // counts the harness reports decide the verdict — `executed` alone was the
+    // SCHEDULED count, never proof anything ran. Only `{kind:"proven"}` greens.
+    const manifestByLeg = new Map<string, ManifestRead>();
     if (browserLegs.size > 0) {
+      // The step's return value is replayed by Workflows, so it must be a
+      // JSON-safe plain object, not a Map (a Map stringifies to `{}`).
       const found = await step.do("list-browser-evidence", async () => {
-        const seen = new Set<string>();
+        const seen: Record<string, ManifestRead> = {};
         // One list over the run prefix gives every result key, from which each
         // browser leg's FINAL attempt key is resolved — evidence is keyed per
         // attempt, so the final attempt's dir is the one that must hold the
@@ -411,25 +416,22 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
           const finalKey = finalLegKey(runKeys, planned.leg);
           const dir = finalKey === null ? null : evidenceKeyFor(finalKey);
           if (dir === null) continue;
-          // #1343 MED4: one stray screenshot is not proof specs ran. The leg's
-          // reporter must write a manifest.json declaring `executed > 0`; any
-          // other file (or a manifest with executed 0) does not green the leg.
           const manifest = await this.env.STUDIO_ARCHIVE.get(`${dir}manifest.json`);
-          if (manifest === null) continue;
-          let proves = false;
-          try {
-            proves = manifestProvesExecution(await manifest.json());
-          } catch {
-            continue;
-          }
-          if (proves) seen.add(planned.leg);
+          // No manifest file at all: absent -> a reported success downgrades to
+          // DID-NOT-RUN (no spec evidence). A manifest that fails to parse is
+          // present-but-unreadable: classifyManifest(null) -> "unverified"
+          // ('manifest lacks counts'), never green.
+          if (manifest === null) { seen[planned.leg] = { kind: "absent" }; continue; }
+          let parsed: unknown = null;
+          try { parsed = await manifest.json(); } catch { parsed = null; }
+          seen[planned.leg] = classifyManifest(parsed);
         }
-        return [...seen];
+        return seen;
       });
-      for (const leg of found) evidenceByLeg.add(leg);
+      for (const [leg, read] of Object.entries(found)) manifestByLeg.set(leg, read);
     }
     const expectedLegs = legs.map((l) => l.leg);
-    const enforced = enforceBrowserLegs(expectedLegs, results, browserLegs, evidenceByLeg);
+    const enforced = enforceBrowserLegs(expectedLegs, results, browserLegs, manifestByLeg);
     const verdict = aggregateVerdict(expectedLegs, enforced);
     const final: Exclude<Verdict, { state: "pending" }> =
       verdict.state === "pending" ? { state: "error", description: "no legs reported" } : verdict;

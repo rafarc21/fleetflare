@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import {
   GATE_R2_HOST,
   handleGateOutbound,
@@ -306,6 +306,19 @@ describe("evidence PUT: scoped to the browser leg's own evidence dir (#1343)", (
     expect(store.has(EVIDENCE)).toBe(true);
     const second = await handleGateOutbound(req("PUT", `/${EVIDENCE}`, { body: "{}" }), bucket, props);
     expect(second.status).toBe(412);
+  });
+
+  // #1381: the duplicate is logged per file so a harness notices its evidence
+  // key collided on name — the 412 response itself is unchanged.
+  it("logs the duplicate evidence key on 412, per file", async () => {
+    const { bucket } = fakeBucket();
+    const props: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: EVIDENCE_DIR };
+    await handleGateOutbound(req("PUT", `/${EVIDENCE}`, { body: "{}" }), bucket, props);
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const second = await handleGateOutbound(req("PUT", `/${EVIDENCE}`, { body: "{}" }), bucket, props);
+    expect(second.status).toBe(412);
+    expect(logSpy).toHaveBeenCalledWith(`gate outbound: evidence already written ${EVIDENCE}`);
+    logSpy.mockRestore();
   });
 
   it("a browser leg cannot PUT another leg's evidence dir (403)", async () => {

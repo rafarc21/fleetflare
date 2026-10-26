@@ -521,7 +521,14 @@ export async function handleGateOutbound(
       // prints a secret into a screenshot is out of scope for text redaction.
       const toStore: ArrayBuffer = redactTextEvidence(target.key, body, props?.secretValues);
       const stored = await bucket.put(target.key, toStore, { onlyIf: { etagDoesNotMatch: "*" } });
-      if (stored === null) return new Response("already written", { status: 412 });
+      if (stored === null) {
+        // #1381: log the duplicate per file so a harness notices the write
+        // collided on name (two attempts writing the same evidence key). The
+        // 412 response itself is unchanged — this is observation, not a
+        // behaviour change.
+        console.log(`gate outbound: evidence already written ${target.key}`);
+        return new Response("already written", { status: 412 });
+      }
       return new Response(null, { status: 201 });
     }
     if (!isWritableByContainer(target.key)) return new Response("forbidden", { status: 403 });
