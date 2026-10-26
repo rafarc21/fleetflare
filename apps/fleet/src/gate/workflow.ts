@@ -49,7 +49,7 @@ import {
 import { postGateStatus, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
 import { realStatusPort } from "./status-post-env";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
-import { enforceBrowserLegs, manifestProvesExecution, verdictEvidenceUrl } from "./browser-leg";
+import { browserLegsToCheck, enforceBrowserLegs, manifestProvesExecution, verdictEvidenceUrl } from "./browser-leg";
 import { evidenceKeyFor } from "./leg-env";
 import { finalLegKey } from "./log";
 
@@ -395,9 +395,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // re-checking it under THIS run's prefix would flip green->red DID-NOT-RUN
     // on every infra/--failed-only rerun. Carried legs are exempt: enforcement
     // (and the link decision) cover only browser legs this run dispatches.
-    const browserLegs = new Set(legs
-      .filter((l) => l.browser === true && carriedByLeg.get(l.leg) === undefined)
-      .map((l) => l.leg));
+    const browserLegs = new Set(browserLegsToCheck(legs, carriedByLeg));
     const evidenceByLeg = new Set<string>();
     if (browserLegs.size > 0) {
       const found = await step.do("list-browser-evidence", async () => {
@@ -409,7 +407,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         const runKeys = (await this.env.STUDIO_ARCHIVE.list({ prefix: `gate/${owner}/${repoName}/runs/${pr}/${event.instanceId}/` }))
           .objects.map((o) => o.key);
         for (const planned of legs) {
-          if (planned.browser !== true || carriedByLeg.get(planned.leg) !== undefined) continue;
+          if (planned.browser !== true || carriedByLeg.get(planned.leg)?.state === "success") continue;
           const finalKey = finalLegKey(runKeys, planned.leg);
           const dir = finalKey === null ? null : evidenceKeyFor(finalKey);
           if (dir === null) continue;

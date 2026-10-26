@@ -108,3 +108,22 @@ export function redactLegResultFields<T extends RedactableLegFields>(result: T, 
     ...(result.stderr === undefined ? {} : { stderr: redact(result.stderr) }),
   };
 }
+
+/** #1343 r2: redact every string value in an arbitrary JSON structure, keeping
+ *  the shape intact. Unlike redactLegResultFields (field-scoped to a leg
+ *  result), browser-leg EVIDENCE JSON has no fixed shape — it can be a
+ *  Playwright console probe `[{type:'log',text:'...'}]`, a nested
+ *  `{messages:[{text:'...'}]}`, or anything the reporter wrote. Arrays stay
+ *  arrays (never rewritten to objects), objects stay objects, numbers/booleans/
+ *  null pass through untouched; only strings are scrubbed. */
+export function redactJsonStrings(value: unknown, values: readonly string[]): unknown {
+  if (values.length === 0) return value;
+  if (typeof value === "string") return redactKnownSecretValues(value, values);
+  if (Array.isArray(value)) return value.map((v) => redactJsonStrings(v, values));
+  if (typeof value === "object" && value !== null) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = redactJsonStrings(v, values);
+    return out;
+  }
+  return value;
+}

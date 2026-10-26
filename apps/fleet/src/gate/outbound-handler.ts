@@ -16,7 +16,7 @@
 // Pure on purpose: no cloudflare:workers import, so bun test can load it.
 // secrets-redact.ts is pure the same way, so this stays true after #1346.
 
-import { redactKnownSecretValues, redactLegResultFields, type RedactableLegFields } from "./secrets-redact";
+import { redactJsonStrings, redactKnownSecretValues, redactLegResultFields, type RedactableLegFields } from "./secrets-redact";
 
 export const GATE_R2_HOST = "gate-r2.internal";
 
@@ -139,16 +139,18 @@ function isImageEvidence(key: string): boolean {
 }
 
 /** #1343 HIGH3: scrub a granted secret out of TEXT evidence before R2. JSON
- *  evidence is field-scoped like a result body (never corrupts structure);
- *  anything else (a raw .txt/.log) falls back to whole-text redaction. Binary
- *  image evidence is never scanned — screenshots cannot be redacted, and the
- *  browser leg's reporter is what must keep secrets out of pixels. */
+ *  evidence is walked whole (every string value, arrays kept as arrays — a
+ *  console probe `[{type:'log',text:'...'}]` is not a leg-result shape, so the
+ *  field-scoped redaction would miss its `text`); anything else (a raw
+ *  .txt/.log) falls back to whole-text redaction. Binary image evidence is
+ *  never scanned — screenshots cannot be redacted, and the browser leg's
+ *  reporter is what must keep secrets out of pixels. */
 function redactTextEvidence(key: string, body: ArrayBuffer, secretValues: readonly string[] | undefined): ArrayBuffer {
   if (!secretValues || secretValues.length === 0 || !/\.(json|txt|log|md)$/i.test(key)) return body;
   const text = new TextDecoder().decode(body);
   let redacted: string;
   try {
-    redacted = JSON.stringify(redactLegResultFields(JSON.parse(text) as RedactableLegFields, secretValues));
+    redacted = JSON.stringify(redactJsonStrings(JSON.parse(text), secretValues));
   } catch {
     redacted = redactKnownSecretValues(text, secretValues);
   }

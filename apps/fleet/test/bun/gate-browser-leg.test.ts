@@ -2,10 +2,11 @@
 // spec evidence exists; zero specs or a skipped leg is RED DID-NOT-RUN.
 import { describe, it, expect } from "bun:test";
 import {
-  DID_NOT_RUN, didNotRunDescription, enforceBrowserLeg, enforceBrowserLegs, manifestProvesExecution, verdictEvidenceUrl,
+  browserLegsToCheck, DID_NOT_RUN, didNotRunDescription, enforceBrowserLeg, enforceBrowserLegs, manifestProvesExecution, verdictEvidenceUrl,
 } from "../../src/gate/browser-leg";
 import { resultKeysPrefix } from "../../src/gate/log";
 import type { LegResult } from "../../src/gate/verdict";
+import type { PlannedLeg } from "../../src/gate/fanout";
 
 describe("enforceBrowserLeg: zero specs -> RED DID-NOT-RUN", () => {
   it("a success with no evidence downgrades to failure DID-NOT-RUN", () => {
@@ -96,5 +97,34 @@ describe("manifestProvesExecution (#1343 MED4)", () => {
 describe("resultKeysPrefix (#1343 MED6)", () => {
   it("scopes to shard-, never the run prefix", () => {
     expect(resultKeysPrefix("gate/acme/example/runs/7/run-a/")).toBe("gate/acme/example/runs/7/run-a/shard-");
+  });
+});
+
+// #1343 r2 blocker 2: a carried green browser leg is exempt from evidence
+// checking — re-checking under the NEW run's prefix flips green->red.
+describe("browserLegsToCheck (#1343 r2)", () => {
+  const planned: PlannedLeg[] = [
+    { leg: "merge-tree", commit: "b..h", installCmd: "", legCmd: "", resultKey: "k1", baselineKeys: [] },
+    { leg: "e2e", commit: "b..h", installCmd: "i", legCmd: "c", resultKey: "k2", baselineKeys: [], browser: true },
+    { leg: "lint", commit: "b..h", installCmd: "i", legCmd: "c", resultKey: "k3", baselineKeys: [] },
+  ];
+
+  it("a carried green browser leg is exempt (never re-checked under the new run)", () => {
+    const carried = new Map([["e2e", { leg: "e2e", state: "success" as const }]]);
+    expect(browserLegsToCheck(planned, carried)).toEqual([]);
+  });
+
+  it("a non-carried browser leg IS checked", () => {
+    expect(browserLegsToCheck(planned, new Map())).toEqual(["e2e"]);
+  });
+
+  it("a carried leg under a DIFFERENT name never exempts a browser leg of the same name", () => {
+    const carried = new Map([["other", { leg: "other", state: "success" as const }]]);
+    expect(browserLegsToCheck(planned, carried)).toEqual(["e2e"]);
+  });
+
+  it("a carried leg that is NOT green (failure/error) is still checked", () => {
+    const carried = new Map([["e2e", { leg: "e2e", state: "failure" as const }]]);
+    expect(browserLegsToCheck(planned, carried)).toEqual(["e2e"]);
   });
 });

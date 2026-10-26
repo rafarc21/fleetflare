@@ -4,6 +4,7 @@
 // "DID-NOT-RUN", never green. Pure on purpose: no I/O, no env, so bun test
 // can load it — the caller (workflow.ts) supplies the evidence set it read.
 import type { LegResult } from "./verdict";
+import type { PlannedLeg } from "./fanout";
 
 /** The state-marker every DID-NOT-RUN description carries, so a caller can
  *  recognise the failure without string-matching a full sentence. */
@@ -21,6 +22,22 @@ export function manifestProvesExecution(parsed: unknown): boolean {
   if (typeof parsed !== "object" || parsed === null) return false;
   const executed = Number((parsed as { executed?: unknown }).executed ?? 0);
   return Number.isFinite(executed) && executed > 0;
+}
+
+/** #1343 r2: the browser legs THIS run must check for evidence. A CARRIED green
+ *  browser leg (already enforced by a prior run) is exempt — re-checking it
+ *  under THIS run's evidence prefix would flip green->red DID-NOT-RUN on every
+ *  infra/--failed-only rerun. Only a carried leg in `success` state is exempt:
+ *  the carry never holds anything but green legs (greenLegsOf), but this
+ *  checks state anyway so a malformed carry can never skip a real check. Pure
+ *  so the exemption is bun-tested: a mutant that drops the carried check fails
+ *  the test. */
+export function browserLegsToCheck(
+  legs: PlannedLeg[], carriedByLeg: ReadonlyMap<string, LegResult>,
+): string[] {
+  return legs
+    .filter((l) => l.browser === true && carriedByLeg.get(l.leg)?.state !== "success")
+    .map((l) => l.leg);
 }
 
 /** A browser leg that reported success but uploaded no spec evidence ran zero

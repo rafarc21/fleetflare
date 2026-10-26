@@ -401,3 +401,39 @@ describe("evidence PUT: size + file-count caps (#1343 MED6)", () => {
     expect(res.status).toBe(413);
   });
 });
+
+// #1343 r2 blocker 1: evidence JSON is walked whole — every string value,
+// arrays kept as arrays, nested objects scrubbed, shape preserved.
+describe("evidence PUT: deep JSON redaction (#1343 r2)", () => {
+  const DIR = "gate/acme/example/runs/715/run-a/evidence/shard-e2e/";
+  const props: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: DIR, secretValues: ["sup3r-s3cret"] };
+
+  it("redacts a console probe array entry's text, keeping it an array", async () => {
+    const { bucket, store } = fakeBucket();
+    const body = JSON.stringify([{ type: "log", text: "token sup3r-s3cret leaked" }]);
+    await handleGateOutbound(req("PUT", `/${DIR}console.json`, { body }), bucket, props);
+    const stored = JSON.parse(store.get(`${DIR}console.json`)!);
+    expect(Array.isArray(stored)).toBe(true);
+    expect(stored[0].type).toBe("log");
+    expect(stored[0].text).toContain("«redacted»");
+    expect(stored[0].text).not.toContain("sup3r-s3cret");
+  });
+
+  it("redacts a nested object's text, shape preserved", async () => {
+    const { bucket, store } = fakeBucket();
+    const body = JSON.stringify({ messages: [{ text: "secret is sup3r-s3cret" }], count: 2 });
+    await handleGateOutbound(req("PUT", `/${DIR}console.json`, { body }), bucket, props);
+    const stored = JSON.parse(store.get(`${DIR}console.json`)!);
+    expect(stored.messages[0].text).toContain("«redacted»");
+    expect(stored.messages[0].text).not.toContain("sup3r-s3cret");
+    expect(stored.count).toBe(2); // number untouched
+    expect(Array.isArray(stored.messages)).toBe(true); // nested array stays array
+  });
+
+  it("preserves non-string scalars and null exactly", async () => {
+    const { bucket, store } = fakeBucket();
+    const body = JSON.stringify({ a: true, b: 5, c: null, d: [1, 2, 3] });
+    await handleGateOutbound(req("PUT", `/${DIR}console.json`, { body }), bucket, props);
+    expect(JSON.parse(store.get(`${DIR}console.json`)!)).toEqual({ a: true, b: 5, c: null, d: [1, 2, 3] });
+  });
+});
