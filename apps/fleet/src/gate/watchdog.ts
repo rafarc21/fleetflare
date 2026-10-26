@@ -28,6 +28,15 @@ export const GATE_WATCHDOG_FINAL_AGE_MS = GATE_WATCHDOG_LOOKBACK_MS - 5 * 60_000
  *  (#1231: more than one infra retry is now possible). */
 const TRY_SUFFIX = /-try(\d+)\.json$/;
 
+/** #1343 MED6: the listing prefix the watchdog uses to read a run's result
+ *  keys. Scoped to `shard-`, never the whole run prefix: a PR-controlled
+ *  evidence .json under `evidence/` must never be read as a result by
+ *  hasRedResult, and >1000 evidence files must never crowd the results out of
+ *  one listing page. */
+export function redResultPrefix(canonical: string, pr: number, runId: string): string {
+  return `gate/${canonical}/runs/${pr}/${runId}/shard-`;
+}
+
 /** Whether any leg's decisive stored result is red. `read` gets one stored result
  *  by key, undefined when absent. A red first try is final unless its retry
  *  passed (#1156 N1c); a red retry is always red; the latest infra-retry try

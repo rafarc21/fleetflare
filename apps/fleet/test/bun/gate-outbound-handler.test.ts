@@ -34,6 +34,10 @@ function fakeBucket(seed: Record<string, string> = {}) {
       const v = store.get(key);
       return v === undefined ? null : { size: v.length };
     },
+    async list({ prefix }) {
+      calls.push({ op: "list", key: prefix });
+      return { objects: [...store.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key })) };
+    },
     async put(key, value, opts) {
       calls.push({ op: "put", key, opts });
       if (opts?.onlyIf?.etagDoesNotMatch === "*" && store.has(key)) return null;
@@ -329,5 +333,71 @@ describe("evidence PUT: scoped to the browser leg's own evidence dir (#1343)", (
     const res = await handleGateOutbound(req("GET", `/${EVIDENCE}`), bucket, undefined);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("SCREENCAP");
+  });
+});
+
+// #1343 HIGH3: a granted secret echoed into TEXT evidence is scrubbed before
+// it reaches R2. Screenshots (binary) are never scanned.
+describe("evidence PUT: text redaction (#1343 HIGH3)", () => {
+  const DIR = "gate/acme/example/runs/715/run-a/evidence/shard-e2e/";
+  const props: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: DIR, secretValues: ["sup3r-s3cret"] };
+
+  it("redacts a secret value out of console JSON evidence before R2", async () => {
+    const { bucket, store } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${DIR}console.json`, { body: '{"stdout":"token sup3r-s3cret leaked"}' }), bucket, props);
+    expect(res.status).toBe(201);
+    expect(store.get(`${DIR}console.json`)).toContain("«redacted»");
+    expect(store.get(`${DIR}console.json`)).not.toContain("sup3r-s3cret");
+  });
+
+  it("a leg with no secretValues stores text evidence untouched", async () => {
+    const { bucket, store } = fakeBucket();
+    const plain: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: DIR };
+    await handleGateOutbound(req("PUT", `/${DIR}console.json`, { body: '{"stdout":"ok"}' }), bucket, plain);
+    expect(store.get(`${DIR}console.json`)).toBe('{"stdout":"ok"}');
+  });
+
+  it("image evidence is never text-scanned (screenshots cannot be redacted)", async () => {
+    const { bucket, store } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${DIR}screenshot.png`, { body: "PNGBYTES" }), bucket, props);
+    expect(res.status).toBe(201);
+    expect(store.get(`${DIR}screenshot.png`)).toBe("PNGBYTES");
+  });
+});
+
+// #1343 MED6: image evidence gets a larger cap than the 1 MiB result cap, and
+// a leg may write at most MAX_EVIDENCE_FILES_PER_LEG per attempt dir.
+describe("evidence PUT: size + file-count caps (#1343 MED6)", () => {
+  const DIR = "gate/acme/example/runs/715/run-a/evidence/shard-e2e/";
+  const props: GateOutboundProps = { resultKey: RUN_KEY, evidenceKey: DIR };
+
+  it("a PNG over the 1 MiB result cap but under the image cap is accepted", async () => {
+    const { bucket, store } = fakeBucket();
+    // The image cap is 8 MiB; a 2 MiB declared body clears the image cap but
+    // would exceed the 1 MiB text cap.
+    const res = await handleGateOutbound(
+      req("PUT", `/${DIR}shot.png`, { headers: { "content-length": String(2 * 1024 * 1024) } }),
+      bucket, props,
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("a text file over 1 MiB is refused (413)", async () => {
+    const { bucket, calls } = fakeBucket();
+    const res = await handleGateOutbound(
+      req("PUT", `/${DIR}console.json`, { headers: { "content-length": String(2 * 1024 * 1024) } }),
+      bucket, props,
+    );
+    expect(res.status).toBe(413);
+    // The file-cap list may have run, but no PUT ever reaches the bucket.
+    expect(calls.some((c) => c.op === "put")).toBe(false);
+  });
+
+  it("a leg at the file cap is refused (413)", async () => {
+    const seeded: Record<string, string> = {};
+    for (let i = 0; i < 64; i++) seeded[`${DIR}file-${i}.txt`] = "x";
+    const { bucket } = fakeBucket(seeded);
+    const res = await handleGateOutbound(req("PUT", `/${DIR}one-more.txt`, { body: "y" }), bucket, props);
+    expect(res.status).toBe(413);
   });
 });

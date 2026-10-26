@@ -9,7 +9,7 @@ import { isGateRunnerRepo } from "./config";
 import { d1WatchdogIndex } from "./auto-run-env";
 import { postGateStatus } from "./status-post";
 import { realStatusPort } from "./status-post-env";
-import { hasRedResult, sweepStalledRuns, type WatchdogRun } from "./watchdog";
+import { hasRedResult, redResultPrefix, sweepStalledRuns, type WatchdogRun } from "./watchdog";
 
 /** Whether any leg of the run stored a red result. The leg result keys are
  *  gate/<owner>/<repo>/runs/<pr>/<runId>/... with the repo's canonical case: R2
@@ -17,7 +17,11 @@ import { hasRedResult, sweepStalledRuns, type WatchdogRun } from "./watchdog";
 async function hasRedLeg(env: Env, repo: string, pr: number, runId: string): Promise<boolean> {
   const token = await repoTokenMinter(env)(repo);
   const canonical = (await getPullRequest(token, repo, pr)).repoFullName;
-  const listed = await env.STUDIO_ARCHIVE.list({ prefix: `gate/${canonical}/runs/${pr}/${runId}/` });
+  // #1343 MED6: result keys live under the `shard-` prefix, evidence under
+  // `evidence/`. Listing the whole run prefix would let >1000 evidence files
+  // (one page) crowd out the result keys, and a PR-controlled evidence .json
+  // would be read as a result by hasRedResult. List the result prefix only.
+  const listed = await env.STUDIO_ARCHIVE.list({ prefix: redResultPrefix(canonical, pr, runId) });
   return hasRedResult(listed.objects.map((o) => o.key), async (key) => {
     const obj = await env.STUDIO_ARCHIVE.get(key);
     return obj === null ? undefined : obj.json<{ state?: string }>();

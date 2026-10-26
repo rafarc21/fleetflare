@@ -14,6 +14,15 @@ export function didNotRunDescription(leg: string): string {
   return `${DID_NOT_RUN}: ${leg} (no spec evidence)`;
 }
 
+/** #1343 MED4: whether a manifest.json proves specs actually executed. A stray
+ *  screenshot is not proof; the reporter must declare `executed > 0`. A
+ *  missing/unparseable manifest, or one with executed 0, is false. */
+export function manifestProvesExecution(parsed: unknown): boolean {
+  if (typeof parsed !== "object" || parsed === null) return false;
+  const executed = Number((parsed as { executed?: unknown }).executed ?? 0);
+  return Number.isFinite(executed) && executed > 0;
+}
+
 /** A browser leg that reported success but uploaded no spec evidence ran zero
  *  specs: downgrade to failure DID-NOT-RUN. Any other state, or evidence
  *  present, passes through unchanged. */

@@ -14,6 +14,9 @@
 // handler never mints. The container never holds the token.
 //
 // Pure on purpose: no cloudflare:workers import, so bun test can load it.
+// secrets-redact.ts is pure the same way, so this stays true after #1346.
+
+import { redactKnownSecretValues, redactLegResultFields, type RedactableLegFields } from "./secrets-redact";
 
 export const GATE_R2_HOST = "gate-r2.internal";
 
@@ -46,10 +49,11 @@ const SEG = "[A-Za-z0-9._-]+";
 const RUN_RESULT_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/shard-[a-z0-9-]+(@head)?(\\.retry)?\\.json$`);
 const BASELINE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/baselines/(${SEG})\\.tar$`);
 // #1343: one browser leg's spec evidence, `.../evidence/shard-<leg>/<file>`.
-// The shard name is the STABLE leg name (no try/retry variant — evidence is
-// per-leg, keyed by run+leg, whatever try produced it). Files are safe
-// path-segment names; the traversal guard above still rejects "." / "..".
-const EVIDENCE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/evidence/shard-[a-z0-9-]+(@head)?/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$`);
+// The shard name carries the ATTEMPT variant (`.retry`, `-tryN`), so an
+// earlier attempt's files never green a later zero-spec retry and a retry's
+// re-upload never hits the first attempt's write-once key (MED4). Files are
+// safe path-segment names; the traversal guard above still rejects "." / "..".
+const EVIDENCE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/evidence/shard-[a-z0-9-]+(@head)?(-try\\d+)?(\\.retry)?/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$`);
 // #1080: one git bundle per run, `gate-bundles/<owner>/<repo>/<runId>/<headSha>.bundle`.
 // Only the bundle leg may write it (bundleWriter); every other leg reads its own run's.
 const BUNDLE_RE = new RegExp(`^gate-bundles/(${SEG})/(${SEG})/(${SEG})/([0-9a-f]{40})\\.bundle$`);
@@ -119,6 +123,38 @@ function isEvidenceKey(key: string): boolean {
   return EVIDENCE_RE.test(key);
 }
 
+/** #1343 MED6: the larger cap image evidence gets. A full-page PNG screenshot
+ *  at desktop resolution is typically 1-4 MiB; the 1 MiB result cap would
+ *  reject it. Binary evidence is not text-scanned, so it needs no redaction. */
+export const MAX_IMAGE_EVIDENCE_BYTES = 8 * 1024 * 1024;
+
+/** #1343 MED6: the per-attempt evidence file ceiling. A real browser leg writes
+ *  a handful (manifest + a few screens + console JSON); a PR-controlled leg
+ *  must not write unbounded files under its dir. */
+export const MAX_EVIDENCE_FILES_PER_LEG = 64;
+
+/** Whether an evidence key is a screenshot (image binary), not text. */
+function isImageEvidence(key: string): boolean {
+  return /\.(png|jpe?g|webp)$/i.test(key);
+}
+
+/** #1343 HIGH3: scrub a granted secret out of TEXT evidence before R2. JSON
+ *  evidence is field-scoped like a result body (never corrupts structure);
+ *  anything else (a raw .txt/.log) falls back to whole-text redaction. Binary
+ *  image evidence is never scanned — screenshots cannot be redacted, and the
+ *  browser leg's reporter is what must keep secrets out of pixels. */
+function redactTextEvidence(key: string, body: ArrayBuffer, secretValues: readonly string[] | undefined): ArrayBuffer {
+  if (!secretValues || secretValues.length === 0 || !/\.(json|txt|log|md)$/i.test(key)) return body;
+  const text = new TextDecoder().decode(body);
+  let redacted: string;
+  try {
+    redacted = JSON.stringify(redactLegResultFields(JSON.parse(text) as RedactableLegFields, secretValues));
+  } catch {
+    redacted = redactKnownSecretValues(text, secretValues);
+  }
+  return new TextEncoder().encode(redacted).buffer as ArrayBuffer;
+}
+
 /** The container may write its own leg's result, never a baseline. A baseline
  *  is what every later PR's gate restores from, so PR code that could write one
  *  could poison every later verdict. A bundle is written only through its own
@@ -132,6 +168,9 @@ function isWritableByContainer(key: string): boolean {
 export interface OutboundBucket {
   get(key: string): Promise<{ body: ReadableStream | null; size: number } | null>;
   head(key: string): Promise<{ size: number } | null>;
+  /** #1343: only the evidence PUT path needs this (to cap files per leg). A
+   *  caller with no listing (older fakes) treats the cap as unenforced. */
+  list?(opts: { prefix: string }): Promise<{ objects: { key: string }[] }>;
   put(
     key: string,
     value: ArrayBuffer | ReadableStream<Uint8Array>,
@@ -157,6 +196,10 @@ export interface GateOutboundProps {
    *  container may write under; absent on a plain leg, which denies every
    *  evidence PUT. */
   evidenceKey?: string;
+  /** #1346: the plain VALUES (never names) of every gate-scoped secret this
+   *  leg was granted. The evidence PUT path redacts each of these out of TEXT
+   *  evidence (console JSON, manifest) before it reaches R2. */
+  secretValues?: string[];
 }
 
 /** The Worker's side of the git proxy: the upstream fetch. Injected so the
@@ -449,15 +492,30 @@ export async function handleGateOutbound(
     // #1343: a browser leg's spec evidence is written under its own evidence
     // dir alone, and only by a browser leg. A plain leg (no evidenceKey in
     // props) can never write evidence; a browser leg can never write another
-    // leg's dir. Evidence is write-once like a result: a rerun's rewrite must
-    // not silently replace the first run's screens.
+    // leg's dir. Evidence is write-once like a result, but keyed PER ATTEMPT
+    // (the dir carries `.retry`/`-tryN`), so a retry's re-upload never hits
+    // the first attempt's write-once key (MED4).
     if (isEvidenceKey(target.key)) {
       if (!props?.evidenceKey || !target.key.startsWith(props.evidenceKey)) return new Response("forbidden", { status: 403 });
+      // #1343 MED6: a browser leg may write at most MAX_EVIDENCE_FILES per
+      // attempt dir. A PR-controlled leg cannot drown a run's evidence prefix
+      // (and the verdict link) in unbounded files.
+      const already = await bucket.list?.({ prefix: props.evidenceKey });
+      if (already !== undefined && already.objects.length >= MAX_EVIDENCE_FILES_PER_LEG) return new Response("too many evidence files", { status: 413 });
       const declared = Number(req.headers.get("content-length") ?? "0");
-      if (declared > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
+      // #1343 MED6: a full-page screenshot PNG easily exceeds the 1 MiB result
+      // cap; image evidence gets a larger cap, text evidence stays at 1 MiB.
+      const cap = isImageEvidence(target.key) ? MAX_IMAGE_EVIDENCE_BYTES : MAX_RESULT_BYTES;
+      if (declared > cap) return new Response("too large", { status: 413 });
       const body = await req.arrayBuffer();
-      if (body.byteLength > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
-      const stored = await bucket.put(target.key, body, { onlyIf: { etagDoesNotMatch: "*" } });
+      if (body.byteLength > cap) return new Response("too large", { status: 413 });
+      // #1343 HIGH3: TEXT evidence (console JSON, manifest) can echo a granted
+      // secret; scrub every value this leg was granted before it reaches R2.
+      // Screenshots (PNG/JPG binary) cannot be redacted — documented, not
+      // silently passed: their bytes are not scanned, and a browser leg that
+      // prints a secret into a screenshot is out of scope for text redaction.
+      const toStore: ArrayBuffer = redactTextEvidence(target.key, body, props?.secretValues);
+      const stored = await bucket.put(target.key, toStore, { onlyIf: { etagDoesNotMatch: "*" } });
       if (stored === null) return new Response("already written", { status: 412 });
       return new Response(null, { status: 201 });
     }

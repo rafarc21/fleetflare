@@ -86,9 +86,12 @@ describe("legRequest: browser flag + evidence key (#1343)", () => {
     expect(Object.hasOwn(gateOutboundProps(legRequest("acme", "example", PLANNED, { baseRef: "main", pr: "7", private: false })), "evidenceKey")).toBe(false);
   });
 
-  it("evidenceKeyFor derives the sibling evidence dir from a result key, keyed run+leg", () => {
+  it("evidenceKeyFor derives the sibling evidence dir from a result key, keyed run+leg+attempt", () => {
     expect(evidenceKeyFor(RESULT)).toBe("gate/acme/example/runs/7/run-a/evidence/shard-e2e/");
-    expect(evidenceKeyFor("gate/acme/example/runs/7/run-a/shard-e2e.retry.json")).toBeNull();
+    // The ATTEMPT variant is part of the dir: an earlier attempt's files never
+    // green a later zero-spec retry, and a retry's re-upload never 412s (MED4).
+    expect(evidenceKeyFor("gate/acme/example/runs/7/run-a/shard-e2e.retry.json")).toBe("gate/acme/example/runs/7/run-a/evidence/shard-e2e.retry/");
+    expect(evidenceKeyFor("gate/acme/example/runs/7/run-a/shard-e2e-try2.json")).toBe("gate/acme/example/runs/7/run-a/evidence/shard-e2e-try2/");
     expect(evidenceKeyFor("not-a-result-key")).toBeNull();
   });
 });

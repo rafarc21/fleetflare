@@ -42,8 +42,9 @@ import {
 import { postGateStatus, STATUS_POST_STEP_CONFIG, type StatusPort } from "./status-post";
 import { realStatusPort } from "./status-post-env";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
-import { enforceBrowserLegs, verdictEvidenceUrl } from "./browser-leg";
+import { enforceBrowserLegs, manifestProvesExecution, verdictEvidenceUrl } from "./browser-leg";
 import { evidenceKeyFor } from "./leg-env";
+import { finalLegKey } from "./log";
 
 export interface GateWorkflowParams {
   repo: string;
@@ -314,17 +315,41 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // all) downgrade to RED DID-NOT-RUN. Evidence detection is one R2 list per
     // browser leg, wrapped in a step so a Workflow replay returns the recorded
     // set instead of re-listing.
-    const browserLegs = new Set(legs.filter((l) => l.browser === true).map((l) => l.leg));
+    // A CARRIED green browser leg (from a prior run, #1230) already passed its
+    // own run's enforcement, so its evidence lives under that run's prefix —
+    // re-checking it under THIS run's prefix would flip green->red DID-NOT-RUN
+    // on every infra/--failed-only rerun. Carried legs are exempt: enforcement
+    // (and the link decision) cover only browser legs this run dispatches.
+    const browserLegs = new Set(legs
+      .filter((l) => l.browser === true && carriedByLeg.get(l.leg) === undefined)
+      .map((l) => l.leg));
     const evidenceByLeg = new Set<string>();
     if (browserLegs.size > 0) {
       const found = await step.do("list-browser-evidence", async () => {
         const seen = new Set<string>();
+        // One list over the run prefix gives every result key, from which each
+        // browser leg's FINAL attempt key is resolved — evidence is keyed per
+        // attempt, so the final attempt's dir is the one that must hold the
+        // manifest (an earlier attempt's files never green a zero-spec retry).
+        const runKeys = (await this.env.STUDIO_ARCHIVE.list({ prefix: `gate/${owner}/${repoName}/runs/${pr}/${event.instanceId}/` }))
+          .objects.map((o) => o.key);
         for (const planned of legs) {
-          if (planned.browser !== true) continue;
-          const dir = evidenceKeyFor(planned.resultKey);
+          if (planned.browser !== true || carriedByLeg.get(planned.leg) !== undefined) continue;
+          const finalKey = finalLegKey(runKeys, planned.leg);
+          const dir = finalKey === null ? null : evidenceKeyFor(finalKey);
           if (dir === null) continue;
-          const page = await this.env.STUDIO_ARCHIVE.list({ prefix: dir });
-          if (page.objects.length > 0) seen.add(planned.leg);
+          // #1343 MED4: one stray screenshot is not proof specs ran. The leg's
+          // reporter must write a manifest.json declaring `executed > 0`; any
+          // other file (or a manifest with executed 0) does not green the leg.
+          const manifest = await this.env.STUDIO_ARCHIVE.get(`${dir}manifest.json`);
+          if (manifest === null) continue;
+          let proves = false;
+          try {
+            proves = manifestProvesExecution(await manifest.json());
+          } catch {
+            continue;
+          }
+          if (proves) seen.add(planned.leg);
         }
         return [...seen];
       });

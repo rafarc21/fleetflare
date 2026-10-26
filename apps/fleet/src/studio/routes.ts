@@ -1143,6 +1143,9 @@ export async function handleStudio(
   if (
     url.pathname === "/studio/gate/start" || url.pathname === "/studio/gate/status"
     || url.pathname === "/studio/gate/protect" || url.pathname === "/studio/gate/log"
+    // #1343: the evidence overview/serve route carries a file path after the
+    // prefix, so it mounts by startsWith, not exact path.
+    || url.pathname.startsWith("/studio/gate/evidence")
   ) {
     return handleGateRoute(req, env);
   }

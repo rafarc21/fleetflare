@@ -1833,3 +1833,32 @@ describe("GET /studio/reach", () => {
   });
 });
 
+
+// #1343 HIGH1: the evidence route mounts on the studio router by startsWith,
+// so the verdict link (…/studio/gate/evidence?repo=…&pr=…&run=…) reaches
+// handleGateRoute instead of falling through to the router's own 404.
+describe("handleStudio mounts /studio/gate/evidence (#1343 HIGH1)", () => {
+  it("an authorized evidence overview request reaches the gate route (400 for missing params, not the router 404)", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(authorizedReq("/studio/gate/evidence"), {
+      ...testEnv,
+      FLEET_GATE_RUNNER: "on",
+      GATE_RUNNER_REPOS: "acme/example",
+    } as unknown as Env);
+    // 400 = mounted + param validation, never 404 (the router's own miss).
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toContain("repo");
+  });
+
+  it("the overview with the runner switch off 404s inside handleGateRoute", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(authorizedReq("/studio/gate/evidence?repo=acme/example&pr=7&run=r"), {
+      ...testEnv,
+      FLEET_GATE_RUNNER: "off",
+    } as unknown as Env);
+    expect(res.status).toBe(404);
+    expect((await res.json() as { error: string }).error).toContain("not enabled");
+  });
+});

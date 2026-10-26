@@ -43,7 +43,13 @@ function rosterDescription({ expected, results, runId }: RosterInput): string {
   const total = expected.length;
   const green = total - red.length;
   const runTag = `(run ${runId})`;
-  if (red.length > 0) return withLegList(`${green}/${total} green; red: `, red, ` ${runTag}`);
+  if (red.length > 0) {
+    // #1343 LOW: a DID-NOT-RUN leg reads "<leg> (DID-NOT-RUN)", not the bare
+    // generic "<leg>" — the zero-spec reason is the headline, never hidden
+    // behind "red: e2e".
+    const names = red.map((leg) => byLeg.get(leg)?.description?.startsWith("DID-NOT-RUN") ? `${leg} (DID-NOT-RUN)` : leg);
+    return withLegList(`${green}/${total} green; red: `, names, ` ${runTag}`);
+  }
   const flaky = expected.filter((leg) => byLeg.get(leg)?.description?.startsWith("flaky:"));
   if (flaky.length === 0) return `${total}/${total} green ${runTag}`;
   return withLegList(`${total}/${total} green (${flaky.length} flaky: `, flaky, `) ${runTag}`);

@@ -2,8 +2,9 @@
 // spec evidence exists; zero specs or a skipped leg is RED DID-NOT-RUN.
 import { describe, it, expect } from "bun:test";
 import {
-  DID_NOT_RUN, didNotRunDescription, enforceBrowserLeg, enforceBrowserLegs, verdictEvidenceUrl,
+  DID_NOT_RUN, didNotRunDescription, enforceBrowserLeg, enforceBrowserLegs, manifestProvesExecution, verdictEvidenceUrl,
 } from "../../src/gate/browser-leg";
+import { resultKeysPrefix } from "../../src/gate/log";
 import type { LegResult } from "../../src/gate/verdict";
 
 describe("enforceBrowserLeg: zero specs -> RED DID-NOT-RUN", () => {
@@ -75,5 +76,25 @@ describe("verdictEvidenceUrl", () => {
     expect(verdictEvidenceUrl("https://fleet.example.com/", "acme/example", 7, "run-a")).toBe(
       "https://fleet.example.com/studio/gate/evidence?repo=acme%2Fexample&pr=7&run=run-a",
     );
+  });
+});
+// #1343 MED4: a manifest must declare executed>0 to prove specs ran.
+describe("manifestProvesExecution (#1343 MED4)", () => {
+  it("true for executed>0, false for 0, missing, unparseable or non-number", () => {
+    expect(manifestProvesExecution({ executed: 3 })).toBe(true);
+    expect(manifestProvesExecution({ executed: 0 })).toBe(false);
+    expect(manifestProvesExecution({})).toBe(false);
+    expect(manifestProvesExecution(null)).toBe(false);
+    expect(manifestProvesExecution("x")).toBe(false);
+    expect(manifestProvesExecution({ executed: "three" })).toBe(false);
+    expect(manifestProvesExecution({ executed: -1 })).toBe(false);
+  });
+});
+
+// #1343 MED6: result keys are listed under `shard-`, never the whole run
+// prefix (evidence lives under `evidence/` and must not crowd results out).
+describe("resultKeysPrefix (#1343 MED6)", () => {
+  it("scopes to shard-, never the run prefix", () => {
+    expect(resultKeysPrefix("gate/acme/example/runs/7/run-a/")).toBe("gate/acme/example/runs/7/run-a/shard-");
   });
 });

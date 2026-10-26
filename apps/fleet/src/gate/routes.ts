@@ -20,7 +20,7 @@ import { isGateRunnerRepo } from "./config";
 import { gateDraining } from "./drain";
 import { greenLegsOf, type CarryGreen, type OutcomeLeg } from "./fanout";
 import { rerunInstanceId, statusFollowingRerun } from "./infra-rerun";
-import { finalLegKey, failingLines, firstFailingTest, legAttemptKeys, type LegOutput } from "./log";
+import { finalLegKey, failingLines, firstFailingTest, legAttemptKeys, resultKeysPrefix, type LegOutput } from "./log";
 import { evidenceKeyFor } from "./leg-env";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
@@ -137,7 +137,11 @@ async function gateLegLogSafe(
     const token = await repoTokenMinter(env)(repo);
     const canonical = (await getPullRequest(token, repo, pr)).repoFullName;
     const prefix = `gate/${canonical}/runs/${pr}/${run.runId}/`;
-    const listed = await env.STUDIO_ARCHIVE.list({ prefix });
+    // #1343 MED6: result keys live under the `shard-` prefix, evidence under
+    // `evidence/`. Listing the whole run prefix would let >1000 evidence files
+    // (one page) crowd out the result keys the leg-log logic reads. List the
+    // result prefix so evidence volume never hides a result.
+    const listed = await env.STUDIO_ARCHIVE.list({ prefix: resultKeysPrefix(prefix) });
     const keys = listed.objects.map((o) => o.key);
     if (evidence) {
       // #1343: the leg's evidence files, listed for `fleet gate log --evidence`.
@@ -273,7 +277,20 @@ async function carryGreenFromLatestRun(
 /** The R2 key a /studio/gate/evidence file path names, or null when it is not
  *  an evidence key (the same shape outbound-handler.ts's EVIDENCE_RE pins for
  *  the container's writes — a serve path outside it is never read). */
-const EVIDENCE_FILE_RE = /^gate\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/runs\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/evidence\/shard-[a-z0-9-]+(?:@head)?\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+const EVIDENCE_FILE_RE = /^gate\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/runs\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/evidence\/shard-[a-z0-9-]+(?:@head)?(?:-try\d+)?(?:\.retry)?\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+
+/** #1343 LOW: the content type of one evidence file by extension, with
+ *  `nosniff` on every serve so a browser never guesses a type the bytes do not
+ *  declare (a JSON file must never be sniffed as HTML). */
+function evidenceContentType(key: string): string {
+  if (/\.json$/i.test(key)) return "application/json";
+  if (/\.png$/i.test(key)) return "image/png";
+  if (/\.jpe?g$/i.test(key)) return "image/jpeg";
+  if (/\.webp$/i.test(key)) return "image/webp";
+  if (/\.txt$/i.test(key)) return "text/plain";
+  if (/\.md$/i.test(key)) return "text/markdown";
+  return "application/octet-stream";
+}
 
 /** Serve one evidence file, or list a run's evidence when no file is named.
  *  The run overview (the verdict target_url) lists every evidence file under
@@ -281,15 +298,24 @@ const EVIDENCE_FILE_RE = /^gate\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/runs\/[A-Za-z
  *  like the rest of the gate route, so the operator's browser opens them. */
 async function gateEvidenceSafe(env: Env, url: URL, file: string): Promise<Response> {
   try {
-    // A path must be the exact evidence-file shape; anything else (traversal,
-    // a result JSON, a baseline) is a 404, never a read.
-    const key = file === "" ? "" : EVIDENCE_FILE_RE.test(file) ? file : "";
-    if (file !== "" && key === "") return j({ error: "not found" }, 404);
+    // Same runner switch as /status and /log: off, or the target repo not
+    // gated in, is a 404 — never a read of evidence the runner does not back.
+    if (env.FLEET_GATE_RUNNER !== "on") return j({ error: "gate runner not enabled for this repo" }, 404);
+    // #1343 MED5: the CLI encodes `@` as `%40` in evidence links. Decode the
+    // file path before the shape match, so a @head leg's dir resolves; the
+    // match itself then re-pins the exact evidence shape (traversal, a result
+    // JSON, a baseline) as a 404, never a read.
+    const decoded = file === "" ? "" : decodeURIComponent(file);
+    const key = decoded === "" ? "" : EVIDENCE_FILE_RE.test(decoded) ? decoded : "";
+    if (decoded !== "" && key === "") return j({ error: "not found" }, 404);
     if (key !== "") {
       const obj = await env.STUDIO_ARCHIVE.get(key);
       if (obj === null) return j({ error: "not found" }, 404);
-      const contentType = key.endsWith(".json") ? "application/json" : "application/octet-stream";
-      return new Response(obj.body, { headers: { "content-length": String(obj.size), "content-type": contentType } });
+      return new Response(obj.body, {
+        headers: {
+          "content-length": String(obj.size), "content-type": evidenceContentType(key), "x-content-type-options": "nosniff",
+        },
+      });
     }
     const repo = url.searchParams.get("repo");
     const pr = Number(url.searchParams.get("pr"));
@@ -297,6 +323,7 @@ async function gateEvidenceSafe(env: Env, url: URL, file: string): Promise<Respo
     if (!repo || !Number.isInteger(pr) || pr <= 0 || !run) {
       return j({ error: "repo, pr and run required" }, 400);
     }
+    if (!isGateRunnerRepo(env.GATE_RUNNER_REPOS, repo)) return j({ error: "gate runner not enabled for this repo" }, 404);
     // Evidence overview: list under the run's evidence prefix, resolved
     // canonical-repo-first so keys match R2's case-sensitive store (#1119).
     const token = await repoTokenMinter(env)(repo);
