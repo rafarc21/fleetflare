@@ -6,11 +6,25 @@
 // evaluates the init-script env var. The value is never logged: error paths
 // are redacted against the extracted secret values.
 //
+// Network is context-level: context.on('response') + context.on('requestfailed')
+// cover the main page, its iframes, popups from their first page-load, and
+// workers, so a popup's page-load 503 is never missed (measured — CDP
+// auto-attach alone misses it).
+//
+// The fixture returns the extracted secrets so a reporter redacts evidence by
+// default without the caller re-deriving them.
+//
 // Structure-only — no hard import of playwright-core / @playwright/test.
 // A consumer repo mounts the same file under either runner by supplying the
 // shapes each runner actually provides.
 
-import { Collector } from "./capture";
+import {
+  Collector,
+  normalizeContextFailure,
+  normalizeContextResponse,
+  type ContextRequestFailedLike,
+  type ContextResponseLike,
+} from "./capture";
 import { wireAutoAttach, type CdpSessionLike } from "./attach";
 import { applyInitScript, initScriptFromEnv, redact, secretsFromInitScript } from "./init-script";
 
@@ -23,6 +37,8 @@ export interface FixtureContextLike {
   newCDPSession(page: unknown): Promise<CdpSessionLike>;
   addInitScript(source: string): Promise<void>;
   on(event: "page", listener: (page: FixturePageLike) => void): void;
+  on(event: "response", listener: (response: ContextResponseLike) => void): void;
+  on(event: "requestfailed", listener: (request: ContextRequestFailedLike) => void): void;
 }
 export interface FixturePageLike {
   goto(url: string): Promise<unknown>;
@@ -34,6 +50,8 @@ export interface FixturePageLike {
 export interface GuardFixture {
   /** The shared collector every attached target feeds. */
   collector: Collector;
+  /** The init-script secret values, for redacting evidence by default. */
+  secrets: string[];
   dispose(): Promise<void>;
 }
 
@@ -51,7 +69,7 @@ export async function guardUserAgent(browser: { version(): Promise<string> }): P
 }
 
 /** The popup path: window.open is never auto-attached, so a popup gets its
- *  own session wired into the same collector. */
+ *  own console session wired into the same collector. */
 function wirePopup(context: FixtureContextLike, collector: Collector, page: FixturePageLike): void {
   context.newCDPSession(page as unknown)
     .then((session) => {
@@ -92,6 +110,17 @@ export async function buildGuardFixture(opts: BuildGuardFixtureOpts): Promise<Bu
   }
 
   const collector = new Collector();
+
+  // Context-level network: popups/workers/iframes from their first load.
+  context.on("response", (response: ContextResponseLike) => {
+    const n = normalizeContextResponse(response);
+    if (n) collector.networkResponse(n.status, n.method, n.path, n.type);
+  });
+  context.on("requestfailed", (request: ContextRequestFailedLike) => {
+    const n = normalizeContextFailure(request);
+    collector.networkFailure(n.method, n.path, n.errorText, n.type);
+  });
+
   let rootSession: CdpSessionLike;
   try {
     rootSession = await context.newCDPSession(page as unknown);
@@ -110,6 +139,7 @@ export async function buildGuardFixture(opts: BuildGuardFixtureOpts): Promise<Bu
     context,
     fixture: {
       collector,
+      secrets,
       dispose: async () => { attach.dispose(); },
     },
   };

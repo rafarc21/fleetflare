@@ -18,8 +18,16 @@ import {
 } from "./evidence";
 import { testKeyFor } from "./evidence";
 import type { CaptureBuckets } from "./capture";
+import { initScriptFromEnv, secretsFromInitScript } from "./init-script";
 
 export const DID_NOT_RUN_FINDING = "[guard] DID-NOT-RUN: zero tests executed";
+
+/** The secret values a reporter redacts by default, derived from the
+ *  BROWSER_GUARD_INIT_SCRIPT env var itself — a caller never has to hand them
+ *  in. */
+export function defaultSecrets(env?: Record<string, string | undefined>): string[] {
+  return secretsFromInitScript(initScriptFromEnv(env ?? (process.env as unknown as Record<string, string | undefined>)));
+}
 
 export interface ReporterHooks {
   /** Called with (testKey, buckets) as each test ends. */
@@ -34,6 +42,8 @@ export interface GuardReporterOpts {
   fingerprint?: string;
   at?: string;
   allowlist?: AllowlistRow[];
+  /** Explicit secrets override the env-derived default; leave unset to
+   *  redact by default from BROWSER_GUARD_INIT_SCRIPT. */
   secrets?: string[];
   /** Reports a screenshot for a test key: returns PNG bytes or a path. */
   screenshotFor?: (testKey: string) => Promise<Uint8Array | string | undefined>;
@@ -48,16 +58,19 @@ export interface ReportGuardTestOpts {
   evidenceDir: string;
   sink: EvidenceSink;
   allowlist?: AllowlistRow[];
+  /** Leave unset to redact by default from BROWSER_GUARD_INIT_SCRIPT. */
   secrets?: string[];
 }
 
-/** One captured test -> per-test evidence + verdict. */
+/** One captured test -> per-test evidence + verdict. Secrets default to the
+ *  env-derived values when not passed. */
 export function reportGuardTest(opts: ReportGuardTestOpts): GuardResult {
   const paths = evidencePathsFor(opts.evidenceDir, opts.testKey);
   const screenshotBytes = typeof opts.screenshot === "string" ? undefined : opts.screenshot;
+  const secrets = opts.secrets ?? defaultSecrets();
   const result = writeEvidence(paths, opts.buckets, screenshotBytes, opts.fingerprint, opts.at, opts.sink, {
     allowlist: opts.allowlist,
-    secrets: opts.secrets,
+    secrets,
   });
   if (typeof opts.screenshot === "string") result.screenshotPath = opts.screenshot;
   return result;
@@ -102,7 +115,7 @@ export class GuardReporter implements ReporterHooks {
       evidenceDir: this.opts.evidenceDir,
       sink: this.opts.sink,
       allowlist: this.opts.allowlist,
-      secrets: this.opts.secrets,
+      secrets: this.opts.secrets ?? defaultSecrets(),
     });
   }
 

@@ -21,7 +21,9 @@ export async function launchGuarded(
 ): Promise<GuardedBrowser> {
   const browser = await chromium.launch({ executablePath: CHROMIUM_PATH, headless: true, args: ["--no-sandbox"] });
   const { buildGuardFixture } = await import("../../container/gate/browser/guard/fixture");
-  const built = await buildGuardFixture({ browser: browser as never, env: env ?? {} });
+  // Omit env when unset so the fixture falls back to process.env (the real
+  // gate's shape); only pass it through when the caller overrides.
+  const built = await buildGuardFixture({ browser: browser as never, ...(env === undefined ? {} : { env }) });
   return { ...built, close: () => browser.close() };
 }
 

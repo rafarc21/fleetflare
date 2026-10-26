@@ -12,14 +12,16 @@
 //   - consoleAPICalled error|warning|assert -> consoleErrors / consoleWarnings;
 //     log|info|debug whose text starts "[tag]" -> debugLogs.
 //   - exceptionThrown -> exceptions.
-//   - responseReceived status >= 400 -> badRequests.
-//   - loadingFailed canceled:false -> badRequests; canceled:true ->
-//     canceledRequests (ignored by the RED rule).
+//   - response status >= 400 -> badRequests.
+//   - request failed, errorText "net::ERR_ABORTED" -> canceledRequests (ignored
+//     by the RED rule); any other failure -> badRequests.
+//   - Network comes from context-level response/requestfailed events, which
+//     cover popups from their first page-load; a request that completes never
+//     also fails, so there is no response/failure double-count to collapse.
 //   - Log.enable replays old entries and Runtime + Log both report one line:
 //     dedupe by raw float timestamp + text + type in every bucket.
 //   - HTTP faults count from Network events only: a Log entry with
-//     source "network" (Chromium's "Failed to load resource") is dropped here;
-//     the request stays in badRequests via the Network path.
+//     source "network" (Chromium's "Failed to load resource") is dropped here.
 
 export interface ConsoleEntry { type: string; text: string; source: string; at: string; }
 export interface DebugLogEntry { type: string; text: string; }
@@ -41,22 +43,23 @@ export function emptyBuckets(): CaptureBuckets {
 }
 
 export const DEFAULT_DEBUG_TAG = "[tag]";
+export const ERR_ABORTED = "net::ERR_ABORTED";
 
 export interface CaptureOpts {
   /** The debug-log prefix that flags a line as a debugLog. */
   debugTag?: string;
 }
 
-/** The collector: one set of buckets every CDP source (main page, workers,
- *  service workers, popups) feeds. Each push is deduped on a caller-supplied
- *  raw key (raw float timestamp + text + type), never an ms-truncated ISO. */
+/** The collector: one set of buckets every capture source (main page, workers,
+ *  service workers, popups) feeds. Console/exception pushes dedupe on a
+ *  caller-supplied raw key (raw float timestamp + text + type); network pushes
+ *  are one-per-event. */
 export class Collector {
   readonly buckets: CaptureBuckets = emptyBuckets();
   private readonly debugTag: string;
   private readonly seenConsole = new Set<string>();
   private readonly seenDebug = new Set<string>();
   private readonly seenException = new Set<string>();
-  private readonly seenBad = new Set<string>();
 
   constructor(opts: CaptureOpts = {}) {
     this.debugTag = opts.debugTag ?? DEFAULT_DEBUG_TAG;
@@ -89,17 +92,20 @@ export class Collector {
     this.buckets.exceptions.push({ text, url });
   }
 
-  /** A bad HTTP request. `rawKey` is the requestId: one request that gets
-   *  both a >=400 response and a non-canceled loadingFailed counts once, and
-   *  N distinct requests count N times. */
-  badRequest(entry: BadRequestEntry, rawKey: string): void {
-    if (this.seenBad.has(rawKey)) return;
-    this.seenBad.add(rawKey);
-    this.buckets.badRequests.push(entry);
+  /** A context-level response: >= 400 is a bad request. */
+  networkResponse(status: number, method: string, path: string, type: string): void {
+    if (status < 400) return;
+    this.buckets.badRequests.push({ method, path, status, errorText: "", type });
   }
 
-  canceledRequest(entry: CanceledRequestEntry): void {
-    this.buckets.canceledRequests.push(entry);
+  /** A context-level request failure: an aborted fetch is canceled, anything
+   *  else is a bad request. */
+  networkFailure(method: string, path: string, errorText: string, type: string): void {
+    if (errorText === ERR_ABORTED) {
+      this.buckets.canceledRequests.push({ method, path, status: 0, errorText, type, canceled: true });
+    } else {
+      this.buckets.badRequests.push({ method, path, status: 0, errorText, type });
+    }
   }
 
   collect(): CaptureBuckets {
@@ -111,7 +117,6 @@ export class Collector {
     this.seenConsole.clear();
     this.seenDebug.clear();
     this.seenException.clear();
-    this.seenBad.clear();
   }
 }
 
@@ -147,9 +152,6 @@ export function exceptionRawKey(timestamp: number | undefined, text: string, url
   return `${timestamp ?? ""}|${text}|${url}`;
 }
 
-/** Normalizes one Runtime.consoleAPICalled (or Log.entryAdded) payload into a
- *  collector push. `textForLog` is the entry.text path; both shapes land in
- *  the same buckets. */
 export interface NormalizedConsole {
   type: string;
   text: string;
@@ -176,8 +178,6 @@ export function normalizeLogEntry(e: any): NormalizedConsole | null {
   const text = String(entry.text ?? "").trim();
   if (text === "") return null;
   const type = String(entry.level ?? "log");
-  // Log carries level "error"/"warning"/"verbose"/"info", not console's own
-  // type set; map the RED-relevant levels and leave the rest as log-ish.
   const mapped = type === "error" || type === "warning" ? type : "log";
   const at = isoAt(entry.timestamp);
   return { type: mapped, text, source, at, rawKey: consoleRawKey(entry.timestamp, mapped, text, source) };
@@ -193,23 +193,31 @@ export function normalizeExceptionThrown(e: any): NormalizedException | null {
   return { text, url, rawKey: exceptionRawKey(e.timestamp, text, url) };
 }
 
-/** Network.requestWillBeSent -> the request context later response/failure
- *  events need (method + url). */
-export function normalizeRequestWillBeSent(e: any): { requestId: string; method: string; url: string; type: string } | null {
-  const requestId = e.requestId;
-  if (requestId === undefined) return null;
-  return { requestId, method: e.request?.method ?? "", url: e.request?.url ?? "", type: e.type ?? "" };
+/** Structural context-level response (playwright-core Response). */
+export interface ContextResponseLike {
+  status(): number;
+  url(): string;
+  request(): { method(): string; resourceType(): string };
 }
 
-export function normalizeResponseReceived(e: any, method: string, url: string, type: string): BadRequestEntry | null {
-  const status = Number(e.response?.status ?? 0);
+/** Structural context-level failed request (playwright-core Request). */
+export interface ContextRequestFailedLike {
+  url(): string;
+  method(): string;
+  resourceType(): string;
+  failure(): { errorText: string } | null;
+}
+
+export function normalizeContextResponse(e: ContextResponseLike): BadRequestEntry | null {
+  const status = e.status();
   if (status < 400) return null;
-  return { method, path: urlPath(url || e.response?.url || ""), status, errorText: "", type: e.type ?? type };
+  return { method: e.request().method(), path: urlPath(e.url()), status, errorText: "", type: e.request().resourceType() };
 }
 
-export function normalizeLoadingFailed(e: any, method: string, url: string, type: string): BadRequestEntry | CanceledRequestEntry {
-  const base = { method, path: urlPath(url), status: 0, errorText: String(e.errorText ?? ""), type: e.type ?? type };
-  return e.canceled === true ? { ...base, canceled: true as const } : base;
+export function normalizeContextFailure(e: ContextRequestFailedLike): BadRequestEntry | CanceledRequestEntry {
+  const errorText = e.failure()?.errorText ?? "";
+  const base = { method: e.method(), path: urlPath(e.url()), status: 0, errorText, type: e.resourceType() };
+  return errorText === ERR_ABORTED ? { ...base, canceled: true as const } : base;
 }
 
 /** The RED rule: one finding per failed guard. Canceled requests never flag. */

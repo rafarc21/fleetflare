@@ -25,7 +25,7 @@ RED `DID-NOT-RUN`.
 
 | Var | Meaning |
 |---|---|
-| `BROWSER_GUARD_INIT_SCRIPT` | Raw JS evaluated on every new document. Used for an App Check debug token. Its string-literal **values** are redacted from every guard write. |
+| `BROWSER_GUARD_INIT_SCRIPT` | Raw JS evaluated on every new document. Used for an App Check debug token. Its string-literal **values** are redacted from every guard write **by default** — the reporter derives them from this var, no caller input needed. |
 | `BROWSER_GUARD_AUTH_FORCE` | `"on"` (exact literal, else off) marks a forced-auth multi-user spec. |
 | `BROWSER_GUARD_MAILHOG` | MailHog HTTP base (e.g. `http://127.0.0.1:8025`); a spec polls `<base>/api/v2/messages`. |
 
@@ -39,32 +39,35 @@ The evidence buckets share one schema with the consumer walk (`#1344` comment
 
 Capture rules (measured, do not re-derive):
 
-- `Runtime.enable` + `Log.enable` + `Network.enable`.
+- `Runtime.enable` + `Log.enable`.
 - `consoleAPICalled` `error|warning|assert` -> `consoleErrors` /
   `consoleWarnings`; `log|info|debug` whose text starts `[tag]` ->
   `debugLogs`.
 - `exceptionThrown` -> `exceptions`.
-- `responseReceived` status >= 400 -> `badRequests`.
-- `loadingFailed` `canceled:false` -> `badRequests`; `canceled:true` ->
-  `canceledRequests` (ignored by the RED rule).
+- Network is **context-level**: `context.on('response')` status >= 400 ->
+  `badRequests`; `context.on('requestfailed')` `net::ERR_ABORTED` ->
+  `canceledRequests` (ignored by the RED rule), any other failure ->
+  `badRequests`.
 - HTTP faults count from Network events only: a `Log` entry with source
-  `network` ("Failed to load resource") is dropped; the request stays in
-  `badRequests` via the Network path.
+  `network` ("Failed to load resource") is dropped.
 - Dedupe by raw float timestamp + type + text, not an ms-truncated ISO.
 
 ## Target capture (measured, do not re-derive)
 
-- Main page + iframes (same- and cross-origin): the page's own CDP session.
-- Dedicated workers + service workers (console and network): page-root
-  **non-flatten** `Target.setAutoAttach` + `sendMessageToTarget` /
-  `receivedMessageFromTarget`.
+- Console (main page + iframes + dedicated workers + service workers):
+  page-root **non-flatten** `Target.setAutoAttach` +
+  `sendMessageToTarget` / `receivedMessageFromTarget`.
+- Network (main page + iframes + workers + popups from their first
+  page-load): context-level `response` / `requestfailed` events.
 - `window.open` popups: never auto-attached; the fixture attaches each via
   `context.on('page')`.
 
 ## Allowlist
 
 Known-safe console/network rows a guard may tolerate. Each row needs all
-three fields and a literal substring (never a wildcard):
+three fields, a pattern of at least 4 chars matched against the underlying
+console/network entry text (never the `[console]` prefix, never a
+wildcard), a why of at least 8 chars, and a `#<number>` issue ref:
 
 ```ts
 { pattern: "/analytics-ping", why: "third-party telemetry beacon", issue: "#123" }

@@ -5,11 +5,10 @@ import {
   exceptionRawKey,
   guardFindings,
   normalizeConsoleAPICalled,
+  normalizeContextFailure,
+  normalizeContextResponse,
   normalizeExceptionThrown,
-  normalizeLoadingFailed,
   normalizeLogEntry,
-  normalizeRequestWillBeSent,
-  normalizeResponseReceived,
   urlPath,
   type CaptureBuckets,
 } from "../../container/gate/browser/guard/capture";
@@ -22,8 +21,10 @@ import {
   INIT_SCRIPT_ENV,
 } from "../../container/gate/browser/guard/init-script";
 import {
-  allowlistMatches,
+  allowlistMatchesEntry,
+  bucketsWithAllowlist,
   findingsWithAllowlist,
+  isAllowlistRowValid,
   isGreen,
   redactBuckets,
   verdictFromBuckets,
@@ -31,7 +32,7 @@ import {
   type GuardResult,
 } from "../../container/gate/browser/guard/evidence";
 import { isAuthForced, mailhogBase, multiUserEnv, AUTH_FORCE_ENV, MAILHOG_ENV } from "../../container/gate/browser/guard/multi-user";
-import { DID_NOT_RUN_FINDING, GuardReporter } from "../../container/gate/browser/guard/reporter";
+import { DID_NOT_RUN_FINDING, defaultSecrets, GuardReporter } from "../../container/gate/browser/guard/reporter";
 import type { EvidenceSink } from "../../container/gate/browser/guard/evidence";
 
 function bucketsWith(b: Partial<CaptureBuckets>): CaptureBuckets {
@@ -83,24 +84,24 @@ describe("Collector bucket rules", () => {
 
   test("a 404 and a 500 are two distinct badRequests", () => {
     const c = new Collector();
-    c.badRequest({ method: "GET", path: "/a", status: 404, errorText: "", type: "Fetch" }, "r1");
-    c.badRequest({ method: "GET", path: "/b", status: 500, errorText: "", type: "Fetch" }, "r2");
+    c.networkResponse(404, "GET", "/a", "Fetch");
+    c.networkResponse(500, "GET", "/b", "Fetch");
     expect(c.buckets.badRequests.length).toBe(2);
   });
 
-  test("same requestId counts once across a >=400 response + non-canceled failure", () => {
+  test("a non-2xx response and an aborted fetch land in different buckets", () => {
     const c = new Collector();
-    c.badRequest({ method: "GET", path: "/a", status: 503, errorText: "", type: "Fetch" }, "r1");
-    c.badRequest({ method: "GET", path: "/a", status: 0, errorText: "aborted", type: "Fetch" }, "r1");
+    c.networkResponse(503, "GET", "/a", "Fetch");
+    c.networkFailure("GET", "/y", "net::ERR_ABORTED", "Fetch");
     expect(c.buckets.badRequests.length).toBe(1);
+    expect(c.buckets.canceledRequests).toEqual([{ method: "GET", path: "/y", status: 0, errorText: "net::ERR_ABORTED", type: "Fetch", canceled: true }]);
   });
 
-  test("canceled loadingFailed -> canceledRequests, never badRequests", () => {
+  test("a non-aborted failure is a badRequest, not canceled", () => {
     const c = new Collector();
-    const n = normalizeLoadingFailed({ errorText: "net::ERR_ABORTED", canceled: true, type: "Fetch" }, "GET", "http://a/y", "Fetch");
-    if ("canceled" in n) c.canceledRequest(n); else c.badRequest(n, "r");
-    expect(c.buckets.canceledRequests).toEqual([{ method: "GET", path: "/y", status: 0, errorText: "net::ERR_ABORTED", type: "Fetch", canceled: true }]);
-    expect(c.buckets.badRequests).toEqual([]);
+    c.networkFailure("POST", "/x", "net::ERR_CONNECTION_REFUSED", "XHR");
+    expect(c.buckets.badRequests).toEqual([{ method: "POST", path: "/x", status: 0, errorText: "net::ERR_CONNECTION_REFUSED", type: "XHR" }]);
+    expect(c.buckets.canceledRequests).toEqual([]);
   });
 });
 
@@ -120,14 +121,19 @@ describe("normalizers", () => {
     expect(normalizeExceptionThrown({})).toBeNull();
   });
 
-  test("responseReceived >= 400 -> bad; 404 and 500 both bad", () => {
-    expect(normalizeResponseReceived({ response: { status: 404 } }, "GET", "http://a/x", "Fetch")?.status).toBe(404);
-    expect(normalizeResponseReceived({ response: { status: 500 } }, "GET", "http://a/x", "Fetch")?.status).toBe(500);
-    expect(normalizeResponseReceived({ response: { status: 200 } }, "GET", "http://a/x", "Fetch")).toBeNull();
+  test("context response >= 400 -> bad; 404 and 500 both bad; 200 dropped", () => {
+    const r = (status: number) => ({ status: () => status, url: () => "http://a/x", request: () => ({ method: () => "GET", resourceType: () => "Fetch" }) });
+    expect(normalizeContextResponse(r(404) as never)?.status).toBe(404);
+    expect(normalizeContextResponse(r(500) as never)?.status).toBe(500);
+    expect(normalizeContextResponse(r(200) as never)).toBeNull();
   });
 
-  test("requestWillBeSent keeps method/url for later events", () => {
-    expect(normalizeRequestWillBeSent({ requestId: "r1", request: { method: "POST", url: "http://a/z" }, type: "XHR" })).toEqual({ requestId: "r1", method: "POST", url: "http://a/z", type: "XHR" });
+  test("context failure: aborted -> canceled, other -> bad", () => {
+    const f = (errorText: string) => ({ url: () => "http://a/z", method: () => "POST", resourceType: () => "XHR", failure: () => ({ errorText }) });
+    const aborted = normalizeContextFailure(f("net::ERR_ABORTED") as never);
+    expect("canceled" in aborted).toBe(true);
+    const refused = normalizeContextFailure(f("net::ERR_CONNECTION_REFUSED") as never);
+    expect("canceled" in refused).toBe(false);
   });
 });
 
@@ -161,9 +167,23 @@ describe("RED rule (guardFindings)", () => {
 describe("allowlist", () => {
   const rows: AllowlistRow[] = [{ pattern: "/analytics-ping", why: "third-party telemetry beacon", issue: "#1" }];
 
-  test("a row requires pattern + why + issue and matches by literal substring", () => {
-    expect(allowlistMatches("[network] 404 /analytics-ping", rows)).toBe(true);
-    expect(allowlistMatches("[network] 404 /api", rows)).toBe(false);
+  test("a valid row matches an entry's text/path by literal substring", () => {
+    expect(allowlistMatchesEntry("/analytics-ping", rows)).toBe(true);
+    expect(allowlistMatchesEntry("/api", rows)).toBe(false);
+  });
+
+  test("blank or short pattern, empty why, or missing issue ref is invalid", () => {
+    expect(isAllowlistRowValid({ pattern: "", why: "a long enough why", issue: "#1" })).toBe(false);
+    expect(isAllowlistRowValid({ pattern: "[", why: "a long enough why", issue: "#1" })).toBe(false);
+    expect(isAllowlistRowValid({ pattern: "okpattern", why: "short", issue: "#1" })).toBe(false);
+    expect(isAllowlistRowValid({ pattern: "okpattern", why: "a long enough why", issue: "" })).toBe(false);
+    expect(isAllowlistRowValid({ pattern: "okpattern", why: "a long enough why", issue: "#1" })).toBe(true);
+  });
+
+  test("a '[' pattern matches nothing (entry text, not prefixed finding)", () => {
+    const b = bucketsWith({ badRequests: [{ method: "GET", path: "/x", status: 404, errorText: "", type: "Fetch" }] });
+    const r = verdictFromBuckets(b, { allowlist: [{ pattern: "[", why: "a long enough why", issue: "#1" }] });
+    expect(r.findings.length).toBeGreaterThan(0);
   });
 
   test("allowlist filters a finding out of the verdict but buckets keep it", () => {
@@ -272,5 +292,12 @@ describe("guard UA", () => {
     const ua = await guardUserAgent({ version: async () => "131.0.6778.85" });
     expect(ua).toContain("Chrome/131.0.6778.85");
     expect(ua).not.toContain("Chrome/124");
+  });
+});
+
+describe("reporter default secrets", () => {
+  test("defaultSecrets derives token values from BROWSER_GUARD_INIT_SCRIPT", () => {
+    expect(defaultSecrets({ [INIT_SCRIPT_ENV]: "window.__t='S3CRET'" })).toEqual(["S3CRET"]);
+    expect(defaultSecrets({})).toEqual([]);
   });
 });

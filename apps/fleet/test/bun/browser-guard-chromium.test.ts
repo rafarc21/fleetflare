@@ -6,13 +6,12 @@ import { launchGuarded } from "./browser-guard-helper";
 import {
   findingsWithAllowlist,
   isGreen,
-  writeEvidence,
   evidencePathsFor,
   type AllowlistRow,
 } from "../../container/gate/browser/guard/evidence";
 import { guardFindings } from "../../container/gate/browser/guard/capture";
 import { initScriptFromEnv, redact } from "../../container/gate/browser/guard/init-script";
-import { didNotRunResult } from "../../container/gate/browser/guard/reporter";
+import { didNotRunResult, reportGuardTest } from "../../container/gate/browser/guard/reporter";
 import type { EvidenceSink } from "../../container/gate/browser/guard/evidence";
 
 // Real-Chromium integration: the RED triggers and the aborted-fetch
@@ -133,11 +132,11 @@ describe("r1: worker / popup / service-worker capture", () => {
     server.stop(true);
   }, 30000);
 
-  test("popup (window.open) console error + 500 flips RED", async () => {
+  test("popup (window.open) console error + fetch 500 flips RED", async () => {
     const g = await launchGuarded({});
     const server = Bun.serve({ port: 0, fetch: (req) => {
       const u = new URL(req.url);
-      if (u.pathname === "/popup") return new Response("<script>console.error('POPUP_ERR')</script><script>setTimeout(()=>fetch('/p500').then(()=>{}).catch(()=>{}), 400)</script>", { headers: { "content-type": "text/html" } });
+      if (u.pathname === "/popup") return new Response("<script>console.error('POPUP_ERR')</script><script>fetch('/p500').then(()=>{}).catch(()=>{})</script>", { headers: { "content-type": "text/html" } });
       if (u.pathname === "/p500") return new Response("boom", { status: 500 });
       return new Response(`<html><body><script>window.open('/popup')</script></body></html>`, { headers: { "content-type": "text/html" } });
     }});
@@ -146,6 +145,21 @@ describe("r1: worker / popup / service-worker capture", () => {
     const buckets = g.fixture.collector.collect();
     expect(buckets.consoleErrors.some((e) => e.text.includes("POPUP_ERR"))).toBe(true);
     expect(buckets.badRequests.some((b) => b.path === "/p500" && b.status === 500)).toBe(true);
+    await g.close();
+    server.stop(true);
+  }, 30000);
+
+  test("popup page-load 503 is captured (no fetch delay)", async () => {
+    const g = await launchGuarded({});
+    const server = Bun.serve({ port: 0, fetch: (req) => {
+      const u = new URL(req.url);
+      if (u.pathname === "/popup") return new Response("boom", { status: 503 });
+      return new Response(`<html><body><script>window.open('/popup')</script></body></html>`, { headers: { "content-type": "text/html" } });
+    }});
+    await g.page.goto(`http://127.0.0.1:${server.port}/`);
+    await wait(1500);
+    const buckets = g.fixture.collector.collect();
+    expect(buckets.badRequests.some((b) => b.path === "/popup" && b.status === 503)).toBe(true);
     await g.close();
     server.stop(true);
   }, 30000);
@@ -223,30 +237,41 @@ describe("r1: dedupe, 503 x3, allowlist, redaction, DID-NOT-RUN", () => {
     server.stop(true);
   }, 30000);
 
-  test("init-script token value redacted from evidence, whole script not treated as secret", async () => {
+  test("init-script token value redacted from evidence by default, whole script not treated as secret", async () => {
     const source = "window.__appcheck='TOPSECRETTOKEN123'";
     const dir = mkdtempSync(join(tmpdir(), "browser-guard-redact-"));
-    const g = await launchGuarded({ BROWSER_GUARD_INIT_SCRIPT: source });
-    await g.page.goto("data:text/html,<script>console.error(window.__appcheck)</script>");
-    await wait(400);
-    const buckets = g.fixture.collector.collect();
-    // The token value the page logged is present in the raw bucket text...
-    expect(JSON.stringify(buckets)).toContain("TOPSECRETTOKEN123");
-    const paths = evidencePathsFor(dir, "redact");
-    const screenshot = (await (g.page as any).screenshot({ type: "png" })) as Uint8Array;
-    const { files, sink } = memSink();
-    // ...but writeEvidence redacts it before it lands on disk.
-    writeEvidence(paths, buckets, screenshot, undefined, undefined, sink, { secrets: ["TOPSECRETTOKEN123"] });
-    const consoleJson = files.get(paths.consoleJsonPath) as string;
-    const guardJson = files.get(paths.guardJsonPath) as string;
-    expect(consoleJson).not.toContain("TOPSECRETTOKEN123");
-    expect(guardJson).not.toContain("TOPSECRETTOKEN123");
-    expect(consoleJson).toContain("<redacted>");
-    // The init-script source itself is NOT the secret; only its literal values are.
-    const init = initScriptFromEnv({ BROWSER_GUARD_INIT_SCRIPT: source });
-    expect(redact(`hook failed: ${source}`, ["TOPSECRETTOKEN123"])).toBe("hook failed: window.__appcheck='<redacted>'");
-    expect(init?.source).toBe(source);
-    await g.close();
+    // The real gate sets BROWSER_GUARD_INIT_SCRIPT in the spec process env; the
+    // fixture (defaults to process.env) and the reporter (defaultSecrets) both
+    // read that same source, so no secrets are passed by hand.
+    const prev = process.env.BROWSER_GUARD_INIT_SCRIPT;
+    process.env.BROWSER_GUARD_INIT_SCRIPT = source;
+    try {
+      const g = await launchGuarded();
+      await g.page.goto("data:text/html,<script>console.error(window.__appcheck)</script>");
+      await wait(400);
+      const buckets = g.fixture.collector.collect();
+      // The token value the page logged is present in the raw bucket text...
+      expect(JSON.stringify(buckets)).toContain("TOPSECRETTOKEN123");
+      const screenshot = (await (g.page as any).screenshot({ type: "png" })) as Uint8Array;
+      const { files, sink } = memSink();
+      // ...but reportGuardTest redacts it before it lands on disk, with no secrets
+      // passed by hand — the default derives them from the env var.
+      reportGuardTest({ testKey: "redact", buckets, screenshot, evidenceDir: dir, sink });
+      const paths = evidencePathsFor(dir, "redact");
+      const consoleJson = files.get(paths.consoleJsonPath) as string;
+      const guardJson = files.get(paths.guardJsonPath) as string;
+      expect(consoleJson).not.toContain("TOPSECRETTOKEN123");
+      expect(guardJson).not.toContain("TOPSECRETTOKEN123");
+      expect(consoleJson).toContain("<redacted>");
+      // The init-script source itself is NOT the secret; only its literal values are.
+      const init = initScriptFromEnv({ BROWSER_GUARD_INIT_SCRIPT: source });
+      expect(redact(`hook failed: ${source}`, ["TOPSECRETTOKEN123"])).toBe("hook failed: window.__appcheck='<redacted>'");
+      expect(init?.source).toBe(source);
+      await g.close();
+    } finally {
+      if (prev === undefined) delete process.env.BROWSER_GUARD_INIT_SCRIPT;
+      else process.env.BROWSER_GUARD_INIT_SCRIPT = prev;
+    }
     rmSync(dir, { recursive: true, force: true });
   }, 30000);
 

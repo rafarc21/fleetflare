@@ -21,6 +21,22 @@ export interface AllowlistRow {
   issue: string;
 }
 
+export const ALLOWLIST_MIN_PATTERN = 4;
+export const ALLOWLIST_MIN_WHY = 8;
+export const ALLOWLIST_ISSUE = /^#\d+$/;
+
+/** A row is valid only when its pattern is at least ALLOWLIST_MIN_PATTERN
+ *  chars, its why is at least ALLOWLIST_MIN_WHY chars, and its issue is a
+ *  "#<number>" reference. A blank or trivially-short pattern, or a "[" that
+ *  would match every prefixed finding, is refused. */
+export function isAllowlistRowValid(row: AllowlistRow): boolean {
+  return (
+    row.pattern.trim().length >= ALLOWLIST_MIN_PATTERN &&
+    row.why.trim().length >= ALLOWLIST_MIN_WHY &&
+    ALLOWLIST_ISSUE.test(row.issue.trim())
+  );
+}
+
 export interface GuardResult {
   /** Which guard failed, if any; absent when green. */
   failed?: string;
@@ -56,14 +72,28 @@ export function testKeyFor(file: string, title: string): string {
   return `${file.replace(/[^A-Za-z0-9]+/g, "-")}--${title.replace(/[^A-Za-z0-9]+/g, "-")}`.slice(0, 200);
 }
 
-/** A row matches when its pattern is a literal substring of the finding. */
-export function allowlistMatches(finding: string, rows: AllowlistRow[]): boolean {
-  return rows.some((r) => finding.includes(r.pattern));
+/** True when a validated row's pattern is a literal substring of the entry
+ *  text. Invalid rows never match. */
+export function allowlistMatchesEntry(text: string, rows: AllowlistRow[]): boolean {
+  return rows.some((r) => isAllowlistRowValid(r) && text.includes(r.pattern));
 }
 
-/** The RED rule with allowlist filtering. */
+/** The buckets with allowlisted console/network entries removed, so the RED
+ *  rule runs on the filtered set. */
+export function bucketsWithAllowlist(buckets: CaptureBuckets, allowlist: AllowlistRow[] = []): CaptureBuckets {
+  return {
+    consoleErrors: buckets.consoleErrors.filter((e) => !allowlistMatchesEntry(e.text, allowlist)),
+    consoleWarnings: buckets.consoleWarnings.filter((e) => !allowlistMatchesEntry(e.text, allowlist)),
+    debugLogs: buckets.debugLogs.filter((d) => !allowlistMatchesEntry(d.text, allowlist)),
+    exceptions: buckets.exceptions.filter((e) => !allowlistMatchesEntry(e.text, allowlist)),
+    badRequests: buckets.badRequests.filter((b) => !allowlistMatchesEntry(b.path, allowlist) && !allowlistMatchesEntry(b.errorText, allowlist)),
+    canceledRequests: buckets.canceledRequests.filter((c) => !allowlistMatchesEntry(c.path, allowlist) && !allowlistMatchesEntry(c.errorText, allowlist)),
+  };
+}
+
+/** The RED rule with allowlist filtering: findings run on the filtered set. */
 export function findingsWithAllowlist(buckets: CaptureBuckets, allowlist: AllowlistRow[] = []): string[] {
-  return guardFindings(buckets).filter((f) => !allowlistMatches(f, allowlist));
+  return guardFindings(bucketsWithAllowlist(buckets, allowlist));
 }
 
 /** Guard verdict from buckets + allowlist: RED when any finding survives. */
