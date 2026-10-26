@@ -44,15 +44,32 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === "string");
 }
 
+/** The only keys the object form (`{secrets, head?}`) ever reads. */
+const LEG_ENTRY_KEYS: ReadonlySet<string> = new Set(["secrets", "head"]);
+
 /** One leg's raw OPS-file value, normalized to `GateSecretsLegEntry`, or null
  *  on anything malformed (a bad `secrets` field, a non-boolean `head`, or a
- *  shape that is neither a string array nor `{secrets, head?}`). */
-function parseLegEntry(raw: unknown): GateSecretsLegEntry | null {
+ *  shape that is neither a string array nor `{secrets, head?}`).
+ *  `context` (e.g. "acme/example/\"leg\"") names the entry in a warning only
+ *  -- it changes no parsed value. #1376 security review r1 LOW: the schema
+ *  (`secrets-config.schema.json`) declares `additionalProperties: false` for
+ *  the object form, but the parser itself silently ignored any extra key
+ *  instead of saying so -- an operator typo (`"heads": true` instead of
+ *  `"head"`) would otherwise parse as a quiet no-grant with no signal why.
+ *  Warned, never dropped: an unknown key changes nothing about the grant
+ *  itself, so it is not treated as malformed the way a bad `secrets`/`head`
+ *  value is. */
+function parseLegEntry(raw: unknown, context: string): GateSecretsLegEntry | null {
   if (isStringArray(raw)) return { secrets: raw };
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const r = raw as Record<string, unknown>;
   if (!isStringArray(r.secrets)) return null;
   if (r.head !== undefined && typeof r.head !== "boolean") return null;
+  for (const key of Object.keys(r)) {
+    if (!LEG_ENTRY_KEYS.has(key)) {
+      console.warn(`gate-secrets allowlist: ${context} has an unknown key "${key}" -- ignored, no grant change`);
+    }
+  }
   return r.head === true ? { secrets: r.secrets, head: true } : { secrets: r.secrets };
 }
 
@@ -81,7 +98,7 @@ export function parseGateSecretsAllowlist(raw: unknown): GateSecretsAllowlist {
     }
     const perLeg: Record<string, GateSecretsLegEntry> = Object.create(null);
     for (const [leg, value] of Object.entries(legs as Record<string, unknown>)) {
-      const entry = parseLegEntry(value);
+      const entry = parseLegEntry(value, `${repo}/"${leg}"`);
       if (entry !== null) {
         perLeg[leg] = entry;
       } else {

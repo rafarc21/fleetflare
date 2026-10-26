@@ -6,11 +6,29 @@
 import { gateSecretsRepoEntry, type GateSecretsAllowlist, type GateSecretsLegEntry } from "./secrets-config";
 import { isKnownSecretName } from "./secrets-registry";
 
-/** #1376: a leg name that is the `@head` or `@head-<n>` union-plan copy of
- *  `<base>` (fanout.ts's own headLegName: `<leg>@head` for an ordinary leg,
- *  `<lane>@head-<n>` for a sharded vitest/bun lane) -- captures `<base>` so
- *  grantedSecretNames can look up ITS entry when `leg` itself has none. */
-const HEAD_LEG_RE = /^(.+)@head(?:-\d+)?$/;
+/** #1376 security review r1 item 1: the base leg name a `@head`/`@head-<n>`
+ *  union-plan leg was renamed FROM, or null when `leg` is not such a name.
+ *  Must be the EXACT inverse of fanout.ts's own headLegName:
+ *    headLegName("vitest-3") === "vitest@head-3"   (a sharded vitest/bun lane)
+ *    headLegName("ai-smoke") === "ai-smoke@head"   (everything else)
+ *  A single regex (`^(.+)@head(?:-\d+)?$`) is NOT that inverse: its greedy
+ *  `(.+)` strips the WHOLE `@head-<n>` suffix, turning "vitest@head-3" into
+ *  base "vitest" (not "vitest-3" -- so a granted "vitest-3" entry can never
+ *  match its own head copy) and, worse, turning "bun@head-7" into base "bun"
+ *  -- so an OPS entry for a CUSTOM leg literally named "bun" (unrelated to
+ *  the auto-generated bun-test shard lanes) would leak its grant to every
+ *  bun-shard leg's head copy. The two shapes are checked separately, in the
+ *  same order headLegName itself branches: the sharded-lane shape FIRST
+ *  (narrower, `vitest`/`bun` only, with a shard number), the plain shape
+ *  second (anything else, no shard number) -- so "ai-smoke@head-3," a name
+ *  headLegName can never actually produce, matches neither and resolves to
+ *  null, not a wrong base. */
+export function headLegBaseName(leg: string): string | null {
+  const sharded = /^(vitest|bun)@head-(\d+)$/.exec(leg);
+  if (sharded !== null) return `${sharded[1]}-${sharded[2]}`;
+  const plain = /^(.+)@head$/.exec(leg);
+  return plain === null ? null : plain[1];
+}
 
 /** #1346 security review r1: author_association values trusted enough to
  *  receive a gate-scoped secret. CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR and NONE
@@ -131,9 +149,9 @@ export function grantedSecretNames(
   if (forRepo === undefined) return [];
   const direct = ownLegEntry(forRepo, leg);
   if (direct !== undefined) return filterKnownNames(repo, leg, direct.secrets);
-  const headMatch = HEAD_LEG_RE.exec(leg);
-  if (headMatch === null) return [];
-  const base = ownLegEntry(forRepo, headMatch[1]);
+  const baseName = headLegBaseName(leg);
+  if (baseName === null) return [];
+  const base = ownLegEntry(forRepo, baseName);
   if (base === undefined || base.head !== true) return [];
-  return filterKnownNames(repo, headMatch[1], base.secrets);
+  return filterKnownNames(repo, baseName, base.secrets);
 }

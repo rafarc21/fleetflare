@@ -90,6 +90,16 @@ describe("parseGateSecretsAllowlist: {secrets, head?} object form (#1376)", () =
       },
     });
   });
+
+  // #1376 security review r1 LOW: the schema says additionalProperties:
+  // false, but an unknown key is a typo to surface, not a reason to drop an
+  // otherwise well-formed grant.
+  it("warns on an unknown key but keeps the entry and its grant unchanged", () => {
+    const parsed = parseGateSecretsAllowlist({
+      "acme/example": { "ai-smoke": { secrets: ["workers-ai"], head: true, heads: true } },
+    });
+    expect(parsed).toEqual({ "acme/example": { "ai-smoke": { secrets: ["workers-ai"], head: true } } });
+  });
 });
 
 describe("gateSecretsRepoEntry", () => {
