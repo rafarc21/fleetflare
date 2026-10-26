@@ -90,8 +90,8 @@ aggregates below survived, recorded in
 **Batch-1 Worker-fixture anomaly:** one batch shows newPage p50 383 ms where
 everywhere else it is ~80 ms, and the interleaved rerun lands 213–547 ms.
 Not root-caused before the reboot — treated as variance evidence: the same
-config spans 4× across sessions. Best-set Browser Run leg (interleaved,
-in-Worker) is 272/547; the honest spread is 272–1840 p50.
+config spans 6.8× across sessions (1840 vs 272 ms p50). Best-set Browser Run
+leg (interleaved, in-Worker) is 272/547; the honest spread is 272–1840 p50.
 
 **Reachability finding (hard blocker for the tunnel option):** Browser Run →
 `*.trycloudflare.com` quick tunnel is **403 "Your request was blocked"** at
@@ -174,18 +174,19 @@ So the deciding factor is latency, not the runner.
    straight win. Config-gated, not a hard-coded switch, same posture as the
    existing `fleet.json` gate block.
 3. **Do not treat Browser Run as the e2e path unless a rerun closes the
-   gaps.** The partial data is enough to keep Chrome primary; the two open
-   questions below (batch-1 4× variance root cause, and n=24 interleaved per
-   config) are what a rerun should answer before any re-evaluation.
+   gaps.** The partial data is enough to keep Chrome primary; the open
+   questions below (batch-1 6.8× variance root cause, and n=24 interleaved
+   per config) are what a rerun should answer before any re-evaluation.
 
 ## Open — a full rerun would close these
 
-1. **Root-cause the batch-1 4× variance** (1840 ms vs 272 ms p50, same
+1. **Root-cause the batch-1 6.8× variance** (1840 ms vs 272 ms p50, same
    config). If that is a slow-browser-instance draw, it is a real tail risk
    Chrome does not show.
 2. **n=24 interleaved per config, cold n≥24, per-step breakdown** — the
-   partial run's n=18 interleaved and n=12 cold are below the task's ≥10 but
-   the reboot truncated the interleaved sets before they reached 24.
+   partial run already meets the task's ≥10 per config (n=18 interleaved,
+   n=12 cold), but the reboot truncated the interleaved sets before they
+   reached the intended n=24; a rerun should complete those.
 3. **Browser Run reachability for a real gate leg** — quick tunnel is 403 from
    Browser Run; the workaround is a bench Worker proxy. A per-PR preview
    deploy (or a named tunnel) needs a live test, not the quick-tunnel proxy.
@@ -193,10 +194,17 @@ So the deciding factor is latency, not the runner.
 ## Reproduction
 
 ```sh
-bun scripts/bench/browser/run.ts chrome --runs 12                 # in-container
+# in-container Chrome
+bun scripts/bench/browser/run.ts chrome --runs 12
 bun scripts/bench/browser/run.ts chrome --runs 12 \
   --target https://<tunnel>/ --out chrome-tunnel                  # reachability cost
 bun scripts/bench/browser/cold-boot.ts chrome                     # boot overhead
+
+# CF Browser Run (operator/maestro session — studio holds no CF credential)
+CF_BROWSER_ACCOUNT_ID=… CF_BROWSER_TOKEN=… \
+  bun scripts/bench/browser/run.ts browser-run --runs 12 --target https://<tunnel-or-preview>/
+CF_BROWSER_ACCOUNT_ID=… CF_BROWSER_TOKEN=… \
+  bun scripts/bench/browser/cold-boot.ts browser-run
 ```
 
 Guard mutation check: the suite's 5 assertion guards were each mutated to a

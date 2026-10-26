@@ -4,11 +4,11 @@
 // Chromium driver and the CF Browser Run driver map their real page onto
 // this surface, so the measured leg wall is the SAME work on both.
 //
-// Why this shape: `playwright test` (the runner) is still "not yet fully
-// supported" by Browser Run, so a shared minimal surface is the only honest
-// way to run the SAME assertions over both engines. The suite mirrors what a
-// real gate e2e leg does — load, assert, interact, wait on async — without
-// depending on the test runner.
+// Why this shape: a shared minimal surface is the only honest way to run the
+// SAME assertions over both engines without depending on either's runner
+// wiring (in-container chromium.launch vs Browser Run's connectOverCDP
+// binding/fixture). The suite mirrors what a real gate e2e leg does — load,
+// assert, interact, wait on async.
 
 export interface SuitePage {
   goto(url: string): Promise<void>;

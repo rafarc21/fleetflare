@@ -1,20 +1,23 @@
-// CF Browser Run driver (remote engine). Not runnable from a studio container:
-// no Cloudflare credential exists here by design (house rule — no
-// CLOUDFLARE_API_TOKEN / CLOUDFLARE_DEPLOY_TOKEN). This driver is complete and
-// ready to run the instant an operator provides an account id + Bearer token
-// (a throwaway Worker on the CF account is also acceptable per the task).
+// CF Browser Run driver (remote engine). Needs an account id + Bearer token;
+// a studio container holds no Cloudflare credential by design (house rule —
+// no CLOUDFLARE_API_TOKEN / CLOUDFLARE_DEPLOY_TOKEN), so this runs from an
+// operator/maestro session, not inside a studio. Measured end to end by the
+// maestro (#1347 comment 6413360970): connectOverCDP with the browser binding
+// runs the stock @playwright/test runner 12/12; only the native
+// use.connectOptions path fails.
 //
 // Connection (task recon facts, verified against CF docs):
 //   wss://api.cloudflare.com/client/v4/accounts/{accountId}/browser-run/devtools/browser
 //   Authorization: Bearer <token>
 //   keep_alive <= 1200000 ms (20 min)
-//   playwright-core connectOverCDP works per docs.
+//   playwright-core connectOverCDP works.
 //
 // Reachability: a remote browser cannot reach the fixture server bound to
 // 127.0.0.1 inside this container. The baseUrl the runner passes must be the
 // cloudflared-tunnel or per-PR-preview URL that exposes the same fixture.
-// That bridge latency is part of the remote leg wall and is measured
-// separately (see run.ts --target).
+// Note Browser Run rejects *.trycloudflare.com quick tunnels (403 at the CF
+// edge); the maestro's bench used a Worker proxy. That bridge latency is part
+// of the remote leg wall and is measured separately (see run.ts --target).
 import { chromium } from "/opt/fleet/ego-browser/node_modules/playwright-core/index.mjs";
 import type { SuitePage } from "../suite.ts";
 

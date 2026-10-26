@@ -21,9 +21,9 @@ CF_BROWSER_ACCOUNT_ID=... CF_BROWSER_TOKEN=... \
 
 ## What it measures
 
-- **leg wall** — one pass of `suite.ts` (7 assertions: load, title, click,
-  fill, input value, wait-for-async, count), engine already up. p50/p95 over
-  the runs.
+- **leg wall** — one pass of `suite.ts` (9 steps: load, title, heading, click,
+  count, fill, input value, wait-for-async, item count), engine already up.
+  p50/p95 over the runs.
 - **boot overhead** — `cold-boot.ts` (fresh process: import + launch/connect)
   and `run.ts`'s per-invocation launch (warm process).
 - **flake rate** — failed passes / total passes.
@@ -34,8 +34,10 @@ CF_BROWSER_ACCOUNT_ID=... CF_BROWSER_TOKEN=... \
 
 ## Raw output
 
-`scripts/bench/browser/out/<engine>/runs.csv` (append-only) and
-`summary.json`. Re-running accumulates rows; delete `out/` for a clean set.
+`scripts/bench/browser/out/<engine>/runs.csv` (append-only raw rows) and
+`aggregate.json` (full-set p50/p95/flake, recomputed over every appended
+row — the committed source of truth; `summary.json` is per-batch only).
+Re-running accumulates rows; delete `out/` for a clean set.
 
 ## Browser Run auth
 
