@@ -27,6 +27,22 @@ describe("SECRET_REGISTRY / isKnownSecretName / secretDef", () => {
   });
 });
 
+// #1367: consumer AI legs' own labels, registered the same way staging-login
+// already is -- each a name -> Env-var indirection, never a value.
+describe("SECRET_REGISTRY: consumer AI labels (#1367)", () => {
+  it("registers appcheck-debug-token, staging-minter-sa and gemini-gate-key", () => {
+    expect(isKnownSecretName("appcheck-debug-token")).toBe(true);
+    expect(isKnownSecretName("staging-minter-sa")).toBe(true);
+    expect(isKnownSecretName("gemini-gate-key")).toBe(true);
+  });
+
+  it("each resolves through its own Env key", () => {
+    expect(secretDef("appcheck-debug-token")).toEqual({ envVar: "GATE_SECRET_APPCHECK_DEBUG_TOKEN" });
+    expect(secretDef("staging-minter-sa")).toEqual({ envVar: "GATE_SECRET_STAGING_MINTER_SA" });
+    expect(secretDef("gemini-gate-key")).toEqual({ envVar: "GATE_SECRET_GEMINI_GATE_KEY" });
+  });
+});
+
 describe("resolveGrantedSecrets", () => {
   it("resolves a stored secret from the env", async () => {
     const out = await resolveGrantedSecrets(
@@ -75,6 +91,29 @@ describe("resolveGrantedSecrets", () => {
     expect(out).toEqual({});
     expect(minted).toBe(false);
   });
+
+  // #1367: each consumer AI label resolves the same way staging-login does --
+  // confirms the registry entries, not the (already-generic) resolution loop.
+  it("resolves each consumer AI label when its own Env var is set", async () => {
+    const env = {
+      GATE_SECRET_APPCHECK_DEBUG_TOKEN: "appcheck-value",
+      GATE_SECRET_STAGING_MINTER_SA: "minter-value",
+      GATE_SECRET_GEMINI_GATE_KEY: "gemini-value",
+    };
+    const out = await resolveGrantedSecrets(
+      ["appcheck-debug-token", "staging-minter-sa", "gemini-gate-key"], env, async () => undefined,
+    );
+    expect(out).toEqual({
+      "appcheck-debug-token": "appcheck-value",
+      "staging-minter-sa": "minter-value",
+      "gemini-gate-key": "gemini-value",
+    });
+  });
+
+  it("skips a consumer AI label whose own Env var is unset", async () => {
+    const out = await resolveGrantedSecrets(["gemini-gate-key"], {}, async () => undefined);
+    expect(out).toEqual({});
+  });
 });
 
 // #1346 security review r1 item 3: "missing secret fails open" -> do.ts turns
@@ -102,5 +141,14 @@ describe("firstUnresolvedSecret", () => {
     // never needs to special-case "" itself -- it only ever sees keys that are
     // genuinely present with a non-empty value, or genuinely absent.
     expect(firstUnresolvedSecret(["staging-login"], { "staging-login": "" })).toBeNull();
+  });
+
+  // #1367: a consumer AI label whose Worker secret was never set goes through
+  // the SAME existing fail-closed path -- no new guard needed, just confirming
+  // it reaches a new label the same way it already does staging-login.
+  it("flags a consumer AI label as unresolved the same way, via the existing path", async () => {
+    const resolved = await resolveGrantedSecrets(["staging-minter-sa"], {}, async () => undefined);
+    const unresolved = firstUnresolvedSecret(["staging-minter-sa"], resolved);
+    expect(unresolved).toBe("staging-minter-sa");
   });
 });

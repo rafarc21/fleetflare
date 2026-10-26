@@ -38,6 +38,12 @@ export const SECRET_REGISTRY: Readonly<Record<string, SecretDef>> = {
   // #1346: Workers AI proxy route (floor mode, T4). No stored value: a
   // run-scoped bearer token is minted per leg instead (secrets-ai-token.ts).
   "workers-ai": { minted: true },
+  // #1367: consumer AI legs. Values are already stored by the consumer
+  // maestro's own deploy -- this entry only registers the NAME + the Env key
+  // it reads from, never the value itself.
+  "appcheck-debug-token": { envVar: "GATE_SECRET_APPCHECK_DEBUG_TOKEN" },
+  "staging-minter-sa": { envVar: "GATE_SECRET_STAGING_MINTER_SA" },
+  "gemini-gate-key": { envVar: "GATE_SECRET_GEMINI_GATE_KEY" },
 };
 
 export function isKnownSecretName(name: string): boolean {
@@ -78,7 +84,7 @@ export async function resolveGrantedSecrets(
 /**
  * #1346 security review r1 item 3: "missing secret fails open." A granted
  * name resolving to nothing (an OPS allowlist entry naming a Worker secret
- * that was never `wrangler secret put`, a signing key absent so the AI token
+ * that was never `deploy.sh secret put`, a signing key absent so the AI token
  * cannot mint, a registry entry quietly removed) must never let the leg run
  * anyway as if nothing had been granted -- that silently degrades a
  * misconfigured deploy into "looks green, ran without its secret," exactly

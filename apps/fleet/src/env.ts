@@ -445,10 +445,19 @@ export interface Env {
   GATE_SECRET_SIGNING_KEY?: string;
   /** #1346: example gate-scoped secret, registered in secrets-registry.ts
    *  under the name "staging-login". Operator: add one such field, one
-   *  registry entry, and one `wrangler secret put` per staging credential a
-   *  browser/AI gate leg needs -- MUST be a staging-only credential, never
-   *  production or deploy (see the design doc's "Operator responsibility"). */
+   *  registry entry, and one `apps/fleet/scripts/deploy.sh secret put` per
+   *  staging credential a browser/AI gate leg needs -- MUST be a
+   *  staging-only credential, never production or deploy (see the design
+   *  doc's "Operator responsibility"). */
   GATE_SECRET_STAGING_LOGIN?: string;
+  /** #1367: consumer AI legs' own gate-scoped secrets, registered in
+   *  secrets-registry.ts under "appcheck-debug-token"/"staging-minter-sa"/
+   *  "gemini-gate-key" respectively. Values are stored by the consumer
+   *  maestro's own deploy, never by this repo -- staging-only, same rule as
+   *  every other entry here. */
+  GATE_SECRET_APPCHECK_DEBUG_TOKEN?: string;
+  GATE_SECRET_STAGING_MINTER_SA?: string;
+  GATE_SECRET_GEMINI_GATE_KEY?: string;
   /**
    * Board #350 — THREE secrets, all optional here and ALL THREE MUST be set
    * together before this feature does anything: install-cache.ts's
