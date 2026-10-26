@@ -158,13 +158,16 @@ A `gate` block may name the image its legs run in:
 ```
 
 - The value is a key of the operator's `images` map, never an image ref. Only
-  `gate` (the default, used when the key is absent) and `desktop` are accepted.
-  Any other value, including a registry ref, makes the block malformed: the
-  repo is failed red (no valid gate config), as above.
+  `gate` (the default, used when the key is absent), `desktop` and `e2e` are
+  accepted. Any other value, including a registry ref, makes the block
+  malformed: the repo is failed red (no valid gate config), as above.
 - The operator binds each key in `GateRunnerDO`'s `images` map (`wrangler.jsonc`
   `containers[]`). `desktop` builds `container/Dockerfile.gate-desktop`, with
-  `build_context` `./container`. The example file binds `gate` only; add
-  `desktop` to the live file to use it.
+  `build_context` `./container`. `e2e` (#1342) maps to the SAME
+  `container/Dockerfile.gate` (Chromium + Playwright at
+  `/usr/local/bin/chromium`) so a leg runs one Playwright spec headless via
+  `"image": "e2e"`. The example file binds `gate` and `e2e`; add `desktop` to
+  the live file to use it.
 - A key that the map does not bind fails every leg as an infra error (`gate
   image not bound (images.<key>)`). The gate never falls back to the shared
   image for it.

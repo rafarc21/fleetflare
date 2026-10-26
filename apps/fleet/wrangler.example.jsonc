@@ -266,8 +266,14 @@
       // no key = "gate". Each value is a `dockerfile` (wrangler builds and
       // pushes it) or a digest-pinned `image` ref. Operator adds its own
       // entries here; this template ships the shared image only.
+      // "e2e" (#1342) is the browser-capable image: it maps to the SAME
+      // Dockerfile.gate, which already bakes Chromium + Playwright at
+      // /usr/local/bin/chromium. No second image until a fixture proves the
+      // default image insufficient; then a Dockerfile.gate-e2e lands here
+      // digest-pinned (scripts/gate-desktop-image.ts pattern).
       "images": {
-        "gate": { "dockerfile": "./container/Dockerfile.gate", "build_context": "./container" }
+        "gate": { "dockerfile": "./container/Dockerfile.gate", "build_context": "./container" },
+        "e2e": { "dockerfile": "./container/Dockerfile.gate", "build_context": "./container" }
       }
     }
   ]
