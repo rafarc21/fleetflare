@@ -12,11 +12,14 @@ against a small fixture app, three configs.
 - **B — N gate-style shards (containers).** `model-b.ts` folds config A's
   measured per-shard time with gate boot/overhead constants. Arithmetic only.
 - **C — preview deploy + Browser Run sessions in parallel.**
-  `run-c.ts` (connectOverCDP, one session per spec). Needs a CF credential —
-  run from the maestro's session. Measured: k=50 loses (18.5 s suite wall, the
-  3 new/s acquisition ramp IS the wall after the 10-session burst bucket);
-  k=10 burst wins suite wall (2.8 s) but loses per-PR end-to-end once the
-  13.7 s preview deploy is paid. C fits only post-deploy checks, k≤10.
+  `run-c.ts` (connectOverCDP, one session per spec) is a committed ALTERNATIVE
+  shape — the measured harness (in-Worker runner over the `browser` binding,
+  round-robin sessions, DO-backed app) was throwaway, not committed. Needs a
+  CF credential — run from the maestro's session. Measured: k=50 loses
+  (18.5 s suite wall, the 3 new/s acquisition ramp IS the wall after the
+  10-session burst bucket); k=10 burst wins suite wall (2.8 s) but loses
+  per-PR end-to-end once the 13.7 s preview deploy is paid. C fits only
+  post-deploy checks, k≤10.
 
 ## Run it
 
@@ -28,7 +31,8 @@ bun scripts/bench/browser-throughput/run.ts \
 # B — model (reads config A's aggregate.json):
 BENCH_B_COLD_MS=60000 bun scripts/bench/browser-throughput/model-b.ts
 
-# C — Browser Run fan-out (maestro session only; studio holds no CF credential):
+# C — committed ALTERNATIVE shape (maestro session only; studio holds no CF
+#     credential; not the byte-exact measured harness — see evidence doc):
 CF_BROWSER_ACCOUNT_ID=... CF_BROWSER_TOKEN=... \
   bun scripts/bench/browser-throughput/run-c.ts \
     --target https://<preview-deploy>/ --k 50 --runs 5 \
@@ -48,9 +52,11 @@ CF_BROWSER_ACCOUNT_ID=... CF_BROWSER_TOKEN=... \
 
 ## Raw output
 
-`out/config-a/{runs.csv,aggregate.json}` (per-k in `k<N>/`),
-`out/config-c/{runs.csv,aggregate.json}` (maestro). `aggregate.json` is the
-source of truth; re-running overwrites (delete `out/` for a clean set).
+`out/config-a/{runs.csv,aggregate.json}` (per-k in `k<N>/`) is committed.
+Config C's measured numbers are in the evidence doc + issue #1364 comment
+6416784180 (the measured harness was throwaway); `run-c.ts` writes
+`out/config-c/{runs.csv,aggregate.json}` when it is run. `aggregate.json` is
+the source of truth; re-running overwrites (delete `out/` for a clean set).
 
 ## Data-isolation risk
 

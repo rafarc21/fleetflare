@@ -125,9 +125,17 @@ driver in-Worker (not Mac-side CDP). `/reset` before each suite, 15 s gap
 between suites. Suite wall = first launch request → last session closed.
 
 The suite is engine-agnostic (same `SpecPage` surface), so config C runs the
-IDENTICAL 50 specs over `connectOverCDP`, one session per spec. The committed
-`drivers/browser-run.ts` + `run-c.ts` are the studio-side repro of this same
-shape (a studio holds no CF credential, so the maestro ran it).
+IDENTICAL 50 specs over `connectOverCDP`, one session per spec.
+
+**Measured harness was NOT committed (throwaway, by design).** The actual C
+run used an in-Worker runner over the `browser` binding, round-robin sessions
+per request, and a DO-backed app — throwaway Workers, deleted after the run.
+What IS committed is `drivers/browser-run.ts` + `run-c.ts`: an ALTERNATIVE
+shape (Mac/container-side `connectOverCDP` directly against the wss endpoint,
+one session per spec) that a studio can run if it ever holds a credential. It
+is not the exact harness the numbers came from, and its numbers would differ
+(session-per-spec fan-out vs round-robin share; Mac-side CDP vs in-Worker
+driver). Treat it as a starting point, not the measured apparatus.
 
 **The binding limits, now measured, not doc-read:** `limits()` reports
 `maxConcurrentSessions 200` and `allowedBrowserAcquisitions 10` (burst
@@ -159,19 +167,33 @@ leak. So C's isolation risk is equal to A's, not higher.
 gap). Runner Worker deploy 26.8 s, but that is one-time (playwright bundle),
 not per-PR.
 
-**Exact repro steps (maestro runs this — a studio holds no CF credential):**
+**How the measured harness was built (not committed — throwaway):**
 
 ```sh
-# 1. Deploy the fixture as a throwaway preview Worker (maestro, operator cred):
-#    fixture/app.ts ported to a Worker with a single Durable Object store
+# 1. Fixture app ported to a Worker with a single Durable Object store
 #    (in-memory Map breaks POST-then-GET across isolates).
 
-# 2. Run the fan-out:
+# 2. Runner Worker over the `browser` binding (@cloudflare/playwright@1.3.6):
+#    one request = one Browser Run session; session runs its round-robin share
+#    of the same 50 specs.ts; driver in-Worker, not Mac-side CDP.
+
+# 3. Mac-side orchestrator fires requests, staggered 334 ms (or burst),
+#    /reset before each suite, 15 s gap between suites.
+```
+
+**Committed alternative (runs the same suite, different shape):**
+
+```sh
+# One session PER spec, connectOverCDP straight to the wss endpoint:
 CF_BROWSER_ACCOUNT_ID=... CF_BROWSER_TOKEN=... \
   bun scripts/bench/browser-throughput/run-c.ts \
     --target https://<preview-deploy>/ --k 50 --runs 5 \
     --out scripts/bench/browser-throughput/out/config-c
 ```
+
+This is a valid re-measure path, not a byte-exact replay of the maestro's
+harness; expect different numbers (session-per-spec vs round-robin, Mac-side
+CDP vs in-Worker).
 
 ## Cost model (USD per suite)
 
@@ -228,7 +250,8 @@ bun scripts/bench/browser-throughput/run.ts \
 # B — model:
 BENCH_B_COLD_MS=60000 bun scripts/bench/browser-throughput/model-b.ts
 
-# C — Browser Run fan-out (maestro/operator session, CF credential):
+# C — committed ALTERNATIVE shape (maestro/operator session, CF credential;
+#     not the byte-exact measured harness — see Config C section):
 CF_BROWSER_ACCOUNT_ID=... CF_BROWSER_TOKEN=... \
   bun scripts/bench/browser-throughput/run-c.ts \
     --target https://<preview-deploy>/ --k 50 --runs 5 \
