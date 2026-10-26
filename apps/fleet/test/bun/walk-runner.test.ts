@@ -1,16 +1,27 @@
 // apps/fleet/test/bun/walk-runner.test.ts
-// #1348: runSweep's control flow, against fake auth/engine/sink/log — the
-// system boundaries this runner depends on (test-lies-check's own-module-mock
-// exemption: these are the seams runner.ts is written against, not mocks of
-// runner.ts's own code).
+// #1348 (+review r1): runSweep's control flow against fake auth/engine/sink
+// — the system boundaries runner.ts depends on (test-lies-check's
+// own-module-mock exemption: these are the seams runner.ts is written
+// against, T5/T6's real wiring, not mocks of runner.ts's own code).
 import { describe, it, expect } from "bun:test";
 import { runSweep, type WalkAuthProvider, type WalkEngine, type WalkEvidenceSink, type WalkLog } from "../../src/walk/runner";
 import type { WalkAttempt, WalkItem, WalkItemEvidence, WalkSweepEvidence } from "../../src/walk/types";
 
 const ITEMS: WalkItem[] = [
-  { id: "home", url: "https://staging.example.com/" },
-  { id: "login", url: "https://staging.example.com/login" },
+  { id: "signup", role: "member", idx: 0, url: "https://staging.example.com/signup" },
+  { id: "settings", role: "member", idx: 1, url: "https://staging.example.com/settings" },
 ];
+
+const EMPTY_CONSOLE = {
+  consoleErrors: [], consoleWarnings: [], debugLogs: [], exceptions: [], badRequests: [], canceledRequests: [],
+};
+
+function playwrightState(secretValues: string[]): string {
+  return JSON.stringify({
+    cookies: secretValues.map((v, i) => ({ name: `sid${i}`, value: v, domain: "x", path: "/" })),
+    origins: [],
+  });
+}
 
 function fakeSink() {
   const writes: { key: string; body: string }[] = [];
@@ -27,141 +38,211 @@ function fakeLog() {
 function missingAuth(): WalkAuthProvider {
   return { getStorageState: async () => undefined };
 }
-
-function presentAuth(secret: string): WalkAuthProvider {
-  return { getStorageState: async () => secret };
+function emptyAuth(): WalkAuthProvider {
+  return { getStorageState: async () => "" };
+}
+function credentialLessAuth(): WalkAuthProvider {
+  return { getStorageState: async () => JSON.stringify({ cookies: [], origins: [] }) };
+}
+function throwingAuth(message: string): WalkAuthProvider {
+  return { getStorageState: async () => { throw new Error(message); } };
+}
+function presentAuth(secretValues: string[]): WalkAuthProvider {
+  return { getStorageState: async () => playwrightState(secretValues) };
 }
 
-function recordingEngine(byItem: Record<string, WalkAttempt | Error>) {
-  const calls: { itemId: string; storageState: string }[] = [];
+function passAttempt(overrides: Partial<WalkAttempt> = {}): WalkAttempt {
+  return { result: "pass", steps: [], console: EMPTY_CONSOLE, ai: { turns: [] }, accounts: ["acct-a"], ...overrides };
+}
+
+function fakeEngine(opts: {
+  runItem?: (item: WalkItem) => WalkAttempt | Error;
+  sweepRoutes?: () => { routes: never[]; signatures: never[] } | Error;
+} = {}) {
+  const runItemCalls: { itemId: string; storageState: string }[] = [];
+  let sweepRoutesCalls = 0;
   const engine: WalkEngine = {
+    sweepRoutes: async () => {
+      sweepRoutesCalls++;
+      const r = (opts.sweepRoutes ?? (() => ({ routes: [], signatures: [] })))();
+      if (r instanceof Error) throw r;
+      return r;
+    },
     runItem: async (item, storageState) => {
-      calls.push({ itemId: item.id, storageState });
-      const outcome = byItem[item.id];
-      if (outcome instanceof Error) throw outcome;
-      return outcome;
+      runItemCalls.push({ itemId: item.id, storageState });
+      const r = (opts.runItem ?? (() => passAttempt()))(item);
+      if (r instanceof Error) throw r;
+      return r;
     },
   };
-  return { engine, calls };
+  return { engine, runItemCalls, get sweepRoutesCalls() { return sweepRoutesCalls; } };
 }
 
-const clock = (() => {
-  let n = 0;
-  return () => `t${n++}`;
-})();
+const clock = (() => { let n = 0; return () => `t${n++}`; })();
 
-describe("runSweep — missing storage state", () => {
-  it("every item is did-not-run, the sweep is did-not-run, and the engine is never called", async () => {
+describe("runSweep — no usable auth (missing, empty, credential-less)", () => {
+  for (const [label, auth] of [
+    ["missing (undefined)", missingAuth()],
+    ["empty string", emptyAuth()],
+    ["credential-less ({cookies:[],origins:[]})", credentialLessAuth()],
+  ] as const) {
+    it(`${label} -> did-not-run, no item files, engine never called`, async () => {
+      const { sink, writes } = fakeSink();
+      const { log } = fakeLog();
+      const { engine, runItemCalls, sweepRoutesCalls } = fakeEngine();
+
+      const result = await runSweep("build-1", ITEMS, { auth, engine, sink, log, verifier: "member-walker", now: clock });
+
+      expect(result.state).toBe("did-not-run");
+      expect(runItemCalls).toHaveLength(0);
+      expect(sweepRoutesCalls).toBe(0);
+      expect(writes).toHaveLength(1);
+      expect(writes[0].key).toBe("walk/build-1/sweep.json");
+      const sweep = JSON.parse(writes[0].body) as WalkSweepEvidence;
+      expect("state" in sweep && sweep.state).toBe("did-not-run");
+    });
+  }
+});
+
+describe("runSweep — auth provider throws", () => {
+  it("writes an error sweep.json instead of nothing, engine never called", async () => {
     const { sink, writes } = fakeSink();
-    const { log, lines } = fakeLog();
-    const { engine, calls } = recordingEngine({});
+    const { log } = fakeLog();
+    const { engine, runItemCalls } = fakeEngine();
 
-    const sweep = await runSweep("sweep-1", ITEMS, { auth: missingAuth(), engine, sink, log, now: clock });
+    const result = await runSweep("build-2", ITEMS, {
+      auth: throwingAuth("infisical unreachable"), engine, sink, log, verifier: "member-walker", now: clock,
+    });
 
-    expect(calls).toHaveLength(0);
-    expect(sweep.state).toBe("did-not-run");
-    expect(sweep.items.map((i) => i.state)).toEqual(["did-not-run", "did-not-run"]);
-
-    const itemWrites = writes.filter((w) => w.key.includes("/items/"));
-    expect(itemWrites).toHaveLength(2);
-    for (const w of itemWrites) {
-      const parsed = JSON.parse(w.body) as WalkItemEvidence;
-      expect(parsed.state).toBe("did-not-run");
-    }
-
-    const sweepWrite = writes.find((w) => w.key === "walk/sweep-1/sweep.json");
-    expect(sweepWrite).toBeDefined();
-    expect((JSON.parse(sweepWrite!.body) as WalkSweepEvidence).state).toBe("did-not-run");
-
-    expect(lines.length).toBeGreaterThan(0);
+    expect(result.state).toBe("error");
+    expect(runItemCalls).toHaveLength(0);
+    expect(writes).toHaveLength(1);
+    const sweep = JSON.parse(writes[0].body) as WalkSweepEvidence;
+    expect("state" in sweep && sweep.state).toBe("error");
+    expect("reason" in sweep && sweep.reason).toBe("infisical unreachable");
   });
 });
 
-describe("runSweep — storage state present", () => {
-  it("runs every item through the engine with the storage state, in order", async () => {
+describe("runSweep — usable auth present", () => {
+  it("runs every item through the engine with the storage state, writes v1-shaped item evidence", async () => {
+    const { sink, writes } = fakeSink();
+    const { log } = fakeLog();
+    const state = playwrightState(["cookie-secret-1"]);
+    const { engine, runItemCalls } = fakeEngine();
+
+    const result = await runSweep("build-3", ITEMS, {
+      auth: { getStorageState: async () => state }, engine, sink, log, verifier: "member-walker", now: clock,
+    });
+
+    expect(runItemCalls).toEqual([
+      { itemId: "signup", storageState: state },
+      { itemId: "settings", storageState: state },
+    ]);
+    expect(result.state).toBe("success");
+
+    const itemWrite = writes.find((w) => w.key === "walk/build-3/item-member-0-signup.json");
+    expect(itemWrite).toBeDefined();
+    const ev = JSON.parse(itemWrite!.body) as WalkItemEvidence;
+    expect(ev.fingerprint).toBe("build-3");
+    expect(ev.verifier).toBe("member-walker");
+    expect(ev.result).toBe("pass");
+    expect(ev.accounts).toEqual(["acct-a"]);
+
+    const sweepWrite = writes.find((w) => w.key === "walk/build-3/sweep.json");
+    const sweep = JSON.parse(sweepWrite!.body) as WalkSweepEvidence;
+    expect("routes" in sweep).toBe(true);
+  });
+
+  it("a failing item makes the overall state failure", async () => {
     const { sink } = fakeSink();
     const { log } = fakeLog();
-    const { engine, calls } = recordingEngine({
-      home: { state: "success" },
-      login: { state: "failure", description: "assertion failed" },
+    const { engine } = fakeEngine({
+      runItem: (item) => (item.id === "settings" ? passAttempt({ result: "fail", failReason: "red chip" }) : passAttempt()),
     });
 
-    const sweep = await runSweep("sweep-2", ITEMS, { auth: presentAuth("sekret123"), engine, sink, log, now: clock });
-
-    expect(calls).toEqual([
-      { itemId: "home", storageState: "sekret123" },
-      { itemId: "login", storageState: "sekret123" },
-    ]);
-    expect(sweep.state).toBe("failure");
-    expect(sweep.items.map((i) => i.state)).toEqual(["success", "failure"]);
+    const result = await runSweep("build-4", ITEMS, {
+      auth: presentAuth(["s1"]), engine, sink, log, verifier: "member-walker", now: clock,
+    });
+    expect(result.state).toBe("failure");
   });
 
-  it("every written item evidence body parses as stub-v0 with the required fields", async () => {
+  it("an engine.runItem throw writes no file for that item and makes the overall state error", async () => {
     const { sink, writes } = fakeSink();
     const { log } = fakeLog();
-    const { engine } = recordingEngine({ home: { state: "success" }, login: { state: "success" } });
-
-    await runSweep("sweep-3", ITEMS, { auth: presentAuth("sekret123"), engine, sink, log, now: clock });
-
-    const itemWrites = writes.filter((w) => w.key.includes("/items/"));
-    expect(itemWrites).toHaveLength(2);
-    for (const w of itemWrites) {
-      const parsed = JSON.parse(w.body) as WalkItemEvidence;
-      expect(parsed.schemaVersion).toBe("stub-v0");
-      expect(typeof parsed.sweepId).toBe("string");
-      expect(typeof parsed.itemId).toBe("string");
-      expect(typeof parsed.url).toBe("string");
-      expect(["success", "failure", "error", "did-not-run"]).toContain(parsed.state);
-      expect(typeof parsed.startedAt).toBe("string");
-      expect(typeof parsed.finishedAt).toBe("string");
-    }
-  });
-
-  it("an engine throw becomes error evidence instead of escaping runSweep", async () => {
-    const { sink, writes } = fakeSink();
-    const { log } = fakeLog();
-    const { engine } = recordingEngine({
-      home: new Error("boom"),
-      login: { state: "success" },
+    const { engine } = fakeEngine({
+      runItem: (item) => (item.id === "signup" ? new Error("engine crashed") : passAttempt()),
     });
 
-    const sweep = await runSweep("sweep-4", ITEMS, { auth: presentAuth("sekret123"), engine, sink, log, now: clock });
+    const result = await runSweep("build-5", ITEMS, {
+      auth: presentAuth(["s1"]), engine, sink, log, verifier: "member-walker", now: clock,
+    });
 
-    expect(sweep.state).toBe("error");
-    const homeWrite = writes.find((w) => w.key === "walk/sweep-4/items/home.json");
-    expect((JSON.parse(homeWrite!.body) as WalkItemEvidence).state).toBe("error");
+    expect(result.state).toBe("error");
+    expect(writes.find((w) => w.key === "walk/build-5/item-member-0-signup.json")).toBeUndefined();
+    expect(writes.find((w) => w.key === "walk/build-5/item-member-1-settings.json")).toBeDefined();
+  });
+
+  it("a sweepRoutes throw writes an abnormal sweep.json and makes the overall state error", async () => {
+    const { sink, writes } = fakeSink();
+    const { log } = fakeLog();
+    const { engine } = fakeEngine({ sweepRoutes: () => new Error("navigation timed out") });
+
+    const result = await runSweep("build-6", ITEMS, {
+      auth: presentAuth(["s1"]), engine, sink, log, verifier: "member-walker", now: clock,
+    });
+
+    expect(result.state).toBe("error");
+    const sweep = JSON.parse(writes.find((w) => w.key === "walk/build-6/sweep.json")!.body) as WalkSweepEvidence;
+    expect("state" in sweep && sweep.state).toBe("error");
+  });
+
+  it("zero items with usable auth still sweeps routes and is a success, not did-not-run", async () => {
+    const { sink, writes } = fakeSink();
+    const { log } = fakeLog();
+    const { engine } = fakeEngine();
+
+    const result = await runSweep("build-7", [], {
+      auth: presentAuth(["s1"]), engine, sink, log, verifier: "member-walker", now: clock,
+    });
+
+    expect(result.state).toBe("success");
+    expect(writes).toHaveLength(1); // sweep.json only, no item files
   });
 });
 
-describe("runSweep — secret never reaches logs or evidence", () => {
-  it("scrubs the live storage state out of an engine error that echoes it, on both logs and evidence", async () => {
-    const secret = "sekret-abc-123";
+describe("runSweep — secret hygiene", () => {
+  it("scrubs a secret value that leaks into a failReason, across raw/base64/url encodings, from both evidence and logs", async () => {
+    const secret = "cookie-secret-xyz";
     const { sink, writes } = fakeSink();
     const { log, lines } = fakeLog();
-    const { engine } = recordingEngine({
-      home: new Error(`auth rejected token ${secret}`),
-      login: { state: "success" },
+    const { engine } = fakeEngine({
+      runItem: (item) =>
+        item.id === "signup"
+          ? passAttempt({
+              result: "fail",
+              failReason: `blob leak raw:${secret} b64:${btoa(secret)} url:${encodeURIComponent(secret)}`,
+            })
+          : passAttempt(),
     });
 
-    await runSweep("sweep-5", ITEMS, { auth: presentAuth(secret), engine, sink, log, now: clock });
+    await runSweep("build-8", ITEMS, {
+      auth: presentAuth([secret]), engine, sink, log, verifier: "member-walker", now: clock,
+    });
 
-    const haystacks = [
-      ...writes.map((w) => w.body),
-      ...lines.map((l) => JSON.stringify(l)),
-    ];
-    for (const h of haystacks) {
-      expect(h).not.toContain(secret);
-    }
+    const haystacks = [...writes.map((w) => w.body), ...lines.map((l) => JSON.stringify(l))];
+    for (const h of haystacks) expect(h).not.toContain(secret);
   });
 
-  it("missing-storage-state path logs no secret (there is none to leak)", async () => {
-    const { sink, writes } = fakeSink();
+  it("logs carry only structured fields, never the raw storage state", async () => {
+    const secret = "cookie-secret-log-check";
+    const { sink } = fakeSink();
     const { log, lines } = fakeLog();
-    const { engine } = recordingEngine({});
+    const { engine } = fakeEngine();
 
-    await runSweep("sweep-6", ITEMS, { auth: missingAuth(), engine, sink, log, now: clock });
+    await runSweep("build-9", ITEMS, {
+      auth: presentAuth([secret]), engine, sink, log, verifier: "member-walker", now: clock,
+    });
 
-    for (const l of lines) expect(JSON.stringify(l)).not.toMatch(/sekret/i);
-    for (const w of writes) expect(w.body).not.toMatch(/sekret/i);
+    for (const l of lines) expect(JSON.stringify(l)).not.toContain(secret);
   });
 });
