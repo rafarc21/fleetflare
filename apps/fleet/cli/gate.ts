@@ -344,13 +344,15 @@ export function firstLine(text: string): string {
 }
 
 /** The `fleet gate log` header line (#1277/#1318): the leg and its state —
- *  summary, then the run id. Kept pure so the default-output shape is pinned
- *  by a test (r1 found it had lost the state/summary part). */
-export function gateLogHeader(repo: string, pr: number, leg: string, body: { state?: string; summary?: string; runId?: string }): string {
+ *  the description (the cause line) when present, then the summary, then the
+ *  run id. Kept pure so the default-output shape is pinned by a test (r1
+ *  found it had lost the state/summary part). */
+export function gateLogHeader(repo: string, pr: number, leg: string, body: { state?: string; summary?: string; description?: string; runId?: string }): string {
   const state = body.state ?? "?";
+  const cause = body.description ? ` — ${body.description}` : "";
   const summary = body.summary ? ` — ${body.summary}` : "";
   const run = body.runId ? ` (run ${body.runId})` : "";
-  return `gate log ${repo}#${pr} ${leg}: ${state}${summary}${run}`;
+  return `gate log ${repo}#${pr} ${leg}: ${state}${cause}${summary}${run}`;
 }
 
 /** One attempt of a leg as `--all` prints it (#1318). */
@@ -358,7 +360,46 @@ interface GateLogAttempt {
   key: string;
   state: string;
   summary?: string;
+  description?: string;
   failingTest: string | null;
+}
+
+/** One attempt's evidence block as `--evidence` prints it (#1377): the
+ *  attempt label (e.g. shard-browser@head.retry) and that attempt's own
+ *  evidence files — an earlier attempt's screens are never hidden behind a
+ *  later retry's empty dir. */
+interface GateLogEvidenceAttempt {
+  attempt: string;
+  evidence: { key: string; url: string }[];
+}
+
+/** The `--evidence` output lines (#1377): one block per attempt, the attempt
+ *  label on its own line, then each of THAT attempt's evidence links (a
+ *  retry's empty dir reads "(no evidence)" under its own label, never a
+ *  blank that hides an earlier attempt's files). Pure, so a test pins the
+ *  shape without a network call. */
+export function gateLogEvidenceLines(blocks: GateLogEvidenceAttempt[], workerUrl: string): string[] {
+  if (blocks.length === 0) return ["(no evidence)"];
+  const out: string[] = [];
+  for (const block of blocks) {
+    out.push(`  ${block.attempt}`);
+    if (block.evidence.length === 0) {
+      out.push("    (no evidence)");
+    } else {
+      for (const e of block.evidence) out.push(`    ${new URL(e.url, workerUrl).href}\t${e.key}`);
+    }
+  }
+  return out;
+}
+
+/** The two lines one `--all` attempt prints (#1318/#1377): its state, key and
+ *  cause description, then its first failing test and summary. Pure. */
+export function gateLogAttemptLines(a: GateLogAttempt): string[] {
+  const failing = a.failingTest ?? "(no failing test named in the kept tail)";
+  return [
+    `  ${a.state.padEnd(7)} ${a.key}${a.description ? ` — ${a.description}` : ""}`,
+    `    ${failing}${a.summary ? ` — ${a.summary}` : ""}`,
+  ];
 }
 
 /** #1277/#1318: `fleet gate log <pr> <leg> [--run <runId>] [--full] [--all] [--evidence]`.
@@ -384,7 +425,7 @@ export async function cmdGateLog(creds: Credentials, pr: number, leg: string, op
     throw new Error(`fleet gate log: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
   const text = await res.text();
-  let body: { error?: string; state?: string; summary?: string; failing?: string[]; stdout?: string; stderr?: string; runId?: string; key?: string; attempts?: GateLogAttempt[]; evidence?: { key: string; url: string }[] };
+  let body: { error?: string; state?: string; description?: string; summary?: string; failing?: string[]; stdout?: string; stderr?: string; runId?: string; key?: string; attempts?: (GateLogAttempt | GateLogEvidenceAttempt)[] };
   try {
     body = JSON.parse(text) as typeof body;
   } catch {
@@ -398,20 +439,13 @@ export async function cmdGateLog(creds: Credentials, pr: number, leg: string, op
     return;
   }
   if (opts.evidence) {
-    const lines = body.evidence ?? [];
-    if (lines.length === 0) {
-      console.log("(no evidence)");
-    } else {
-      for (const e of lines) console.log(`${new URL(e.url, creds.workerUrl).href}\t${e.key}`);
-    }
+    for (const line of gateLogEvidenceLines((body.attempts ?? []) as GateLogEvidenceAttempt[], creds.workerUrl)) console.log(line);
     return;
   }
   console.log(gateLogHeader(repo, pr, leg, body));
   if (opts.all && body.attempts !== undefined) {
-    for (const a of body.attempts) {
-      const failing = a.failingTest ?? "(no failing test named in the kept tail)";
-      console.log(`  ${a.state.padEnd(7)} ${a.key}`);
-      console.log(`    ${failing}${a.summary ? ` — ${a.summary}` : ""}`);
+    for (const a of body.attempts as GateLogAttempt[]) {
+      for (const line of gateLogAttemptLines(a)) console.log(line);
     }
     return;
   }

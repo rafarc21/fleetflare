@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, spyOn } from "bun:test";
-import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, parseStartResponse, firstLine, runGate, formatMs, legLines, gateStartLine, gateQueuedLine, gateLogHeader, type GateStatusResponse } from "../../cli/gate";
+import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, parseStartResponse, firstLine, runGate, formatMs, legLines, gateStartLine, gateQueuedLine, gateLogHeader, gateLogEvidenceLines, gateLogAttemptLines, type GateStatusResponse } from "../../cli/gate";
 
 // #1085 (refs #715): the start line says whether the run was reattached or fresh.
 describe("gateStartLine: reattached to a live run vs a fresh run (#1085)", () => {
@@ -298,5 +298,54 @@ describe("gateLogHeader (#1318 r1)", () => {
   });
   it("no summary or run -> just the state", () => {
     expect(h({ state: "success" })).toBe("gate log acme/example#9 vitest-6: success");
+  });
+  it("prints the description (the cause line) before the summary (#1377)", () => {
+    expect(h({ state: "failure", description: "browser@head exited 1", summary: "Tests 1 failed", runId: "run-a" }))
+      .toBe("gate log acme/example#9 vitest-6: failure — browser@head exited 1 — Tests 1 failed (run run-a)");
+  });
+  it("description without summary still prints (cause only, #1377)", () => {
+    expect(h({ state: "failure", description: "clone 429" }))
+      .toBe("gate log acme/example#9 vitest-6: failure — clone 429");
+  });
+});
+
+describe("gateLogEvidenceLines (#1377)", () => {
+  it("one block per attempt, the attempt label on its own line, then its links", () => {
+    const lines = gateLogEvidenceLines([
+      { attempt: "shard-browser@head", evidence: [{ key: "gate/a/b/runs/1/r/evidence/shard-browser@head/console.json", url: "/studio/gate/evidence/gate/a/b/runs/1/r/evidence/shard-browser@head/console.json" }] },
+      { attempt: "shard-browser@head.retry", evidence: [] },
+    ], "https://worker");
+    expect(lines).toEqual([
+      "  shard-browser@head",
+      "    https://worker/studio/gate/evidence/gate/a/b/runs/1/r/evidence/shard-browser@head/console.json\tgate/a/b/runs/1/r/evidence/shard-browser@head/console.json",
+      "  shard-browser@head.retry",
+      "    (no evidence)",
+    ]);
+  });
+
+  it("no attempts -> the single '(no evidence)' line", () => {
+    expect(gateLogEvidenceLines([], "https://worker")).toEqual(["(no evidence)"]);
+  });
+});
+
+describe("gateLogAttemptLines (#1377)", () => {
+  it("prints the state, key and cause description, then failing test + summary", () => {
+    expect(gateLogAttemptLines({
+      key: "gate/a/b/runs/1/r/shard-browser@head.json", state: "failure",
+      description: "browser@head exited 1", failingTest: "should load",
+      summary: "Tests 1 failed",
+    })).toEqual([
+      "  failure gate/a/b/runs/1/r/shard-browser@head.json — browser@head exited 1",
+      "    should load — Tests 1 failed",
+    ]);
+  });
+
+  it("no description and no failing test -> the honest placeholders", () => {
+    expect(gateLogAttemptLines({
+      key: "gate/a/b/runs/1/r/shard-browser@head.json", state: "success", failingTest: null,
+    })).toEqual([
+      "  success gate/a/b/runs/1/r/shard-browser@head.json",
+      "    (no failing test named in the kept tail)",
+    ]);
   });
 });

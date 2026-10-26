@@ -20,7 +20,7 @@ import { isGateRunnerRepo } from "./config";
 import { gateDraining } from "./drain";
 import { greenLegsOf, type CarryGreen, type OutcomeLeg } from "./fanout";
 import { rerunInstanceId, statusFollowingRerun } from "./infra-rerun";
-import { finalLegKey, failingLines, firstFailingTest, legAttemptKeys, resultKeysPrefix, type LegOutput } from "./log";
+import { finalLegKey, failingLines, firstFailingTest, legAttemptKeys, resultKeysPrefix, attemptLabel, type LegOutput } from "./log";
 import { evidenceKeyFor } from "./leg-env";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
@@ -144,13 +144,19 @@ async function gateLegLogSafe(
     const listed = await env.STUDIO_ARCHIVE.list({ prefix: resultKeysPrefix(prefix) });
     const keys = listed.objects.map((o) => o.key);
     if (evidence) {
-      // #1343: the leg's evidence files, listed for `fleet gate log --evidence`.
-      // The evidence dir is derived from the leg's FINAL result key, so the
-      // try/retry variant does not change where evidence lives (evidence is
-      // per-leg, keyed by run+leg). No result at all -> no evidence dir.
-      const finalKey = finalLegKey(keys, leg);
-      const evidenceKeys = finalKey === null ? [] : await listEvidenceKeys(env.STUDIO_ARCHIVE, evidenceKeyFor(finalKey));
-      return j({ repo, pr, leg, runId: run.runId, evidence: evidenceKeys.map(evidenceLine) });
+      // #1377: evidence for EVERY attempt of the leg, not just the final-try
+      // dir. `--evidence` once looked under the FINAL result key's dir only
+      // (e.g. shard-browser@head.retry) and printed '(no evidence)' while the
+      // first attempt's evidence sat under shard-browser@head/. Each attempt's
+      // block carries its own attempt label, so an earlier try's screens are
+      // never hidden behind a later retry's empty dir.
+      const attemptKeys = legAttemptKeys(keys, leg);
+      const attempts = await Promise.all(attemptKeys.map(async (k) => {
+        const label = attemptLabel(k);
+        const evidenceKeys = await listEvidenceKeys(env.STUDIO_ARCHIVE, evidenceKeyFor(k));
+        return { attempt: label, evidence: evidenceKeys.map(evidenceLine) };
+      }));
+      return j({ repo, pr, leg, runId: run.runId, attempts });
     }
     const key = finalLegKey(keys, leg);
     if (key === null) return j({ error: `no result for leg ${leg}`, runId: run.runId }, 404);
@@ -175,6 +181,10 @@ async function gateLegLogSafe(
           key: k,
           state: b.state ?? "error",
           summary: b.summary,
+          // #1377: the description is the cause line (e.g. 'browser@head exited
+          // 1', a clone 429) — the CLI prints it, so a red attempt's reason is
+          // never lost to summary-only output.
+          description: b.description,
           failingTest: firstFailingTest(b as LegOutput),
         };
       }));

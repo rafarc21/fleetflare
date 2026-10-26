@@ -200,6 +200,33 @@ describe("GET /studio/gate/log --all (#1318)", () => {
     expect(retry.state).toBe("success");
   });
 
+  it("--all carries each attempt's description (the cause line, #1377)", async () => {
+    realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/pulls/")) {
+        return new Response(JSON.stringify({
+          number: PR, merged: false, merge_commit_sha: null, state: "open",
+          base: { ref: "main", repo: { full_name: CANONICAL, private: false } },
+          head: { ref: "feature", sha: "a".repeat(40) },
+          title: "t", body: "",
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+
+    await env.STUDIO_ARCHIVE.put(
+      `gate/${CANONICAL}/runs/${PR}/${RUN}/shard-browser@head.json`,
+      JSON.stringify({ state: "failure", description: "browser@head exited 1" }),
+    );
+
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=browser%40head&run=${RUN}&all=1`);
+    const res = await handleGateRoute(req, logEnv());
+    expect(res.status).toBe(200);
+    const body = await res.json() as { attempts: { description?: string }[] };
+    expect(body.attempts[0].description).toBe("browser@head exited 1");
+  });
+
   it("--all on a leg with no result 404s the same as the single-key path", async () => {
     realFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (input: any) => {
@@ -318,18 +345,48 @@ describe("GET /studio/gate/log --evidence + /studio/gate/evidence (#1343)", () =
     const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=e2e&run=${RUN}&evidence=1`);
     const res = await handleGateRoute(req, logEnv());
     expect(res.status).toBe(200);
-    const body = await res.json() as { evidence: { key: string; url: string }[] };
-    expect(body.evidence).toHaveLength(1);
-    expect(body.evidence[0].key).toBe(EVIDENCE);
-    expect(body.evidence[0].url).toContain("console.json");
+    const body = await res.json() as { attempts: { attempt: string; evidence: { key: string; url: string }[] }[] };
+    expect(body.attempts).toHaveLength(1);
+    expect(body.attempts[0].attempt).toBe("shard-e2e");
+    expect(body.attempts[0].evidence[0].key).toBe(EVIDENCE);
+    expect(body.attempts[0].evidence[0].url).toContain("console.json");
   });
 
-  it("--evidence on a leg with no result lists nothing (an empty evidence set, not an error)", async () => {
+  it("--evidence on a leg with no result lists nothing (an empty attempt set, not an error)", async () => {
     pulls();
     const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=e2e&run=${RUN}&evidence=1`);
     const res = await handleGateRoute(req, logEnv());
     expect(res.status).toBe(200);
-    expect((await res.json() as { evidence: unknown[] }).evidence).toEqual([]);
+    expect((await res.json() as { attempts: unknown[] }).attempts).toEqual([]);
+  });
+
+  it("--evidence lists evidence for EVERY attempt, not just the final-try dir (#1377)", async () => {
+    pulls();
+    // First attempt has evidence; the retry's dir is empty. The old code read
+    // only the final key (`.retry`) and reported nothing.
+    await env.STUDIO_ARCHIVE.put(
+      `gate/${CANONICAL}/runs/${PR}/${RUN}/shard-browser@head.json`,
+      JSON.stringify({ state: "failure", description: "browser@head exited 1" }),
+    );
+    await env.STUDIO_ARCHIVE.put(
+      `gate/${CANONICAL}/runs/${PR}/${RUN}/shard-browser@head.retry.json`,
+      JSON.stringify({ state: "success" }),
+    );
+    await env.STUDIO_ARCHIVE.put(
+      `gate/${CANONICAL}/runs/${PR}/${RUN}/evidence/shard-browser@head/console.json`,
+      "{}",
+    );
+
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=browser%40head&run=${RUN}&evidence=1`);
+    const res = await handleGateRoute(req, logEnv());
+    expect(res.status).toBe(200);
+    const body = await res.json() as { attempts: { attempt: string; evidence: { key: string; url: string }[] }[] };
+    expect(body.attempts).toHaveLength(2);
+    expect(body.attempts[0].attempt).toBe("shard-browser@head");
+    expect(body.attempts[0].evidence).toHaveLength(1);
+    expect(body.attempts[0].evidence[0].key).toBe(`gate/${CANONICAL}/runs/${PR}/${RUN}/evidence/shard-browser@head/console.json`);
+    expect(body.attempts[1].attempt).toBe("shard-browser@head.retry");
+    expect(body.attempts[1].evidence).toHaveLength(0);
   });
 
   it("the evidence overview lists every evidence file under the run", async () => {

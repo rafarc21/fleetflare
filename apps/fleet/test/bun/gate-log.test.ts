@@ -2,7 +2,7 @@
 // failing-line extraction — kept apart from the Worker route so bun test can
 // load them.
 import { describe, it, expect } from "bun:test";
-import { finalLegKey, failingLines, legAttemptKeys, firstFailingTest, type LegOutput } from "../../src/gate/log";
+import { finalLegKey, failingLines, legAttemptKeys, firstFailingTest, attemptLabel, type LegOutput } from "../../src/gate/log";
 
 describe("finalLegKey: pick the final try, never a stale SIGTERM try (#1277)", () => {
   const prefix = "gate/acme/example/runs/7/run-abc/";
@@ -132,6 +132,14 @@ describe("firstFailingTest: the first named failing test in an attempt's output 
   it("null when no failing test is named in the tail", () => {
     expect(firstFailingTest(out("1393 passed\n"))).toBeNull();
     expect(firstFailingTest(out("FAIL (no name follows)\n"))).toBeNull();
+  });
+});
+
+describe("attemptLabel (#1377)", () => {
+  it("the shard name with its attempt variant, @head included", () => {
+    expect(attemptLabel("gate/a/b/runs/1/r/shard-browser@head.retry.json")).toBe("shard-browser@head.retry");
+    expect(attemptLabel("gate/a/b/runs/1/r/shard-browser@head.json")).toBe("shard-browser@head");
+    expect(attemptLabel("gate/a/b/runs/1/r/shard-e2e.json")).toBe("shard-e2e");
   });
 });
 
