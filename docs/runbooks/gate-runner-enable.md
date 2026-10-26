@@ -61,6 +61,13 @@ This policy takes `images`, not `image`, and rejects `instance_type` and
 
 Paths are relative to the config file. Adjust `build_context` if live sits elsewhere.
 
+The `e2e` key (#1342) ships in the same allowlist change as this binding.
+Add it to the LIVE `images` map with the SAME value as live `gate` — a
+second `dockerfile` entry would rebuild the image and drift from the gate
+digest. Ship both in ONE deploy: an allowlisted `e2e` with no binding fails
+every `"image": "e2e"` leg as an infra error, and a PR that uses `e2e` before
+this binding lands fails red (no valid gate config).
+
 ## 2. Boot smoke test (before real deploy)
 
 From `apps/fleet`, with the LIVE config path:
@@ -168,6 +175,11 @@ A `gate` block may name the image its legs run in:
   `/usr/local/bin/chromium`) so a leg runs one Playwright spec headless via
   `"image": "e2e"`. The example file binds `gate` and `e2e`; add `desktop` to
   the live file to use it.
+- A consumer spec launches the baked browser with
+  `launchOptions.executablePath: "/usr/local/bin/chromium"`. If it instead
+  installs its own Playwright, pin `@playwright/test` to `1.63.x`: the image
+  carries chromium-1243, and any other Playwright revision looks for a browser
+  that is not there (`Executable doesn't exist`).
 - A key that the map does not bind fails every leg as an infra error (`gate
   image not bound (images.<key>)`). The gate never falls back to the shared
   image for it.

@@ -265,7 +265,7 @@
       // Named images (#1066): a gate block's `"image"` key picks one by name;
       // no key = "gate". Each value is a `dockerfile` (wrangler builds and
       // pushes it) or a digest-pinned `image` ref. Operator adds its own
-      // entries here; this template ships the shared image only.
+      // entries here; this template ships the shared `gate` image plus `e2e`.
       // "e2e" (#1342) is the browser-capable image: it maps to the SAME
       // Dockerfile.gate, which already bakes Chromium + Playwright at
       // /usr/local/bin/chromium. No second image until a fixture proves the
