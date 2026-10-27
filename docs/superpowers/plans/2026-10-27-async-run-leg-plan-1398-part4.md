@@ -349,7 +349,7 @@ export class GateRunnerDO extends DurableObject<Env> {
 }
 ```
 
-(`GATE_CONTAINER_PORT` import from `./run-leg`, already exported. Note `observeOnce` never attempts the "Leftovers item 5" optimization — the DO writing a live `/result` 200 straight to R2 itself — this plan's own Leftovers section explicitly defers that to a follow-up with its own test coverage, not folded in silently here.)
+(`GATE_CONTAINER_PORT` import from `./run-leg`, already exported. Note `observeOnce` never attempts the optimization named in the SPEC's own "Leftovers" item 5 — `docs/superpowers/specs/2026-10-26-async-run-leg-design.md`'s own section of that name, item 5: the DO writing a live `/result` 200 straight to R2 itself, rather than depending on the container's own separately-timed write. This PLAN does not have a "Leftovers" section of its own — the deferral is tracked here, explicitly, as its own named follow-up: implementing it would mean `observeOnce` also calling `claimOrReadBack` (redacted, using the `secretValues` `alarmTick` already has in scope) the moment it receives a live 200, with its own dedicated test proving the write landed before the container's own PUT could have. Not scheduled as a task in this plan — named so it is not silently lost.)
 
 - [ ] **Step 6: tsc check**
 
@@ -604,73 +604,80 @@ Refs #1398, #1396."
 - Create: `apps/fleet/test/gate-async-run-leg.test.ts` (vitest, follows `test/gate-workflow-precheck.test.ts`'s own harness conventions — read that file first for the exact fake-GitHub/fake-R2/instance-creation boilerplate this new file should reuse, not reinvent).
 
 **Interfaces:**
-- Consumes: the real `GateWorkflow`/`GateRunnerDO` classes, a REAL (local, miniflare-backed) `GATE_WORKFLOW`/`GATE_RUNNER`/`STUDIO_ARCHIVE` binding (same harness `gate-workflow-precheck.test.ts` already sets up), `GATE_ASYNC_LEGS` set to opt the test repo in, `claimOrReadBack`/`ClaimableBucket` (Task 6, imported directly for Step 4's own assertion against the real binding).
+- Consumes: the real `GateWorkflow`/`GateRunnerDO` classes, a REAL (local, miniflare-backed) `GATE_WORKFLOW`/`GATE_RUNNER`/`STUDIO_ARCHIVE` binding (same harness `gate-workflow-precheck.test.ts` already sets up), `GATE_ASYNC_LEGS` set to opt the test repo in, `claimOrReadBack`/`ClaimableBucket` (Task 6, imported directly for Step 4's own assertion against the real binding), and (plan review r2 item 1) `cloudflare:test`'s own `introspectWorkflowInstance` (already used throughout `gate-workflow-precheck.test.ts`), `runDurableObjectAlarm`, `runInDurableObject`, `mockStepError`, `disableSleeps`, `waitForStepResult` (all confirmed-present exports of this repo's pinned `@cloudflare/vitest-pool-workers` version).
 
-- [ ] **Step 1: Read the existing harness**
+**Environment constraint this task's own tests must design around**: per `gate-workflow-precheck.test.ts`'s own header comment, "the real container-backed GateRunnerDO cannot boot under vitest" — `this.ctx.container` is never a real, usable container binding in THIS test environment, for any test in this file, under any approach. Every test below is designed to prove something real WITHOUT ever needing a container to actually start (exactly how `gate-workflow-precheck.test.ts` itself works around the same constraint, with its own inline fake `GATE_RUNNER` namespace for Workflow-level tests).
+
+- [ ] **Step 1: Read the existing harness, and confirm the exact signatures of the five named APIs**
 
 Run: `cd apps/fleet && sed -n '1,80p' test/gate-workflow-precheck.test.ts`
 
-Identify: how it fakes GitHub responses (`mockFetch`), how it creates a real Workflow instance and awaits its result, how it reads back R2 state, and how long a full run of that file takes (measured earlier in this project's history at ~130s) — this new file will be comparably heavy; budget it as its OWN heavy gate, never run alongside another vitest-pool-workers file or a full `bun test test/bun/`.
+Identify: how it fakes `GATE_RUNNER` (an inline namespace, never the real DO, for exactly the container-boot reason above), how it fakes GitHub responses (`mockFetch`), how long a full run of that file takes (measured earlier in this project's history at ~130s) — this new file will be comparably heavy; budget it as its OWN heavy gate, never run alongside another vitest-pool-workers file or a full `bun test test/bun/`.
 
-- [ ] **Step 2: Write test 1 — a fresh invocation resumes from R2 state, never re-dispatching**
+Then run: `cd apps/fleet && grep -n "runDurableObjectAlarm\|runInDurableObject\|mockStepError\|disableSleeps\|waitForStepResult" node_modules/.bun/@cloudflare+vitest-pool-workers*/node_modules/@cloudflare/vitest-pool-workers/dist/**/*.d.ts 2>/dev/null`
 
-The exact miniflare mechanism for forcibly killing an in-flight Workflow instance mid-step is not available from this sandbox to verify ahead of time (no live `@cloudflare/vitest-pool-workers` API access). Rather than guess at an unverified API, this test asserts the CONCRETE, fully-specified, still-meaningful claim this design actually depends on: a dispatch step that has ALREADY accepted (202) and recorded its `resultKey`/`startedAt`, when its surrounding function runs AGAIN from scratch (`runLegStepPolling` called a second time, same `step` instance so its cache is real), never re-dispatches a second container for that same attempt — it reads the cached accept and goes straight to polling:
+Confirm each function's exact parameter order and return type against the REAL installed type definitions before writing the tests below — the code here is written against the reviewer's own confirmed list of exports, but exact signatures (argument order, whether `mockStepError` takes a count or a predicate, whether `disableSleeps` is binding-scoped or global) should be checked against the real `.d.ts`, not assumed from this plan alone.
+
+- [ ] **Step 2: Write test 1 — a step forced to fail once (simulating #1393's invocation cut) does not lose the leg's own R2 result**
+
+Uses the SAME fake `GATE_RUNNER` namespace convention `gate-workflow-precheck.test.ts` already establishes (never the real DO, per the environment constraint above) so the test exercises the REAL `GateWorkflow`/`runLegStepPolling` replay semantics without ever needing a container:
 
 ```ts
-it("a replayed dispatch step never re-dispatches a second container (simulates #1393's invocation-cut recovery)", async () => {
+it("a poll step forced to fail once (simulating #1393's invocation-cut) still finds the leg's own R2 result on the next tick", async () => {
   const resultKey = `gate/acme/widgets/runs/9/${crypto.randomUUID()}/shard-lint.json`;
   await env.STUDIO_ARCHIVE.put(resultKey, JSON.stringify({ state: "success" }));
-  let dispatchCalls = 0;
+  disableSleeps(env.GATE_WORKFLOW); // step.sleep(60s) resolves instantly for this test
+  const instanceId = crypto.randomUUID();
+  // fakeGateRunner answers 202 immediately to /run-leg, matching the async
+  // dispatch contract -- the leg's OWN result already sits in R2 above,
+  // exactly as if a real container had already finished and reported before
+  // this invocation was killed.
   const instance = await env.GATE_WORKFLOW.create({
-    params: { repo: "acme/widgets", pr: 1 },
+    id: instanceId, params: { repo: "acme/widgets", pr: 9 },
   });
-  // Drive the SAME instance's step history twice via the real engine by
-  // awaiting its status after each of two identical invocations of the
-  // underlying run() logic -- the harness's own helper for this (matching
-  // gate-workflow-precheck.test.ts's own pattern for asserting step-cache
-  // behavior) is `runWorkflowStepTwice` if that harness already defines an
-  // equivalent; if not, this task's own implementer adds one, following
-  // that file's existing conventions for driving a real instance to a
-  // known step boundary -- this is a concrete, scoped follow-up, not an
-  // open-ended "figure out the harness" task.
-  const status = await instance.status();
-  expect(status.status).not.toBe("errored");
+  // Force the FIRST poll step this leg's dispatch produces to throw once --
+  // simulating #1393's own invocation-cut: the engine recycles mid-step, the
+  // NEXT attempt at that same step name must still succeed by finding the
+  // ALREADY-WRITTEN R2 result, never losing it.
+  await mockStepError(env.GATE_WORKFLOW, "dispatch-start-lint-try1-poll-1", new Error("internal workflows error"));
+  const result = await introspectWorkflowInstance(env.GATE_WORKFLOW, instanceId).waitForStatus("complete");
+  expect(result.output).toMatchObject({ state: "success" });
 });
 ```
 
-- [ ] **Step 3: Write test 2 — the DO's alarm chain reaches a terminal write exactly once, even under a duplicate tick**
+- [ ] **Step 3: Write test 2 — the DO's alarm reaches a terminal write exactly once, even under a duplicate tick, WITHOUT a real container**
+
+Uses `runInDurableObject` to seed `ctx.storage` directly (standing in for "a container already started, is now polling"), bypassing the container-start call entirely — then `runDurableObjectAlarm` to trigger the REAL `alarm()`/`alarmTick` orchestration twice:
 
 ```ts
 it("a duplicate/redelivered alarm tick never produces two different terminal writes to the same result key", async () => {
   const instanceId = crypto.randomUUID();
-  const leg = "lint";
-  const resultKey = `gate/acme/widgets/runs/9/${instanceId}/shard-${leg}.json`;
-  const doId = env.GATE_RUNNER.idFromName(`${instanceId}/${leg}/attempt-1`);
-  const stub = env.GATE_RUNNER.get(doId);
-  // Start the async leg for real -- a 202 means ctx.storage now holds a
-  // RunLegAlarmState and a scheduled alarm.
-  const res = await stub.fetch("https://gate-runner/run-leg", {
-    method: "POST",
-    body: JSON.stringify({
-      owner: "acme", repo: "widgets", commit: "abc", leg, installCmd: "true", legCmd: "true",
-      resultKey, baselineKeys: [], baseRef: "main", pr: "9", mode: "async-poll", instanceId,
-    }),
+  const resultKey = `gate/acme/widgets/runs/9/${instanceId}/shard-lint.json`;
+  const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(`${instanceId}/lint/attempt-1`));
+  await runInDurableObject(stub, async (_instance, state) => {
+    // "polling" phase with no real container: observeOnce's own c===undefined
+    // branch answers "poll-failed", so the FIRST alarm tick concludes infra
+    // immediately -- exactly the terminal-write path this test needs,
+    // reached without ever touching a container.
+    await state.storage.put("alarmState", {
+      phase: "polling", resultKey, leg: "lint", timeoutMin: undefined,
+      readyStartedAt: 0, pollStartedAt: 0, instanceId, statusCheckCount: 0, consecutiveFailures: 0,
+    });
+    await state.storage.setAlarm(Date.now());
   });
-  expect(res.status).toBe(202);
-  // Force the container to answer /result with a real success, then fire
-  // TWO alarm ticks back to back -- miniflare's own Durable Object test
-  // helper exposes a way to invoke a DO's own lifecycle methods directly
-  // (`runInDurableObject`/an equivalent the existing harness already uses
-  // for GateRunnerDO elsewhere in this test suite, if any -- reuse it here,
-  // never hand-roll a second one).
-  // ...drive alarm() to completion once, confirm a terminal write landed...
+  const firstRan = await runDurableObjectAlarm(stub);
+  expect(firstRan).toBe(true);
   const first = await env.STUDIO_ARCHIVE.get(resultKey);
   expect(first).not.toBeNull();
   const firstBody = await first!.json();
-  // ...fire alarm() again on the SAME (now-terminal) DO state...
+  expect(firstBody).toMatchObject({ state: "error" }); // the DO's own "gate container exited mid-leg" conclusion
+  // alarmState was deleted after the first terminal write -- a second,
+  // redelivered tick must find NOTHING scheduled and be a safe no-op.
+  const secondRan = await runDurableObjectAlarm(stub);
+  expect(secondRan).toBe(false);
   const second = await env.STUDIO_ARCHIVE.get(resultKey);
   const secondBody = await second!.json();
-  expect(secondBody).toEqual(firstBody); // unchanged -- the second tick was a safe no-op, never a second write
+  expect(secondBody).toEqual(firstBody); // unchanged -- no second write landed
 });
 ```
 
@@ -693,26 +700,32 @@ it("the DO's own infra guess never overwrites a container's genuine report that 
 });
 ```
 
-- [ ] **Step 5: Write test 4 — `/run-leg`'s own idempotency (plan review r1 BLOCKER 3, the second half)**
+- [ ] **Step 5: Write test 4 — `/run-leg`'s own idempotency check runs BEFORE any container access (plan review r1 BLOCKER 3 / r2 item 1)**
+
+The real container can never start in this environment (the constraint stated above) — which makes this the STRONGEST possible proof of the idempotency guard's own placement: pre-seed `alarmState` directly (standing in for "a container was already started by an earlier /run-leg call"), then POST `/run-leg` again and confirm it answers 202 WITHOUT ever reaching `startLegContainer` at all (which, if reached, would hit the container-binding-missing branch, not 202) — proving `startAsyncLeg`'s idempotency check runs strictly first:
 
 ```ts
-it("a retried /run-leg POST to the same DO answers 202 again WITHOUT starting a second container", async () => {
+it("a /run-leg POST against a DO with ALREADY-SEEDED alarmState answers 202 without touching the container path at all", async () => {
   const instanceId = crypto.randomUUID();
   const resultKey = `gate/acme/widgets/runs/9/${instanceId}/shard-lint.json`;
   const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(`${instanceId}/lint/attempt-1`));
-  const body = JSON.stringify({
-    owner: "acme", repo: "widgets", commit: "abc", leg: "lint", installCmd: "true", legCmd: "true",
-    resultKey, baselineKeys: [], baseRef: "main", pr: "9", mode: "async-poll", instanceId,
+  await runInDurableObject(stub, async (_instance, state) => {
+    await state.storage.put("alarmState", {
+      phase: "waiting-for-ready", resultKey, leg: "lint", timeoutMin: undefined,
+      readyStartedAt: Date.now(), instanceId, statusCheckCount: 0, consecutiveFailures: 0,
+    });
   });
-  const first = await stub.fetch("https://gate-runner/run-leg", { method: "POST", body });
-  const second = await stub.fetch("https://gate-runner/run-leg", { method: "POST", body });
-  expect(first.status).toBe(202);
-  expect(second.status).toBe(202);
-  // Both calls targeted the SAME DO (same gateRunnerName) -- startAsyncLeg's
-  // own idempotency check (Task 8) means the second call's container-start
-  // attempt never happened at all, confirmed indirectly: no error, no
-  // duplicate alarm schedule conflict, exactly one container's worth of
-  // billing for this attempt.
+  const res = await stub.fetch("https://gate-runner/run-leg", {
+    method: "POST",
+    body: JSON.stringify({
+      owner: "acme", repo: "widgets", commit: "abc", leg: "lint", installCmd: "true", legCmd: "true",
+      resultKey, baselineKeys: [], baseRef: "main", pr: "9", mode: "async-poll", instanceId,
+    }),
+  });
+  // 202, not a 503 "gate container binding missing" -- had the idempotency
+  // check NOT run first, this call would have reached startLegContainer,
+  // which WOULD hit the missing-container branch in this environment.
+  expect(res.status).toBe(202);
 });
 ```
 
@@ -727,13 +740,16 @@ Expected: PASS. Iterate — these tests exercise real engine semantics this plan
 git add apps/fleet/test/gate-async-run-leg.test.ts
 git commit -m "test(gate): add vitest-pool-workers engine tests for the async leg path
 
-#1398 review r1 item 11: a replayed dispatch step never re-dispatches a
-second container for the same attempt (the #1393 invocation-cut recovery
-claim), a duplicate alarm tick never produces two different terminal
-writes, the DO-vs-Workflow write-once race holds under the REAL R2
-binding's conditional-write behavior (not just a fake bucket's
-approximation of it), and a retried /run-leg POST to the same DO is
-idempotent (plan review r1 BLOCKER 3).
+#1398 review r1 item 11 / review r2 item 1: a step forced to fail once
+(mockStepError, simulating #1393's invocation cut) still finds the leg's
+own R2 result on its next tick; a duplicate/redelivered alarm tick
+(runDurableObjectAlarm, twice) never produces two different terminal
+writes; the DO-vs-Workflow write-once race holds under the REAL R2
+binding's conditional-write behavior; and /run-leg's own idempotency check
+(runInDurableObject to seed alarmState directly) runs strictly before any
+container access, proven in an environment where the container path would
+otherwise fail outright (the real GateRunnerDO cannot boot a container
+under vitest at all).
 
 Refs #1398, #1396."
 ```
@@ -844,6 +860,18 @@ Refs #1398, #1396."
 7. `port-retry` phase was unreachable (a real dead-code bug) and a `poll-result` could be dropped in favor of a same-tick deadline message — FIXED in `nextAlarmStep` (Task 4), both with direct regression tests.
 8. Minor: `ms`/the flaky-retry `summary` are now preserved in `runLegStepPolling`; `StoredLegResult` is widened for `summary`; `NO_INSTANCE_DESCRIPTION` is imported, not re-declared; the step-count budget is recomputed to include the `leg-started`/`budget`/`giveup` steps this review's own fixes added.
 
-**Placeholder scan** — re-run after the above fixes: no remaining `[fill in...]` brackets, no test that asserts "ordering" without a concrete value, no test whose own comment admits it doesn't exercise the code path it claims to. The two Task 12 tests that still name an unverified harness detail (the exact miniflare DO-lifecycle test helper) are bounded, concrete fallbacks, not open-ended placeholders — flagged as such, not silently assumed solvable.
+**Placeholder scan (round 1)** — re-run after the above fixes: no remaining `[fill in...]` brackets, no test that asserts "ordering" without a concrete value, no test whose own comment admits it doesn't exercise the code path it claims to. The two Task 12 tests that still name an unverified harness detail (the exact miniflare DO-lifecycle test helper) are bounded, concrete fallbacks, not open-ended placeholders — flagged as such, not silently assumed solvable.
+
+**Plan review r2 (3 blockers, final pass, no round 3) — disposition:**
+1. Task 12's engine tests still read as placeholders despite round 1's cleanup — FIXED: rewritten against the reviewer's own confirmed-available real APIs (`introspectWorkflowInstance`, `runDurableObjectAlarm`, `runInDurableObject`, `mockStepError`, `disableSleeps`, `waitForStepResult`), explicitly designed around the one real environment constraint this test file's own header comment already states (the real `GateRunnerDO` cannot boot a container under vitest at all) — the idempotency test (Step 5) is now the STRONGEST possible version of that proof: it seeds `alarmState` directly via `runInDurableObject` and confirms `/run-leg` answers 202 in an environment where reaching the container-start path at all would otherwise fail outright, proving the idempotency check's own placement rather than assuming it.
+2. `touch()` was still gated to only the dispatch step's `tryNo === 1`, meaning a leg whose first two tries each spend ~25-30 min polling before failing infra would go ~50-60 min between progress stamps — past `GATE_STALL_MS` (37 min), a false stall on a run that is, in fact, still actively polling. FIXED: `touch()` now fires on every dispatch AND every poll tick, with a direct call-count test (`toBe(6)` across 3 tries).
+3. `attemptId` was minted inside the dispatch step's OWN callback — correct for surviving a deploy-triggered REPLAY (which never re-runs an already-succeeded step), but WRONG for a Workflows-level AUTOMATIC step-retry (the callback genuinely re-invoked when it throws), which would mint a fresh id on every retry and permanently defeat Task 8's own idempotency guard (no retry would ever reach the SAME DO twice). FIXED: minted in its own, separate, always-succeeding step BEFORE the dispatch step, with a direct test using `fakeGenericStep` (Task 1's own harness, which genuinely re-invokes a throwing callback) proving the id stays identical across a forced one-time dispatch failure and its automatic retry.
+
+Leftovers inside this plan, named precisely per review r2's own closing note:
+- `ms`'s computation was flagged as happening "outside a step" in one spot — FIXED: `ms` is now computed strictly inside whichever step callback (`...-poll-<i>`, `...-giveup`) resolves the terminal value, never read from a live clock after that `step.do` call returns.
+- `alarmTick`'s own "DO alarm failed N times" give-up message did not match `isLegInfraDescription`'s regex, meaning `runLegStepPolling`'s own try-loop would have treated a persistently-broken DO as a FINAL answer rather than retrying on a fresh attempt — FIXED: the regex now also matches this exact phrase.
+- Task 9's own comment about the deferred "DO writes a live 200 straight to R2" optimization incorrectly cited "this plan's own Leftovers section" — THIS plan has no such section; the deferral is the SPEC's own "Leftovers" item 5. Corrected the citation and restated the deferred work precisely (what it would take to implement, and that it is a named, tracked, NOT-silently-dropped follow-up, not a task in this plan).
+
+**Placeholder scan (round 2)** — Task 12's remaining uncertainty is now scoped to "confirm the exact signature of five NAMED, confirmed-to-exist functions against the real `.d.ts`" (Step 1's own explicit instruction), never "figure out whether an equivalent mechanism exists at all" — a materially different, much narrower kind of uncertainty than round 1 left.
 
 **Type consistency** — `DispatchOutcome` (Task 7) is the one type multiple later tasks must match EXACTLY: Task 8's `do.ts` response shapes (200/202/4xx) are what Task 11's `workflow.ts` dispatch closure parses back INTO a `DispatchOutcome`; `RunLegAlarmState` (Task 4) is constructed in Task 8 and consumed in Task 9 — both tasks were checked against the SAME field list above. `ClaimableBucket` (Task 6) is satisfied structurally by `R2Bucket` (used directly in Task 9 via a cast, same pattern `workflow.ts`'s existing `env.STUDIO_ARCHIVE as unknown as ...` casts already use elsewhere in this codebase) and by the fake buckets in Tasks 6/7/13's own tests.
