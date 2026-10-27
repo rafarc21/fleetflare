@@ -19,11 +19,18 @@ import { DurableObject, exports as workerExports } from "cloudflare:workers";
 import type { Env } from "../env";
 import { mintPrivateCloneToken } from "../github/auth";
 import { gateOutboundProps, legGitToken, type GateLegRequest } from "./leg-env";
-import { legResponse, runLegInContainer, runLegWithSecrets, type LegResult } from "./run-leg";
+import { legResponse, runLegInContainer, runLegWithSecrets, startLegContainer, type LegResult } from "./run-leg";
 import { legResultReader } from "./leg-run";
+import { ALARM_TICK_MS, type RunLegAlarmState } from "./run-leg-alarm";
 import { legTimeoutMin } from "./config";
-import { resolveGrantedSecrets } from "./secrets-registry";
+import { firstUnresolvedSecret, resolveGrantedSecrets } from "./secrets-registry";
 import { mintRunToken } from "./secrets-ai-token";
+
+/** #1398: the container's own inactivity timeout for the async path, sized
+ *  past one DO alarm-tick interval (spec "Container lifetime") so the
+ *  platform never stops an idle container between two ticks (which would
+ *  read as a false "exited mid-leg"). */
+const INACTIVITY_TIMEOUT_MS = 2 * ALARM_TICK_MS;
 
 /** The one refusal a PAT-served private leg gets. Named so it reaches the leg. */
 const PAT_ONLY_REFUSAL = "private clone needs the GitHub App on this owner";
@@ -72,12 +79,29 @@ export class GateRunnerDO extends DurableObject<Env> {
       const secretValues = await resolveGrantedSecrets(
         body.secretNames ?? [], this.env as unknown as Record<string, string | undefined>, mintAiToken(body, this.env),
       );
+      // #1398: runLegWithSecrets owns this guard for the sync path; the async
+      // path does NOT go through runLegWithSecrets (it starts a container and
+      // returns), so the same "an unresolved granted secret never runs" check
+      // is lifted here, before either branch, for BOTH modes.
+      const unresolved = firstUnresolvedSecret(body.secretNames ?? [], secretValues);
+      if (unresolved !== null) {
+        const failed: LegResult = { state: "error", description: `DID-NOT-RUN: secret "${unresolved}" unresolved` };
+        return Response.json(failed);
+      }
       // Every plain outbound request from the leg container is served by
       // GateOutbound, the Worker-side entrypoint that holds the R2 binding.
       // Props carry this leg's own resultKey (the only key the container may PUT),
       // for a private leg its one repo and minted token, and the plain VALUES
       // (never names) of its granted secrets, for result-body redaction.
       const outbound = workerExports.GateOutbound({ props: gateOutboundProps(body, gitToken, secretValues) });
+      // #1398: the async branch starts a container and returns 202 without
+      // holding the request open; the leg result arrives in R2 and is found
+      // by the Workflow's own poll loop (Task 7). The two synchronous refusals
+      // above (git token, unresolved secret) still answer before ANY container
+      // starts, for EITHER mode.
+      if (body.mode === "async-poll") {
+        return this.startAsyncLeg(body, outbound, secretValues);
+      }
       // #1346 security review r2: both "an unresolved granted secret never
       // runs" and "redact the leg's own result before it leaves this DO"
       // live in run-leg.ts's runLegWithSecrets, not here -- this file
@@ -93,5 +117,42 @@ export class GateRunnerDO extends DurableObject<Env> {
     }
     return new Response("not found", { status: 404 });
   }
-  // /run-leg is synchronous by design: the reply is the leg's LegResult.
+
+  /** #1398: the async path's own /run-leg half -- starts the container,
+   *  persists this attempt's state (and secretValues, for the eventual
+   *  terminal redaction, a later task) to ctx.storage, schedules the first
+   *  alarm, answers 202. Resolution failures (git token, secret) are already
+   *  handled above this call -- by the time this runs, a container IS about
+   *  to start.
+   *
+   *  #1398 plan review r1 BLOCKER 3: IDEMPOTENT. If `alarmState` already
+   *  exists for this DO (a retried/duplicate /run-leg POST -- e.g. the
+   *  original request succeeded server-side but its RESPONSE was lost,
+   *  causing Workflows to treat the dispatch step as failed and retry it),
+   *  this answers 202 again WITHOUT starting a second container. Every
+   *  /run-leg POST targets a freshly-named DO per attempt (gateRunnerName),
+   *  so an already-populated alarmState can ONLY mean "I already handled
+   *  this exact attempt" -- never a different attempt's leftover state. */
+  private async startAsyncLeg(
+    body: GateLegRequest, outbound: ReturnType<typeof workerExports.GateOutbound>, secretValues: Record<string, string>,
+  ): Promise<Response> {
+    const existing = await this.ctx.storage.get<RunLegAlarmState>("alarmState");
+    if (existing !== undefined) return new Response(null, { status: 202 });
+    const started = await startLegContainer(body, {
+      container: this.ctx.container, outbound, secretValues, inactivityTimeoutMs: INACTIVITY_TIMEOUT_MS,
+    });
+    if (started.kind === "infra") {
+      return new Response(JSON.stringify({ error: started.description }), { status: 503 });
+    }
+    const state: RunLegAlarmState = {
+      phase: "waiting-for-ready", resultKey: body.resultKey, leg: body.leg, timeoutMin: body.timeoutMin,
+      readyStartedAt: Date.now(), instanceId: body.instanceId ?? "", statusCheckCount: 0, consecutiveFailures: 0,
+    };
+    await this.ctx.storage.put("alarmState", state);
+    await this.ctx.storage.put("secretValues", secretValues); // Task 9 reads+deletes this at the terminal tick
+    await this.ctx.storage.setAlarm(Date.now() + ALARM_TICK_MS);
+    return new Response(null, { status: 202 });
+  }
+  // /run-leg is synchronous by design for the sync-legacy path; the async
+  // path's reply is just an accept -- the real leg result arrives in R2.
 }

@@ -42,6 +42,14 @@ export interface GateLegRequest {
    *  legGitToken mints the git token outside this request body rather than
    *  carrying it in. Absent or empty means no secrets for this leg. */
   secretNames?: string[];
+  /** #1398: which protocol this leg's /run-leg call uses. Absent means
+   *  "sync-legacy" — every existing caller (today's workflow.ts) is
+   *  unaffected until a later task starts setting this explicitly. */
+  mode?: "sync-legacy" | "async-poll";
+  /** #1398: the GATE_WORKFLOW instance this attempt belongs to -- used ONLY
+   *  by the async path's superseded-run check (a later task), never to
+   *  address an event (there is no event, spec Non-goals). */
+  instanceId?: string;
 }
 
 /** No token field, no URL field: the R2 keys below are plain keys, not
