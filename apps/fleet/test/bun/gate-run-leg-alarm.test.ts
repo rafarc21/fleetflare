@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
-import { nextAlarmStep, isLiveStatus, asyncAttemptDeadlineMs, ALARM_TICK_MS, type RunLegAlarmState } from "../../src/gate/run-leg-alarm";
+import { nextAlarmStep, isLiveStatus, asyncAttemptDeadlineMs, ALARM_TICK_MS, alarmTick, type AlarmTickDeps, type RunLegAlarmState } from "../../src/gate/run-leg-alarm";
 import { NO_INSTANCE_DESCRIPTION } from "../../src/gate/run-leg";
+import { R2_PREFIX } from "../../src/gate/leg-run";
 
 const BASE_STATE: RunLegAlarmState = {
   phase: "waiting-for-ready",
@@ -192,5 +193,187 @@ describe("asyncAttemptDeadlineMs (plan review r1 BLOCKER 2: the Workflow's own b
   it("scales with a non-default timeoutMin the same way", () => {
     const doWorstCaseMs = 180_000 + 90_000 + 10 * 60_000;
     expect(asyncAttemptDeadlineMs(10)).toBeGreaterThan(doWorstCaseMs);
+  });
+});
+
+/** A fully mutable, inspectable fake for AlarmTickDeps. `state` holds the
+ *  fake DO storage's CURRENT alarmState (read/write it directly to seed a
+ *  test or assert on it afterward); `bucketStore`/`destroyCount`/
+ *  `scheduledAtMs` are plain, directly-readable records of every call made.
+ *  `deps` is the actual AlarmTickDeps object to pass to alarmTick. */
+function fakeAlarmDeps(opts: { observe?: AlarmTickDeps["observe"]; instanceStatus?: AlarmTickDeps["instanceStatus"] } = {}) {
+  const fixture = {
+    state: { ...BASE_STATE, phase: "polling" as const, pollStartedAt: 0, consecutiveFailures: 0 } as RunLegAlarmState | undefined,
+    secretValues: undefined as Record<string, string> | undefined,
+    bucketStore: new Map<string, string>(),
+    destroyCount: 0,
+    scheduledAtMs: [] as number[],
+    nowMs: 0,
+    deleteSecretValuesThrows: undefined as Error | undefined,
+    scheduleAlarmThrows: undefined as Error | undefined,
+    destroyThrows: undefined as Error | undefined,
+  };
+  const deps: AlarmTickDeps = {
+    storage: {
+      getState: async () => fixture.state,
+      getSecretValues: async () => fixture.secretValues,
+      putState: async (s) => { fixture.state = s; },
+      deleteSecretValues: async () => { if (fixture.deleteSecretValuesThrows) throw fixture.deleteSecretValuesThrows; fixture.secretValues = undefined; },
+      deleteState: async () => { fixture.state = undefined as unknown as RunLegAlarmState; },
+      scheduleAlarm: async (at) => { if (fixture.scheduleAlarmThrows) throw fixture.scheduleAlarmThrows; fixture.scheduledAtMs.push(at); },
+    },
+    container: { destroy: async () => { fixture.destroyCount++; if (fixture.destroyThrows) throw fixture.destroyThrows; } },
+    bucket: {
+      put: async (key, value) => {
+        if (fixture.bucketStore.has(key)) return null;
+        fixture.bucketStore.set(key, value);
+        return {};
+      },
+      get: async (key) => {
+        const v = fixture.bucketStore.get(key);
+        return v === undefined ? null : { json: async () => JSON.parse(v) };
+      },
+    },
+    instanceStatus: opts.instanceStatus ?? (async () => "running"),
+    observe: opts.observe ?? (async () => ({ kind: "poll-pending" })),
+    now: () => fixture.nowMs,
+  };
+  return { deps, fixture };
+}
+
+describe("alarmTick (#1398 plan review r1 BLOCKER 4)", () => {
+  it("a stray/duplicate tick with no persisted state is a safe no-op", async () => {
+    const { deps, fixture } = fakeAlarmDeps();
+    fixture.state = undefined;
+    expect(await alarmTick(deps)).toBe("done");
+  });
+
+  it("re-arms on 'not-yet', bumping statusCheckCount", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-pending" }) });
+    const result = await alarmTick(deps);
+    expect(result).toBe("re-armed");
+    expect(fixture.scheduledAtMs.length).toBe(1);
+  });
+
+  it("checks instance status every STATUS_CHECK_EVERY_N_TICKS ticks, and destroys the container + drops state when superseded", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ instanceStatus: async () => "terminated" });
+    fixture.state = { ...fixture.state!, statusCheckCount: 5 };
+    const result = await alarmTick(deps);
+    expect(result).toBe("superseded");
+    expect(fixture.destroyCount).toBe(1);
+    expect(fixture.state).toBeUndefined();
+  });
+
+  it("a 'waiting'/'paused' instance status is NOT superseded (isLiveStatus fail-safe)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ instanceStatus: async () => "waiting" });
+    fixture.state = { ...fixture.state!, statusCheckCount: 5 };
+    expect(await alarmTick(deps)).not.toBe("superseded");
+  });
+
+  it("a terminal RESULT (not just infra) is written via claimOrReadBack, redacted -- BLOCKER 2: every self-made outcome, not just infra", async () => {
+    const { deps, fixture } = fakeAlarmDeps({
+      observe: async () => ({ kind: "poll-result", result: { state: "failure", description: "contains secret-value-xyz" } }),
+    });
+    fixture.secretValues = { "my-secret": "secret-value-xyz" };
+    const result = await alarmTick(deps);
+    expect(result).toBe("done");
+    const stored = JSON.parse(fixture.bucketStore.get(BASE_STATE.resultKey)!);
+    expect(stored.state).toBe("failure");
+    expect(stored.description).not.toContain("secret-value-xyz"); // redacted
+    expect(fixture.destroyCount).toBe(1);
+  });
+
+  it("the leg's own deadline (a 'result' outcome, never 'infra') is ALSO written, not silently dropped (BLOCKER 2's exact bug)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-pending" }) });
+    fixture.state = { ...fixture.state!, timeoutMin: 25 };
+    fixture.nowMs = 25 * 60_000; // exactly at the leg's own deadline
+    const result = await alarmTick(deps);
+    expect(result).toBe("done");
+    const stored = JSON.parse(fixture.bucketStore.get(BASE_STATE.resultKey)!);
+    expect(stored).toEqual({ state: "error", description: "lint exceeded 25 min without a result" });
+  });
+
+  it("a DO-authored infra conclusion is R2_PREFIX-marked", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-failed" }) });
+    await alarmTick(deps);
+    const stored = JSON.parse(fixture.bucketStore.get(BASE_STATE.resultKey)!);
+    expect(stored.description.startsWith(R2_PREFIX)).toBe(true);
+  });
+
+  it("secretValues and alarmState are deleted after a terminal write", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-failed" }) });
+    fixture.secretValues = { x: "y" };
+    await alarmTick(deps);
+    expect(fixture.secretValues).toBeUndefined();
+    expect(fixture.state).toBeUndefined();
+  });
+
+  it("re-arms on a thrown observe(), tracking consecutiveFailures, never propagating the exception", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("transient R2 blip"); } });
+    const result = await alarmTick(deps);
+    expect(result).toBe("re-armed");
+    expect(fixture.state?.consecutiveFailures).toBe(1);
+  });
+
+  it("caps consecutive failures: gives up with a terminal infra result rather than re-arming forever (no infinite billing)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("stuck"); } });
+    fixture.state = { ...fixture.state!, consecutiveFailures: 4 };
+    const result = await alarmTick(deps);
+    expect(result).toBe("gave-up-after-failures");
+    expect(fixture.destroyCount).toBe(1);
+    const stored = JSON.parse(fixture.bucketStore.get(BASE_STATE.resultKey)!);
+    expect(stored.description).toContain("5 times"); // the 5th failure is what trips the cap
+  });
+
+  it("every value alarmTick persists via storage.putState is structuredClone-safe (plan review r1 item 5 -- DO storage uses structured clone)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-pending" }) });
+    await alarmTick(deps);
+    expect(() => structuredClone(fixture.state)).not.toThrow();
+  });
+
+  it("the superseded path deletes secretValues (r1 item 1: deleting the call passes all 37)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ instanceStatus: async () => "terminated" });
+    fixture.state = { ...fixture.state!, statusCheckCount: 5 };
+    fixture.secretValues = { x: "y" };
+    expect(await alarmTick(deps)).toBe("superseded");
+    expect(fixture.secretValues).toBeUndefined();
+  });
+
+  it("the give-up path deletes secretValues (r1 item 1: deleting the call passes all 37)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("stuck"); } });
+    fixture.state = { ...fixture.state!, consecutiveFailures: 4 };
+    fixture.secretValues = { x: "y" };
+    expect(await alarmTick(deps)).toBe("gave-up-after-failures");
+    expect(fixture.secretValues).toBeUndefined();
+  });
+
+  it("an empty instanceId '' is NEVER superseded, even with a terminal status (r1 item 2)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ instanceStatus: async () => "terminated" });
+    fixture.state = { ...fixture.state!, instanceId: "", statusCheckCount: 5 };
+    expect(await alarmTick(deps)).not.toBe("superseded");
+    expect(fixture.destroyCount).toBe(0);
+  });
+
+  it("a scheduleAlarm throw on the re-arm path rethrows, so CF's own alarm retry takes over (r1 item 3)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("stuck"); } });
+    fixture.scheduleAlarmThrows = new Error("setAlarm rejected");
+    await expect(alarmTick(deps)).rejects.toThrow("setAlarm rejected");
+  });
+
+  it("a deleteSecretValues throw on the give-up path rethrows, so CF's own alarm retry takes over (r1 item 3)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("stuck"); } });
+    fixture.state = { ...fixture.state!, consecutiveFailures: 4 };
+    fixture.deleteSecretValuesThrows = new Error("storage delete rejected");
+    await expect(alarmTick(deps)).rejects.toThrow("storage delete rejected");
+  });
+
+  it("a throwing container.destroy on the normal terminal path does NOT re-arm: keys still deleted (r1 item 4)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-failed" }) });
+    fixture.destroyThrows = new Error("destroy rejected");
+    fixture.secretValues = { x: "y" };
+    expect(await alarmTick(deps)).toBe("done");
+    expect(fixture.secretValues).toBeUndefined();
+    expect(fixture.state).toBeUndefined();
+    expect(fixture.scheduledAtMs.length).toBe(0); // no re-arm scheduled
   });
 });
