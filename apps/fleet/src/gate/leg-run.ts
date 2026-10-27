@@ -458,10 +458,25 @@ async function dispatchAndPollOnce(
       // dispatch), past GATE_STALL_MS (37 min) -- a FALSE stall on a run
       // that is, in fact, still actively polling every 60s the whole time.
       await deps.touch?.();
+      // #1398 review r1 item 1: the raw R2 read can hang (a stuck get) or
+      // throw (R2 down). withStepDeadline bounds the hang; a throw becomes a
+      // read-failed signal below -- NEVER a rejection out of this callback,
+      // so runLegStepPolling keeps runLegStep's never-throws contract.
+      let found: StoredLegResult | undefined;
+      let readError: string | undefined;
+      try {
+        found = await withStepDeadline(
+          deps.readResult(dispatched.resultKey), R2_READ_TIMEOUT_MS, "result read timed out",
+        );
+      } catch (err) {
+        readError = err instanceof Error ? err.message : String(err);
+      }
+      if (readError !== undefined) {
+        return { kind: "read-failed" as const, description: `gate result read failed: ${readError.slice(0, MAX_INFRA_CAUSE_CHARS)}` };
+      }
       // #1398 review r2 item 1: the RAW reader, never storedLegResult --
       // a container-authored record (including its own live "exited
       // 143/137") is trusted exactly as-is, summary intact, never reclassified.
-      const found = await deps.readResult(dispatched.resultKey);
       // #1398 plan review r2 "ms outside step" note: ms is computed HERE,
       // strictly inside this callback (deps.now() read live, dispatched.startedAt
       // read from an already-resolved step) -- never after this step.do call
@@ -471,6 +486,7 @@ async function dispatchAndPollOnce(
         : { kind: "not-yet" as const };
     });
     if (tick.kind === "found") return { leg: target.leg, ...tick.result, ms: tick.ms };
+    if (tick.kind === "read-failed") return { leg: target.leg, state: "error", description: tick.description };
     // #1398 plan review r1 BLOCKER 1: the elapsed-time decision is its OWN
     // step, reading now() strictly inside this callback.
     const pastDeadline = await step.do(`${stepName}-budget-${i}`, LEG_STEP_CONFIG, async () =>
@@ -480,10 +496,22 @@ async function dispatchAndPollOnce(
       // every DO-authored write uses -- this is the Workflow's OWN guess,
       // and claimOrReadBack ensures a real, later-arriving result still wins.
       // ms computed inside this SAME callback, same reasoning as the poll tick above.
+      // #1398 review r1 item 1: the write can hang or throw too (R2 down) --
+      // bounded and caught, never a rejection out of runLegStepPolling.
       const claimed = await step.do(`${stepName}-giveup`, LEG_STEP_CONFIG, async () => {
-        const result = await claimOrReadBack(deps.bucket, dispatched.resultKey, {
-          state: "error", description: `${R2_PREFIX}${target.leg}: no progress past its deadline`,
-        });
+        let result: StoredLegResult;
+        try {
+          result = await withStepDeadline(
+            claimOrReadBack(deps.bucket, dispatched.resultKey, {
+              state: "error", description: `${R2_PREFIX}${target.leg}: no progress past its deadline`,
+            }),
+            R2_READ_TIMEOUT_MS,
+            "result write timed out",
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          result = { state: "error", description: `gate result write failed: ${message.slice(0, MAX_INFRA_CAUSE_CHARS)}` };
+        }
         return { leg: target.leg, ...result, ms: deps.now() - dispatched.startedAt };
       });
       return claimed;

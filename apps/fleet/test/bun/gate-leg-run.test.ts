@@ -1512,4 +1512,30 @@ describe("runLegStepPolling (#1398)", () => {
     // on the very first tick, never reaching claimOrReadBack at all.
     expect(result.state).toBe("success");
   });
+
+  it("a poll read that throws (R2 down) is an infra result, never a rejection out of runLegStepPolling (review r1 item 1)", async () => {
+    const step = fakePollingStep();
+    const bucket = {
+      put: async () => { throw new Error("r2 write down"); },
+      get: async () => { throw new Error("r2 down"); },
+    };
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+      ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, stepDeadlineMs: 1_000, totalDeadlineMs: 10_000 });
+    expect(result.state).toBe("error");
+    expect(result.description).toContain("gate result read failed");
+  });
+
+  it("a give-up write that throws (R2 down) is an infra result, never a rejection out of runLegStepPolling (review r1 item 1)", async () => {
+    const step = fakePollingStep();
+    const bucket = {
+      put: async () => { throw new Error("r2 write down"); },
+      get: async () => null, // nothing in R2 yet, so the budget step trips and give-up writes
+    };
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+      ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, stepDeadlineMs: 0, totalDeadlineMs: 10_000 });
+    expect(result.state).toBe("error");
+    expect(result.description).toContain("gate result write failed");
+  });
 });
