@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  runLegInContainer, runLegWithSecrets, legResponse, prepareAndStartContainer, NO_INSTANCE_DESCRIPTION, type GateContainer, type OutboundBinding,
+  runLegInContainer, runLegWithSecrets, legResponse, prepareAndStartContainer, startLegContainer, NO_INSTANCE_DESCRIPTION, type GateContainer, type OutboundBinding,
   type LegOutcome,
 } from "../../src/gate/run-leg";
 import { buildLegEnvVars, type GateLegRequest } from "../../src/gate/leg-env";
@@ -45,6 +45,7 @@ class FakeContainer implements GateContainer {
   /** GET /result calls made, for the poll count. */
   polls = 0;
   startThrows: Error | undefined;
+  setInactivityTimeoutThrows: Error | undefined = undefined;
   staleRunning = false;
   /** Clock time at which the container stops running (it exited mid-leg). */
   exitAtMs = Number.POSITIVE_INFINITY;
@@ -99,6 +100,7 @@ class FakeContainer implements GateContainer {
 
   async setInactivityTimeout(ms: number | bigint): Promise<void> {
     this.calls.push("setInactivityTimeout");
+    if (this.setInactivityTimeoutThrows) throw this.setInactivityTimeoutThrows;
     this.inactivityTimeoutMs = Number(ms);
   }
 }
@@ -152,6 +154,32 @@ describe("prepareAndStartContainer (#1398)", () => {
     const c = new FakeContainer();
     c.images = undefined;
     const result = await prepareAndStartContainer(LEG, { container: c, outbound: OUTBOUND });
+    expect(result).toEqual({ kind: "infra", description: "gate image not bound (images.gate)" });
+  });
+
+  test("a rejecting setInactivityTimeout is an infra result, never a throw (#1398 review r1)", async () => {
+    const c = new FakeContainer();
+    c.setInactivityTimeoutThrows = new Error("inactivity timeout rejected");
+    const result = await prepareAndStartContainer(LEG, { container: c, outbound: OUTBOUND, inactivityTimeoutMs: 60_000 });
+    expect(result).toEqual({ kind: "infra", description: "gate container failed: inactivity timeout rejected" });
+  });
+});
+
+describe("startLegContainer (#1398)", () => {
+  test("starts the container and returns immediately, never waiting for readiness or polling", async () => {
+    const c = new FakeContainer();
+    c.runningAfterMs = Number.POSITIVE_INFINITY; // never becomes ready -- would hang the OLD path forever
+    const result = await startLegContainer(LEG, { container: c, outbound: OUTBOUND, inactivityTimeoutMs: 60_000 });
+    expect(result).toEqual({ kind: "started" });
+    expect(c.inactivityTimeoutMs).toBe(60_000); // the async path sets it too -- a mutant dropping it from deps would still pass otherwise
+    expect(c.fetchCalls).toBe(0); // never talked to the server
+    expect(c.destroyCount).toBe(0); // never torn down -- the DO's alarm owns that later
+  });
+
+  test("surfaces an infra description when the image is not bound, same as the sync path", async () => {
+    const c = new FakeContainer();
+    c.images = undefined;
+    const result = await startLegContainer(LEG, { container: c, outbound: OUTBOUND });
     expect(result).toEqual({ kind: "infra", description: "gate image not bound (images.gate)" });
   });
 });
