@@ -880,6 +880,14 @@ export async function issueExists(token: string, repo: string, number: number): 
   return exists(token, `https://api.github.com/repos/${repo}/issues/${number}`, `read ${repo}#${number}`);
 }
 
+/** #1430: an issue's or PR's `state` ("open" | "closed"; a merged PR reads
+ *  "closed"). Throws on any non-2xx, so the caller fails closed. */
+export async function issueState(token: string, repo: string, number: number): Promise<string> {
+  const issue = await ghJson<{ state?: string }>(
+    token, `https://api.github.com/repos/${repo}/issues/${number}`, { method: "GET" }, `state of ${repo}#${number}`);
+  return issue.state ?? "";
+}
+
 /**
  * Does this path exist at this ref? One Contents API call answers BOTH a
  * `/blob/<ref>/<path>` (file) and a `/tree/<ref>/<path>` (directory) url —

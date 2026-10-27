@@ -16,7 +16,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import type { Env } from "../env";
 import {
   compareFiles, comparePrecheckData, fetchRepoFile, getAuthenticatedAppSlug, getBranchSha, getDefaultBranch,
-  getPullRequest, listOpenPulls, listRepoTree,
+  getPullRequest, issueState, listOpenPulls, listRepoTree,
 } from "../github/api";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { appJwt } from "../github/app";
@@ -27,7 +27,7 @@ import {
   type GateSecretsAllowlist,
 } from "./secrets-config";
 import { trustedForSecrets } from "./secrets-scope";
-import { capStatusDescription, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
+import { capStatusDescription, closedCommitRefs, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import {
@@ -291,11 +291,14 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // cannot leave it (board/leak.ts's own skip), so the fetch is pure waste.
       const patterns = resolved.private ? [] : opsRepo === null ? [] : parseDenylist(
         await fetchRepoFile(await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }), opsRepo, OPS_DENYLIST_PATH, "HEAD"));
+      const commitMessages = compare.commits.map((c) => c.message);
+      // #1430: a commit keyword naming only already-closed refs closes nothing.
+      const closedRefs = await closedCommitRefs(commitMessages, repo, (n) => issueState(token, repo, n));
       return mergePrecheckFailures({
         title: resolved.title, body: resolved.body, patterns,
         blobs: precheckBlobs({ title: resolved.title, body: resolved.body, files: compare.files, commits: compare.commits }),
         private: resolved.private, truncated: compare.truncated,
-        commitMessages: compare.commits.map((c) => c.message),
+        commitMessages, repo, closedRefs,
         files: compare.files,
       });
     }).catch(() => ["gate precheck failed closed"] as string[]);

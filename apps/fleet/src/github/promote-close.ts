@@ -305,13 +305,20 @@ const CLOSING_KEYWORD =
  * branch, so a PR merged into staging needs the text.
  */
 export function closesIssueByKeyword(text: string, issue: number, repo: string | readonly string[]): boolean {
+  return closingKeywordRefs(text, repo).includes(issue);
+}
+
+/** #1430: every issue in `repo` this text closes by keyword, in order — the
+ *  same grammar closesIssueByKeyword asks of one issue. */
+export function closingKeywordRefs(text: string, repo: string | readonly string[]): number[] {
   // #265: a qualified ref may name the caller's slug or the canonical name.
   const known = (typeof repo === "string" ? [repo] : repo).map((r) => r.toLowerCase());
+  const out: number[] = [];
   for (const m of text.matchAll(CLOSING_KEYWORD)) {
     const ref = m[1] ?? m[2];
-    if (Number(m[3]) === issue && (ref === undefined || known.includes(ref.toLowerCase()))) return true;
+    if (ref === undefined || known.includes(ref.toLowerCase())) out.push(Number(m[3]));
   }
-  return false;
+  return out;
 }
 
 /** The primary path, for every commit in one push. */

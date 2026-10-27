@@ -2,6 +2,7 @@
 // pure over inputs so bun test proves every rule. Fail closed: no denylist or
 // a scanner error refuses, never passes (leak-gate.ts's own rule).
 import { scanText, leakHitMessage } from "../leak-gate";
+import { closingKeywordRefs } from "../github/promote-close";
 
 /** #1169: any closing keyword at all in a PR's title or body makes the merge
  *  precheck red. Deliberately cruder than promote-close.ts's CLOSING_KEYWORD
@@ -29,6 +30,29 @@ export function closingKeywordFailure(title: string, body: string): string | nul
   // check.
   const re = new RegExp(CLOSING_KEYWORD_RE.source, CLOSING_KEYWORD_RE.flags.replace("g", ""));
   return re.test(`${title}\n${body}`) ? CLOSING_KEYWORD_FAILURE : null;
+}
+
+/** #1430: the refs each keyword-hit commit message closes, by GitHub's own
+ *  grammar (promote-close.ts). An empty list means a hit with no readable ref. */
+function commitClosingRefs(messages: string[], repo: string): number[][] {
+  return messages.filter((m) => closingKeywordFailure(m, "") !== null).map((m) => closingKeywordRefs(m, repo));
+}
+
+/** #1430: the commit-message refs already closed (a merged PR reads "closed"
+ *  on the issues API). Fail closed: a ref whose lookup throws or answers
+ *  anything but "closed" is left out, so it stays red. */
+export async function closedCommitRefs(
+  messages: string[], repo: string, refState: (n: number) => Promise<string>,
+): Promise<Set<number>> {
+  const closed = new Set<number>();
+  for (const n of new Set(commitClosingRefs(messages, repo).flat())) {
+    try {
+      if (await refState(n) === "closed") closed.add(n);
+    } catch (err) {
+      console.error(`gate precheck: ref state of ${repo}#${n} unreadable, keeping it red`, err instanceof Error ? err.message : err);
+    }
+  }
+  return closed;
 }
 
 /** The leak-scan failure description (pattern indexes only, never terms), or
@@ -118,6 +142,11 @@ export interface MergePrecheckInput {
   /** #1176: commit messages join the keyword and leak scans (a squash body builds
    *  from them, so a keyword there closes issues at merge). */
   commitMessages?: string[];
+  /** #1430: the PR's repo, for qualified commit-message refs. */
+  repo?: string;
+  /** #1430: commit-message refs already closed (closedCommitRefs). A keyword
+   *  passes only when every ref it names is here; absent = all red. */
+  closedRefs?: ReadonlySet<number>;
   /** #1176: the compare's files, for the patchless-file fail-closed check. */
   files?: { filename: string; previous_filename?: string; patch?: string; status?: string; changes?: number }[];
 }
@@ -134,7 +163,11 @@ export function mergePrecheckFailures(input: MergePrecheckInput): string[] {
   if (closing !== null) out.push(closing);
   // #1176: a keyword in any commit message closes issues at merge (GitHub's
   // squash builds the merge commit's message from them), so it refuses too.
-  const commitClosing = (input.commitMessages ?? []).some((m) => closingKeywordFailure(m, "") !== null);
+  // #1430: unless every ref it names is already closed — a promotion PR
+  // re-presents merged commits whose refs can close nothing.
+  const closedRefs = input.closedRefs ?? new Set<number>();
+  const commitClosing = commitClosingRefs(input.commitMessages ?? [], input.repo ?? "")
+    .some((refs) => refs.length === 0 || refs.some((n) => !closedRefs.has(n)));
   if (commitClosing) out.push(CLOSING_KEYWORD_COMMIT_FAILURE);
   if (input.private === true) {
     // Leaks cannot leave a private repo, so neither the scan nor its truncation

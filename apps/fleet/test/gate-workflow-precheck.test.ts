@@ -107,6 +107,9 @@ let pullsCalls = 0;
 // The compare's commit message, so a test can hold the precheck clean (the
 // default "Fix #9" fails it before the recheck could ever run).
 let commitMessage = "Fix #9";
+// #1430: the issues-API state served per ref. A ref absent here rejects, so the
+// default "Fix #9" fails closed on an unreadable ref.
+let issueStates: Record<number, string> = {};
 // The fleet.json body served (FLEET_JSON or RUN_FLEET_JSON), so a test can
 // pick the skip path or the run path.
 let fleetJson = FLEET_JSON;
@@ -196,6 +199,12 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     }
     return Promise.resolve(new Response(JSON.stringify(openPullsBody), { status: 200, headers }));
   }
+  const issue = method === "GET" ? /\/issues\/(\d+)$/.exec(url) : null;
+  if (issue !== null) {
+    // #1430: issueState — the commit-keyword ref lookup.
+    const state = issueStates[Number(issue[1])];
+    return state === undefined ? Promise.reject(new Error("issue lookup 502")) : Promise.resolve(json({ state }));
+  }
   if (method === "GET" && /\/commits\/main$/.test(url)) {
     return Promise.resolve(json({ sha: BASE }));
   }
@@ -262,6 +271,7 @@ beforeEach(() => {
   compareThrows2nd = false;
   pullsCalls = 0;
   commitMessage = "Fix #9";
+  issueStates = {};
   fleetJson = FLEET_JSON;
   openPullsCalls = 0;
   openPullsBody = [];
@@ -313,9 +323,55 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
         description: CLOSING_KEYWORD_COMMIT_FAILURE,
       });
 
+      // #1430: #9's state lookup rejects (no issueStates entry) — fail closed.
+      expect(recorded.some((r) => r.method === "GET" && /\/issues\/9$/.test(r.url))).toBe(true);
+
       // No leg ran: the SKIP path and its precheck never touch GATE_RUNNER.
       const legCalls = recorded.filter((r) => /\/run-leg/.test(r.url));
       expect(legCalls).toEqual([]);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("#1430: a commit keyword naming only an already-closed ref passes the precheck (skip path green)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    titleFlipsOnRecheck = false;
+    issueStates = { 9: "closed" };
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-closed-ref");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-closed-ref", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out).toMatchObject({ state: "success", description: "no gated paths changed" });
+      expect(recorded.some((r) => r.method === "GET" && /\/issues\/9$/.test(r.url))).toBe(true);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("#1430: a commit keyword naming an OPEN ref still fails the precheck", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    titleFlipsOnRecheck = false;
+    issueStates = { 9: "open" };
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-open-ref");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-open-ref", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out).toMatchObject({ state: "failure", description: CLOSING_KEYWORD_COMMIT_FAILURE });
     } finally {
       await instance.dispose();
     }
