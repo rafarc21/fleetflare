@@ -19,11 +19,19 @@ import { DurableObject, exports as workerExports } from "cloudflare:workers";
 import type { Env } from "../env";
 import { mintPrivateCloneToken } from "../github/auth";
 import { gateOutboundProps, legGitToken, type GateLegRequest } from "./leg-env";
-import { legResponse, runLegInContainer, runLegWithSecrets, type LegResult } from "./run-leg";
+import { legResponse, runLegInContainer, runLegWithSecrets, startAsyncLeg, startLegContainer, type LegResult } from "./run-leg";
 import { legResultReader } from "./leg-run";
 import { legTimeoutMin } from "./config";
 import { resolveGrantedSecrets } from "./secrets-registry";
 import { mintRunToken } from "./secrets-ai-token";
+
+/** #1398: the container's own inactivity timeout for the async path, in
+ *  MINUTES, sized past the leg's own deadline (review r1 item 5) so the
+ *  platform never stops an idle container mid-leg. The old 2*ALARM_TICK_MS
+ *  (40 s) let ONE late alarm tick read as a false "exited mid-leg"; minutes
+ *  (max 6h per https://developers.cloudflare.com/sandbox/concepts/lifetime/)
+ *  are far past both the tick and the leg, never between them. */
+const INACTIVITY_TIMEOUT_MIN = 60;
 
 /** The one refusal a PAT-served private leg gets. Named so it reaches the leg. */
 const PAT_ONLY_REFUSAL = "private clone needs the GitHub App on this owner";
@@ -78,6 +86,28 @@ export class GateRunnerDO extends DurableObject<Env> {
       // for a private leg its one repo and minted token, and the plain VALUES
       // (never names) of its granted secrets, for result-body redaction.
       const outbound = workerExports.GateOutbound({ props: gateOutboundProps(body, gitToken, secretValues) });
+      // #1398: the async branch starts a container and returns 202 without
+      // holding the request open; the leg result arrives in R2 and is found
+      // by the Workflow's own poll loop (Task 7). Its check+start+persist runs
+      // inside blockConcurrencyWhile so two overlapping /run-leg POSTs on this
+      // instance cannot both observe "no alarmState" and start two containers
+      // (review r1 item 3). The SYNC path is NOT wrapped: a sync leg holds
+      // this DO for minutes (readiness wait + poll), far past
+      // blockConcurrencyWhile's ~30 s ceiling, and wrapping it would reset
+      // every sync leg mid-run (review r2 BLOCKER).
+      if (body.mode === "async-poll") {
+        return legResponse(await this.ctx.blockConcurrencyWhile(async () =>
+          startAsyncLeg(body, secretValues, {
+            getAlarmState: async () => this.ctx.storage.get("alarmState"),
+            putAlarmState: async (state) => { await this.ctx.storage.put("alarmState", state); },
+            putSecretValues: async (secretValues) => { await this.ctx.storage.put("secretValues", secretValues); },
+            setAlarm: async (at) => { await this.ctx.storage.setAlarm(at); },
+          }, () =>
+            startLegContainer(body, {
+              container: this.ctx.container, outbound, secretValues,
+              inactivityTimeoutMs: INACTIVITY_TIMEOUT_MIN * 60_000,
+            }))));
+      }
       // #1346 security review r2: both "an unresolved granted secret never
       // runs" and "redact the leg's own result before it leaves this DO"
       // live in run-leg.ts's runLegWithSecrets, not here -- this file
@@ -93,5 +123,12 @@ export class GateRunnerDO extends DurableObject<Env> {
     }
     return new Response("not found", { status: 404 });
   }
-  // /run-leg is synchronous by design: the reply is the leg's LegResult.
+
+  /** #1398: the alarm() stub this PR adds so setAlarm() has a handler to
+   *  target (workerd refuses setAlarm on a class with no alarm() handler).
+   *  Task 9 replaces this body with the real tick loop; until it lands, an
+   *  alarm that fires does nothing, and this PR must not merge ahead of it. */
+  async alarm(): Promise<void> {
+    // Intentionally empty: Task 9 owns the real tick.
+  }
 }
