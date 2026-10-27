@@ -9,6 +9,7 @@ import type { GateLegRequest } from "./leg-env";
 import { normalizeLegResult, type LegRunMeta, type PlannedLeg } from "./fanout";
 import { legTimeoutMin } from "./config";
 import type { LegResult } from "./verdict";
+import { asyncAttemptDeadlineMs } from "./run-leg-alarm";
 import { grantedSecretNames, trustedForSecrets } from "./secrets-scope";
 import type { GateSecretsAllowlist } from "./secrets-config";
 
@@ -158,8 +159,12 @@ export function withStepDeadline<T>(work: Promise<T>, ms: number, message: strin
   return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
 
-/** A leg's result as the container wrote it to R2: state and description, no leg name. */
-export type StoredLegResult = { state: LegResult["state"]; description?: string };
+/** A leg's result as the container wrote it to R2: state, description, and
+ *  (#1398) summary -- widened so runLegStepPolling's own normal read
+ *  (legResultReader, never storedLegResult) can surface it, matching what
+ *  the container already writes and what runLegStep's own live-response
+ *  path already preserves today. */
+export type StoredLegResult = { state: LegResult["state"]; description?: string; summary?: string };
 
 /** #1321: a leg killed by SIGTERM (143) or SIGKILL (137) writes "exited 143/137".
  *  A LIVE gate-server that returns this means the test proc itself died — an OOM
@@ -372,6 +377,218 @@ export function isRetryable(first: LegRunResult): boolean {
   // matches on its underlying cause (#1126).
   const stripped = description.startsWith(R2_PREFIX) ? description.slice(R2_PREFIX.length) : description;
   return stripped.startsWith("install failed") || stripped.startsWith("clone failed:");
+}
+
+/** #1398: the slice of Workflows' WorkflowStep the async/polling path needs
+ *  -- do(), generic (Task 1), plus sleep(), which real Workflows exposes as
+ *  step.sleep(name, duration) and which does NOT count toward the instance's
+ *  step budget (spec "Cost"). */
+export interface PollingLegStepRunner {
+  do<T>(name: string, config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<T>): Promise<T>;
+  sleep(name: string, durationSeconds: number): Promise<void>;
+}
+
+/** #1398: a dispatch call's own outcome -- a TERMINAL LegResult reached
+ *  before any container ever started (DID-NOT-RUN, PAT-only refusal, spec
+ *  "Secrets across alarm ticks"), or an ACCEPTED container start, carrying
+ *  the governing-invariant-safe values (startedAt minted inside the
+ *  dispatch step itself) later poll steps need. */
+export type DispatchOutcome =
+  | { kind: "terminal"; result: LegRunResult }
+  | { kind: "accepted"; resultKey: string; startedAt: number };
+
+const POLL_INTERVAL_SECONDS_DEFAULT = 60;
+
+/** #1398: ONE try's own dispatch + poll loop. Returns the container-authored
+ *  (or DO-written infra) LegResult once found, or the Workflow's own
+ *  give-up result once this try's own deadline elapses with nothing in R2.
+ *  Every governing-invariant-sensitive value (attemptId, each deadline
+ *  check) is minted/computed strictly INSIDE its own step.do callback --
+ *  this function's own surrounding `for` loop only ever reads already-
+ *  resolved step results (plan review r1 BLOCKER 1). */
+async function dispatchAndPollOnce(
+  step: PollingLegStepRunner,
+  dispatch: (planned: PlannedLeg, attemptId: string) => Promise<DispatchOutcome>,
+  target: PlannedLeg,
+  stepName: string,
+  attemptDeadlineMs: number,
+  deps: { bucket: ClaimableBucket; now: () => number; pollIntervalSeconds: number; readResult: (key: string) => Promise<StoredLegResult | undefined>; touch?: () => Promise<void> },
+): Promise<LegRunResult> {
+  // #1398 plan review r2 item 3: minted in its OWN step, BEFORE the dispatch
+  // step. A Workflows-level AUTOMATIC step-retry (the dispatch step's own
+  // callback THROWING, LEG_STEP_CONFIG.retries kicking in) genuinely
+  // RE-INVOKES that callback -- unlike a deploy-triggered REPLAY, which
+  // never re-runs an already-succeeded step's callback at all. If attemptId
+  // were minted INSIDE the dispatch step (as an earlier draft had it), each
+  // automatic retry would mint a DIFFERENT id, so retry 2 would target a
+  // BRAND-NEW, empty DO -- never the one retry 1 already started a container
+  // on -- and Task 8's own idempotency guard (an already-populated
+  // alarmState) could never fire, because there would never BE one. Minting
+  // it here, in a step that (once it succeeds once, which a bare
+  // crypto.randomUUID() call always does) is simply REPLAYED like any other
+  // already-resolved step, means every retry of the dispatch step reads the
+  // SAME id.
+  const attemptId = await step.do(`${stepName}-attempt-id`, LEG_STEP_CONFIG, async () => crypto.randomUUID());
+  let dispatched: DispatchOutcome;
+  try {
+    dispatched = await step.do(stepName, LEG_STEP_CONFIG, async () => {
+      // #1398 plan review r2 item 2: touch() ALSO fires here (every NEW
+      // dispatch, i.e. every try, not gated to tryNo===1 anymore -- see the
+      // poll step below for why tryNo-gating alone was wrong).
+      await deps.touch?.();
+      return dispatch(target, attemptId);
+    });
+  } catch (err) {
+    // #1398 plan review r1 BLOCKER 3 (the other half -- workflow.ts's own
+    // dispatch closure THROWS on a non-2xx; this is where that throw must
+    // land once the step's own LEG_STEP_CONFIG.retries are exhausted, never
+    // an unhandled rejection out of runLegStepPolling entirely). Same shape
+    // runLegStep's own catch block already returns for this case.
+    const message = err instanceof Error ? err.message : String(err);
+    return { leg: target.leg, state: "error", description: message.slice(0, MAX_INFRA_CAUSE_CHARS) };
+  }
+  if (dispatched.kind === "terminal") return dispatched.result;
+  for (let i = 1; ; i++) {
+    await step.sleep(`${stepName}-sleep-${i}`, deps.pollIntervalSeconds);
+    const tick = await step.do(`${stepName}-poll-${i}`, LEG_STEP_CONFIG, async () => {
+      // #1398 plan review r2 item 2: touch() fires on EVERY poll tick, not
+      // just the dispatch step -- a leg whose first two tries each spend
+      // their own ~25-30 min polling before failing infra would otherwise go
+      // ~50-60 min between progress stamps (only stamped at each NEW try's
+      // dispatch), past GATE_STALL_MS (37 min) -- a FALSE stall on a run
+      // that is, in fact, still actively polling every 60s the whole time.
+      await deps.touch?.();
+      // #1398 review r2 item 1: the RAW reader, never storedLegResult --
+      // a container-authored record (including its own live "exited
+      // 143/137") is trusted exactly as-is, summary intact, never reclassified.
+      const found = await deps.readResult(dispatched.resultKey);
+      // #1398 plan review r2 "ms outside step" note: ms is computed HERE,
+      // strictly inside this callback (deps.now() read live, dispatched.startedAt
+      // read from an already-resolved step) -- never after this step.do call
+      // resolves, so a replay never recomputes it from a fresh, wrong clock read.
+      return found !== undefined
+        ? { kind: "found" as const, result: found, ms: deps.now() - dispatched.startedAt }
+        : { kind: "not-yet" as const };
+    });
+    if (tick.kind === "found") return { leg: target.leg, ...tick.result, ms: tick.ms };
+    // #1398 plan review r1 BLOCKER 1: the elapsed-time decision is its OWN
+    // step, reading now() strictly inside this callback.
+    const pastDeadline = await step.do(`${stepName}-budget-${i}`, LEG_STEP_CONFIG, async () =>
+      deps.now() - dispatched.startedAt >= attemptDeadlineMs);
+    if (pastDeadline) {
+      // #1398 plan review r1 BLOCKER 2: R2_PREFIX-marked, same convention
+      // every DO-authored write uses -- this is the Workflow's OWN guess,
+      // and claimOrReadBack ensures a real, later-arriving result still wins.
+      // ms computed inside this SAME callback, same reasoning as the poll tick above.
+      const claimed = await step.do(`${stepName}-giveup`, LEG_STEP_CONFIG, async () => {
+        const result = await claimOrReadBack(deps.bucket, dispatched.resultKey, {
+          state: "error", description: `${R2_PREFIX}${target.leg}: no progress past its deadline`,
+        });
+        return { leg: target.leg, ...result, ms: deps.now() - dispatched.startedAt };
+      });
+      return claimed;
+    }
+  }
+}
+
+/**
+ * #1398 (spec "New architecture" / "Retries"): the explicit try-loop that
+ * replaces Workflows' own automatic step-retry (runLegStep's `ctx.attempt`
+ * usage) with real application code -- dispatch is now a SHORT step that
+ * only throws for a synchronous protocol failure; everything after the
+ * container starts is a terminal R2 outcome this loop discovers by polling,
+ * never a thrown exception. Coexists with runLegStep: nothing calls this
+ * yet (a later task wires it in behind the per-instance mode pin).
+ */
+export async function runLegStepPolling(
+  step: PollingLegStepRunner,
+  dispatch: (planned: PlannedLeg, attemptId: string) => Promise<DispatchOutcome>,
+  planned: PlannedLeg,
+  deps: LegRunDeps & { bucket: ClaimableBucket; pollIntervalSeconds?: number },
+): Promise<LegRunResult> {
+  const now = deps.now ?? Date.now;
+  // #1398 plan review r1 BLOCKER 2: the per-attempt deadline this loop uses
+  // is asyncAttemptDeadlineMs (run-leg-alarm.ts), NOT the sync path's own
+  // legStepDeadlineMs -- it must stay strictly longer than the DO's own
+  // worst-case total time, or the Workflow's give-up write could race a
+  // still-legitimately-working DO under normal operation, not just a true fault.
+  const attemptDeadlineMs = deps.stepDeadlineMs ?? asyncAttemptDeadlineMs(planned.timeoutMin);
+  const totalDeadlineMs = deps.totalDeadlineMs ?? totalLegWallMs(planned.timeoutMin);
+  const pollIntervalSeconds = deps.pollIntervalSeconds ?? POLL_INTERVAL_SECONDS_DEFAULT;
+  // #1398 review r2 item 1: the normal read is the RAW reader (never
+  // storedLegResult), so a container-authored record is trusted as-is; the
+  // bucket IS the source (deps.readResult only overrides it for tests that
+  // need a reader with side effects).
+  const readResult = deps.readResult ?? legResultReader(deps.bucket);
+  const legStarted = await step.do(`leg-started-${planned.leg}`, LEG_STEP_CONFIG, async () => now());
+
+  const runPhase = async (phaseName: "start" | "retry", targetFor: (tryNo: number) => PlannedLeg): Promise<LegRunResult> => {
+    const causes: string[] = [];
+    for (let tryNo = 1; ; tryNo++) {
+      // #1398 plan review r1 BLOCKER 1: the TOTAL-deadline check is its own
+      // step too -- tryNo itself is a safe, replay-stable loop counter (not
+      // a wall-clock value), but the now()-vs-totalDeadlineMs comparison is not.
+      const overBudget = await step.do(`total-budget-${planned.leg}-try${tryNo}`, LEG_STEP_CONFIG, async () =>
+        now() - legStarted >= totalDeadlineMs);
+      if (overBudget) {
+        return {
+          leg: planned.leg, state: "error",
+          description: causes.length > 0 ? combineCauses(causes) : `${planned.leg} exceeded ${legTimeoutMin(planned.timeoutMin)} min without a result`,
+        };
+      }
+      const target = targetFor(tryNo);
+      // #1398 Leftovers item 6: phase-qualified step names -- dispatch-start-
+      // and dispatch-retry- never collide on the same tryNo.
+      // #1398 plan review r2 item 2: touch is passed for EVERY tryNo now,
+      // not gated to tryNo===1 -- dispatchAndPollOnce itself calls it on
+      // every dispatch AND every poll tick, so progress is stamped
+      // throughout a long multi-try leg, never just once at the very start.
+      const result = await dispatchAndPollOnce(
+        step, dispatch, target, `dispatch-${phaseName}-${planned.leg}-try${tryNo}`, attemptDeadlineMs,
+        { bucket: deps.bucket, now, pollIntervalSeconds, readResult, touch: deps.touch },
+      );
+      const isInfra = result.state === "error" && isLegInfraDescription(result.description);
+      if (!isInfra) return result;
+      causes.push(result.description ?? "infra");
+    }
+  };
+
+  const first = await runPhase("start", (tryNo) => tryNo === 1 ? planned : { ...planned, resultKey: infraRetryResultKey(planned.resultKey, tryNo) });
+  if (!isRetryable({ ...first, leg: planned.leg })) return { ...first, leg: planned.leg };
+
+  const retryBase = { ...planned, resultKey: retryResultKey(planned.resultKey) };
+  const retry = await runPhase("retry", (tryNo) => tryNo === 1 ? retryBase : { ...retryBase, resultKey: infraRetryResultKey(retryBase.resultKey, tryNo) });
+
+  const ms = sumMs(first.ms, retry.ms);
+  const firstCause = (first.description ?? "failure").slice(0, MAX_FIRST_DESCRIPTION_CHARS);
+  if (retry.state === "success") {
+    return { leg: planned.leg, state: "success", description: `flaky: passed on retry; first: ${firstCause}`, ms, summary: retry.summary };
+  }
+  if (first.state === "failure") return { ...retry, leg: planned.leg, ms, redFirst: true };
+  const retryCause = retry.description ?? retry.state;
+  return { ...retry, leg: planned.leg, ms, description: `${retryCause}; first: ${firstCause}`.slice(0, MAX_DESCRIPTION_CHARS) };
+}
+
+/** #1398: the infra-cause check this loop's own try-decision needs --
+ *  SEPARATE from isInfraLegFailure (infra-rerun.ts), which ALSO excludes a
+ *  redFirst result; this loop decides "retry this ONE phase's attempt,"
+ *  infra-rerun.ts later decides "auto-rerun the WHOLE run." Reuses the SAME
+ *  INFRA_CAUSE-shaped matching by checking for the DO's own known infra
+ *  description prefixes, mirroring isRetryable's own R2_PREFIX-stripping
+ *  pattern. Exported for the engine tests (Task 12) to exercise directly.
+ */
+export function isLegInfraDescription(description: string | undefined): boolean {
+  if (description === undefined) return false;
+  // "HTTP \d+" also covers a dispatch step's OWN thrown-and-caught protocol
+  // failure (plan review r1 BLOCKER 3's catch, above: "<leg>: HTTP 503" etc)
+  // -- a step-retry-exhausted dispatch failure retries on a fresh attempt
+  // via THIS loop, the same category as every other infra cause.
+  // "DO alarm failed" (plan review r2): alarmTick's own consecutive-failure
+  // give-up message (Task 9) -- a persistently broken DO is itself a
+  // platform-level condition, not the leg's own code, so it retries on a
+  // fresh attempt (a new DO, a new container) the same as any other infra
+  // cause, never treated as this try's own final answer.
+  return /gate (container|server|capacity)|no progress past its deadline|HTTP \d+|DO alarm failed/.test(description);
 }
 
 /** The minimal R2 bucket shape the reader needs: the real R2Bucket satisfies it. */

@@ -3,7 +3,7 @@
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
 import { describe, it, expect, spyOn } from "bun:test";
-import { claimOrReadBack, combineCauses, gateRunnerName, infraRetryResultKey, LEG_STEP_CONFIG, legResultReader, MAX_COMBINED_CAUSE_CHARS, recoverCandidateKeys, retryResultKey, runLegStep, type LegStepConfig, type LegStepContext } from "../../src/gate/leg-run";
+import { claimOrReadBack, combineCauses, gateRunnerName, infraRetryResultKey, LEG_STEP_CONFIG, legResultReader, MAX_COMBINED_CAUSE_CHARS, recoverCandidateKeys, retryResultKey, runLegStep, runLegStepPolling, isLegInfraDescription, R2_PREFIX, type DispatchOutcome, type LegStepConfig, type LegStepContext } from "../../src/gate/leg-run";
 import { isInfraLegFailure } from "../../src/gate/infra-rerun";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
@@ -35,6 +35,10 @@ function fakeStep() {
         }
       }
     },
+    // #1398: runLegStepPolling needs sleep() too (its poll loop); runLegStep
+    // never calls it (it uses deps.sleep). A no-op keeps the auto-step-retry
+    // test assignable to PollingLegStepRunner without polluting `calls`.
+    sleep: async () => {},
   };
 }
 
@@ -1309,5 +1313,203 @@ describe("claimOrReadBack (#1398)", () => {
     };
     const result = await claimOrReadBack(bucket, "k", { state: "error", description: "guessed infra" });
     expect(result).toEqual({ state: "success" }); // NEVER the guessed infra value
+  });
+});
+
+// #1398: runLegStepPolling's own fake step needs BOTH do() and sleep() --
+// sleep is a no-op in tests (no real waiting), do() runs its callback once
+// per call (no Workflows-style automatic retry -- this new design's OWN
+// try-loop drives retries explicitly, never an implicit step-retry).
+function fakePollingStep() {
+  const calls: string[] = [];
+  return {
+    calls,
+    do: async <T>(name: string, _config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<T>): Promise<T> => {
+      calls.push(name);
+      return fn({ attempt: 1, step: { name, count: 1 } });
+    },
+    sleep: async (name: string) => { calls.push(`sleep:${name}`); },
+  };
+}
+
+function fakeBucket(initial: Record<string, unknown> = {}) {
+  const store = new Map(Object.entries(initial).map(([k, v]) => [k, JSON.stringify(v)]));
+  return {
+    store,
+    put: async (key: string, value: string) => {
+      if (store.has(key)) return null;
+      store.set(key, value);
+      return {};
+    },
+    get: async (key: string) => {
+      const v = store.get(key);
+      return v === undefined ? null : { json: async () => JSON.parse(v) };
+    },
+  };
+}
+
+describe("runLegStepPolling (#1398)", () => {
+  it("a container-authored success in R2 on the first poll ends the attempt, summary AND ms intact", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      bucket.store.set(planned.resultKey, JSON.stringify({ state: "success", summary: "42 passed" }));
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 1_000 });
+    expect(result).toMatchObject({ leg: "lint", state: "success", summary: "42 passed", ms: 1_000 });
+    expect(step.calls.some((c) => c.startsWith("sleep:"))).toBe(true);
+  });
+
+  it("a DID-NOT-RUN/PAT-only terminal dispatch never enters the poll loop at all", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    const dispatch = async (): Promise<DispatchOutcome> => ({
+      kind: "terminal", result: { leg: "lint", state: "error", description: 'DID-NOT-RUN: secret "x" unresolved' },
+    });
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0 });
+    expect(result).toMatchObject({ state: "error", description: 'DID-NOT-RUN: secret "x" unresolved' });
+    expect(step.calls.some((c) => c.startsWith("sleep:"))).toBe(false);
+  });
+
+  it("a container's own live-observed 'exited 143/137' stays a REAL failure, never reclassified (review r2 item 1 regression test)", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      bucket.store.set(planned.resultKey, JSON.stringify({ state: "failure", description: "exited 137" }));
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0 });
+    expect(result.state).toBe("failure"); // NOT "error" -- never reclassified as infra
+    expect(result.description).toBe("exited 137"); // raw, never R2_PREFIX-marked
+  });
+
+  it("attemptId is minted inside the dispatch step: a replayed step (same name) never calls dispatch a second time (governing invariant, BLOCKER 1)", async () => {
+    const bucket = fakeBucket();
+    let dispatchCalls = 0;
+    const seenAttemptIds: string[] = [];
+    const dispatch = async (planned: PlannedLeg, attemptId: string): Promise<DispatchOutcome> => {
+      dispatchCalls++;
+      seenAttemptIds.push(attemptId);
+      bucket.store.set(planned.resultKey, JSON.stringify({ state: "success" }));
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    // A step cache keyed by name, exactly mirroring Workflows' own replay
+    // contract: the SECOND do() call for a name already seen returns the
+    // FIRST call's result without re-invoking fn.
+    const cache = new Map<string, unknown>();
+    const replayingStep = {
+      do: async <T>(name: string, _config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<T>): Promise<T> => {
+        if (cache.has(name)) return cache.get(name) as T;
+        const result = await fn(undefined);
+        cache.set(name, result);
+        return result;
+      },
+      sleep: async () => {},
+    };
+    // Run the WHOLE function twice against the SAME cache, simulating a
+    // mid-run replay that re-executes runLegStepPolling's own body from
+    // scratch but hits the SAME step cache for every step it already took.
+    await runLegStepPolling(replayingStep, dispatch, PLANNED, { bucket, now: () => 0 });
+    await runLegStepPolling(replayingStep, dispatch, PLANNED, { bucket, now: () => 0 });
+    expect(dispatchCalls).toBe(1); // never re-dispatched
+    expect(new Set(seenAttemptIds).size).toBe(1); // the SAME attemptId both times
+  });
+
+  it("attemptId stays the SAME across a Workflows-level AUTOMATIC step-retry of the dispatch step, not just a deploy replay (plan review r2 item 3)", async () => {
+    // fakeGenericStep (Task 1) genuinely RE-INVOKES a throwing step.do
+    // callback up to LEG_STEP_CONFIG's own retry limit -- this is Workflows'
+    // OWN automatic step-retry, a DIFFERENT mechanism from the cache-based
+    // replayingStep above (which models a deploy replay of an
+    // ALREADY-SUCCEEDED step). The attemptId-minting step only ever runs
+    // ONCE (it never throws), so the dispatch step's own retries all read
+    // the SAME already-resolved value as a plain variable.
+    const step = fakeGenericStep();
+    const bucket = fakeBucket();
+    const seenAttemptIds: string[] = [];
+    let dispatchAttempts = 0;
+    const dispatch = async (planned: PlannedLeg, attemptId: string): Promise<DispatchOutcome> => {
+      dispatchAttempts++;
+      seenAttemptIds.push(attemptId);
+      if (dispatchAttempts === 1) throw new Error("transient network error"); // forces LEG_STEP_CONFIG's own retry
+      bucket.store.set(planned.resultKey, JSON.stringify({ state: "success" }));
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0 });
+    expect(result.state).toBe("success");
+    expect(dispatchAttempts).toBe(2); // one throw, one success -- Workflows' OWN step-retry, never this loop's try-loop
+    expect(new Set(seenAttemptIds).size).toBe(1); // the SAME attemptId on both the failing and the succeeding call
+  });
+
+  it("touch() fires on every dispatch AND every poll tick, not just the first try's dispatch (plan review r2 item 2)", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    let touchCalls = 0;
+    const touch = async () => { touchCalls++; };
+    let tries = 0;
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      tries++;
+      bucket.store.set(planned.resultKey, JSON.stringify(
+        tries < 3 ? { state: "error", description: "gate container exited mid-leg" } : { state: "success" },
+      ));
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, touch, totalDeadlineMs: 1_000_000 });
+    expect(result.state).toBe("success");
+    // 3 tries, each: one touch on dispatch + one touch on the poll tick that
+    // finds its result (infra on tries 1-2, success on try 3) = 2 touches
+    // per try x 3 tries = 6, never just 1 (the old tryNo===1-gated behavior).
+    expect(touchCalls).toBe(6);
+  });
+
+  it("an infra outcome (DO-written) retries with a fresh attemptId, up to the total deadline, never waitForEvent (positive form of the old gate-leg-run.test.ts invariant)", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    let tries = 0;
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      tries++;
+      bucket.store.set(planned.resultKey, JSON.stringify(
+        tries < 2 ? { state: "error", description: "gate container exited mid-leg" } : { state: "success" },
+      ));
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: tries === 1 ? 0 : 1_000 };
+    };
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, totalDeadlineMs: 100_000 });
+    expect(result.state).toBe("success");
+    expect(tries).toBe(2);
+    expect("waitForEvent" in step).toBe(false);
+  });
+
+  it("a per-try give-up writes R2_PREFIX-marked via claimOrReadBack -- EXACT expectation, fully traced, not just 'ordering' (plan review r1 item 5)", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    let now = 0;
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      const startedAt = now;
+      now += 100; // a little real time passes per try, so the TOTAL deadline (below) can trip deterministically
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt };
+    };
+    // Trace: try 1's own attempt deadline (stepDeadlineMs: 0) trips on its
+    // first poll tick (now=100 by then, startedAt=0) -- claimOrReadBack
+    // writes the R2_PREFIX-marked guess to planned.resultKey. That reads as
+    // infra (isLegInfraDescription), so runPhase loops to try 2 -- but try
+    // 2's own TOTAL-deadline check (now=100 >= totalDeadlineMs=100) fires
+    // FIRST, before try 2 ever dispatches, with exactly ONE cause recorded
+    // -- combineCauses of a single, short cause passes it through verbatim.
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => now, stepDeadlineMs: 0, totalDeadlineMs: 100 });
+    const expectedDescription = `${R2_PREFIX}lint: no progress past its deadline`;
+    expect(result).toMatchObject({ leg: "lint", state: "error", description: expectedDescription });
+    expect(JSON.parse(bucket.store.get(PLANNED.resultKey)!)).toEqual({ state: "error", description: expectedDescription });
+  });
+
+  it("the poll step finds a container's own real result before ever reaching the give-up path (the common case)", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket({ [PLANNED.resultKey]: { state: "success" } }); // pre-populated: the container already wrote it
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+      ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, stepDeadlineMs: 0, totalDeadlineMs: 1_000 });
+    // The poll step's own R2 read happens BEFORE the budget check in
+    // dispatchAndPollOnce's own loop -- it finds the pre-populated success
+    // on the very first tick, never reaching claimOrReadBack at all.
+    expect(result.state).toBe("success");
   });
 });
