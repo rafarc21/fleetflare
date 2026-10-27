@@ -42,7 +42,7 @@ import {
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
 import {
   bundleStepEnabled, gateRunnerName, legRequest, legRequestContext, legResultReader, runBundleStep, runLegStep,
-  RETRY_LEG_JITTER_MS, type LegRequestContext, type LegRunResult,
+  RETRY_LEG_JITTER_MS, type LegRequestContext, type LegRunResult, type LegStepConfig, type LegStepContext,
 } from "./leg-run";
 import { markRunProgress } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
@@ -609,7 +609,19 @@ function runLeg(
   touch: () => Promise<void>,
 ): Promise<LegRunResult> {
   return runLegStep(
-    { do: (name, config, fn) => step.do(name, config, fn) },
+    // #1398: a method shorthand, not an arrow-function property -- LegStepRunner.do
+    // is generic, and TS only accepts a genuinely generic implementation (method
+    // syntax) for that, never a property holding a non-generic arrow function.
+    // The inner cast bridges LegStepRunner's own unconstrained T (leg-run.ts
+    // never imports cloudflare:workers, so it cannot reference Workflows' own
+    // Serializable<T> constraint) against the real WorkflowStep.do's stricter
+    // signature -- every type this module ever passes through it (LegRunResult,
+    // a dispatch outcome) is plain, JSON-serializable data, so the cast is safe.
+    {
+      do<T>(name: string, config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<T>): Promise<T> {
+        return step.do(name, config, fn as never) as Promise<T>;
+      },
+    },
     async (leg, attemptId, signal) => {
       // Scoped by run instance, leg AND attempt: two PRs gating the same leg name
       // must never share one container, one leg per container is the DO's
