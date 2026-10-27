@@ -3,7 +3,7 @@
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
 import { describe, it, expect, spyOn } from "bun:test";
-import { combineCauses, gateRunnerName, infraRetryResultKey, LEG_STEP_CONFIG, legResultReader, MAX_COMBINED_CAUSE_CHARS, retryResultKey, runLegStep, type LegStepConfig, type LegStepContext } from "../../src/gate/leg-run";
+import { claimOrReadBack, combineCauses, gateRunnerName, infraRetryResultKey, LEG_STEP_CONFIG, legResultReader, MAX_COMBINED_CAUSE_CHARS, retryResultKey, runLegStep, type LegStepConfig, type LegStepContext } from "../../src/gate/leg-run";
 import { isInfraLegFailure } from "../../src/gate/infra-rerun";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
@@ -1053,5 +1053,34 @@ describe("runLegStep: the retry step's own infra-retries get unique keys (#1398)
     const base = retryResultKey("gate/o/r/runs/1/i/shard-vitest-8.json");
     expect(base).toBe("gate/o/r/runs/1/i/shard-vitest-8.retry.json");
     expect(infraRetryResultKey(base, 2)).toBe("gate/o/r/runs/1/i/shard-vitest-8.retry-try2.json");
+  });
+});
+
+describe("claimOrReadBack (#1398)", () => {
+  it("the write wins when nothing is there yet", async () => {
+    const store = new Map<string, string>();
+    const bucket = {
+      put: async (key: string, value: string) => {
+        if (store.has(key)) return null;
+        store.set(key, value);
+        return {};
+      },
+      get: async (key: string) => {
+        const v = store.get(key);
+        return v === undefined ? null : { json: async () => JSON.parse(v) };
+      },
+    };
+    const result = await claimOrReadBack(bucket, "k", { state: "error", description: "guessed infra" });
+    expect(result).toEqual({ state: "error", description: "guessed infra" });
+  });
+
+  it("a conflict defers to whatever is already there, never the caller's own value", async () => {
+    const store = new Map<string, string>([["k", JSON.stringify({ state: "success" })]]);
+    const bucket = {
+      put: async () => null, // already written -- simulates a container's own report winning the race
+      get: async (key: string) => ({ json: async () => JSON.parse(store.get(key)!) }),
+    };
+    const result = await claimOrReadBack(bucket, "k", { state: "error", description: "guessed infra" });
+    expect(result).toEqual({ state: "success" }); // NEVER the guessed infra value
   });
 });
