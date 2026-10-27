@@ -19,7 +19,7 @@ import { DurableObject, exports as workerExports } from "cloudflare:workers";
 import type { Env } from "../env";
 import { mintPrivateCloneToken } from "../github/auth";
 import { gateOutboundProps, legGitToken, type GateLegRequest } from "./leg-env";
-import { legResponse, runLegDispatch, runLegInContainer, runLegWithSecrets, startAsyncLeg, startLegContainer, type LegResult } from "./run-leg";
+import { legResponse, runLegInContainer, runLegWithSecrets, startAsyncLeg, startLegContainer, type LegResult } from "./run-leg";
 import { legResultReader } from "./leg-run";
 import { legTimeoutMin } from "./config";
 import { resolveGrantedSecrets } from "./secrets-registry";
@@ -86,45 +86,39 @@ export class GateRunnerDO extends DurableObject<Env> {
       // for a private leg its one repo and minted token, and the plain VALUES
       // (never names) of its granted secrets, for result-body redaction.
       const outbound = workerExports.GateOutbound({ props: gateOutboundProps(body, gitToken, secretValues) });
-      // #1398: runLegDispatch is the mode split, pure in run-leg.ts (so bun
-      // test proves it), carrying the unresolved-secret refusal into the
-      // async branch via startAsyncLeg. The async branch's check+start+persist
-      // runs inside blockConcurrencyWhile so two overlapping /run-leg POSTs
-      // on this instance cannot both observe "no alarmState" and start two
-      // containers (review r1 item 3).
-      const outcome = await this.ctx.blockConcurrencyWhile(async () =>
-        runLegDispatch(
-          body,
-          secretValues,
-          () =>
-            // #1346 security review r2: both "an unresolved granted secret never
-            // runs" and "redact the leg's own result before it leaves this DO"
-            // live in run-leg.ts's runLegWithSecrets, not here -- this file
-            // imports cloudflare:workers and can never be loaded under bun test,
-            // so either guard living as plain code here could be silently
-            // reverted without failing a single test. The container's own R2
-            // result (read on a transport loss, #1122) is passed straight through.
-            runLegWithSecrets(body.secretNames ?? [], secretValues, () =>
-              runLegInContainer(body, {
-                container: this.ctx.container, outbound, readResult: legResultReader(this.env.STUDIO_ARCHIVE), secretValues,
-              })),
-          () =>
-            // The async branch's own check+start+persist, answered 202 on an
-            // already-populated alarmState (a retried /run-leg) or on a fresh
-            // start; 503 on an infra refusal. setAlarm runs BEFORE the
-            // alarmState write (review r1 BLOCKER 1), so a class with no
-            // alarm() handler throws before any alarmState is persisted.
-            startAsyncLeg(body, secretValues, {
-              getAlarmState: async () => this.ctx.storage.get("alarmState"),
-              putAlarmState: async (state) => { await this.ctx.storage.put("alarmState", state); },
-              putSecretValues: async (secretValues) => { await this.ctx.storage.put("secretValues", secretValues); },
-              setAlarm: async (at) => { await this.ctx.storage.setAlarm(at); },
-            }, () =>
-              startLegContainer(body, {
-                container: this.ctx.container, outbound, secretValues,
-                inactivityTimeoutMs: INACTIVITY_TIMEOUT_MIN * 60_000,
-              })),
-        ));
+      // #1398: the async branch starts a container and returns 202 without
+      // holding the request open; the leg result arrives in R2 and is found
+      // by the Workflow's own poll loop (Task 7). Its check+start+persist runs
+      // inside blockConcurrencyWhile so two overlapping /run-leg POSTs on this
+      // instance cannot both observe "no alarmState" and start two containers
+      // (review r1 item 3). The SYNC path is NOT wrapped: a sync leg holds
+      // this DO for minutes (readiness wait + poll), far past
+      // blockConcurrencyWhile's ~30 s ceiling, and wrapping it would reset
+      // every sync leg mid-run (review r2 BLOCKER).
+      if (body.mode === "async-poll") {
+        return legResponse(await this.ctx.blockConcurrencyWhile(async () =>
+          startAsyncLeg(body, secretValues, {
+            getAlarmState: async () => this.ctx.storage.get("alarmState"),
+            putAlarmState: async (state) => { await this.ctx.storage.put("alarmState", state); },
+            putSecretValues: async (secretValues) => { await this.ctx.storage.put("secretValues", secretValues); },
+            setAlarm: async (at) => { await this.ctx.storage.setAlarm(at); },
+          }, () =>
+            startLegContainer(body, {
+              container: this.ctx.container, outbound, secretValues,
+              inactivityTimeoutMs: INACTIVITY_TIMEOUT_MIN * 60_000,
+            }))));
+      }
+      // #1346 security review r2: both "an unresolved granted secret never
+      // runs" and "redact the leg's own result before it leaves this DO"
+      // live in run-leg.ts's runLegWithSecrets, not here -- this file
+      // imports cloudflare:workers and can never be loaded under bun test,
+      // so either guard living as plain code here could be silently
+      // reverted without failing a single test. The container's own R2
+      // result (read on a transport loss, #1122) is passed straight through.
+      const outcome = await runLegWithSecrets(body.secretNames ?? [], secretValues, () =>
+        runLegInContainer(body, {
+          container: this.ctx.container, outbound, readResult: legResultReader(this.env.STUDIO_ARCHIVE), secretValues,
+        }));
       return legResponse(outcome);
     }
     return new Response("not found", { status: 404 });

@@ -218,13 +218,6 @@ export interface AsyncLegStorage {
   setAlarm(at: number): Promise<void>;
 }
 
-export type AsyncLegDecision =
-  | { kind: "accepted" }
-  | { kind: "infra"; description: string }
-  // The DID-NOT-RUN refusal is a RESULT (200 red), never infra (503 retry):
-  // a broken secret is deterministic and never retries away, exactly like the
-  // sync path's own runLegWithSecrets refusal.
-  | { kind: "result"; result: LegResult };
 
 /** #1398: the async path's whole start decision, pure. One function so the
  *  order it enforces — the unresolved-secret refusal, the idempotency check,
@@ -246,7 +239,7 @@ export async function startAsyncLeg(
   storage: AsyncLegStorage,
   start: () => Promise<{ kind: "started" } | { kind: "infra"; description: string }>,
   now: () => number = Date.now,
-): Promise<AsyncLegDecision> {
+): Promise<LegOutcome> {
   const unresolved = firstUnresolvedSecret(body.secretNames ?? [], secretValues);
   if (unresolved !== null) {
     return { kind: "result", result: { state: "error", description: `DID-NOT-RUN: secret "${unresolved}" unresolved` } };
@@ -263,30 +256,6 @@ export async function startAsyncLeg(
   await storage.putAlarmState(state);
   await storage.putSecretValues(secretValues); // a later task reads+deletes this at the terminal tick
   return { kind: "accepted" };
-}
-
-/** #1398: the /run-leg mode dispatch, pure. Absent (or any non-async) mode
- *  keeps every existing caller on the sync path; "async-poll" runs the async
- *  branch. The two refusals answered inside the async branch are the same
- *  class of refusal the sync path answers through runLegWithSecrets — both
- *  branches refuse an unresolved secret before any container starts. */
-export async function runLegDispatch(
-  body: GateLegRequest,
-  secretValues: Record<string, string>,
-  runSync: () => Promise<LegOutcome>,
-  runAsync: () => Promise<AsyncLegDecision>,
-): Promise<LegOutcome> {
-  if (body.mode === "async-poll") {
-    const decision = await runAsync();
-    if (decision.kind === "infra") {
-      return { kind: "infra", description: decision.description };
-    }
-    if (decision.kind === "result") {
-      return { kind: "result", result: decision.result };
-    }
-    return { kind: "accepted" };
-  }
-  return runSync();
 }
 
 export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): Promise<LegOutcome> {

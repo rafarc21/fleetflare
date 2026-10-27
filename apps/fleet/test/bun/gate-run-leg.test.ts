@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  runLegInContainer, runLegWithSecrets, legResponse, prepareAndStartContainer, startLegContainer, startAsyncLeg, runLegDispatch,
+  runLegInContainer, runLegWithSecrets, legResponse, prepareAndStartContainer, startLegContainer, startAsyncLeg,
   NO_INSTANCE_DESCRIPTION, type AsyncLegStorage, type GateContainer, type OutboundBinding,
   type LegOutcome,
 } from "../../src/gate/run-leg";
@@ -268,32 +268,6 @@ describe("startAsyncLeg (#1398 async branch)", () => {
     expect(decision).toEqual({ kind: "result", result: { state: "error", description: 'DID-NOT-RUN: secret "staging-login" unresolved' } });
     expect(started).toBe(false);
     expect(storage.writes).toEqual([]);
-  });
-});
-
-// #1398 review r1 item 4: the mode dispatch, pure. Absent mode keeps the sync
-// path; "async-poll" runs the async branch and maps an infra decision to an
-// infra outcome, an accepted decision to an accepted outcome.
-describe("runLegDispatch (#1398 mode split)", () => {
-  test("absent mode runs the sync path, never the async branch", async () => {
-    let asyncRan = false;
-    const outcome = await runLegDispatch(LEG, {}, async () => ({ kind: "result" as const, result: { state: "success" as const } }), async () => { asyncRan = true; return { kind: "accepted" as const }; });
-    expect(outcome).toEqual({ kind: "result", result: { state: "success" } });
-    expect(asyncRan).toBe(false);
-  });
-
-  test("async-poll runs the async branch, mapping accepted, infra, and the DID-NOT-RUN result", async () => {
-    let syncRan = false;
-    const asyncBody: GateLegRequest = { ...LEG, mode: "async-poll" };
-    const accepted = await runLegDispatch(asyncBody, {}, async () => { syncRan = true; return { kind: "result" as const, result: { state: "success" as const } }; }, async () => ({ kind: "accepted" as const }));
-    expect(accepted).toEqual({ kind: "accepted" });
-    expect(syncRan).toBe(false);
-
-    const infra = await runLegDispatch(asyncBody, {}, async () => ({ kind: "result" as const, result: { state: "success" as const } }), async () => ({ kind: "infra" as const, description: "gate container failed: boom" }));
-    expect(infra).toEqual({ kind: "infra", description: "gate container failed: boom" });
-
-    const didNotRun = await runLegDispatch(asyncBody, {}, async () => ({ kind: "result" as const, result: { state: "success" as const } }), async () => ({ kind: "result" as const, result: { state: "error" as const, description: 'DID-NOT-RUN: secret "staging-login" unresolved' } }));
-    expect(didNotRun).toEqual({ kind: "result", result: { state: "error", description: 'DID-NOT-RUN: secret "staging-login" unresolved' } });
   });
 });
 
@@ -627,6 +601,12 @@ describe("legResponse: /run-leg status mapping", () => {
     const res = legResponse({ kind: "result", result: { state: "failure", description: "3 errors" } });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ state: "failure", description: "3 errors" });
+  });
+
+  test("an async accept answers 202 with an empty body (#1398)", async () => {
+    const res = legResponse({ kind: "accepted" });
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe("");
   });
 });
 // #1066: the leg's image key is an allowlisted lookup into images. Unbound or
