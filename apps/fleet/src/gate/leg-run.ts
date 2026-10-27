@@ -856,6 +856,8 @@ export function legRequest(
      *  nothing, same as an allowlist with no entry for this repo. */
     secretsAllowlist?: GateSecretsAllowlist;
   },
+  mode: "sync-legacy" | "async-poll" = "sync-legacy",
+  instanceId?: string,
 ): GateLegRequest {
   // #1346: the ONLY place a secret grant is decided for this leg. Every
   // guard (trust, repo, leg, registry) lives in grantedSecretNames itself.
@@ -873,6 +875,10 @@ export function legRequest(
     ...(pr.mergeBase === undefined ? {} : { mergeBase: pr.mergeBase }),
     ...(planned.browser === true ? { browser: true } : {}),
     ...(secretNames.length === 0 ? {} : { secretNames }),
+    // #1398: the per-instance leg-mode pin and (async-only) the workflow
+    // instance id the DO's superseded-run check reads. Absent on the sync
+    // path -- every existing caller is unaffected until it opts in.
+    ...(mode === "async-poll" ? { mode, instanceId } : {}),
   };
 }
 

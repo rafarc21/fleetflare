@@ -31,7 +31,7 @@ import { capStatusDescription, mergePrecheckFailures, precheckBlobs, recheckFail
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import {
-  bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, guardSuccessStatus,
+  bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, guardSuccessStatus, isAsyncLegsRepo,
   type GateConfig, type SharedHeadLookup,
 } from "./config";
 import { fleetJsonReader } from "./fleet-json";
@@ -42,7 +42,7 @@ import {
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
 import {
   bundleStepEnabled, gateRunnerName, legRequest, legRequestContext, legResultReader, runBundleStep, runLegStep,
-  RETRY_LEG_JITTER_MS, type LegRequestContext, type LegRunResult, type LegStepConfig, type LegStepContext,
+  runLegStepPolling, RETRY_LEG_JITTER_MS, type ClaimableBucket, type DispatchOutcome, type LegRequestContext, type LegRunResult, type LegStepConfig, type LegStepContext,
 } from "./leg-run";
 import { markRunProgress } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
@@ -418,13 +418,21 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // watchdog must see a retry loop, not a run that keeps "progressing".
     const touch = (): Promise<void> =>
       markRunProgress(d1RunIndex(this.env.DB), repo, pr, event.instanceId, Date.now());
+    // #1398 (docs/superpowers/specs/2026-10-26-async-run-leg-design.md,
+    // "Migration"): pinned per-instance, replay-safely -- an in-flight
+    // instance that already resolved "sync-legacy" never flips mid-run just
+    // because the live flag changed later. GATE_ASYNC_LEGS ships empty, so
+    // every repo stays on the old synchronous path until an operator opts
+    // one in (backlog #1428 gates the enabling: secrets at rest).
+    const legMode = await step.do("leg-mode", async (): Promise<"sync-legacy" | "async-poll"> =>
+      isAsyncLegsRepo(this.env.GATE_ASYNC_LEGS, repo) ? "async-poll" : "sync-legacy");
     const results = await Promise.all(
       legs.map((planned) => {
         // #1230: a leg already green in the carry rides straight into the
         // verdict; everything else dispatches to GATE_RUNNER as before.
         const carried = carriedByLeg.get(planned.leg);
         if (carried !== undefined) return Promise.resolve(carried as LegRunResult);
-        return runLeg(this.env, step, event.instanceId, owner, repoName,
+        return runLeg(this.env, step, event.instanceId, legMode, owner, repoName,
           legRequestContext(
             trustContext,
             resolved.private, legSecretsAllowlist,
@@ -602,12 +610,60 @@ function bunLaneFiles(tree: Parameters<typeof laneFilesFromTree>[0], cfg: GateCo
 
 /** One leg: a start-<leg> step, and a retry-<leg> step when it fails red. The step's return value is the DO's LegResult. */
 function runLeg(
-  env: Env, step: WorkflowStep, instanceId: string,
+  env: Env, step: WorkflowStep, instanceId: string, mode: "sync-legacy" | "async-poll",
   owner: string, repoName: string,
   pr: LegRequestContext,
   planned: PlannedLeg,
   touch: () => Promise<void>,
 ): Promise<LegRunResult> {
+  // #1398: the async path's explicit dispatch+poll try-loop replaces Workflows'
+  // own automatic step-retry. GATE_ASYNC_LEGS ships empty, so this branch is
+  // unreachable until an operator opts a repo in -- the sync path below is
+  // byte-for-byte unchanged.
+  if (mode === "async-poll") {
+    return runLegStepPolling(
+      {
+        do<T>(name: string, config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<T>): Promise<T> {
+          return step.do(name, config, fn as never) as Promise<T>;
+        },
+        sleep: (name: string, seconds: number) => step.sleep(name, `${seconds} seconds`),
+      },
+      async (leg, attemptId): Promise<DispatchOutcome> => {
+        const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(gateRunnerName(instanceId, leg.leg, attemptId)));
+        const res = await stub.fetch("https://gate-runner/run-leg", {
+          method: "POST",
+          body: JSON.stringify(legRequest(owner, repoName, leg, { ...pr, image: leg.image }, mode, instanceId)),
+        });
+        if (res.status === 202) return { kind: "accepted", resultKey: leg.resultKey, startedAt: Date.now() };
+        if (res.status === 200) {
+          // The DO answers 200 with the container's own body ({ state,
+          // description, summary } -- no leg, same shape the sync path reads).
+          const body = await res.json() as LegRunResult;
+          return { kind: "terminal", result: { ...body, leg: leg.leg } };
+        }
+        // #1398 plan review r1 BLOCKER 3: any OTHER status is a protocol-level
+        // failure (malformed request, no container binding, image not bound) --
+        // a 503 body is `{error: "..."}`, which has NO `state` field at all.
+        // Spreading that into a LegResult (as an earlier draft did) produced a
+        // state-less, broken result. THROW instead, so this step's own
+        // LEG_STEP_CONFIG.retries applies, exactly as today's sync-legacy
+        // dispatch already does for a non-2xx.
+        let cause = `${leg.leg}: HTTP ${res.status}`;
+        try {
+          const body = await res.json() as { error?: unknown };
+          if (typeof body.error === "string" && body.error.length > 0) cause = `${leg.leg}: ${body.error}`;
+        } catch { /* non-JSON body: keep the HTTP status as the cause */ }
+        throw new Error(cause);
+      },
+      planned,
+      {
+        bucket: env.STUDIO_ARCHIVE as unknown as ClaimableBucket,
+        readResult: legResultReader(env.STUDIO_ARCHIVE),
+        retryJitterMs: RETRY_LEG_JITTER_MS,
+        touch,
+      },
+    );
+  }
   return runLegStep(
     // #1398: a method shorthand, not an arrow-function property -- LegStepRunner.do
     // is generic, and TS only accepts a genuinely generic implementation (method
