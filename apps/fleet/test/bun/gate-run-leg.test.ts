@@ -171,6 +171,7 @@ describe("startLegContainer (#1398)", () => {
     c.runningAfterMs = Number.POSITIVE_INFINITY; // never becomes ready -- would hang the OLD path forever
     const result = await startLegContainer(LEG, { container: c, outbound: OUTBOUND, inactivityTimeoutMs: 60_000 });
     expect(result).toEqual({ kind: "started" });
+    expect(c.inactivityTimeoutMs).toBe(60_000); // the async path sets it too -- a mutant dropping it from deps would still pass otherwise
     expect(c.fetchCalls).toBe(0); // never talked to the server
     expect(c.destroyCount).toBe(0); // never torn down -- the DO's alarm owns that later
   });
