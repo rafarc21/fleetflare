@@ -43,7 +43,57 @@ describe("aggregateVerdict", () => {
       { leg: "vitest-1", state: "success" },
       { leg: "vitest-2", state: "success" },
     ];
+    // #1395: the real red failure is no longer invisible behind the infra error.
+    expect(aggregateVerdict(legs, results)).toEqual({
+      state: "error", description: "GateRunnerDO crashed; red: typecheck: type error",
+    });
+  });
+
+  it("an error leg that precedes a failure in configured order still lists that failure (#1395)", () => {
+    const results: LegResult[] = [
+      { leg: "typecheck", state: "error", description: "GateRunnerDO crashed" },
+      { leg: "lint", state: "success" },
+      { leg: "vitest-1", state: "failure", description: "1 test failed" },
+      { leg: "vitest-2", state: "success" },
+    ];
+    expect(aggregateVerdict(legs, results)).toEqual({
+      state: "error", description: "GateRunnerDO crashed; red: vitest-1: 1 test failed",
+    });
+  });
+
+  it("lists every real failure alongside the error, in configured leg order (#1395)", () => {
+    const results: LegResult[] = [
+      { leg: "typecheck", state: "error", description: "GateRunnerDO crashed" },
+      { leg: "lint", state: "failure", description: "3 errors" },
+      { leg: "vitest-1", state: "failure", description: "1 test failed" },
+      { leg: "vitest-2", state: "failure" },
+    ];
+    expect(aggregateVerdict(legs, results)).toEqual({
+      state: "error",
+      description: "GateRunnerDO crashed; red: lint: 3 errors, vitest-1: 1 test failed, vitest-2: failed",
+    });
+  });
+
+  it("an error with no real failure keeps the error description alone (#1395)", () => {
+    const results: LegResult[] = [
+      { leg: "typecheck", state: "error", description: "GateRunnerDO crashed" },
+      { leg: "lint", state: "success" },
+      { leg: "vitest-1", state: "success" },
+      { leg: "vitest-2", state: "success" },
+    ];
     expect(aggregateVerdict(legs, results)).toEqual({ state: "error", description: "GateRunnerDO crashed" });
+  });
+
+  it("an error with no description still lists the failures, generated error text intact (#1395)", () => {
+    const results: LegResult[] = [
+      { leg: "typecheck", state: "error" },
+      { leg: "lint", state: "failure", description: "3 errors" },
+      { leg: "vitest-1", state: "success" },
+      { leg: "vitest-2", state: "success" },
+    ];
+    expect(aggregateVerdict(legs, results)).toEqual({
+      state: "error", description: "typecheck errored; red: lint: 3 errors",
+    });
   });
 
   it("falls back to a generated description when a leg reports none", () => {

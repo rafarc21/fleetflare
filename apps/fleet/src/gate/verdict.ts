@@ -29,13 +29,28 @@ export function aggregateVerdict(expectedLegs: string[], results: LegResult[]): 
 
   for (const leg of expectedLegs) {
     const r = byLeg.get(leg)!;
-    if (r.state === "error") return { state: "error", description: r.description ?? `${leg} errored` };
+    if (r.state === "error") return { state: "error", description: errorDescription(expectedLegs, byLeg, r) };
   }
   for (const leg of expectedLegs) {
     const r = byLeg.get(leg)!;
     if (r.state === "failure") return { state: "failure", description: r.description ?? `${leg} failed` };
   }
   return { state: "success" };
+}
+
+/** #1395: an infra error used to hide every real red leg behind it — a run
+ *  read "GateRunnerDO crashed" while two legs had genuinely failed. List the
+ *  real failures alongside the error, in configured leg order, so a red leg is
+ *  never invisible in the verdict description. The error stays the headline
+ *  (the verdict state is still "error"), and with no failure present the
+ *  description is exactly what it was before. */
+function errorDescription(
+  expectedLegs: string[], byLeg: Map<string, LegResult>, error: LegResult,
+): string {
+  const red = expectedLegs.filter((leg) => byLeg.get(leg)!.state === "failure");
+  if (red.length === 0) return error.description ?? `${error.leg} errored`;
+  const list = red.map((leg) => `${leg}: ${byLeg.get(leg)!.description ?? "failed"}`).join(", ");
+  return `${error.description ?? `${error.leg} errored`}; red: ${list}`;
 }
 
 // Call at the deadline: every leg still unreported becomes "error" (timeout or
