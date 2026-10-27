@@ -34,10 +34,10 @@ const INFRA_CAUSE = new RegExp([
   // #1321: a container the platform SIGTERM/SIGKILL'd writes "exited 143/137";
   // the kill is infra (a Workflows internal error), never the code under test.
   "exited 1(43|37)",
-  // #1398: the async path's own two new infra causes -- a persistently broken
-  // DO alarm (alarmTick's consecutive-failure cap) and a poll read/write of R2
+  // #1398: the async path's own new infra cause -- a poll read/write of R2
   // that failed (the Workflow's own give-up path could not reach R2 at all).
-  "DO alarm failed",
+  // ('DO alarm failed' is deliberately NOT here: nothing emits it yet; it
+  // enters only with its emitter, never as a pattern nothing can match.)
   "gate result (read|write) failed",
 ].join("|"));
 

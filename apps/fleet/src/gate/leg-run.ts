@@ -515,14 +515,20 @@ async function dispatchAndPollOnce(
       // read from an already-resolved step) -- never after this step.do call
       // resolves, so a replay never recomputes it from a fresh, wrong clock read.
       if (found !== undefined) {
-        // #1398 review r1 item 6 nit: cap the container-authored description
-        // to MAX_DESCRIPTION_CHARS -- a raw R2 body must never let 32K of
-        // stdout ride into a 1 MiB step result (the container already caps
-        // its own write, but the poll read is the Workflow's own read-back,
-        // so it caps again rather than trust the container).
-        const capped: StoredLegResult = found.description === undefined
-          ? found
-          : { ...found, description: found.description.slice(0, MAX_DESCRIPTION_CHARS) };
+        // #1398 review r1 item 6 nit + r2 item B: cap the container-authored
+        // description to MAX_DESCRIPTION_CHARS AND rebuild the result from
+        // only its own three fields -- a raw R2 body must never let 32K of
+        // stdout/stderr (or commit/limits) ride into a 1 MiB step result, and
+        // a non-string description must not throw the poll callback (the
+        // container already caps its own write, but the poll read is the
+        // Workflow's own read-back, so it rebuilds rather than trust the body).
+        const capped: StoredLegResult = {
+          state: found.state,
+          description: typeof found.description === "string"
+            ? found.description.slice(0, MAX_DESCRIPTION_CHARS)
+            : undefined,
+          summary: typeof found.summary === "string" ? found.summary : undefined,
+        };
         return { kind: "found" as const, result: capped, ms: deps.now() - dispatched.startedAt };
       }
       return { kind: "not-yet" as const, pastDeadline: deps.now() - dispatched.startedAt >= attemptDeadlineMs };
@@ -603,7 +609,7 @@ export async function runLegStepPolling(
       // The step returns the ELAPSED time (not just a boolean) so the try's
       // own deadline cap below reads a step-returned value, never a second
       // bare now() in the surrounding loop (governing invariant).
-      const elapsed = await step.do(`total-budget-${planned.leg}-try${tryNo}`, LEG_STEP_CONFIG, async () =>
+      const elapsed = await step.do(`total-budget-${phaseName}-${planned.leg}-try${tryNo}`, LEG_STEP_CONFIG, async () =>
         now() - legStarted);
       if (elapsed >= totalDeadlineMs) {
         return {

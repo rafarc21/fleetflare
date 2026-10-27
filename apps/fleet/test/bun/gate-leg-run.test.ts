@@ -1322,13 +1322,21 @@ describe("claimOrReadBack (#1398)", () => {
 // try-loop drives retries explicitly, never an implicit step-retry).
 function fakePollingStep() {
   const calls: string[] = [];
+  // #1398 r2 item A: a removed try cap (or a deadline moved out of the poll
+  // step) turns runLegStepPolling's own loop into an unbounded one. Cap the
+  // fake's total call count so such a mutation FAILS a test (this guard
+  // throws) instead of hanging it forever.
+  const guard = () => {
+    if (calls.length > 1000) throw new Error(`fakePollingStep loop guard tripped at ${calls.length} calls`);
+  };
   return {
     calls,
     do: async <T>(name: string, _config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<T>): Promise<T> => {
+      guard();
       calls.push(name);
       return fn({ attempt: 1, step: { name, count: 1 } });
     },
-    sleep: async (name: string) => { calls.push(`sleep:${name}`); },
+    sleep: async (name: string) => { guard(); calls.push(`sleep:${name}`); },
   };
 }
 
@@ -1585,5 +1593,211 @@ describe("runLegStepPolling (#1398)", () => {
     // step.sleep, never deps.sleep) -- so a non-empty sleeps proves the
     // retryJitterMs was honored, not silently ignored.
     expect(sleeps).toContain(2_000); // floor(0.5 * 4000) = 2000, the jitter honored on the retry dispatch
+  });
+
+  it("(A) replay mid-dispatch: the attemptId step is recorded, the dispatch step is not -- the replayed run dispatches the SAME id, exactly once (a bare crypto.randomUUID() outside its step fails)", async () => {
+    const bucket = fakeBucket();
+    let dispatchCalls = 0;
+    const seenAttemptIds: string[] = [];
+    const dispatch = async (planned: PlannedLeg, attemptId: string): Promise<DispatchOutcome> => {
+      dispatchCalls++;
+      seenAttemptIds.push(attemptId);
+      // Park a terminal result so the poll finds it on the first tick and the
+      // run never re-enters the try loop.
+      bucket.store.set(planned.resultKey, JSON.stringify({ state: "success" }));
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    // Cache the attemptId step as already-done from a prior run (the engine
+    // died after minting the id, before dispatch completed), but NOT the
+    // dispatch step. The replayed run re-executes runLegStepPolling's whole
+    // body, reads the CACHED id, and must pass it to the still-uncached
+    // dispatch step.
+    const cache = new Map<string, unknown>();
+    const replayingStep = {
+      do: async <T>(name: string, _config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<T>): Promise<T> => {
+        if (cache.has(name)) return cache.get(name) as T;
+        const result = await fn(undefined);
+        cache.set(name, result);
+        return result;
+      },
+      sleep: async () => {},
+    };
+    const seededAttemptId = "11111111-1111-4111-8111-111111111111";
+    await replayingStep.do("dispatch-start-lint-try1-attempt-id", LEG_STEP_CONFIG, async () => seededAttemptId);
+    await runLegStepPolling(replayingStep, dispatch, PLANNED, { bucket, now: () => 0 });
+    expect(dispatchCalls).toBe(1);
+    // A mutant that mints attemptId with a bare crypto.randomUUID() OUTSIDE its
+    // own step re-mints a FRESH id on this replay -- dispatched id !== the
+    // recorded one, so this equality fails.
+    expect(seenAttemptIds).toEqual([seededAttemptId]);
+  });
+
+  it("(A) the past-deadline check rides INSIDE the poll step: moving it out to a per-tick budget step adds a step and fails this step-count assertion", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    let now = 0;
+    // readResult advances the clock past the per-try attempt deadline on the
+    // FIRST poll tick, so exactly one poll runs per try before the give-up.
+    const readResult = async () => { now += 100_000; return undefined; };
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      // Never write a result: the leg polls, trips its attempt deadline, gives
+      // up, and the give-up's infra description loops it to the next try.
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    await runLegStepPolling(step, dispatch, PLANNED, {
+      bucket, now: () => now, readResult, stepDeadlineMs: 100, totalDeadlineMs: 1_000_000,
+    });
+    // The deadline decision is INSIDE the poll step: per tick there is exactly
+    // one `-poll-` step and NO separate `-budget-` step. A mutant that moves
+    // pastDeadline into its own per-tick budget step would emit a `-budget-`
+    // step name here and fail.
+    expect(step.calls.filter((c) => c.includes("-poll-"))).toHaveLength(3); // one per try, 3 tries
+    expect(step.calls.filter((c) => /-budget-\d+/.test(c))).toHaveLength(0);
+  });
+
+  it("(A) Math.min(perTry, total-remaining) caps a late try: a long per-try deadline cannot outrun the total budget (removing Math.min fails the poll-count)", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    let now = 0;
+    let dispatches = 0;
+    // Each poll tick advances 5000 ms: past the TIGHT total budget (100) but
+    // far short of the huge per-try deadline (10_000).
+    const readResult = async () => { now += 5_000; return undefined; };
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      dispatches++;
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    const result = await runLegStepPolling(step, dispatch, PLANNED, {
+      bucket, now: () => now, readResult, stepDeadlineMs: 10_000, totalDeadlineMs: 100,
+    });
+    expect(result.state).toBe("error");
+    // Real code: try 1's per-try deadline is Math.min(10_000, 100 - 0) = 100,
+    // so the FIRST poll tick (now 5000) already sees pastDeadline and gives up;
+    // try 2's total-budget step (elapsed 5000 >= 100) then ends the run. One
+    // dispatch, one poll. A mutant using the bare per-try deadline (10_000)
+    // would let try 1 poll a SECOND tick (now 10_000) before its deadline
+    // trips -- this count catches that.
+    expect(dispatches).toBe(1);
+    expect(step.calls.filter((c) => c.includes("-poll-"))).toHaveLength(1);
+  });
+
+  it("(A) a throwing dispatch returns an error result, never a rejection out of runLegStepPolling", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    const dispatch = async (): Promise<DispatchOutcome> => {
+      throw new Error("Network connection lost");
+    };
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, totalDeadlineMs: 1_000_000 });
+    // The try/catch in dispatchAndPollOnce converts the throw into an infra
+    // error result (which then loops, is infra, and ends as combined causes).
+    // A removed try/catch would let the throw escape and this test would
+    // reject instead of resolving.
+    expect(result.state).toBe("error");
+    expect(result.description).toContain("Network connection lost");
+  });
+
+  it("(A) a give-up that loses the R2 race returns the container's real result, never its own guess", async () => {
+    const step = fakePollingStep();
+    const containerResult = { state: "success", summary: "42 passed" };
+    let puts = 0;
+    let containerWrote = false;
+    const bucket = {
+      // The give-up's write-once PUT loses the race (returns null): the
+      // container's own result already landed at the key. Model that landing by
+      // making the container's result visible only AFTER this put is attempted
+      // (the poll tick's own read, earlier in the same tick, still saw nothing).
+      put: async () => { puts++; containerWrote = true; return null; },
+      get: async () => (containerWrote ? { json: async () => containerResult } : null),
+    };
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+      ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+    // stepDeadlineMs 0 -> the first poll tick trips the deadline -> the give-up
+    // write LOSES, then claimOrReadBack reads back the container's own result.
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, stepDeadlineMs: 0, totalDeadlineMs: 1_000_000 });
+    expect(puts).toBe(1); // the give-up genuinely attempted its write-once PUT
+    expect(result.state).toBe("success"); // the container's own result, not the guess
+    expect(result.summary).toBe("42 passed");
+  });
+
+  it("(B) a raw R2 body's extra fields never ride into the poll step result: only state, capped description, and summary survive", async () => {
+    const step = fakePollingStep();
+    const stdout = "x".repeat(32_097);
+    const bucket = fakeBucket({
+      [PLANNED.resultKey]: {
+        state: "success", // success: no retry phase, so the poll's own result is the final one
+        description: "x".repeat(3000),
+        summary: "42 passed",
+        stdout,
+        stderr: "y".repeat(32_097),
+        commit: "abc",
+        limits: { cpu: 1 },
+      },
+    });
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+      ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, stepDeadlineMs: 0, totalDeadlineMs: 1_000 });
+    expect(result.state).toBe("success");
+    expect(result.description?.length).toBeLessThanOrEqual(2000);
+    expect(result.summary).toBe("42 passed");
+    expect(result).not.toHaveProperty("stdout");
+    expect(result).not.toHaveProperty("stderr");
+    expect(result).not.toHaveProperty("commit");
+    expect(result).not.toHaveProperty("limits");
+  });
+
+  it("(B) a non-string description in the R2 body does not throw the poll callback", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket({
+      [PLANNED.resultKey]: { state: "success", description: 42 },
+    });
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+      ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, stepDeadlineMs: 0, totalDeadlineMs: 1_000 });
+    // A mutant that calls .slice() on the raw description would throw here and
+    // the poll callback would return read-failed instead of the real result.
+    expect(result.state).toBe("success");
+    expect(result.description).toBeUndefined();
+  });
+
+  it("(C) the total-budget step name carries its phase, so start and retry never collide", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    // First try: a red test (so the retry phase runs); retry: success.
+    let first = true;
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      if (first) {
+        first = false;
+        bucket.store.set(planned.resultKey, JSON.stringify({ state: "failure", description: "1 failed" }));
+      } else {
+        bucket.store.set(planned.resultKey, JSON.stringify({ state: "success" }));
+      }
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, totalDeadlineMs: 1_000_000 });
+    const budgets = step.calls.filter((c) => c.includes("total-budget-"));
+    expect(budgets).toContain("total-budget-start-lint-try1");
+    expect(budgets).toContain("total-budget-retry-lint-try1");
+  });
+
+  it("(D) 'DO alarm failed' is NOT infra (dropped: nothing emits it yet); 'gate result (read|write) failed' IS, and no live description collides with it", () => {
+    expect(isLegInfraDescription("DO alarm failed 3 times")).toBe(false);
+    expect(isLegInfraDescription("gate result read failed: boom")).toBe(true);
+    expect(isLegInfraDescription("gate result write failed: boom")).toBe(true);
+    // The kept pattern 'gate result (read|write) failed' must not collide with
+    // any live-path infra description: none of them contains that phrase, so
+    // keeping the pattern changes no live classification.
+    const live = [
+      "gate capacity: no container instance available",
+      "gate image not bound (images.gate)",
+      "gate container binding missing",
+      "gate container did not start within 180 s",
+      "gate container failed: boom",
+      "gate server unreachable after 90 s: boom",
+      "gate server HTTP 503",
+      "gate container exited mid-leg",
+      "lint exceeded 25 min without a result",
+    ];
+    const kept = /\bgate result (read|write) failed\b/;
+    for (const d of live) expect(kept.test(d)).toBe(false);
   });
 });
