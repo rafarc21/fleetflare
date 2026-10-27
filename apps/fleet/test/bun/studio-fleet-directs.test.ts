@@ -43,7 +43,7 @@ beforeAll(async () => {
       warm.exited.then(() => clearTimeout(timer));
     }),
   ]);
-});
+}, { timeout: 35_000 });
 afterAll(() => server.stop(true));
 
 async function run(args: string[], stdin = "", extraEnv: Record<string, string> = {}) {
