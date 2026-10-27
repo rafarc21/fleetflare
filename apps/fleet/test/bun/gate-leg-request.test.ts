@@ -49,6 +49,29 @@ describe("legRequest", () => {
   });
 });
 
+// #1398: the per-instance leg-mode pin. Default "sync-legacy" keeps every
+// existing caller on the old path; only an explicit async-poll call carries
+// mode + instanceId to the DO.
+describe("legRequest: leg-mode pin (#1398)", () => {
+  it("defaults to sync-legacy: no mode and no instanceId on the body", () => {
+    const body = legRequest("acme", "example", PLANNED, { baseRef: "main", pr: "7", private: false });
+    expect(Object.hasOwn(body, "mode")).toBe(false);
+    expect(Object.hasOwn(body, "instanceId")).toBe(false);
+  });
+
+  it("an explicit async-poll call carries mode AND instanceId", () => {
+    const body = legRequest("acme", "example", PLANNED, { baseRef: "main", pr: "7", private: false }, "async-poll", "run-a");
+    expect(body.mode).toBe("async-poll");
+    expect(body.instanceId).toBe("run-a");
+  });
+
+  it("an explicit sync-legacy call still carries nothing", () => {
+    const body = legRequest("acme", "example", PLANNED, { baseRef: "main", pr: "7", private: false }, "sync-legacy", "run-a");
+    expect(Object.hasOwn(body, "mode")).toBe(false);
+    expect(Object.hasOwn(body, "instanceId")).toBe(false);
+  });
+});
+
 // #1066: the run's image key rides the leg request, and is absent when unset.
 describe("legRequest: image key", () => {
   it("carries the run's image key in the request body", () => {
