@@ -92,8 +92,9 @@ export interface GateContainer {
   /** #1398 (design review r1 item 3): without this, the platform may stop an
    *  idle container between two DO alarm ticks (15-30s apart) -- read as
    *  "container exited mid-leg," a false infra failure on perfectly healthy
-   *  work. Set once, at start, sized past the alarm tick interval. */
-  setInactivityTimeout(ms: number): void;
+   *  work. Set once, at start, sized past the alarm tick interval. Matches
+   *  workers-types Container's own signature (number | bigint, Promise<void>). */
+  setInactivityTimeout(durationMs: number | bigint): Promise<void>;
 }
 
 export interface RunLegDeps {
@@ -153,7 +154,7 @@ export async function prepareAndStartContainer(
       instance: GATE_INSTANCE,
       env: buildLegEnvVars(req, deps.secretValues),
     });
-    if (deps.inactivityTimeoutMs !== undefined) c.setInactivityTimeout(deps.inactivityTimeoutMs);
+    if (deps.inactivityTimeoutMs !== undefined) await c.setInactivityTimeout(deps.inactivityTimeoutMs);
     return { kind: "ok" };
   } catch (err) {
     // The account-at-capacity refusal surfaces here from start(): fail fast,

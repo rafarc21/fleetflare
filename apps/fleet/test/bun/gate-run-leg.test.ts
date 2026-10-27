@@ -97,9 +97,9 @@ class FakeContainer implements GateContainer {
     this.destroyCount += 1;
   }
 
-  setInactivityTimeout(ms: number): void {
+  async setInactivityTimeout(ms: number | bigint): Promise<void> {
     this.calls.push("setInactivityTimeout");
-    this.inactivityTimeoutMs = ms;
+    this.inactivityTimeoutMs = Number(ms);
   }
 }
 
