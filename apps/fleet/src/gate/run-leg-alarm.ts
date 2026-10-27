@@ -260,27 +260,46 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
       return "re-armed";
     }
     await writeTerminalOutcome(deps, current.resultKey, decision.outcome);
+    // r1 item 4: destroy FIRST, guarded -- a throwing destroy must never fall
+    // into the catch below and re-arm (which would rewrite the already-deleted
+    // state and bill 4 extra ticks). The keys are deleted regardless, so a
+    // dead/unreachable container can never resurrect this attempt.
+    try {
+      await deps.container?.destroy();
+    } catch (err) {
+      console.error("gate-runner: alarm tick destroy failed", errorText(err));
+    }
     await deps.storage.deleteSecretValues();
     await deps.storage.deleteState();
-    await deps.container?.destroy();
     return "done";
-  } catch {
+  } catch (err) {
     // #1398 plan review r1 BLOCKER 4: never let an uncaught exception
-    // propagate -- re-arm (tracking the failure count) unless the cap is
-    // reached, in which case give up with a terminal infra result rather
-    // than re-arm (and bill) forever.
+    // propagate silently -- log (never secret values: only the error text),
+    // then re-arm (tracking the failure count) unless the cap is reached, in
+    // which case give up with a terminal infra result rather than re-arm (and
+    // bill) forever.
+    console.error("gate-runner: alarm tick failed", errorText(err));
     const failures = (state.consecutiveFailures ?? 0) + 1;
     if (failures >= MAX_CONSECUTIVE_FAILURES) {
       await writeTerminalOutcome(deps, state.resultKey, {
         kind: "infra", description: `DO alarm failed ${failures} times in a row, giving up`,
       }).catch(() => {});
-      await deps.storage.deleteSecretValues().catch(() => {});
+      // r1 item 3: a failing secret delete MUST rethrow, so CF's own alarm
+      // retry takes over -- swallowing it returns "gave-up" with the
+      // secretValues still stored, stranded forever.
+      await deps.storage.deleteSecretValues();
       await deps.storage.deleteState().catch(() => {});
       await deps.container?.destroy().catch(() => {});
       return "gave-up-after-failures";
     }
-    await deps.storage.putState({ ...state, consecutiveFailures: failures }).catch(() => {});
-    await deps.storage.scheduleAlarm(deps.now() + ALARM_TICK_MS).catch(() => {});
+    // r1 item 3: a failing re-arm MUST rethrow -- swallowing it makes alarm()
+    // return normally (CF never retries) and strands the attempt forever.
+    await deps.storage.putState({ ...state, consecutiveFailures: failures });
+    await deps.storage.scheduleAlarm(deps.now() + ALARM_TICK_MS);
     return "re-armed";
   }
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

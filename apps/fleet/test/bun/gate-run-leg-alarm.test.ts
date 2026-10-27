@@ -209,17 +209,20 @@ function fakeAlarmDeps(opts: { observe?: AlarmTickDeps["observe"]; instanceStatu
     destroyCount: 0,
     scheduledAtMs: [] as number[],
     nowMs: 0,
+    deleteSecretValuesThrows: undefined as Error | undefined,
+    scheduleAlarmThrows: undefined as Error | undefined,
+    destroyThrows: undefined as Error | undefined,
   };
   const deps: AlarmTickDeps = {
     storage: {
       getState: async () => fixture.state,
       getSecretValues: async () => fixture.secretValues,
       putState: async (s) => { fixture.state = s; },
-      deleteSecretValues: async () => { fixture.secretValues = undefined; },
+      deleteSecretValues: async () => { if (fixture.deleteSecretValuesThrows) throw fixture.deleteSecretValuesThrows; fixture.secretValues = undefined; },
       deleteState: async () => { fixture.state = undefined as unknown as RunLegAlarmState; },
-      scheduleAlarm: async (at) => { fixture.scheduledAtMs.push(at); },
+      scheduleAlarm: async (at) => { if (fixture.scheduleAlarmThrows) throw fixture.scheduleAlarmThrows; fixture.scheduledAtMs.push(at); },
     },
-    container: { destroy: async () => { fixture.destroyCount++; } },
+    container: { destroy: async () => { fixture.destroyCount++; if (fixture.destroyThrows) throw fixture.destroyThrows; } },
     bucket: {
       put: async (key, value) => {
         if (fixture.bucketStore.has(key)) return null;
@@ -326,5 +329,51 @@ describe("alarmTick (#1398 plan review r1 BLOCKER 4)", () => {
     const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-pending" }) });
     await alarmTick(deps);
     expect(() => structuredClone(fixture.state)).not.toThrow();
+  });
+
+  it("the superseded path deletes secretValues (r1 item 1: deleting the call passes all 37)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ instanceStatus: async () => "terminated" });
+    fixture.state = { ...fixture.state!, statusCheckCount: 5 };
+    fixture.secretValues = { x: "y" };
+    expect(await alarmTick(deps)).toBe("superseded");
+    expect(fixture.secretValues).toBeUndefined();
+  });
+
+  it("the give-up path deletes secretValues (r1 item 1: deleting the call passes all 37)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("stuck"); } });
+    fixture.state = { ...fixture.state!, consecutiveFailures: 4 };
+    fixture.secretValues = { x: "y" };
+    expect(await alarmTick(deps)).toBe("gave-up-after-failures");
+    expect(fixture.secretValues).toBeUndefined();
+  });
+
+  it("an empty instanceId '' is NEVER superseded, even with a terminal status (r1 item 2)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ instanceStatus: async () => "terminated" });
+    fixture.state = { ...fixture.state!, instanceId: "", statusCheckCount: 5 };
+    expect(await alarmTick(deps)).not.toBe("superseded");
+    expect(fixture.destroyCount).toBe(0);
+  });
+
+  it("a scheduleAlarm throw on the re-arm path rethrows, so CF's own alarm retry takes over (r1 item 3)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("stuck"); } });
+    fixture.scheduleAlarmThrows = new Error("setAlarm rejected");
+    await expect(alarmTick(deps)).rejects.toThrow("setAlarm rejected");
+  });
+
+  it("a deleteSecretValues throw on the give-up path rethrows, so CF's own alarm retry takes over (r1 item 3)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("stuck"); } });
+    fixture.state = { ...fixture.state!, consecutiveFailures: 4 };
+    fixture.deleteSecretValuesThrows = new Error("storage delete rejected");
+    await expect(alarmTick(deps)).rejects.toThrow("storage delete rejected");
+  });
+
+  it("a throwing container.destroy on the normal terminal path does NOT re-arm: keys still deleted (r1 item 4)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-failed" }) });
+    fixture.destroyThrows = new Error("destroy rejected");
+    fixture.secretValues = { x: "y" };
+    expect(await alarmTick(deps)).toBe("done");
+    expect(fixture.secretValues).toBeUndefined();
+    expect(fixture.state).toBeUndefined();
+    expect(fixture.scheduledAtMs.length).toBe(0); // no re-arm scheduled
   });
 });
