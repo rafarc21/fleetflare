@@ -194,10 +194,23 @@ describe("runLegStep", () => {
     expect(result.description).toContain("lint: 3");
   });
 
-  it("only one step per leg, and no waitForEvent: the start step is the whole leg", async () => {
+  it("runLegStep (sync-legacy) still holds: one step per leg, no waitForEvent (unchanged by #1398)", async () => {
     const step = fakeStep();
     await runLegStep(step, async () => reply({ state: "success" }), PLANNED);
     expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint"]);
+    expect("waitForEvent" in step).toBe(false);
+  });
+
+  it("runLegStepPolling (async-poll, #1398) is the OPPOSITE shape on purpose: many short steps, never one long one, still no waitForEvent", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      bucket.store.set(planned.resultKey, JSON.stringify({ state: "success" }));
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0 });
+    expect(step.calls.some((c) => c.startsWith("dispatch-start-lint-try1"))).toBe(true);
+    expect(step.calls.some((c) => c.startsWith("sleep:"))).toBe(true);
     expect("waitForEvent" in step).toBe(false);
   });
 
