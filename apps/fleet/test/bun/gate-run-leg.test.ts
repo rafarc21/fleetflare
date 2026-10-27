@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  runLegInContainer, runLegWithSecrets, legResponse, NO_INSTANCE_DESCRIPTION, type GateContainer, type OutboundBinding,
+  runLegInContainer, runLegWithSecrets, legResponse, prepareAndStartContainer, NO_INSTANCE_DESCRIPTION, type GateContainer, type OutboundBinding,
   type LegOutcome,
 } from "../../src/gate/run-leg";
 import { buildLegEnvVars, type GateLegRequest } from "../../src/gate/leg-env";
@@ -48,6 +48,8 @@ class FakeContainer implements GateContainer {
   staleRunning = false;
   /** Clock time at which the container stops running (it exited mid-leg). */
   exitAtMs = Number.POSITIVE_INFINITY;
+  /** #1398: the last inactivity timeout set, if any. */
+  inactivityTimeoutMs: number | undefined = undefined;
   private startedAt: number | undefined = undefined;
   clock: { now: number } = { now: 0 };
 
@@ -94,6 +96,11 @@ class FakeContainer implements GateContainer {
     this.calls.push("destroy");
     this.destroyCount += 1;
   }
+
+  setInactivityTimeout(ms: number): void {
+    this.calls.push("setInactivityTimeout");
+    this.inactivityTimeoutMs = ms;
+  }
 }
 
 /** A fake clock: sleep advances time, so no real waiting happens. */
@@ -114,6 +121,40 @@ function okResponse(state: string): Response {
 function running(): Response {
   return Response.json({ state: "running" }, { status: 202 });
 }
+
+// #1398 Task 3: the async dispatch path starts a container WITHOUT waiting
+// for readiness in the same call. The shared start sequence (image lookup,
+// survivor destroy, intercept, start) is factored out so both the old
+// synchronous path and the new async path share one implementation.
+describe("prepareAndStartContainer (#1398)", () => {
+  test("starts the container and sets an inactivity timeout, without waiting for readiness", async () => {
+    const c = new FakeContainer();
+    c.runningAfterMs = 5_000; // would need a wait in the OLD synchronous path
+    const result = await prepareAndStartContainer(LEG, { container: c, outbound: OUTBOUND, inactivityTimeoutMs: 60_000 });
+    expect(result).toEqual({ kind: "ok" });
+    expect(c.starts).toHaveLength(1);
+    expect(c.inactivityTimeoutMs).toBe(60_000);
+    expect(c.calls).toContain("intercept");
+    // No "poll"/"port-fetch" calls at all -- this function never talks to the
+    // server, only the container's own start/intercept lifecycle.
+    expect(c.fetchCalls).toBe(0);
+  });
+
+  test("destroys a stale-running survivor before starting fresh (same as runLegInContainer today)", async () => {
+    const c = new FakeContainer();
+    c.staleRunning = true;
+    await prepareAndStartContainer(LEG, { container: c, outbound: OUTBOUND });
+    expect(c.destroyCount).toBe(1);
+    expect(c.starts).toHaveLength(1);
+  });
+
+  test("answers infra when the image is not bound (same mapping as runLegInContainer today)", async () => {
+    const c = new FakeContainer();
+    c.images = undefined;
+    const result = await prepareAndStartContainer(LEG, { container: c, outbound: OUTBOUND });
+    expect(result).toEqual({ kind: "infra", description: "gate image not bound (images.gate)" });
+  });
+});
 
 describe("runLegInContainer: container start", () => {
   test("starts the image bound as images.gate, on the standard-4 instance, with internet and the leg env", async () => {
