@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { MAX_LEG_TIMEOUT_MIN } from "../../src/gate/config";
 import {
-  parseGateRunnerRepos, isGateRunnerRepo, parseGateBlock, gateMapEntry, matchesPathRules,
+  parseGateRunnerRepos, isGateRunnerRepo, isAsyncLegsRepo, parseGateBlock, gateMapEntry, matchesPathRules,
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR, legTimeoutMin,
   GATE_IMAGES, fleetJsonChanged, gateDecision, decideGateRun, headFleetJsonFailure,
   gateMapHasInvalidEntry,
@@ -33,6 +33,14 @@ describe("isGateRunnerRepo", () => {
   });
   it("no match when repo not listed", () => {
     expect(isGateRunnerRepo("acme/example", "other/repo")).toBe(false);
+  });
+});
+
+describe("isAsyncLegsRepo (#1398)", () => {
+  it("matches a comma-separated, case-insensitive allowlist, same shape as isGateRunnerRepo", () => {
+    expect(isAsyncLegsRepo("Acme/Widgets, other/repo", "acme/widgets")).toBe(true);
+    expect(isAsyncLegsRepo("acme/widgets", "acme/other")).toBe(false);
+    expect(isAsyncLegsRepo(undefined, "acme/widgets")).toBe(false);
   });
 });
 

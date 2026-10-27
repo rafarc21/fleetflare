@@ -13,6 +13,18 @@ export function isGateRunnerRepo(raw: string | undefined, workRepoSlug: string):
   return parseGateRunnerRepos(raw).includes(workRepoSlug.toLowerCase());
 }
 
+/** #1398: the GATE_ASYNC_LEGS repo gate, same comma-separated "owner/repo"
+ *  shape as GATE_RUNNER_REPOS (above) -- a fleet-wide, per-repo opt-in into
+ *  the async /run-leg path. Absent/empty means every repo stays on the old
+ *  synchronous path, the default this flag ships with. */
+export function parseAsyncLegsRepos(raw: string | undefined): string[] {
+  return parseGateRunnerRepos(raw);
+}
+
+export function isAsyncLegsRepo(raw: string | undefined, workRepoSlug: string): boolean {
+  return parseAsyncLegsRepos(raw).includes(workRepoSlug.toLowerCase());
+}
+
 /** Vitest shards when the gate block names none (#1015 spike, #715 comment 6188308109). */
 export const DEFAULT_VITEST_SHARDS = 8;
 
