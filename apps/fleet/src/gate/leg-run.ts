@@ -320,8 +320,14 @@ export async function runLegStep(
   if (!isRetryable(first)) return first;
 
   // The retry writes its own log: the first attempt's shard-<leg>.json stays as evidence.
-  const retryTarget: PlannedLeg = { ...planned, resultKey: retryResultKey(planned.resultKey) };
-  const retry = await attempt(`retry-${planned.leg}`, () => retryTarget).catch((err: unknown): LegRunResult => {
+  // #1398: the retry step's OWN internal infra-retries get unique keys too
+  // (review r2 item 2) -- the SAME scheme the start step's targetFor already
+  // uses, composed on top of retryResultKey instead of the bare planned.resultKey.
+  const retryBase = { ...planned, resultKey: retryResultKey(planned.resultKey) };
+  const retry = await attempt(`retry-${planned.leg}`, (tryNo) => tryNo === 1
+    ? retryBase
+    : { ...retryBase, resultKey: infraRetryResultKey(retryBase.resultKey, tryNo) },
+  ).catch((err: unknown): LegRunResult => {
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
   });

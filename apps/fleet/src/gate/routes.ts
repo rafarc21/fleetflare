@@ -287,7 +287,7 @@ async function carryGreenFromLatestRun(
 /** The R2 key a /studio/gate/evidence file path names, or null when it is not
  *  an evidence key (the same shape outbound-handler.ts's EVIDENCE_RE pins for
  *  the container's writes — a serve path outside it is never read). */
-const EVIDENCE_FILE_RE = /^gate\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/runs\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/evidence\/shard-[a-z0-9-]+(?:@head)?(?:-try\d+)?(?:\.retry)?\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+const EVIDENCE_FILE_RE = /^gate\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/runs\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/evidence\/shard-[a-z0-9-]+(?:@head)?(?:\.retry)?(?:-try\d+)?\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 
 /** #1343 LOW: the content type of one evidence file by extension, with
  *  `nosniff` on every serve so a browser never guesses a type the bytes do not

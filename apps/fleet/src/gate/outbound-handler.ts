@@ -46,14 +46,14 @@ const SEG = "[A-Za-z0-9._-]+";
 // `shard-<leg>@head.json` (union leg, #1095), each optionally combined. Shard
 // name chars stay exact: no path separators, no uppercase, no other suffixes.
 // Baselines: `<owner>/<repo>/baselines/<sha>-<lockhash>.tar` (baseline.ts baselineTarballKey).
-const RUN_RESULT_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/shard-[a-z0-9-]+(@head)?(\\.retry)?\\.json$`);
+const RUN_RESULT_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/shard-[a-z0-9-]+(@head)?(\\.retry)?(-try\\d+)?\\.json$`);
 const BASELINE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/baselines/(${SEG})\\.tar$`);
 // #1343: one browser leg's spec evidence, `.../evidence/shard-<leg>/<file>`.
 // The shard name carries the ATTEMPT variant (`.retry`, `-tryN`), so an
 // earlier attempt's files never green a later zero-spec retry and a retry's
 // re-upload never hits the first attempt's write-once key (MED4). Files are
 // safe path-segment names; the traversal guard above still rejects "." / "..".
-const EVIDENCE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/evidence/shard-[a-z0-9-]+(@head)?(-try\\d+)?(\\.retry)?/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$`);
+const EVIDENCE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/evidence/shard-[a-z0-9-]+(@head)?(\\.retry)?(-try\\d+)?/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$`);
 // #1080: one git bundle per run, `gate-bundles/<owner>/<repo>/<runId>/<headSha>.bundle`.
 // Only the bundle leg may write it (bundleWriter); every other leg reads its own run's.
 const BUNDLE_RE = new RegExp(`^gate-bundles/(${SEG})/(${SEG})/(${SEG})/([0-9a-f]{40})\\.bundle$`);

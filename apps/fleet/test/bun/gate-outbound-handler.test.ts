@@ -142,6 +142,22 @@ describe("PUT of a retry or head result key (write-once, leg's own key only)", (
     expect(res.status).toBe(403);
     expect(calls).toEqual([]);
   });
+
+  it("a retry step's own 2nd/3rd internal try (shard-<leg>.retry-try2.json) PUTs write-once (201) (#1398)", async () => {
+    const key = "gate/acme/example/runs/715/run-a/shard-typecheck.retry-try2.json";
+    const { bucket, store } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${key}`, { body: "{}" }), bucket, { resultKey: key, repo: "acme/example" });
+    expect(res.status).toBe(201);
+    expect(store.has(key)).toBe(true);
+  });
+
+  it("a DOUBLE .retry (shard-<leg>.retry.retry-try2.json) is still refused, same as the existing .retry.retry.json case", async () => {
+    const bad = "gate/acme/example/runs/715/run-a/shard-typecheck.retry.retry-try2.json";
+    const { bucket, calls } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${bad}`, { body: "{}" }), bucket, { resultKey: bad, repo: "acme/example" });
+    expect(res.status).toBe(403);
+    expect(calls).toEqual([]);
+  });
 });
 
 describe("handleGateOutbound", () => {
