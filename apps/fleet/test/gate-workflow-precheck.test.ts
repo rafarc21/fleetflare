@@ -987,3 +987,116 @@ const RUN_FLEET_JSON_VITEST_TIMEOUT = JSON.stringify({
       await instance.dispose();
     }
   }, 60_000);
+
+// #1398 Task 11: the per-instance leg-mode pin. GATE_ASYNC_LEGS ships empty,
+// so the default is "sync-legacy" -- runLegStep, and the /run-leg body carries
+// NO mode/instanceId. Only a repo explicitly listed opts into runLegStepPolling.
+describe("GateWorkflow.run() leg-mode pin (#1398)", () => {
+  // The async path's GATE_RUNNER answers 202 (container started, no result
+  // yet); runLegStepPolling then finds the terminal result by polling R2. The
+  // result must be pre-seeded under the run's own result key (the fake runner
+  // never starts a real DO that would write it).
+  const ASYNC_RUNNER = {
+    idFromName: (name: string) => name as unknown as DurableObjectId,
+    get: (_id: unknown) => ({
+      fetch: async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(init.body as string) as { leg?: string };
+        recorded.push({ method: init.method ?? "POST", url: _url, body });
+        return new Response(null, { status: 202 });
+      },
+    }),
+  };
+
+  async function runLegMode(
+    instanceId: string, flags: string | undefined, asyncPath: boolean,
+  ): Promise<{ out: { state: string }; calls: Recorded[] }> {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = (asyncPath ? ASYNC_RUNNER : greenRunner) as unknown as Env["GATE_RUNNER"];
+    if (flags === undefined) delete e.GATE_ASYNC_LEGS; else e.GATE_ASYNC_LEGS = flags;
+    // The async path's poll finds a success result parked under the merge-tree
+    // leg's own result key (runId is the instance id, per planFor).
+    if (asyncPath) {
+      await e.STUDIO_ARCHIVE.put(
+        `gate/acme/example/runs/${PR}/${instanceId}/shard-merge-tree.json`,
+        JSON.stringify({ state: "success" }),
+      );
+    }
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, instanceId);
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: instanceId, params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+      const out = await instance.getOutput() as { state: string };
+      return { out, calls: [...recorded] };
+    } finally {
+      await instance.dispose();
+    }
+  }
+
+  it("flag empty -> sync path: /run-leg body has no mode and no instanceId", async () => {
+    const { out, calls } = await runLegMode("gate-leg-mode-sync", undefined, false);
+    expect(out.state).toBe("success");
+    const runLeg = calls.find((r) => /\/run-leg/.test(r.url));
+    expect(runLeg).toBeDefined();
+    const body = runLeg!.body as Record<string, unknown>;
+    expect(Object.hasOwn(body, "mode")).toBe(false);
+    expect(Object.hasOwn(body, "instanceId")).toBe(false);
+  }, 60_000);
+
+  it("flag lists THIS repo -> async path: /run-leg body carries mode + instanceId", async () => {
+    const { out, calls } = await runLegMode("gate-leg-mode-async", REPO, true);
+    expect(out.state).toBe("success");
+    const runLeg = calls.find((r) => /\/run-leg/.test(r.url));
+    expect(runLeg).toBeDefined();
+    expect((runLeg!.body as { mode?: string }).mode).toBe("async-poll");
+    expect((runLeg!.body as { instanceId?: string }).instanceId).toBe("gate-leg-mode-async");
+  }, 60_000);
+
+  it("flag lists ANOTHER repo -> sync path: /run-leg body has no mode", async () => {
+    const { out, calls } = await runLegMode("gate-leg-mode-other", "acme/other", false);
+    expect(out.state).toBe("success");
+    const runLeg = calls.find((r) => /\/run-leg/.test(r.url));
+    expect(runLeg).toBeDefined();
+    expect(Object.hasOwn((runLeg!.body as Record<string, unknown>), "mode")).toBe(false);
+  }, 60_000);
+
+  it("the 'leg-mode' step is named exactly that and resolves the sync-legacy pin before the first dispatch", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    commitMessage = "clean";
+    fleetJson = RUN_FLEET_JSON;
+    titleFlipsOnRecheck = false;
+    e.GATE_RUNNER = greenRunner as unknown as Env["GATE_RUNNER"];
+    delete e.GATE_ASYNC_LEGS;
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-leg-mode-step-name");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-leg-mode-step-name", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      // The leg-mode step's result is the pinned mode string -- waitForStepResult
+      // resolves it by name, proving the step exists and is named exactly so.
+      const mode = await instance.waitForStepResult({ name: "leg-mode" });
+      expect(mode).toBe("sync-legacy");
+
+      // Order: the pin had to resolve BEFORE the dispatch, because the dispatch
+      // body itself proves the sync path (no mode field) -- a pin read after the
+      // dispatch could not have steered the path it already took.
+      const runLeg = recorded.find((r) => /\/run-leg/.test(r.url));
+      expect(runLeg).toBeDefined();
+      expect(Object.hasOwn((runLeg!.body as Record<string, unknown>), "mode")).toBe(false);
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+});
