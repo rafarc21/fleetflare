@@ -1384,7 +1384,7 @@ describe("runLegStepPolling (#1398)", () => {
     expect(result.description).toBe("exited 137"); // raw, never R2_PREFIX-marked
   });
 
-  it("attemptId is minted inside the dispatch step: a replayed step (same name) never calls dispatch a second time (governing invariant, BLOCKER 1)", async () => {
+  it("attemptId is minted in its OWN step before the dispatch step: a replayed step (same name) never calls dispatch a second time (governing invariant, BLOCKER 1)", async () => {
     const bucket = fakeBucket();
     let dispatchCalls = 0;
     const seenAttemptIds: string[] = [];
@@ -1537,5 +1537,53 @@ describe("runLegStepPolling (#1398)", () => {
     const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, stepDeadlineMs: 0, totalDeadlineMs: 10_000 });
     expect(result.state).toBe("error");
     expect(result.description).toContain("gate result write failed");
+  });
+
+  it("a fast-infra leg is capped at 3 tries per phase, never re-dispatches forever (review r1 item 2)", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    let tries = 0;
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      tries++;
+      bucket.store.set(planned.resultKey, JSON.stringify({ state: "error", description: "gate capacity: no container instance available" }));
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, totalDeadlineMs: 1_000_000 });
+    expect(result.state).toBe("error");
+    // 'gate capacity' is NOT retryable (not a red test / install / clone), so
+    // only the start phase runs -- and it is capped at 3 tries.
+    expect(tries).toBe(3);
+  });
+
+  it("'clone failed ... HTTP 500' is NOT infra-looped (isRetryable's one retry owns it); 'Network connection lost' IS (review r1 item 5)", () => {
+    expect(isLegInfraDescription("clone failed: RPC failed; HTTP 500 curl 22")).toBe(false);
+    expect(isLegInfraDescription("Network connection lost")).toBe(true);
+    expect(isLegInfraDescription("Execution timed out")).toBe(true);
+    expect(isLegInfraDescription("lint: HTTP 503")).toBe(true);
+  });
+
+  it("the retry phase's first dispatch honors retryJitterMs inside its dispatch callback (review r1 item 4)", async () => {
+    const step = fakePollingStep();
+    const bucket = fakeBucket();
+    const sleeps: number[] = [];
+    // First attempt fails as a red test so the retry phase actually runs.
+    let first = true;
+    const dispatchRedFirst = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+      if (first) {
+        first = false;
+        bucket.store.set(planned.resultKey, JSON.stringify({ state: "failure", description: "1 failed" }));
+        return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+      }
+      bucket.store.set(planned.resultKey, JSON.stringify({ state: "success" }));
+      return { kind: "accepted", resultKey: planned.resultKey, startedAt: 0 };
+    };
+    const result = await runLegStepPolling(step, dispatchRedFirst, PLANNED, {
+      bucket, now: () => 0, retryJitterMs: 4_000, random: () => 0.5, sleep: async (ms) => { sleeps.push(ms); }, totalDeadlineMs: 1_000_000,
+    });
+    expect(result.state).toBe("success");
+    // deps.sleep is ONLY called for the retry-phase jitter (the poll loop uses
+    // step.sleep, never deps.sleep) -- so a non-empty sleeps proves the
+    // retryJitterMs was honored, not silently ignored.
+    expect(sleeps).toContain(2_000); // floor(0.5 * 4000) = 2000, the jitter honored on the retry dispatch
   });
 });
