@@ -7,10 +7,18 @@
 // ticks instead of one long poll loop (the design doc's own table, "The DO
 // becomes a tiny state machine").
 import { NO_INSTANCE_DESCRIPTION, type LegOutcome } from "./run-leg";
+import { claimOrReadBack, R2_PREFIX, type ClaimableBucket } from "./leg-run";
+import { redactLegResultFields } from "./secrets-redact";
 import { legTimeoutMin } from "./config";
 
 const READY_TIMEOUT_MS = 180_000;
 const PORT_RETRY_BUDGET_MS = 90_000;
+/** #1398 review r1 item 7: a status check costs an extra RPC, so it runs
+ *  every FEW ticks, not every one. */
+const STATUS_CHECK_EVERY_N_TICKS = 5;
+/** #1398 plan review r1 BLOCKER 4: stays comfortably under Cloudflare's own
+ *  6-failed-retries alarm-dormancy cliff (spec "Container lifetime"). */
+const MAX_CONSECUTIVE_FAILURES = 5;
 /** #1398 review r1 item 10: 15-30s per tick -- a DO wake is a real billed
  *  event, unlike the old in-request sleep, so coarser than the container's
  *  own 5s POLL_MS is the right choice. */
@@ -65,9 +73,14 @@ export type PollSignal =
  *  for anything but its RETURN value (AlarmTickDecision, below). */
 type LegOutcomeResult = Extract<LegOutcome, { kind: "result" }>["result"];
 
+/** A tick's terminal conclusion: only "result" or "infra" -- nextAlarmStep
+ *  never concludes with an "accepted" (that variant is the async START's own
+ *  reply, never an alarm decision). */
+export type TerminalOutcome = Extract<LegOutcome, { kind: "result" } | { kind: "infra" }>;
+
 export type AlarmTickDecision =
   | { kind: "re-arm"; afterMs: number; state: RunLegAlarmState }
-  | { kind: "terminal"; outcome: LegOutcome };
+  | { kind: "terminal"; outcome: TerminalOutcome };
 
 /** One tick of the DO's own state machine: given where this attempt is
  *  (`state`), the current time, and ONE freshly-observed signal, decide
@@ -177,4 +190,97 @@ export function isLiveStatus(status: string): boolean {
  */
 export function asyncAttemptDeadlineMs(timeoutMin: number | undefined): number {
   return READY_TIMEOUT_MS + PORT_RETRY_BUDGET_MS + legTimeoutMin(timeoutMin) * 60_000 + ASYNC_GRACE_MS;
+}
+
+/** #1398: every piece of real I/O one alarm tick needs, injected -- do.ts's
+ *  real alarm() is the ONLY caller built from real bindings; every test above
+ *  builds this from plain fakes. */
+export interface AlarmTickDeps {
+  storage: {
+    getState(): Promise<RunLegAlarmState | undefined>;
+    getSecretValues(): Promise<Record<string, string> | undefined>;
+    putState(state: RunLegAlarmState): Promise<void>;
+    deleteSecretValues(): Promise<void>;
+    deleteState(): Promise<void>;
+    scheduleAlarm(atMs: number): Promise<void>;
+  };
+  container: { destroy(): Promise<void> } | undefined;
+  bucket: ClaimableBucket;
+  instanceStatus: (instanceId: string) => Promise<string>;
+  /** do.ts's own real observeOnce -- the ONE piece of this whole flow that
+   *  actually talks to the container over HTTP. Everything else here is
+   *  pure orchestration. */
+  observe: (state: RunLegAlarmState) => Promise<PollSignal>;
+  now: () => number;
+}
+
+async function writeTerminalOutcome(deps: AlarmTickDeps, resultKey: string, outcome: TerminalOutcome): Promise<void> {
+  const secretValues = (await deps.storage.getSecretValues()) ?? {};
+  const values = Object.values(secretValues).filter((v) => v !== "");
+  // #1398 plan review r1 BLOCKER 2: EVERY self-made outcome is written --
+  // a "result" (a live-observed body, OR the leg's own deadline red) gets
+  // the SAME redaction + claimOrReadBack treatment an "infra" guess does.
+  // Only the "infra" branch's description gets the R2_PREFIX marker added
+  // HERE -- a "result" outcome's own description (e.g. the deadline's
+  // "<leg> exceeded N min...") is already exactly the wording #1390
+  // established and is never prefixed.
+  const toWrite = outcome.kind === "infra"
+    ? { state: "error" as const, description: `${R2_PREFIX}${outcome.description}` }
+    : outcome.result;
+  const redacted = redactLegResultFields(toWrite, values);
+  await claimOrReadBack(deps.bucket, resultKey, redacted);
+}
+
+/**
+ * #1398 plan review r1 BLOCKER 4: one alarm tick's FULL orchestration,
+ * fully injected, fully bun-testable -- do.ts's real alarm() does nothing but
+ * build real deps and call this.
+ */
+export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed" | "superseded" | "gave-up-after-failures"> {
+  const state = await deps.storage.getState();
+  if (state === undefined) return "done"; // a stray/duplicate tick after this attempt already finished
+  try {
+    let current = state;
+    if (current.statusCheckCount >= STATUS_CHECK_EVERY_N_TICKS && current.instanceId !== "") {
+      const status = await deps.instanceStatus(current.instanceId);
+      if (!isLiveStatus(status)) {
+        await deps.container?.destroy();
+        await deps.storage.deleteSecretValues();
+        await deps.storage.deleteState();
+        return "superseded";
+      }
+      current = { ...current, statusCheckCount: 0 };
+    }
+    const signal = await deps.observe(current);
+    const decision = nextAlarmStep(current, deps.now(), signal);
+    if (decision.kind === "re-arm") {
+      const nextState: RunLegAlarmState = { ...decision.state, statusCheckCount: current.statusCheckCount + 1, consecutiveFailures: 0 };
+      await deps.storage.putState(nextState);
+      await deps.storage.scheduleAlarm(deps.now() + decision.afterMs);
+      return "re-armed";
+    }
+    await writeTerminalOutcome(deps, current.resultKey, decision.outcome);
+    await deps.storage.deleteSecretValues();
+    await deps.storage.deleteState();
+    await deps.container?.destroy();
+    return "done";
+  } catch {
+    // #1398 plan review r1 BLOCKER 4: never let an uncaught exception
+    // propagate -- re-arm (tracking the failure count) unless the cap is
+    // reached, in which case give up with a terminal infra result rather
+    // than re-arm (and bill) forever.
+    const failures = (state.consecutiveFailures ?? 0) + 1;
+    if (failures >= MAX_CONSECUTIVE_FAILURES) {
+      await writeTerminalOutcome(deps, state.resultKey, {
+        kind: "infra", description: `DO alarm failed ${failures} times in a row, giving up`,
+      }).catch(() => {});
+      await deps.storage.deleteSecretValues().catch(() => {});
+      await deps.storage.deleteState().catch(() => {});
+      await deps.container?.destroy().catch(() => {});
+      return "gave-up-after-failures";
+    }
+    await deps.storage.putState({ ...state, consecutiveFailures: failures }).catch(() => {});
+    await deps.storage.scheduleAlarm(deps.now() + ALARM_TICK_MS).catch(() => {});
+    return "re-armed";
+  }
 }

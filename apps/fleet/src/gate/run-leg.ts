@@ -213,8 +213,11 @@ export async function startLegContainer(
  *  caller, imports cloudflare:workers and can never load under bun test). */
 export interface AsyncLegStorage {
   getAlarmState(): Promise<RunLegAlarmState | undefined>;
-  putAlarmState(state: RunLegAlarmState): Promise<void>;
-  putSecretValues(secretValues: Record<string, string>): Promise<void>;
+  /** One atomic write of BOTH this attempt's alarmState and its secretValues
+   *  (do.ts's single storage.put({alarmState, secretValues})) -- r2 leftover
+   *  (a): two separate awaits could crash between them and leave one
+   *  persisted without the other, never a coherent attempt. */
+  putAttempt(attempt: { alarmState: RunLegAlarmState; secretValues: Record<string, string> }): Promise<void>;
   setAlarm(at: number): Promise<void>;
 }
 
@@ -230,14 +233,21 @@ export interface AsyncLegStorage {
  *      path, lifted here because this path does not go through it).
  *   2. An existing alarmState answers accepted WITHOUT starting a second
  *      container (a retried /run-leg whose first response was lost).
- *   3. On a real start, setAlarm runs BEFORE putAlarmState: a class with no
+ *   3. On a real start, setAlarm runs BEFORE putAttempt: a class with no
  *      alarm() handler throws on setAlarm, and the persisted alarmState must
- *      only exist when an alarm was actually armed (review r1 BLOCKER 1). */
+ *      only exist when an alarm was actually armed (review r1 BLOCKER 1).
+ *   4. If setAlarm or putAttempt throws AFTER the container started (r2
+ *      leftover b), the just-started container is destroyed via `destroy`
+ *      rather than left to idle to its inactivity timeout with no armed
+ *      alarm to ever poll it — and the throw is caught into an infra outcome,
+ *      never re-thrown into do.ts's blockConcurrencyWhile (a throw there
+ *      resets the DO, stranding the container). */
 export async function startAsyncLeg(
   body: GateLegRequest,
   secretValues: Record<string, string>,
   storage: AsyncLegStorage,
   start: () => Promise<{ kind: "started" } | { kind: "infra"; description: string }>,
+  destroy: () => Promise<void>,
   now: () => number = Date.now,
 ): Promise<LegOutcome> {
   const unresolved = firstUnresolvedSecret(body.secretNames ?? [], secretValues);
@@ -248,13 +258,25 @@ export async function startAsyncLeg(
   if (existing !== undefined) return { kind: "accepted" };
   const started = await start();
   if (started.kind === "infra") return started;
+  const startMs = now();
   const state: RunLegAlarmState = {
     phase: "waiting-for-ready", resultKey: body.resultKey, leg: body.leg, timeoutMin: body.timeoutMin,
-    readyStartedAt: now(), instanceId: body.instanceId ?? "", statusCheckCount: 0, consecutiveFailures: 0,
+    readyStartedAt: startMs, instanceId: body.instanceId ?? "", statusCheckCount: 0, consecutiveFailures: 0,
   };
-  await storage.setAlarm(now() + ALARM_TICK_MS);
-  await storage.putAlarmState(state);
-  await storage.putSecretValues(secretValues); // a later task reads+deletes this at the terminal tick
+  try {
+    await storage.setAlarm(startMs + ALARM_TICK_MS);
+    await storage.putAttempt({ alarmState: state, secretValues });
+  } catch (err) {
+    // r2 leftover b: the container is running but no alarm was armed to poll
+    // it -- destroy it, then answer infra so the step retries on a fresh
+    // attempt. Never re-throw (blockConcurrencyWhile would reset the DO).
+    try {
+      await destroy();
+    } catch (destroyErr) {
+      console.error("gate-runner: destroy after arm failure failed", errorText(destroyErr));
+    }
+    return { kind: "infra", description: `gate container failed: ${errorText(err)}` };
+  }
   return { kind: "accepted" };
 }
 

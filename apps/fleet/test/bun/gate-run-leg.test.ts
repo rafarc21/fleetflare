@@ -217,11 +217,21 @@ describe("startAsyncLeg (#1398 async branch)", () => {
     alarmState: RunLegAlarmState | undefined = undefined;
     secretValues: Record<string, string> | undefined = undefined;
     alarmAt: number | undefined = undefined;
+    putAttemptThrows: Error | undefined = undefined;
+    setAlarmThrows: Error | undefined = undefined;
     writes: string[] = [];
     async getAlarmState(): Promise<RunLegAlarmState | undefined> { return this.alarmState; }
-    async putAlarmState(state: RunLegAlarmState): Promise<void> { this.alarmState = state; this.writes.push("alarmState"); }
-    async putSecretValues(secretValues: Record<string, string>): Promise<void> { this.secretValues = secretValues; this.writes.push("secretValues"); }
-    async setAlarm(at: number): Promise<void> { this.alarmAt = at; this.writes.push("setAlarm"); }
+    async putAttempt(attempt: { alarmState: RunLegAlarmState; secretValues: Record<string, string> }): Promise<void> {
+      if (this.putAttemptThrows) throw this.putAttemptThrows;
+      this.alarmState = attempt.alarmState;
+      this.secretValues = attempt.secretValues;
+      this.writes.push("putAttempt");
+    }
+    async setAlarm(at: number): Promise<void> {
+      if (this.setAlarmThrows) throw this.setAlarmThrows;
+      this.alarmAt = at;
+      this.writes.push("setAlarm");
+    }
   }
 
   test("an existing alarmState answers accepted WITHOUT starting a second container", async () => {
@@ -231,7 +241,7 @@ describe("startAsyncLeg (#1398 async branch)", () => {
       readyStartedAt: 1000, instanceId: "attempt-1", statusCheckCount: 0, consecutiveFailures: 0,
     };
     let started = false;
-    const decision = await startAsyncLeg(ASYNC_LEG, {}, storage, async () => { started = true; return { kind: "started" as const }; });
+    const decision = await startAsyncLeg(ASYNC_LEG, {}, storage, async () => { started = true; return { kind: "started" as const }; }, async () => {});
     expect(decision).toEqual({ kind: "accepted" });
     expect(started).toBe(false);
     expect(storage.writes).toEqual([]); // nothing persisted, no alarm armed
@@ -239,21 +249,22 @@ describe("startAsyncLeg (#1398 async branch)", () => {
 
   test("a start that fails answers infra with nothing written and no alarm", async () => {
     const storage = new FakeStorage();
-    const decision = await startAsyncLeg(ASYNC_LEG, {}, storage, async () => ({ kind: "infra" as const, description: "gate container failed: boom" }));
+    const decision = await startAsyncLeg(ASYNC_LEG, {}, storage, async () => ({ kind: "infra" as const, description: "gate container failed: boom" }), async () => {});
     expect(decision).toEqual({ kind: "infra", description: "gate container failed: boom" });
     expect(storage.alarmState).toBeUndefined();
     expect(storage.secretValues).toBeUndefined();
     expect(storage.alarmAt).toBeUndefined();
   });
 
-  test("a successful start persists setAlarm BEFORE alarmState, then secretValues", async () => {
+  test("a successful start persists setAlarm BEFORE one atomic putAttempt, then secretValues", async () => {
     const storage = new FakeStorage();
-    const decision = await startAsyncLeg(ASYNC_LEG, { "staging-login": "sup3r-s3cret" }, storage, async () => ({ kind: "started" as const }), () => 5000);
+    const decision = await startAsyncLeg(ASYNC_LEG, { "staging-login": "sup3r-s3cret" }, storage, async () => ({ kind: "started" as const }), async () => {}, () => 5000);
     expect(decision).toEqual({ kind: "accepted" });
-    // setAlarm MUST precede putAlarmState: a class with no alarm() handler
+    // setAlarm MUST precede putAttempt: a class with no alarm() handler
     // throws on setAlarm, and a persisted alarmState must never exist while
-    // no alarm is actually armed (review r1 BLOCKER 1).
-    expect(storage.writes).toEqual(["setAlarm", "alarmState", "secretValues"]);
+    // no alarm is actually armed (review r1 BLOCKER 1). putAttempt is ONE
+    // write, not two (r2 leftover a).
+    expect(storage.writes).toEqual(["setAlarm", "putAttempt"]);
     expect(storage.alarmAt).toBe(5000 + 20_000);
     expect(storage.alarmState?.phase).toBe("waiting-for-ready");
     expect(storage.alarmState?.instanceId).toBe("attempt-1");
@@ -264,10 +275,32 @@ describe("startAsyncLeg (#1398 async branch)", () => {
     const storage = new FakeStorage();
     let started = false;
     const withSecret = { ...ASYNC_LEG, secretNames: ["staging-login"] };
-    const decision = await startAsyncLeg(withSecret, {}, storage, async () => { started = true; return { kind: "started" as const }; });
+    const decision = await startAsyncLeg(withSecret, {}, storage, async () => { started = true; return { kind: "started" as const }; }, async () => {});
     expect(decision).toEqual({ kind: "result", result: { state: "error", description: 'DID-NOT-RUN: secret "staging-login" unresolved' } });
     expect(started).toBe(false);
     expect(storage.writes).toEqual([]);
+  });
+
+  test("a setAlarm throw after a successful start destroys the container and answers infra, never re-throws (r2 leftover b)", async () => {
+    const storage = new FakeStorage();
+    storage.setAlarmThrows = new Error("no alarm() handler");
+    let destroyed = 0;
+    const decision = await startAsyncLeg(ASYNC_LEG, {}, storage, async () => ({ kind: "started" as const }), async () => { destroyed += 1; }, () => 5000);
+    expect(decision).toEqual({ kind: "infra", description: "gate container failed: no alarm() handler" });
+    expect(destroyed).toBe(1); // the just-started container is never stranded
+    expect(storage.alarmState).toBeUndefined();
+    expect(storage.secretValues).toBeUndefined();
+  });
+
+  test("a putAttempt throw after a successful start destroys the container and answers infra, never re-throws (r2 leftover b)", async () => {
+    const storage = new FakeStorage();
+    storage.putAttemptThrows = new Error("storage down");
+    let destroyed = 0;
+    const decision = await startAsyncLeg(ASYNC_LEG, {}, storage, async () => ({ kind: "started" as const }), async () => { destroyed += 1; }, () => 5000);
+    expect(decision).toEqual({ kind: "infra", description: "gate container failed: storage down" });
+    expect(destroyed).toBe(1);
+    expect(storage.alarmAt).toBe(5000 + 20_000); // setAlarm already ran before putAttempt threw
+    expect(storage.alarmState).toBeUndefined();
   });
 });
 

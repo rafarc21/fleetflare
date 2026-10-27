@@ -19,8 +19,9 @@ import { DurableObject, exports as workerExports } from "cloudflare:workers";
 import type { Env } from "../env";
 import { mintPrivateCloneToken } from "../github/auth";
 import { gateOutboundProps, legGitToken, type GateLegRequest } from "./leg-env";
-import { legResponse, runLegInContainer, runLegWithSecrets, startAsyncLeg, startLegContainer, type LegResult } from "./run-leg";
-import { legResultReader } from "./leg-run";
+import { GATE_CONTAINER_PORT, legResponse, runLegInContainer, runLegWithSecrets, startAsyncLeg, startLegContainer, type LegResult } from "./run-leg";
+import { legResultReader, type ClaimableBucket } from "./leg-run";
+import { alarmTick, type PollSignal, type RunLegAlarmState } from "./run-leg-alarm";
 import { legTimeoutMin } from "./config";
 import { resolveGrantedSecrets } from "./secrets-registry";
 import { mintRunToken } from "./secrets-ai-token";
@@ -99,14 +100,15 @@ export class GateRunnerDO extends DurableObject<Env> {
         return legResponse(await this.ctx.blockConcurrencyWhile(async () =>
           startAsyncLeg(body, secretValues, {
             getAlarmState: async () => this.ctx.storage.get("alarmState"),
-            putAlarmState: async (state) => { await this.ctx.storage.put("alarmState", state); },
-            putSecretValues: async (secretValues) => { await this.ctx.storage.put("secretValues", secretValues); },
+            // r2 leftover (a): ONE atomic storage.put for both keys, never two.
+            putAttempt: async (attempt) => { await this.ctx.storage.put({ alarmState: attempt.alarmState, secretValues: attempt.secretValues }); },
             setAlarm: async (at) => { await this.ctx.storage.setAlarm(at); },
           }, () =>
             startLegContainer(body, {
               container: this.ctx.container, outbound, secretValues,
               inactivityTimeoutMs: INACTIVITY_TIMEOUT_MIN * 60_000,
-            }))));
+            }),
+          async () => { await this.ctx.container?.destroy(); })));
       }
       // #1346 security review r2: both "an unresolved granted secret never
       // runs" and "redact the leg's own result before it leaves this DO"
@@ -124,11 +126,53 @@ export class GateRunnerDO extends DurableObject<Env> {
     return new Response("not found", { status: 404 });
   }
 
-  /** #1398: the alarm() stub this PR adds so setAlarm() has a handler to
-   *  target (workerd refuses setAlarm on a class with no alarm() handler).
-   *  Task 9 replaces this body with the real tick loop; until it lands, an
-   *  alarm that fires does nothing, and this PR must not merge ahead of it. */
+  /** #1398: the real tick loop, a thin wrapper around alarmTick
+   *  (run-leg-alarm.ts) -- every piece of real I/O is built here and
+   *  injected, so the orchestration itself is bun-tested and cannot be
+   *  silently reverted in this cloudflare:workers-only file. */
   async alarm(): Promise<void> {
-    // Intentionally empty: Task 9 owns the real tick.
+    await alarmTick({
+      storage: {
+        getState: () => this.ctx.storage.get<RunLegAlarmState>("alarmState").then((v) => v ?? undefined),
+        getSecretValues: () => this.ctx.storage.get<Record<string, string>>("secretValues").then((v) => v ?? undefined),
+        putState: (s) => this.ctx.storage.put("alarmState", s),
+        deleteSecretValues: () => this.ctx.storage.delete("secretValues").then(() => undefined),
+        deleteState: () => this.ctx.storage.delete("alarmState").then(() => undefined),
+        scheduleAlarm: (at) => this.ctx.storage.setAlarm(at),
+      },
+      container: this.ctx.container,
+      bucket: this.env.STUDIO_ARCHIVE as unknown as ClaimableBucket,
+      instanceStatus: async (instanceId) => (await this.env.GATE_WORKFLOW.get(instanceId)).status().then((s) => s.status),
+      observe: (state) => this.observeOnce(state),
+      now: () => Date.now(),
+    });
+  }
+
+  /** #1398: the ONE piece of real I/O an alarm tick needs -- talk to the
+   *  container once, per `state.phase`, and translate the raw response into
+   *  a PollSignal. Kept separate from alarmTick/nextAlarmStep so those stay
+   *  pure and bun-testable; this method is the thin, untested-by-bun glue,
+   *  kept as small as possible on purpose. */
+  private async observeOnce(state: RunLegAlarmState): Promise<PollSignal> {
+    const c = this.ctx.container;
+    if (c === undefined) return { kind: "poll-failed" };
+    if (state.phase === "waiting-for-ready" && !c.running) return { kind: "not-running" };
+    const port = c.getTcpPort(GATE_CONTAINER_PORT);
+    try {
+      if (state.phase !== "polling") {
+        const res = await port.fetch("http://container/run", { method: "POST", signal: AbortSignal.timeout(15_000) });
+        if (res.status === 200) return { kind: "run-result", result: (await res.json()) as LegResult };
+        if (res.status === 202) return { kind: "run-accepted" };
+        return { kind: "running-not-listening" };
+      }
+      const res = await port.fetch("http://container/result", { signal: AbortSignal.timeout(15_000) });
+      if (res.status === 200) return { kind: "poll-result", result: (await res.json()) as LegResult };
+      return { kind: "poll-pending" };
+    } catch (err) {
+      if (/no container instance|container instance that can be provided|no instances? available/i.test(err instanceof Error ? err.message : String(err))) {
+        return { kind: "no-instance" };
+      }
+      return state.phase === "polling" && !c.running ? { kind: "poll-failed" } : { kind: "running-not-listening" };
+    }
   }
 }
