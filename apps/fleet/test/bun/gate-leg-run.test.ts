@@ -1779,8 +1779,10 @@ describe("runLegStepPolling (#1398)", () => {
     expect(budgets).toContain("total-budget-retry-lint-try1");
   });
 
-  it("(D) 'DO alarm failed' is NOT infra (dropped: nothing emits it yet); 'gate result (read|write) failed' IS, and no live description collides with it", () => {
-    expect(isLegInfraDescription("DO alarm failed 3 times")).toBe(false);
+  it("(D) 'DO alarm failed N times in a row, giving up' IS infra (emitted by run-leg-alarm.ts alarmTick); 'gate result (read|write) failed' IS, and no live description collides with the latter", () => {
+    // #1425: run-leg-alarm.ts:285 now EMITS this as the alarm's own give-up --
+    // dropping the pattern would make an alarm give-up read as a real red.
+    expect(isLegInfraDescription("DO alarm failed 5 times in a row, giving up")).toBe(true);
     expect(isLegInfraDescription("gate result read failed: boom")).toBe(true);
     expect(isLegInfraDescription("gate result write failed: boom")).toBe(true);
     // The kept pattern 'gate result (read|write) failed' must not collide with
