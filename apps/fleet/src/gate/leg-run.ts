@@ -367,6 +367,40 @@ export interface ResultBucket {
   get(key: string): Promise<{ json(): Promise<unknown> } | null>;
 }
 
+/** #1398: the minimal R2-like shape claimOrReadBack needs -- the real
+ *  R2Bucket satisfies it (put returns R2Object | null; get returns
+ *  R2ObjectBody | null, both narrowed to their .json() half here, same as
+ *  ResultBucket above). */
+export interface ClaimableBucket {
+  put(key: string, value: string, opts: { onlyIf: { etagDoesNotMatch: "*" } }): Promise<unknown | null>;
+  get(key: string): Promise<{ json(): Promise<unknown> } | null>;
+}
+
+/**
+ * #1398 (spec "Who writes what" / "Deadline (#1390) and the write-once
+ * race"): attempts a write-once PUT of `value`; if it wins (nothing else
+ * exists at `key`), returns `value` unchanged. If it loses (a conflict --
+ * `put` resolves null under the real R2 `onlyIf` contract, same as
+ * outbound-handler.ts's own `putBundle`), reads `key` back and returns
+ * WHATEVER IS ACTUALLY THERE -- never the caller's own guessed value. Both
+ * the DO's own "I couldn't reach the container" guess and the Workflow's
+ * own give-up-after-its-deadline write use this SAME function: neither one
+ * ever assumes its own conclusion is correct once a conflict proves
+ * something else already claimed the key.
+ */
+export async function claimOrReadBack(
+  bucket: ClaimableBucket, key: string, value: StoredLegResult,
+): Promise<StoredLegResult> {
+  const stored = await bucket.put(key, JSON.stringify(value), { onlyIf: { etagDoesNotMatch: "*" } });
+  if (stored !== null) return value;
+  const existing = await bucket.get(key);
+  if (existing === null) return value; // the winner's write vanished (extremely unlikely); fall back to our own guess
+  const body = await existing.json() as Partial<StoredLegResult> | null;
+  return body !== null && typeof body === "object" && typeof body.state === "string"
+    ? (body as StoredLegResult)
+    : value;
+}
+
 /** The states the container writes to R2. A body with any other state is not a leg result. */
 const STORED_STATES: ReadonlySet<string> = new Set(["success", "failure", "error"]);
 
