@@ -34,6 +34,12 @@ const INFRA_CAUSE = new RegExp([
   // #1321: a container the platform SIGTERM/SIGKILL'd writes "exited 143/137";
   // the kill is infra (a Workflows internal error), never the code under test.
   "exited 1(43|37)",
+  // #1398: the async path's own two new infra causes -- a poll read/write of
+  // R2 that failed (the Workflow's own give-up path could not reach R2 at
+  // all), and a DO alarm that gave up (run-leg-alarm.ts alarmTick's
+  // consecutive-failure cap).
+  "DO alarm failed",
+  "gate result (read|write) failed",
 ].join("|"));
 
 /** An error leg is infra-class by its cause. A leg whose first attempt was red
@@ -41,7 +47,16 @@ const INFRA_CAUSE = new RegExp([
  *  even when its retry then lost the connection. */
 export function isInfraLegFailure(result: LegResult & { redFirst?: boolean }): boolean {
   if (result.state !== "error" || result.redFirst === true) return false;
-  return INFRA_CAUSE.test(result.description ?? "");
+  return isInfraCause(result.description ?? "");
+}
+
+/** #1398 review r1 item 5: the bare cause check, split out of
+ *  isInfraLegFailure so runLegStepPolling's own try-decision can reuse the
+ *  EXACT INFRA_CAUSE taxonomy instead of a hand-rolled, too-broad regex
+ *  (whose /HTTP \d+/ wrongly infra-looped 'clone failed ... HTTP 500' and
+ *  whose missing lines wrongly treated 'Network connection lost' as final). */
+export function isInfraCause(description: string): boolean {
+  return INFRA_CAUSE.test(description);
 }
 
 /** The id prefix of an infra rerun's instance: rerun-<the first run's id> (#1119). */

@@ -9,7 +9,9 @@ import type { GateLegRequest } from "./leg-env";
 import { normalizeLegResult, type LegRunMeta, type PlannedLeg } from "./fanout";
 import { legTimeoutMin } from "./config";
 import type { LegResult } from "./verdict";
+import { asyncAttemptDeadlineMs } from "./run-leg-alarm";
 import { grantedSecretNames, trustedForSecrets } from "./secrets-scope";
+import { isInfraCause } from "./infra-rerun";
 import type { GateSecretsAllowlist } from "./secrets-config";
 
 /** A leg's result as the step returns it: the DO's LegResult plus wall time and summary. */
@@ -158,8 +160,12 @@ export function withStepDeadline<T>(work: Promise<T>, ms: number, message: strin
   return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
 
-/** A leg's result as the container wrote it to R2: state and description, no leg name. */
-export type StoredLegResult = { state: LegResult["state"]; description?: string };
+/** A leg's result as the container wrote it to R2: state, description, and
+ *  (#1398) summary -- widened so runLegStepPolling's own normal read
+ *  (legResultReader, never storedLegResult) can surface it, matching what
+ *  the container already writes and what runLegStep's own live-response
+ *  path already preserves today. */
+export type StoredLegResult = { state: LegResult["state"]; description?: string; summary?: string };
 
 /** #1321: a leg killed by SIGTERM (143) or SIGKILL (137) writes "exited 143/137".
  *  A LIVE gate-server that returns this means the test proc itself died — an OOM
@@ -372,6 +378,304 @@ export function isRetryable(first: LegRunResult): boolean {
   // matches on its underlying cause (#1126).
   const stripped = description.startsWith(R2_PREFIX) ? description.slice(R2_PREFIX.length) : description;
   return stripped.startsWith("install failed") || stripped.startsWith("clone failed:");
+}
+
+/** #1398: the slice of Workflows' WorkflowStep the async/polling path needs
+ *  -- do(), generic (Task 1), plus sleep(), which real Workflows exposes as
+ *  step.sleep(name, duration) and which does NOT count toward the instance's
+ *  step budget (spec "Cost"). */
+export interface PollingLegStepRunner {
+  do<T>(name: string, config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<T>): Promise<T>;
+  sleep(name: string, durationSeconds: number): Promise<void>;
+}
+
+/** #1398: a dispatch call's own outcome -- a TERMINAL LegResult reached
+ *  before any container ever started (DID-NOT-RUN, PAT-only refusal, spec
+ *  "Secrets across alarm ticks"), or an ACCEPTED container start, carrying
+ *  the governing-invariant-safe values (startedAt minted inside the
+ *  dispatch step itself) later poll steps need. */
+export type DispatchOutcome =
+  | { kind: "terminal"; result: LegRunResult }
+  | { kind: "accepted"; resultKey: string; startedAt: number };
+
+const POLL_INTERVAL_SECONDS_DEFAULT = 60;
+
+/** #1398 review r1 item 2: the explicit try-loop's own cap -- the SAME count
+ *  runLegStep reaches through LEG_STEP_CONFIG.retries (limit 2 = 3 total
+ *  attempts: 1 initial + 2 infra retries). Without this, a fast-infra leg
+ *  ('gate capacity') re-dispatched forever, each try bounded only by its own
+ *  per-try deadline, cycling ~35 min past the total budget. */
+const MAX_TRIES_PER_PHASE = LEG_STEP_CONFIG.retries.limit + 1;
+
+/** #1398: ONE try's own dispatch + poll loop. Returns the container-authored
+ *  (or DO-written infra) LegResult once found, or the Workflow's own
+ *  give-up result once this try's own deadline elapses with nothing in R2.
+ *  Every governing-invariant-sensitive value (attemptId, each deadline
+ *  check) is minted/computed strictly INSIDE its own step.do callback --
+ *  this function's own surrounding `for` loop only ever reads already-
+ *  resolved step results (plan review r1 BLOCKER 1). */
+async function dispatchAndPollOnce(
+  step: PollingLegStepRunner,
+  dispatch: (planned: PlannedLeg, attemptId: string) => Promise<DispatchOutcome>,
+  target: PlannedLeg,
+  stepName: string,
+  attemptDeadlineMs: number,
+  deps: {
+    bucket: ClaimableBucket;
+    now: () => number;
+    pollIntervalSeconds: number;
+    readResult: (key: string) => Promise<StoredLegResult | undefined>;
+    touch?: () => Promise<void>;
+    sleep: (ms: number) => Promise<void>;
+    random: () => number;
+    /** #1398 review r1 item 4: the retry-phase dispatch-start jitter (#1321),
+     *  already applied at the call site (0 for the start phase and for
+     *  tryNo > 1); this just waits it out inside the dispatch callback. */
+    jitterMs: number;
+  },
+): Promise<LegRunResult> {
+  // #1398 plan review r2 item 3: minted in its OWN step, BEFORE the dispatch
+  // step. A Workflows-level AUTOMATIC step-retry (the dispatch step's own
+  // callback THROWING, LEG_STEP_CONFIG.retries kicking in) genuinely
+  // RE-INVOKES that callback -- unlike a deploy-triggered REPLAY, which
+  // never re-runs an already-succeeded step's callback at all. If attemptId
+  // were minted INSIDE the dispatch step (as an earlier draft had it), each
+  // automatic retry would mint a DIFFERENT id, so retry 2 would target a
+  // BRAND-NEW, empty DO -- never the one retry 1 already started a container
+  // on -- and Task 8's own idempotency guard (an already-populated
+  // alarmState) could never fire, because there would never BE one. Minting
+  // it here, in a step that (once it succeeds once, which a bare
+  // crypto.randomUUID() call always does) is simply REPLAYED like any other
+  // already-resolved step, means every retry of the dispatch step reads the
+  // SAME id.
+  const attemptId = await step.do(`${stepName}-attempt-id`, LEG_STEP_CONFIG, async () => crypto.randomUUID());
+  let dispatched: DispatchOutcome;
+  try {
+    dispatched = await step.do(stepName, LEG_STEP_CONFIG, async () => {
+      // #1398 plan review r2 item 2: touch() ALSO fires here (every NEW
+      // dispatch, i.e. every try, not gated to tryNo===1 anymore -- see the
+      // poll step below for why tryNo-gating alone was wrong).
+      await deps.touch?.();
+      // #1398 review r1 item 4: the retry-phase jitter desyncs red legs'
+      // dispatches so they do not clone in lockstep and burst the shared
+      // GitHub token with 429s (#1321). Waited INSIDE the dispatch callback
+      // so a Workflows replay returns the recorded result, never re-waits.
+      if (deps.jitterMs > 0) {
+        await deps.sleep(Math.floor(deps.random() * deps.jitterMs));
+      }
+      return dispatch(target, attemptId);
+    });
+  } catch (err) {
+    // #1398 plan review r1 BLOCKER 3 (the other half -- workflow.ts's own
+    // dispatch closure THROWS on a non-2xx; this is where that throw must
+    // land once the step's own LEG_STEP_CONFIG.retries are exhausted, never
+    // an unhandled rejection out of runLegStepPolling entirely). Same shape
+    // runLegStep's own catch block already returns for this case.
+    const message = err instanceof Error ? err.message : String(err);
+    return { leg: target.leg, state: "error", description: message.slice(0, MAX_INFRA_CAUSE_CHARS) };
+  }
+  if (dispatched.kind === "terminal") return dispatched.result;
+  for (let i = 1; ; i++) {
+    await step.sleep(`${stepName}-sleep-${i}`, deps.pollIntervalSeconds);
+    // #1398 review r1 item 3: the past-deadline check rides INSIDE this same
+    // poll step, not a separate budget step per tick -- a 25-min leg polling
+    // every 60s already costs ~25 poll steps; a second budget step per tick
+    // would double that toward the 10,000-step paid plan. Both the read and
+    // the elapsed check now compute their wall-clock values strictly inside
+    // this ONE callback (governing invariant), so folding them is safe.
+    const tick = await step.do(`${stepName}-poll-${i}`, LEG_STEP_CONFIG, async () => {
+      // #1398 plan review r2 item 2: touch() fires on EVERY poll tick, not
+      // just the dispatch step -- a leg whose first two tries each spend
+      // their own ~25-30 min polling before failing infra would otherwise go
+      // ~50-60 min between progress stamps (only stamped at each NEW try's
+      // dispatch), past GATE_STALL_MS (37 min) -- a FALSE stall on a run
+      // that is, in fact, still actively polling every 60s the whole time.
+      await deps.touch?.();
+      // #1398 review r1 item 1: the raw R2 read can hang (a stuck get) or
+      // throw (R2 down). withStepDeadline bounds the hang; a throw becomes a
+      // read-failed signal below -- NEVER a rejection out of this callback,
+      // so runLegStepPolling keeps runLegStep's never-throws contract.
+      let found: StoredLegResult | undefined;
+      let readError: string | undefined;
+      try {
+        found = await withStepDeadline(
+          deps.readResult(dispatched.resultKey), R2_READ_TIMEOUT_MS, "result read timed out",
+        );
+      } catch (err) {
+        readError = err instanceof Error ? err.message : String(err);
+      }
+      if (readError !== undefined) {
+        return { kind: "read-failed" as const, description: `gate result read failed: ${readError.slice(0, MAX_INFRA_CAUSE_CHARS)}` };
+      }
+      // #1398 review r2 item 1: the RAW reader, never storedLegResult --
+      // a container-authored record (including its own live "exited
+      // 143/137") is trusted exactly as-is, summary intact, never reclassified.
+      // #1398 plan review r2 "ms outside step" note: ms is computed HERE,
+      // strictly inside this callback (deps.now() read live, dispatched.startedAt
+      // read from an already-resolved step) -- never after this step.do call
+      // resolves, so a replay never recomputes it from a fresh, wrong clock read.
+      if (found !== undefined) {
+        // #1398 review r1 item 6 nit + r2 item B: cap the container-authored
+        // description to MAX_DESCRIPTION_CHARS AND rebuild the result from
+        // only its own three fields -- a raw R2 body must never let 32K of
+        // stdout/stderr (or commit/limits) ride into a 1 MiB step result, and
+        // a non-string description must not throw the poll callback (the
+        // container already caps its own write, but the poll read is the
+        // Workflow's own read-back, so it rebuilds rather than trust the body).
+        const capped: StoredLegResult = {
+          state: found.state,
+          description: typeof found.description === "string"
+            ? found.description.slice(0, MAX_DESCRIPTION_CHARS)
+            : undefined,
+          summary: typeof found.summary === "string" ? found.summary : undefined,
+        };
+        return { kind: "found" as const, result: capped, ms: deps.now() - dispatched.startedAt };
+      }
+      return { kind: "not-yet" as const, pastDeadline: deps.now() - dispatched.startedAt >= attemptDeadlineMs };
+    });
+    if (tick.kind === "found") return { leg: target.leg, ...tick.result, ms: tick.ms };
+    if (tick.kind === "read-failed") return { leg: target.leg, state: "error", description: tick.description };
+    if (tick.pastDeadline) {
+      // #1398 plan review r1 BLOCKER 2: R2_PREFIX-marked, same convention
+      // every DO-authored write uses -- this is the Workflow's OWN guess,
+      // and claimOrReadBack ensures a real, later-arriving result still wins.
+      // ms computed inside this SAME callback, same reasoning as the poll tick above.
+      // #1398 review r1 item 1: the write can hang or throw too (R2 down) --
+      // bounded and caught, never a rejection out of runLegStepPolling.
+      const claimed = await step.do(`${stepName}-giveup`, LEG_STEP_CONFIG, async () => {
+        let result: StoredLegResult;
+        try {
+          result = await withStepDeadline(
+            claimOrReadBack(deps.bucket, dispatched.resultKey, {
+              state: "error", description: `${R2_PREFIX}${target.leg}: no progress past its deadline`,
+            }),
+            R2_READ_TIMEOUT_MS,
+            "result write timed out",
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          result = { state: "error", description: `gate result write failed: ${message.slice(0, MAX_INFRA_CAUSE_CHARS)}` };
+        }
+        return { leg: target.leg, ...result, ms: deps.now() - dispatched.startedAt };
+      });
+      return claimed;
+    }
+  }
+}
+
+/**
+ * #1398 (spec "New architecture" / "Retries"): the explicit try-loop that
+ * replaces Workflows' own automatic step-retry (runLegStep's `ctx.attempt`
+ * usage) with real application code -- dispatch is now a SHORT step that
+ * only throws for a synchronous protocol failure; everything after the
+ * container starts is a terminal R2 outcome this loop discovers by polling,
+ * never a thrown exception. Coexists with runLegStep: nothing calls this
+ * yet (a later task wires it in behind the per-instance mode pin).
+ */
+export async function runLegStepPolling(
+  step: PollingLegStepRunner,
+  dispatch: (planned: PlannedLeg, attemptId: string) => Promise<DispatchOutcome>,
+  planned: PlannedLeg,
+  deps: LegRunDeps & { bucket: ClaimableBucket; pollIntervalSeconds?: number },
+): Promise<LegRunResult> {
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const random = deps.random ?? Math.random;
+  // #1398 review r1 item 4: the retry-phase jitter cap (#1321), applied only
+  // to the retry phase's FIRST try's dispatch -- same shape runLegStep's own
+  // jitter already uses (name.startsWith("retry-") && tryNo === 1).
+  const retryJitterMs = deps.retryJitterMs ?? 0;
+  // #1398 plan review r1 BLOCKER 2: the per-attempt deadline this loop uses
+  // is asyncAttemptDeadlineMs (run-leg-alarm.ts), NOT the sync path's own
+  // legStepDeadlineMs -- it must stay strictly longer than the DO's own
+  // worst-case total time, or the Workflow's give-up write could race a
+  // still-legitimately-working DO under normal operation, not just a true fault.
+  const attemptDeadlineMs = deps.stepDeadlineMs ?? asyncAttemptDeadlineMs(planned.timeoutMin);
+  const totalDeadlineMs = deps.totalDeadlineMs ?? totalLegWallMs(planned.timeoutMin);
+  const pollIntervalSeconds = deps.pollIntervalSeconds ?? POLL_INTERVAL_SECONDS_DEFAULT;
+  // #1398 review r2 item 1: the normal read is the RAW reader (never
+  // storedLegResult), so a container-authored record is trusted as-is; the
+  // bucket IS the source (deps.readResult only overrides it for tests that
+  // need a reader with side effects).
+  const readResult = deps.readResult ?? legResultReader(deps.bucket);
+  const legStarted = await step.do(`leg-started-${planned.leg}`, LEG_STEP_CONFIG, async () => now());
+
+  const runPhase = async (phaseName: "start" | "retry", targetFor: (tryNo: number) => PlannedLeg): Promise<LegRunResult> => {
+    const causes: string[] = [];
+    for (let tryNo = 1; tryNo <= MAX_TRIES_PER_PHASE; tryNo++) {
+      // #1398 plan review r1 BLOCKER 1: the TOTAL-deadline check is its own
+      // step too -- tryNo itself is a safe, replay-stable loop counter (not
+      // a wall-clock value), but the now()-vs-totalDeadlineMs comparison is not.
+      // The step returns the ELAPSED time (not just a boolean) so the try's
+      // own deadline cap below reads a step-returned value, never a second
+      // bare now() in the surrounding loop (governing invariant).
+      const elapsed = await step.do(`total-budget-${phaseName}-${planned.leg}-try${tryNo}`, LEG_STEP_CONFIG, async () =>
+        now() - legStarted);
+      if (elapsed >= totalDeadlineMs) {
+        return {
+          leg: planned.leg, state: "error",
+          description: causes.length > 0 ? combineCauses(causes) : `${planned.leg} exceeded ${legTimeoutMin(planned.timeoutMin)} min without a result`,
+        };
+      }
+      const target = targetFor(tryNo);
+      // #1398 Leftovers item 6: phase-qualified step names -- dispatch-start-
+      // and dispatch-retry- never collide on the same tryNo.
+      // #1398 plan review r2 item 2: touch is passed for EVERY tryNo now,
+      // not gated to tryNo===1 -- dispatchAndPollOnce itself calls it on
+      // every dispatch AND every poll tick, so progress is stamped
+      // throughout a long multi-try leg, never just once at the very start.
+      // #1398 review r1 item 2: this try's own attempt deadline is capped by
+      // the REMAINING total budget (min(attemptDeadlineMs, total - elapsed)),
+      // exactly runLegStep's own Math.min(deadlineMs, totalDeadlineMs - elapsed)
+      // -- so a try that starts late can never hold the whole leg past its cap.
+      const remainingTotalMs = totalDeadlineMs - elapsed;
+      const tryDeadlineMs = Math.max(0, Math.min(attemptDeadlineMs, remainingTotalMs));
+      const jitterMs = phaseName === "retry" && tryNo === 1 ? retryJitterMs : 0;
+      const result = await dispatchAndPollOnce(
+        step, dispatch, target, `dispatch-${phaseName}-${planned.leg}-try${tryNo}`, tryDeadlineMs,
+        { bucket: deps.bucket, now, pollIntervalSeconds, readResult, touch: deps.touch, sleep, random, jitterMs },
+      );
+      const isInfra = result.state === "error" && isLegInfraDescription(result.description);
+      if (!isInfra) return result;
+      causes.push(result.description ?? "infra");
+    }
+    // All MAX_TRIES_PER_PHASE tries were infra and the total deadline never
+    // tripped: end with the combined causes, never an unbounded loop.
+    return {
+      leg: planned.leg, state: "error",
+      description: combineCauses(causes),
+    };
+  };
+
+  const first = await runPhase("start", (tryNo) => tryNo === 1 ? planned : { ...planned, resultKey: infraRetryResultKey(planned.resultKey, tryNo) });
+  if (!isRetryable({ ...first, leg: planned.leg })) return { ...first, leg: planned.leg };
+
+  const retryBase = { ...planned, resultKey: retryResultKey(planned.resultKey) };
+  const retry = await runPhase("retry", (tryNo) => tryNo === 1 ? retryBase : { ...retryBase, resultKey: infraRetryResultKey(retryBase.resultKey, tryNo) });
+
+  const ms = sumMs(first.ms, retry.ms);
+  const firstCause = (first.description ?? "failure").slice(0, MAX_FIRST_DESCRIPTION_CHARS);
+  if (retry.state === "success") {
+    return { leg: planned.leg, state: "success", description: `flaky: passed on retry; first: ${firstCause}`, ms, summary: retry.summary };
+  }
+  if (first.state === "failure") return { ...retry, leg: planned.leg, ms, redFirst: true };
+  const retryCause = retry.description ?? retry.state;
+  return { ...retry, leg: planned.leg, ms, description: `${retryCause}; first: ${firstCause}`.slice(0, MAX_DESCRIPTION_CHARS) };
+}
+
+/** #1398: the infra-cause check this loop's own try-decision needs --
+ *  SEPARATE from isInfraLegFailure (infra-rerun.ts), which ALSO excludes a
+ *  redFirst result; this loop decides "retry this ONE phase's attempt,"
+ *  infra-rerun.ts later decides "auto-rerun the WHOLE run." Reuses the SAME
+ *  INFRA_CAUSE taxonomy (isInfraCause) rather than a hand-rolled regex, so
+ *  the two can never drift apart: 'clone failed ... HTTP 500' is NOT infra
+ *  here (its one isRetryable retry handles it), while a caught dispatch
+ *  error like 'Network connection lost' IS (review r1 item 5). Exported for
+ *  the engine tests (Task 12) to exercise directly.
+ */
+export function isLegInfraDescription(description: string | undefined): boolean {
+  if (description === undefined) return false;
+  return isInfraCause(description);
 }
 
 /** The minimal R2 bucket shape the reader needs: the real R2Bucket satisfies it. */
