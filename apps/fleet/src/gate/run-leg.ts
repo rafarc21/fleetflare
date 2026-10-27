@@ -14,6 +14,11 @@ import { DEFAULT_GATE_IMAGE, GATE_IMAGES, legTimeoutMin } from "./config";
 import { storedLegResult, type StoredLegResult } from "./leg-run";
 import { firstUnresolvedSecret } from "./secrets-registry";
 import { redactLegResultFields } from "./secrets-redact";
+// #1398: the alarm tick interval and attempt state, for the async branch's
+// own start helper (startAsyncLeg, below). This closes the run-leg <->
+// run-leg-alarm cycle, but only through function BODIES (neither module
+// reads the other's values at top level), so the cycle is safe at runtime.
+import { ALARM_TICK_MS, type RunLegAlarmState } from "./run-leg-alarm";
 
 export const GATE_CONTAINER_PORT = 8080;
 export const GATE_INSTANCE = "standard-4";
@@ -51,19 +56,26 @@ export const NO_INSTANCE_DESCRIPTION = "gate capacity: no container instance ava
 // (secrets-redact.ts's redactLegResultFields) see and scrub it.
 export type LegResult = { state: "success" | "failure" | "error"; description?: string; summary?: string };
 
-/** A leg run ends in exactly one of two things: a real gate-server body
- *  (success/failure/error — data, 200) or an infra failure (container never
+/** A leg run ends in exactly one of three things: a real gate-server body
+ *  (success/failure/error — data, 200), an infra failure (container never
  *  started, server unreachable, exited mid-leg — 503 so the Workflow step
- *  retries). A leg past its own deadline is a real red body, never infra (#1387). */
+ *  retries), or an accept (the async path started the container and answered
+ *  before any result existed — 202, the leg result arrives later in R2). A
+ *  leg past its own deadline is a real red body, never infra (#1387). */
 export type LegOutcome =
   | { kind: "result"; result: LegResult }
-  | { kind: "infra"; description: string };
+  | { kind: "infra"; description: string }
+  | { kind: "accepted" };
 
 /** The /run-leg reply: infra failures answer 503 so leg-run.ts's non-2xx
- *  check retries them twice; a real leg body is 200 and carried as data. */
+ *  check retries them twice; a real leg body is 200 and carried as data; an
+ *  accept (async path) is 202 with an empty body — the result arrives in R2. */
 export function legResponse(outcome: LegOutcome): Response {
   if (outcome.kind === "infra") {
     return new Response(JSON.stringify({ error: outcome.description }), { status: 503 });
+  }
+  if (outcome.kind === "accepted") {
+    return new Response(null, { status: 202 });
   }
   return Response.json(outcome.result);
 }
@@ -128,6 +140,7 @@ export async function prepareAndStartContainer(
   deps: { container: GateContainer; outbound: OutboundBinding; secretValues?: Record<string, string>; inactivityTimeoutMs?: number },
 ): Promise<{ kind: "ok" } | { kind: "infra"; description: string }> {
   const c = deps.container;
+  let started = false;
   try {
     // The image is looked up by key, never taken from repo text: the key must be
     // allowlisted AND an own property of the operator's images map, so an
@@ -150,9 +163,21 @@ export async function prepareAndStartContainer(
       instance: GATE_INSTANCE,
       env: buildLegEnvVars(req, deps.secretValues),
     });
+    started = true;
     if (deps.inactivityTimeoutMs !== undefined) await c.setInactivityTimeout(deps.inactivityTimeoutMs);
     return { kind: "ok" };
   } catch (err) {
+    // #1398 review r1 item 6: start() already ran and a rejecting
+    // setInactivityTimeout left the container running with NO inactivity
+    // timeout — an orphan that bills while nobody polls it. Destroy it on
+    // this path, so the caller's 503 never strands a live container.
+    if (started) {
+      try {
+        await c.destroy();
+      } catch (destroyErr) {
+        console.error("gate-runner: destroy after start failure failed", errorText(destroyErr));
+      }
+    }
     // The account-at-capacity refusal surfaces here from start(): fail fast,
     // never retry the host in place.
     if (isNoInstance(err)) return { kind: "infra", description: NO_INSTANCE_DESCRIPTION };
@@ -181,6 +206,87 @@ export async function startLegContainer(
     container: c, outbound: deps.outbound, secretValues: deps.secretValues, inactivityTimeoutMs: deps.inactivityTimeoutMs,
   });
   return prepared.kind === "infra" ? prepared : { kind: "started" };
+}
+
+/** #1398: the slice of the Durable Object's storage the async branch touches.
+ *  Injected so startAsyncLeg is pure and bun-testable (do.ts, the only real
+ *  caller, imports cloudflare:workers and can never load under bun test). */
+export interface AsyncLegStorage {
+  getAlarmState(): Promise<RunLegAlarmState | undefined>;
+  putAlarmState(state: RunLegAlarmState): Promise<void>;
+  putSecretValues(secretValues: Record<string, string>): Promise<void>;
+  setAlarm(at: number): Promise<void>;
+}
+
+export type AsyncLegDecision =
+  | { kind: "accepted" }
+  | { kind: "infra"; description: string }
+  // The DID-NOT-RUN refusal is a RESULT (200 red), never infra (503 retry):
+  // a broken secret is deterministic and never retries away, exactly like the
+  // sync path's own runLegWithSecrets refusal.
+  | { kind: "result"; result: LegResult };
+
+/** #1398: the async path's whole start decision, pure. One function so the
+ *  order it enforces — the unresolved-secret refusal, the idempotency check,
+ *  and, on a real start, setAlarm BEFORE the alarmState write — cannot be
+ *  reverted in do.ts (which no test can load) without failing a bun test.
+ *
+ *  Ordering is load-bearing:
+ *   1. An unresolved granted secret is a DID-NOT-RUN refusal BEFORE any
+ *      container starts (same guard runLegWithSecrets owns for the sync
+ *      path, lifted here because this path does not go through it).
+ *   2. An existing alarmState answers accepted WITHOUT starting a second
+ *      container (a retried /run-leg whose first response was lost).
+ *   3. On a real start, setAlarm runs BEFORE putAlarmState: a class with no
+ *      alarm() handler throws on setAlarm, and the persisted alarmState must
+ *      only exist when an alarm was actually armed (review r1 BLOCKER 1). */
+export async function startAsyncLeg(
+  body: GateLegRequest,
+  secretValues: Record<string, string>,
+  storage: AsyncLegStorage,
+  start: () => Promise<{ kind: "started" } | { kind: "infra"; description: string }>,
+  now: () => number = Date.now,
+): Promise<AsyncLegDecision> {
+  const unresolved = firstUnresolvedSecret(body.secretNames ?? [], secretValues);
+  if (unresolved !== null) {
+    return { kind: "result", result: { state: "error", description: `DID-NOT-RUN: secret "${unresolved}" unresolved` } };
+  }
+  const existing = await storage.getAlarmState();
+  if (existing !== undefined) return { kind: "accepted" };
+  const started = await start();
+  if (started.kind === "infra") return started;
+  const state: RunLegAlarmState = {
+    phase: "waiting-for-ready", resultKey: body.resultKey, leg: body.leg, timeoutMin: body.timeoutMin,
+    readyStartedAt: now(), instanceId: body.instanceId ?? "", statusCheckCount: 0, consecutiveFailures: 0,
+  };
+  await storage.setAlarm(now() + ALARM_TICK_MS);
+  await storage.putAlarmState(state);
+  await storage.putSecretValues(secretValues); // a later task reads+deletes this at the terminal tick
+  return { kind: "accepted" };
+}
+
+/** #1398: the /run-leg mode dispatch, pure. Absent (or any non-async) mode
+ *  keeps every existing caller on the sync path; "async-poll" runs the async
+ *  branch. The two refusals answered inside the async branch are the same
+ *  class of refusal the sync path answers through runLegWithSecrets — both
+ *  branches refuse an unresolved secret before any container starts. */
+export async function runLegDispatch(
+  body: GateLegRequest,
+  secretValues: Record<string, string>,
+  runSync: () => Promise<LegOutcome>,
+  runAsync: () => Promise<AsyncLegDecision>,
+): Promise<LegOutcome> {
+  if (body.mode === "async-poll") {
+    const decision = await runAsync();
+    if (decision.kind === "infra") {
+      return { kind: "infra", description: decision.description };
+    }
+    if (decision.kind === "result") {
+      return { kind: "result", result: decision.result };
+    }
+    return { kind: "accepted" };
+  }
+  return runSync();
 }
 
 export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): Promise<LegOutcome> {

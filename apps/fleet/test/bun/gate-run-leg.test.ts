@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
-  runLegInContainer, runLegWithSecrets, legResponse, prepareAndStartContainer, startLegContainer, NO_INSTANCE_DESCRIPTION, type GateContainer, type OutboundBinding,
+  runLegInContainer, runLegWithSecrets, legResponse, prepareAndStartContainer, startLegContainer, startAsyncLeg, runLegDispatch,
+  NO_INSTANCE_DESCRIPTION, type AsyncLegStorage, type GateContainer, type OutboundBinding,
   type LegOutcome,
 } from "../../src/gate/run-leg";
 import { buildLegEnvVars, type GateLegRequest } from "../../src/gate/leg-env";
+import type { RunLegAlarmState } from "../../src/gate/run-leg-alarm";
 
 // #715: GateRunnerDO drives the native ctx.container API. These tests run the
 // pure runLegInContainer with a fake container that records every call. A
@@ -181,6 +183,117 @@ describe("startLegContainer (#1398)", () => {
     c.images = undefined;
     const result = await startLegContainer(LEG, { container: c, outbound: OUTBOUND });
     expect(result).toEqual({ kind: "infra", description: "gate image not bound (images.gate)" });
+  });
+});
+
+// #1398 review r1 item 6: a rejecting setInactivityTimeout AFTER start() left
+// the container running orphaned. The shared prepareAndStartContainer must
+// destroy it on that path, so the caller's 503 never strands a live container.
+describe("prepareAndStartContainer: destroy after a post-start failure", () => {
+  test("a rejecting setInactivityTimeout destroys the just-started container", async () => {
+    const c = new FakeContainer();
+    c.setInactivityTimeoutThrows = new Error("inactivity timeout rejected");
+    const result = await prepareAndStartContainer(LEG, { container: c, outbound: OUTBOUND, inactivityTimeoutMs: 60_000 });
+    expect(result).toEqual({ kind: "infra", description: "gate container failed: inactivity timeout rejected" });
+    expect(c.destroyCount).toBe(1); // the orphan is destroyed, never stranded
+  });
+
+  test("an image-not-bound refusal never destroys (start never ran)", async () => {
+    const c = new FakeContainer();
+    c.images = undefined;
+    const result = await prepareAndStartContainer(LEG, { container: c, outbound: OUTBOUND, inactivityTimeoutMs: 60_000 });
+    expect(result).toEqual({ kind: "infra", description: "gate image not bound (images.gate)" });
+    expect(c.destroyCount).toBe(0); // nothing started, nothing to destroy
+  });
+});
+
+// #1398 review r1 item 4: the async branch extracted into a pure helper, so
+// its ordering (unresolved-secret refusal, idempotency, setAlarm BEFORE the
+// alarmState write) is bun-testable instead of living untested in do.ts.
+describe("startAsyncLeg (#1398 async branch)", () => {
+  const ASYNC_LEG: GateLegRequest = { ...LEG, mode: "async-poll", instanceId: "attempt-1" };
+
+  class FakeStorage implements AsyncLegStorage {
+    alarmState: RunLegAlarmState | undefined = undefined;
+    secretValues: Record<string, string> | undefined = undefined;
+    alarmAt: number | undefined = undefined;
+    writes: string[] = [];
+    async getAlarmState(): Promise<RunLegAlarmState | undefined> { return this.alarmState; }
+    async putAlarmState(state: RunLegAlarmState): Promise<void> { this.alarmState = state; this.writes.push("alarmState"); }
+    async putSecretValues(secretValues: Record<string, string>): Promise<void> { this.secretValues = secretValues; this.writes.push("secretValues"); }
+    async setAlarm(at: number): Promise<void> { this.alarmAt = at; this.writes.push("setAlarm"); }
+  }
+
+  test("an existing alarmState answers accepted WITHOUT starting a second container", async () => {
+    const storage = new FakeStorage();
+    storage.alarmState = {
+      phase: "waiting-for-ready", resultKey: "results/leg-a.json", leg: "leg-a", timeoutMin: undefined,
+      readyStartedAt: 1000, instanceId: "attempt-1", statusCheckCount: 0, consecutiveFailures: 0,
+    };
+    let started = false;
+    const decision = await startAsyncLeg(ASYNC_LEG, {}, storage, async () => { started = true; return { kind: "started" as const }; });
+    expect(decision).toEqual({ kind: "accepted" });
+    expect(started).toBe(false);
+    expect(storage.writes).toEqual([]); // nothing persisted, no alarm armed
+  });
+
+  test("a start that fails answers infra with nothing written and no alarm", async () => {
+    const storage = new FakeStorage();
+    const decision = await startAsyncLeg(ASYNC_LEG, {}, storage, async () => ({ kind: "infra" as const, description: "gate container failed: boom" }));
+    expect(decision).toEqual({ kind: "infra", description: "gate container failed: boom" });
+    expect(storage.alarmState).toBeUndefined();
+    expect(storage.secretValues).toBeUndefined();
+    expect(storage.alarmAt).toBeUndefined();
+  });
+
+  test("a successful start persists setAlarm BEFORE alarmState, then secretValues", async () => {
+    const storage = new FakeStorage();
+    const decision = await startAsyncLeg(ASYNC_LEG, { "staging-login": "sup3r-s3cret" }, storage, async () => ({ kind: "started" as const }), () => 5000);
+    expect(decision).toEqual({ kind: "accepted" });
+    // setAlarm MUST precede putAlarmState: a class with no alarm() handler
+    // throws on setAlarm, and a persisted alarmState must never exist while
+    // no alarm is actually armed (review r1 BLOCKER 1).
+    expect(storage.writes).toEqual(["setAlarm", "alarmState", "secretValues"]);
+    expect(storage.alarmAt).toBe(5000 + 20_000);
+    expect(storage.alarmState?.phase).toBe("waiting-for-ready");
+    expect(storage.alarmState?.instanceId).toBe("attempt-1");
+    expect(storage.secretValues).toEqual({ "staging-login": "sup3r-s3cret" });
+  });
+
+  test("an unresolved granted secret is a DID-NOT-RUN refusal (200 red, never infra), never starts", async () => {
+    const storage = new FakeStorage();
+    let started = false;
+    const withSecret = { ...ASYNC_LEG, secretNames: ["staging-login"] };
+    const decision = await startAsyncLeg(withSecret, {}, storage, async () => { started = true; return { kind: "started" as const }; });
+    expect(decision).toEqual({ kind: "result", result: { state: "error", description: 'DID-NOT-RUN: secret "staging-login" unresolved' } });
+    expect(started).toBe(false);
+    expect(storage.writes).toEqual([]);
+  });
+});
+
+// #1398 review r1 item 4: the mode dispatch, pure. Absent mode keeps the sync
+// path; "async-poll" runs the async branch and maps an infra decision to an
+// infra outcome, an accepted decision to an accepted outcome.
+describe("runLegDispatch (#1398 mode split)", () => {
+  test("absent mode runs the sync path, never the async branch", async () => {
+    let asyncRan = false;
+    const outcome = await runLegDispatch(LEG, {}, async () => ({ kind: "result" as const, result: { state: "success" as const } }), async () => { asyncRan = true; return { kind: "accepted" as const }; });
+    expect(outcome).toEqual({ kind: "result", result: { state: "success" } });
+    expect(asyncRan).toBe(false);
+  });
+
+  test("async-poll runs the async branch, mapping accepted, infra, and the DID-NOT-RUN result", async () => {
+    let syncRan = false;
+    const asyncBody: GateLegRequest = { ...LEG, mode: "async-poll" };
+    const accepted = await runLegDispatch(asyncBody, {}, async () => { syncRan = true; return { kind: "result" as const, result: { state: "success" as const } }; }, async () => ({ kind: "accepted" as const }));
+    expect(accepted).toEqual({ kind: "accepted" });
+    expect(syncRan).toBe(false);
+
+    const infra = await runLegDispatch(asyncBody, {}, async () => ({ kind: "result" as const, result: { state: "success" as const } }), async () => ({ kind: "infra" as const, description: "gate container failed: boom" }));
+    expect(infra).toEqual({ kind: "infra", description: "gate container failed: boom" });
+
+    const didNotRun = await runLegDispatch(asyncBody, {}, async () => ({ kind: "result" as const, result: { state: "success" as const } }), async () => ({ kind: "result" as const, result: { state: "error" as const, description: 'DID-NOT-RUN: secret "staging-login" unresolved' } }));
+    expect(didNotRun).toEqual({ kind: "result", result: { state: "error", description: 'DID-NOT-RUN: secret "staging-login" unresolved' } });
   });
 });
 
