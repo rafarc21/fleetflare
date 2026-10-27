@@ -31,16 +31,19 @@ beforeAll(async () => {
   // spawns (later tests run warm and pass). Warm it once here so the first
   // real test is not the one paying the JIT/startup cost. --help exits 0 with
   // no server, so this is a cheap warm, bounded at 30 s.
-  const warm = Bun.spawn(["bun", BIN, "--help"], { stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH! } });
+  // Same sh-wrapper trick as run(): EOF on the child's pipes is the exit
+  // signal, never p.exited (which can hang on a dead child under the gate's
+  // no-init PID1).
+  const warm = Bun.spawn(["sh", "-c", 'bun "$0" "$@"; echo "__EXIT=$?" >&2', BIN, "--help"], {
+    stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH! },
+  });
   await Promise.race([
-    warm.exited.then(() => undefined),
+    Promise.all([new Response(warm.stdout).text(), new Response(warm.stderr).text()]).then(() => undefined),
     new Promise<never>((_, reject) => {
       const timer = setTimeout(() => {
         try { warm.kill(); } catch { /* already gone */ }
         reject(new Error("studio-fleet --help warm timed out after 30 s"));
       }, 30_000);
-      // Keep the timer from keeping the process alive once the child exits.
-      warm.exited.then(() => clearTimeout(timer));
     }),
   ]);
 }, { timeout: 35_000 });
@@ -48,14 +51,22 @@ afterAll(() => server.stop(true));
 
 async function run(args: string[], stdin = "", extraEnv: Record<string, string> = {}) {
   seen = [];
-  const p = Bun.spawn(["bun", BIN, ...args], {
+  // #1398 side-PR: run the child under sh, which echoes its real exit code to
+  // stderr after it returns. EOF on both pipes means the shell has closed its
+  // fds — i.e. the child has exited — even when bun never delivers the exit
+  // event (gate PID1 has no init, so p.exited can hang forever on a dead child).
+  const p = Bun.spawn(["sh", "-c", 'bun "$0" "$@"; echo "__EXIT=$?" >&2', BIN, ...args], {
     stdin: new Blob([stdin]), stdout: "pipe", stderr: "pipe",
     env: {
       PATH: process.env.PATH!, FLEET_WORKER_URL: `http://127.0.0.1:${server.port}`, FLEET_SPAWN_TOKEN: TOKEN,
       ...extraEnv,
     },
   });
-  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  const [out, errRaw] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+  const m = /__EXIT=(\d+)\s*$/.exec(errRaw);
+  // No marker = sh never reached the echo (its own failure); treat as failure.
+  const code = m ? Number(m[1]) : 1;
+  const err = errRaw.replace(/__EXIT=\d+\s*$/, "").trimEnd();
   return { out, err, code };
 }
 

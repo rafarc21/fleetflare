@@ -432,6 +432,9 @@ export interface Env {
   /** Comma-separated "owner/repo", same shape as INSTALL_CACHE_REPOS. Phase 1
    *  value is a single entry: the operator's own repo. */
   GATE_RUNNER_REPOS?: string;
+  /** #1398: the async-/run-leg repo opt-in, same shape as GATE_RUNNER_REPOS.
+   *  Absent/empty means every repo stays on the old synchronous path. */
+  GATE_ASYNC_LEGS?: string;
   /** Phase 1 (#715): operator-set warm-pool size for GateRunnerDO keep-warm
    *  nudges. Absent/invalid = 0 = off. Never hardcoded — a cost/latency tradeoff. */
   GATE_WARM_POOL_SIZE?: string;

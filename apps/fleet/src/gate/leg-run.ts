@@ -308,7 +308,13 @@ export async function runLegStep(
   const first = await attempt(`start-${planned.leg}`, (tryNo) => tryNo === 1
     ? planned
     : { ...planned, resultKey: infraRetryResultKey(planned.resultKey, tryNo) },
-  ).catch((err: unknown): LegRunResult => {
+  ).catch(async (err: unknown): Promise<LegRunResult> => {
+    // #1395: before failing the leg, read its stored results. A container that
+    // wrote its result to R2 before the Workflows invocation was cut means the
+    // leg already finished — return that result, never restart from zero.
+    const recovered = await recoverLegResult(
+      step, `recover-start-${planned.leg}`, deps.readResult, planned.leg, planned.resultKey, "start");
+    if (recovered !== undefined) return recovered;
     // Retries spent (infra). The thrown message already carries the cause.
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
@@ -327,7 +333,13 @@ export async function runLegStep(
   const retry = await attempt(`retry-${planned.leg}`, (tryNo) => tryNo === 1
     ? retryBase
     : { ...retryBase, resultKey: infraRetryResultKey(retryBase.resultKey, tryNo) },
-  ).catch((err: unknown): LegRunResult => {
+  ).catch(async (err: unknown): Promise<LegRunResult> => {
+    // #1395: the retry phase recovers only its own `.retry*` keys, under a
+    // distinct step name (a start-phase recovery step must never be replayed as
+    // this phase's read).
+    const recovered = await recoverLegResult(
+      step, `recover-retry-${planned.leg}`, deps.readResult, planned.leg, planned.resultKey, "retry");
+    if (recovered !== undefined) return recovered;
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
   });
@@ -365,6 +377,40 @@ export function isRetryable(first: LegRunResult): boolean {
 /** The minimal R2 bucket shape the reader needs: the real R2Bucket satisfies it. */
 export interface ResultBucket {
   get(key: string): Promise<{ json(): Promise<unknown> } | null>;
+}
+
+/** #1398: the minimal R2-like shape claimOrReadBack needs -- the real
+ *  R2Bucket satisfies it (put returns R2Object | null; get returns
+ *  R2ObjectBody | null, both narrowed to their .json() half here, same as
+ *  ResultBucket above). */
+export interface ClaimableBucket {
+  put(key: string, value: string, opts: { onlyIf: { etagDoesNotMatch: "*" } }): Promise<unknown | null>;
+  get(key: string): Promise<{ json(): Promise<unknown> } | null>;
+}
+
+/**
+ * #1398 (spec "Who writes what" / "Deadline (#1390) and the write-once
+ * race"): attempts a write-once PUT of `value`; if it wins (nothing else
+ * exists at `key`), returns `value` unchanged. If it loses (a conflict --
+ * `put` resolves null under the real R2 `onlyIf` contract, same as
+ * outbound-handler.ts's own `putBundle`), reads `key` back and returns
+ * WHATEVER IS ACTUALLY THERE -- never the caller's own guessed value. Both
+ * the DO's own "I couldn't reach the container" guess and the Workflow's
+ * own give-up-after-its-deadline write use this SAME function: neither one
+ * ever assumes its own conclusion is correct once a conflict proves
+ * something else already claimed the key.
+ */
+export async function claimOrReadBack(
+  bucket: ClaimableBucket, key: string, value: StoredLegResult,
+): Promise<StoredLegResult> {
+  const stored = await bucket.put(key, JSON.stringify(value), { onlyIf: { etagDoesNotMatch: "*" } });
+  if (stored !== null) return value;
+  const existing = await bucket.get(key);
+  if (existing === null) return value; // the winner's write vanished (extremely unlikely); fall back to our own guess
+  const body = await existing.json() as Partial<StoredLegResult> | null;
+  return body !== null && typeof body === "object" && typeof body.state === "string"
+    ? (body as StoredLegResult)
+    : value;
 }
 
 /** The states the container writes to R2. A body with any other state is not a leg result. */
@@ -416,6 +462,73 @@ export function retryResultKey(resultKey: string): string {
  *  (outbound-handler.ts). */
 export function infraRetryResultKey(resultKey: string, tryNo: number): string {
   return resultKey.replace(/\.json$/, `-try${tryNo}.json`);
+}
+
+/** The candidate result keys one recovery phase may read, newest first (#1395).
+ *  `phase` splits the set by who could have written it THIS run, so a stale
+ *  value from an earlier instance (same run id, R2 keys never expire) can never
+ *  read back as this run's result:
+ *   - "start": the first attempt's base key and its own `-tryN` infra retries
+ *     (newest `-tryN` first, then base). A `.retry*` key cannot exist until a
+ *     red first attempt has been seen, so the start phase never reads it.
+ *   - "retry": the bare `.retry` and its own `.retry-tryN` internal infra
+ *     retries (newest first), never the base/`-tryN` start-phase keys. */
+export function recoverCandidateKeys(baseResultKey: string, phase: "start" | "retry"): string[] {
+  const maxTryNo = LEG_STEP_CONFIG.retries.limit + 1;
+  const keys: string[] = [];
+  if (phase === "retry") {
+    const retryBase = retryResultKey(baseResultKey);
+    for (let tryNo = maxTryNo; tryNo >= 2; tryNo--) keys.push(infraRetryResultKey(retryBase, tryNo));
+    keys.push(retryBase);
+    return keys;
+  }
+  for (let tryNo = maxTryNo; tryNo >= 2; tryNo--) keys.push(infraRetryResultKey(baseResultKey, tryNo));
+  keys.push(baseResultKey);
+  return keys;
+}
+
+/** #1395: reads one leg's stored results newest-first, skipping kill results.
+ *  A container that wrote its result to R2 before the Workflows invocation was
+ *  cut is the leg's real result, so a leg whose step died as WorkflowInternalError
+ *  never restarts from zero when that result exists. A SIGTERM/SIGKILL result
+ *  (`exited 143/137`) is a platform kill, not the code under test: it is
+ *  skipped in favour of an older real result; only when every candidate is a
+ *  kill (or absent) is a kill returned, to be read back as infra. Undefined
+ *  when no candidate key holds a known state. */
+async function recoverStoredLegResult(
+  read: LegRunDeps["readResult"], resultKey: string, phase: "start" | "retry",
+): Promise<StoredLegResult & { description: string } | undefined> {
+  let kill: (StoredLegResult & { description: string }) | undefined;
+  for (const key of recoverCandidateKeys(resultKey, phase)) {
+    const stored = await storedLegResult(read, key);
+    if (stored === undefined) continue;
+    if (stored.state === "failure" && isSignalKill(stored.description)) {
+      kill ??= stored; // remember the newest kill, keep looking for a real result
+      continue;
+    }
+    return stored;
+  }
+  return kill;
+}
+
+/** #1395: the recovery step a start/retry step runs once its infra retries are
+ *  spent: read the leg's stored results and, if one exists, make it the leg's
+ *  result instead of the infra error. A platform SIGTERM/SIGKILL (exited
+ *  143/137) read back from R2 is infra, never a red test (#1321). `name` is a
+ *  distinct step per phase (`recover-start-<leg>` / `recover-retry-<leg>`), so
+ *  a leg named `retry-<x>` can never collide with another leg's recovery step
+ *  (leg names allow `[a-z0-9-]`). */
+async function recoverLegResult(
+  step: LegStepRunner, name: string, read: LegRunDeps["readResult"], leg: string,
+  resultKey: string, phase: "start" | "retry",
+): Promise<LegRunResult | undefined> {
+  const stored = await step.do(name, LEG_STEP_CONFIG, async () =>
+    recoverStoredLegResult(read, resultKey, phase));
+  if (stored === undefined) return undefined;
+  if (stored.state === "failure" && isSignalKill(stored.description)) {
+    return { leg, state: "error", description: stored.description };
+  }
+  return { leg, ...stored };
 }
 
 /** The sum of the attempts that were timed; undefined when none was. */
