@@ -89,6 +89,12 @@ export interface GateContainer {
   interceptAllOutboundHttp(binding: OutboundBinding): Promise<void>;
   getTcpPort(port: number): { fetch(input: string, init?: RequestInit): Promise<Response> };
   destroy(error?: unknown): Promise<void>;
+  /** #1398 (design review r1 item 3): without this, the platform may stop an
+   *  idle container between two DO alarm ticks (15-30s apart) -- read as
+   *  "container exited mid-leg," a false infra failure on perfectly healthy
+   *  work. Set once, at start, sized past the alarm tick interval. Matches
+   *  workers-types Container's own signature (number | bigint, Promise<void>). */
+  setInactivityTimeout(durationMs: number | bigint): Promise<void>;
 }
 
 export interface RunLegDeps {
@@ -116,11 +122,16 @@ const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTim
  *  container afterwards. Every infra failure returns an infra outcome (503,
  *  retried twice by the Workflow step); a real gate-server body returns as a
  *  result. Never a throw. */
-export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): Promise<LegOutcome> {
+/** #1398: the image-lookup, survivor-destroy, intercept, and start sequence
+ *  shared by the OLD synchronous path (runLegInContainer, below, which then
+ *  waits for readiness and polls to completion in the SAME call) and the NEW
+ *  async path (startLegContainer, Task 5) which returns right after this
+ *  resolves. Never waits for "running" -- that is each caller's own job. */
+export async function prepareAndStartContainer(
+  req: GateLegRequest,
+  deps: { container: GateContainer; outbound: OutboundBinding; secretValues?: Record<string, string>; inactivityTimeoutMs?: number },
+): Promise<{ kind: "ok" } | { kind: "infra"; description: string }> {
   const c = deps.container;
-  if (!c) return { kind: "infra", description: "gate container binding missing" };
-  const now = deps.now ?? Date.now;
-  const sleep = deps.sleep ?? realSleep;
   try {
     // The image is looked up by key, never taken from repo text: the key must be
     // allowlisted AND an own property of the operator's images map, so an
@@ -143,6 +154,24 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
       instance: GATE_INSTANCE,
       env: buildLegEnvVars(req, deps.secretValues),
     });
+    if (deps.inactivityTimeoutMs !== undefined) await c.setInactivityTimeout(deps.inactivityTimeoutMs);
+    return { kind: "ok" };
+  } catch (err) {
+    // The account-at-capacity refusal surfaces here from start(): fail fast,
+    // never retry the host in place.
+    if (isNoInstance(err)) return { kind: "infra", description: NO_INSTANCE_DESCRIPTION };
+    return { kind: "infra", description: `gate container failed: ${errorText(err)}` };
+  }
+}
+
+export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): Promise<LegOutcome> {
+  const c = deps.container;
+  if (!c) return { kind: "infra", description: "gate container binding missing" };
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? realSleep;
+  try {
+    const prepared = await prepareAndStartContainer(req, { container: c, outbound: deps.outbound, secretValues: deps.secretValues });
+    if (prepared.kind === "infra") return prepared;
     if (!(await waitUntilRunning(c, now, sleep))) {
       return { kind: "infra", description: "gate container did not start within 180 s" };
     }
