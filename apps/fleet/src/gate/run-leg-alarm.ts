@@ -40,6 +40,11 @@ export interface RunLegAlarmState {
    *  check -- do.ts's real alarm() increments this and checks status every
    *  FEW ticks, never every tick (a real extra RPC cost per check). */
   statusCheckCount: number;
+  /** #1398 (Task 9): how many consecutive alarm ticks failed to make
+   *  progress -- do.ts's alarm() increments this and gives up as terminal
+   *  infra once a cap is hit, so a persistently broken DO never re-arms
+   *  forever. Optional: Task 4's own state literals need not set it. */
+  consecutiveFailures?: number;
 }
 
 /** One alarm tick's raw observation, already fetched by do.ts's real
@@ -50,6 +55,7 @@ export type PollSignal =
   | { kind: "running-not-listening" }
   | { kind: "run-accepted" }
   | { kind: "run-result"; result: LegOutcomeResult }
+  | { kind: "run-rejected"; description: string }
   | { kind: "poll-pending" }
   | { kind: "poll-result"; result: LegOutcomeResult }
   | { kind: "poll-failed" };
@@ -76,6 +82,14 @@ export type AlarmTickDecision =
 export function nextAlarmStep(state: RunLegAlarmState, now: number, signal: PollSignal): AlarmTickDecision {
   if (signal.kind === "no-instance") {
     return { kind: "terminal", outcome: { kind: "infra", description: NO_INSTANCE_DESCRIPTION } };
+  }
+  // #1398 review r1 item 5: /run answered a non-200/non-202 status. run-leg.ts's
+  // own runOnServer maps that to an infra failure carrying the status text
+  // (its `gate server HTTP <n>`), never a retryable "not listening yet" --
+  // the alarm must classify it the same way, whatever phase the /run was
+  // attempted from.
+  if (signal.kind === "run-rejected") {
+    return { kind: "terminal", outcome: { kind: "infra", description: signal.description } };
   }
   switch (state.phase) {
     case "waiting-for-ready": {
@@ -115,15 +129,19 @@ export function nextAlarmStep(state: RunLegAlarmState, now: number, signal: Poll
       // #1398 plan review r1 item 7: checked FIRST -- a real result wins over
       // a same-tick deadline, never the reverse.
       if (signal.kind === "poll-result") return { kind: "terminal", outcome: { kind: "result", result: signal.result } };
+      // #1398 review r1 item 4: checked BEFORE the deadline -- a container that
+      // died in the SAME tick the deadline elapses is infra (retried on a fresh
+      // container), never a red "exceeded" body, exactly as run-leg.ts's own
+      // runOnServer reads c.running before its deadline check today.
+      if (signal.kind === "poll-failed") {
+        return { kind: "terminal", outcome: { kind: "infra", description: "gate container exited mid-leg" } };
+      }
       const minutes = legTimeoutMin(state.timeoutMin);
       if (now - startedAt >= minutes * 60_000) {
         return {
           kind: "terminal",
           outcome: { kind: "result", result: { state: "error", description: `${state.leg} exceeded ${minutes} min without a result` } },
         };
-      }
-      if (signal.kind === "poll-failed") {
-        return { kind: "terminal", outcome: { kind: "infra", description: "gate container exited mid-leg" } };
       }
       // "poll-pending" or anything else: keep polling.
       return { kind: "re-arm", afterMs: ALARM_TICK_MS, state: { ...state, pollStartedAt: startedAt } };
