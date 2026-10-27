@@ -17,9 +17,10 @@ const PLANNED: PlannedLeg = {
   resultKey: "gate/o/r/runs/1/i/shard-lint.json", baselineKeys: [],
 };
 
+// Generic (#1398): LegStepRunner.do is generic now.
 function fakeStep() {
   return {
-    do: async (_name: string, config: LegStepConfig, fn: (ctx: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>): Promise<LegResult> => {
+    do: async <T>(_name: string, config: LegStepConfig, fn: (ctx: { attempt: number; step: { name: string; count: number } }) => Promise<T>): Promise<T> => {
       const limit = config.retries.limit;
       for (let attempt = 0; ; attempt++) {
         try {

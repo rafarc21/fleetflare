@@ -16,11 +16,15 @@ const PLANNED: PlannedLeg = {
 // Mirrors Workflows' retry rule: a step that throws is re-run until its retry
 // limit is spent, then the error propagates to the caller. ctx.attempt is
 // 1-based, matching Workflows' durable per-attempt counter (#1321).
+// Generic (#1398): LegStepRunner.do is generic (the real WorkflowStep.do is
+// too), so a fake pinned to one return type (LegResult) is no longer
+// structurally assignable to it -- every call site in this file still gets
+// LegResult back in practice, this just lets tsc see that it COULD be any T.
 function fakeStep() {
   const calls: { name: string; config: LegStepConfig }[] = [];
   return {
     calls,
-    do: async (name: string, config: LegStepConfig, fn: (ctx: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>): Promise<LegResult> => {
+    do: async <T>(name: string, config: LegStepConfig, fn: (ctx: { attempt: number; step: { name: string; count: number } }) => Promise<T>): Promise<T> => {
       calls.push({ name, config });
       const limit = config.retries.limit;
       for (let attempt = 0; ; attempt++) {
@@ -34,16 +38,38 @@ function fakeStep() {
   };
 }
 
+// #1398: an alias -- kept as a separate name at the one call site (the
+// legStarted-mint test) that deliberately exercises a non-LegResult return
+// type, so that test's own intent (proving the generic widening) reads
+// clearly without implying every OTHER fakeStep() call in this file also
+// returns something other than LegResult.
+const fakeGenericStep = fakeStep;
+
 const reply = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 describe("runLegStep", () => {
+  it("mints legStarted in its own step, first, and uses THAT value for total-deadline math, never a fresh Date.now() (governing invariant, #1398)", async () => {
+    const step = fakeGenericStep();
+    // The fake clock jumps far past totalDeadlineMs AFTER the leg-started step
+    // already minted its own value -- if runLegStep read a fresh Date.now()
+    // for its deadline math instead of the step-returned value, this dispatch
+    // would never even run (it would short-circuit straight to the total-cap
+    // branch on its very first attempt).
+    let now = 1_000;
+    const dispatch = async () => { now += 10_000_000; return reply({ state: "success" }); };
+    const result = await runLegStep(step, dispatch, PLANNED, { now: () => now });
+    expect(result.state).toBe("success");
+    expect(step.calls.map((c) => c.name)[0]).toBe("leg-started-lint");
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint"]);
+  });
+
   it("a leg deadline (200, state error) is final: no infra retry and no flaky retry", async () => {
     const step = fakeStep();
     const dispatch = async () => reply({ state: "error", description: "lint exceeded 25 min without a result" });
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "error", description: "lint exceeded 25 min without a result" });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint"]);
   });
 
   it("success: returns the DO payload as the leg result", async () => {
@@ -58,7 +84,7 @@ describe("runLegStep", () => {
     const dispatch = async () => { sent++; return reply({ state: "failure", description: "3 errors" }); };
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "failure", description: "3 errors", redFirst: true });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
 
@@ -68,7 +94,7 @@ describe("runLegStep", () => {
     const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" }); };
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "success", description: "flaky: passed on retry; first: timing" });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
 
@@ -123,7 +149,7 @@ describe("runLegStep", () => {
   it("only one step per leg, and no waitForEvent: the start step is the whole leg", async () => {
     const step = fakeStep();
     await runLegStep(step, async () => reply({ state: "success" }), PLANNED);
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint"]);
     expect("waitForEvent" in step).toBe(false);
   });
 
@@ -131,7 +157,7 @@ describe("runLegStep", () => {
     const step = fakeStep();
     const dispatch = async () => reply({ state: "error", description: "container OOM" });
     await runLegStep(step, dispatch, PLANNED);
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint"]);
   });
 
   it("start step config: two retries from a 15s exponential base delay, 30-minute attempt timeout (#1231)", async () => {
@@ -148,7 +174,7 @@ describe("runLegStep", () => {
     const dispatch = async () => reply({ state: "failure", description: "x".repeat(5000) });
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result.description?.length).toBe(2000);
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
   });
 
   it("unknown state from the DO becomes error, never success", async () => {
@@ -416,7 +442,7 @@ describe("runLegStep: an infra failure carries the leg's R2 result (#1094)", () 
     expect(result).toMatchObject({
       leg: "lint", state: "failure", description: "lint exited 137", redFirst: true,
     });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
 
@@ -569,7 +595,7 @@ describe("runLegStep: per-try keys from ctx.attempt survive an engine restart (#
     // A fake engine that models the restart: the first attempt ran (and its
     // result was lost with the old engine), then the step re-enters at attempt 2.
     const step = {
-      do: async (_name: string, config: LegStepConfig, fn: (ctx: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>) => {
+      do: async <T>(_name: string, config: LegStepConfig, fn: (ctx: { attempt: number; step: { name: string; count: number } }) => Promise<T>) => {
         let attempt = 2; // restart: durable attemptedCount is already 2
         for (; ; attempt++) {
           try {
@@ -604,7 +630,7 @@ describe("runLegStep: per-try keys from ctx.attempt survive an engine restart (#
     });
     // One jitter wait on the retry step's first attempt, none on the start step.
     expect(sleeps).toEqual([2_000]);
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
   });
 
   it("no jitter when the cap is 0 (default): the retry dispatches without a wait (#1321)", async () => {
@@ -623,7 +649,7 @@ describe("runLegStep: per-try keys from ctx.attempt survive an engine restart (#
     // A step engine that always throws the retry step's callback: the jitter
     // must still fire on attempt 1 before the infra retries re-run the step.
     const step = {
-      do: async (name: string, config: LegStepConfig, fn: (ctx?: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>): Promise<LegResult> => {
+      do: async <T>(name: string, config: LegStepConfig, fn: (ctx?: { attempt: number; step: { name: string; count: number } }) => Promise<T>): Promise<T> => {
         if (name === "start-lint") return await fn({ attempt: 1, step: { name, count: 1 } });
         // retry-lint: throw on every attempt, exercising the jitter + infra retries.
         const limit = config.retries.limit;
@@ -648,7 +674,7 @@ describe("runLegStep: per-try keys from ctx.attempt survive an engine restart (#
 
   it("a step context that omits ctx falls back to try 1, never a TypeError (#1321 review)", async () => {
     const step = {
-      do: async (name: string, config: LegStepConfig, fn: (ctx?: { attempt: number; step: { name: string; count: number } }) => Promise<LegResult>): Promise<LegResult> => {
+      do: async <T>(name: string, config: LegStepConfig, fn: (ctx?: { attempt: number; step: { name: string; count: number } }) => Promise<T>): Promise<T> => {
         // The runtime passed no context: fn() with no argument.
         return await fn();
       },
@@ -698,7 +724,7 @@ describe("runLegStep: clone failure retries once (#1104)", () => {
     const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "error", description: CLONE }) : reply({ state: "success" }); };
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "success", description: `flaky: passed on retry; first: ${CLONE}` });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
 
@@ -712,7 +738,7 @@ describe("runLegStep: clone failure retries once (#1104)", () => {
       ms: expect.any(Number), leg: "lint", state: "error",
       description: `${second}; first: ${CLONE}`,
     });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
 
@@ -748,7 +774,7 @@ describe("runLegStep: clone failure retries once (#1104)", () => {
       ms: expect.any(Number), leg: "lint", state: "success",
       description: `flaky: passed on retry; first: result read from R2 after transport loss: ${CLONE}`,
     });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
 
@@ -763,7 +789,7 @@ describe("runLegStep: clone failure retries once (#1104)", () => {
       ms: expect.any(Number), leg: "lint", state: "error",
       description: "result read from R2 after transport loss: disk quota exceeded",
     });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint"]);
     expect(sent).toBe(1);
   });
 });
@@ -777,7 +803,7 @@ describe("runLegStep: install failure retries once (#1092)", () => {
     const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "error", description: INSTALL }) : reply({ state: "success" }); };
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "success", description: `flaky: passed on retry; first: ${INSTALL}` });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
 
@@ -802,7 +828,7 @@ describe("runLegStep: install failure retries once (#1092)", () => {
       ms: expect.any(Number), leg: "lint", state: "error",
       description: `install failed: 404 for registry; first: ${INSTALL}`,
     });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
     expect(sent).toBe(2);
   });
 
@@ -833,7 +859,7 @@ describe("runLegStep: install failure retries once (#1092)", () => {
     const cause = "lint: gate container did not start within 180 s after 0 min";
     expect(result.state).toBe("error");
     expect(result.description).toBe(`${combineCauses([cause, cause, cause])}; first: ${INSTALL}`);
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
   });
 
   it.each([
@@ -845,7 +871,7 @@ describe("runLegStep: install failure retries once (#1092)", () => {
     const dispatch = async () => reply({ state: "error", description });
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result).toMatchObject({ state: "error", description });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint"]);
   });
 });
 
@@ -859,7 +885,7 @@ describe("runLegStep: a deadline is final, infra still retries (#1387)", () => {
     const dispatch = async () => { sent++; return reply({ state: "error", description: "lint exceeded 25 min without a result" }); };
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "error", description: "lint exceeded 25 min without a result" });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint"]);
     expect(sent).toBe(1);
   });
 
@@ -905,7 +931,7 @@ describe("runLegStep: total wall-time cap (#1387)", () => {
     const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" }); };
     const result = await runLegStep(step, dispatch, PLANNED, { touch: async () => { touches++; } });
     expect(result).toMatchObject({ leg: "lint", state: "success" });
-    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "retry-lint"]);
     expect(touches).toBe(2);
   });
 

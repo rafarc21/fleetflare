@@ -62,9 +62,12 @@ export interface LegStepContext {
   step: { name: string; count: number };
 }
 
-/** The slice of Workflows' WorkflowStep this module uses. */
+/** The slice of Workflows' WorkflowStep this module uses. Generic (#1398):
+ *  the real WorkflowStep.do is generic too, and later steps in this file
+ *  (the async/polling path's dispatch/poll steps) return shapes other than
+ *  LegRunResult. */
 export interface LegStepRunner {
-  do(name: string, config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<LegRunResult>): Promise<LegRunResult>;
+  do<T>(name: string, config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<T>): Promise<T>;
 }
 
 export const LEG_STEP_CONFIG: LegStepConfig = {
@@ -109,6 +112,11 @@ export interface LegRunDeps {
   touch?: () => Promise<void>;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
+  /** #1398 governing invariant: injectable clock, mirroring run-leg.ts's own
+   *  RunLegDeps.now. Real caller: Date.now. A test can fake it to prove
+   *  deadline math uses the leg-started STEP's own returned value, never a
+   *  second live read. */
+  now?: () => number;
 }
 
 /** The live cap on the retry-step start jitter (#1321): each retry-<leg> step
@@ -189,7 +197,11 @@ export async function runLegStep(
   // every infra attempt) may spend: the leg's own timeout plus the step grace.
   // A leg that keeps failing infra past this is ended, never left to cycle.
   const totalDeadlineMs = deps.totalDeadlineMs ?? totalLegWallMs(planned.timeoutMin);
-  const legStarted = Date.now();
+  const now = deps.now ?? Date.now;
+  // #1398 governing invariant: minted inside its own step, so a mid-run
+  // deploy replay of this whole function returns the CACHED mint time,
+  // never a fresh now() that would silently corrupt totalDeadlineMs math.
+  const legStarted = await step.do(`leg-started-${planned.leg}`, LEG_STEP_CONFIG, async () => now());
   const jitterMs = deps.retryJitterMs ?? 0;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const random = deps.random ?? Math.random;
@@ -220,13 +232,13 @@ export async function runLegStep(
       const attemptId = crypto.randomUUID();
       // Timed inside the callback (after any jitter): a Workflow replay returns
       // the recorded ms instead of timing the replay.
-      const started = Date.now();
+      const started = now();
       // #1387: the whole leg is capped, not just this attempt. An infra retry
       // that would start past the cap is ended with the causes already earned —
       // still an infra-class error, so the run takes its one auto-rerun, never a
       // false red on healthy code. Only a hung attempt that hits its OWN leg
       // deadline (inside runOnServer) is the final red.
-      const elapsed = Date.now() - legStarted;
+      const elapsed = now() - legStarted;
       if (elapsed >= totalDeadlineMs) {
         return {
           leg: planned.leg, state: "error",
@@ -262,7 +274,7 @@ export async function runLegStep(
         return {
           ...normalized,
           description: normalized.description?.slice(0, MAX_DESCRIPTION_CHARS),
-          ms: Date.now() - started,
+          ms: now() - started,
         };
       } catch (err) {
         // The container may have written its own result before the transport
@@ -275,9 +287,9 @@ export async function runLegStep(
           // text stays a real failure (OOM kill / `timeout -s KILL`), never
           // converted here.
           if (stored.state === "failure" && stored.description.startsWith(R2_PREFIX) && isSignalKill(stored.description)) {
-            return { leg: planned.leg, ms: Date.now() - started, state: "error", description: stored.description };
+            return { leg: planned.leg, ms: now() - started, state: "error", description: stored.description };
           }
-          return { leg: planned.leg, ms: Date.now() - started, ...stored };
+          return { leg: planned.leg, ms: now() - started, ...stored };
         }
         // A thrown attempt still counts: its wall time rides in the message, so
         // a failed leg's description shows real time (ms skips thrown attempts).
@@ -286,7 +298,7 @@ export async function runLegStep(
         const message = signal.aborted
           ? `${planned.leg}: no progress past its deadline`
           : err instanceof Error ? err.message : String(err);
-        const minutes = Math.round((Date.now() - started) / 60_000);
+        const minutes = Math.round((now() - started) / 60_000);
         causes.push(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min`);
         throw new Error(combineCauses(causes));
       }
