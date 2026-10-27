@@ -118,10 +118,6 @@ export interface RunLegDeps {
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Starts the gate container for one leg, posts /run, and always destroys the
- *  container afterwards. Every infra failure returns an infra outcome (503,
- *  retried twice by the Workflow step); a real gate-server body returns as a
- *  result. Never a throw. */
 /** #1398: the image-lookup, survivor-destroy, intercept, and start sequence
  *  shared by the OLD synchronous path (runLegInContainer, below, which then
  *  waits for readiness and polls to completion in the SAME call) and the NEW
@@ -164,6 +160,10 @@ export async function prepareAndStartContainer(
   }
 }
 
+/** Starts the gate container for one leg, posts /run, and always destroys the
+ *  container afterwards. Every infra failure returns an infra outcome (503,
+ *  retried twice by the Workflow step); a real gate-server body returns as a
+ *  result. Never a throw. */
 export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): Promise<LegOutcome> {
   const c = deps.container;
   if (!c) return { kind: "infra", description: "gate container binding missing" };

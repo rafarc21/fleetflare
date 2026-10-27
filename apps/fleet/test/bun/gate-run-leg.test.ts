@@ -45,6 +45,7 @@ class FakeContainer implements GateContainer {
   /** GET /result calls made, for the poll count. */
   polls = 0;
   startThrows: Error | undefined;
+  setInactivityTimeoutThrows: Error | undefined = undefined;
   staleRunning = false;
   /** Clock time at which the container stops running (it exited mid-leg). */
   exitAtMs = Number.POSITIVE_INFINITY;
@@ -99,6 +100,7 @@ class FakeContainer implements GateContainer {
 
   async setInactivityTimeout(ms: number | bigint): Promise<void> {
     this.calls.push("setInactivityTimeout");
+    if (this.setInactivityTimeoutThrows) throw this.setInactivityTimeoutThrows;
     this.inactivityTimeoutMs = Number(ms);
   }
 }
@@ -153,6 +155,13 @@ describe("prepareAndStartContainer (#1398)", () => {
     c.images = undefined;
     const result = await prepareAndStartContainer(LEG, { container: c, outbound: OUTBOUND });
     expect(result).toEqual({ kind: "infra", description: "gate image not bound (images.gate)" });
+  });
+
+  test("a rejecting setInactivityTimeout is an infra result, never a throw (#1398 review r1)", async () => {
+    const c = new FakeContainer();
+    c.setInactivityTimeoutThrows = new Error("inactivity timeout rejected");
+    const result = await prepareAndStartContainer(LEG, { container: c, outbound: OUTBOUND, inactivityTimeoutMs: 60_000 });
+    expect(result).toEqual({ kind: "infra", description: "gate container failed: inactivity timeout rejected" });
   });
 });
 
