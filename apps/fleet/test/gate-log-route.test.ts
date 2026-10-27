@@ -422,6 +422,20 @@ describe("GET /studio/gate/log --evidence + /studio/gate/evidence (#1343)", () =
     const bad = new Request(`https://worker/studio/gate/evidence/${RESULT}`);
     expect((await handleGateRoute(bad, logEnv())).status).toBe(404);
   });
+
+  it("serves the retry step's own internal-try evidence path (shard-<leg>.retry-tryN/) (#1398)", async () => {
+    pulls();
+    // The retry step's 2nd/3rd internal infra-retry writes its own evidence dir
+    // (shard-e2e.retry-try2/), the shape routes.ts's EVIDENCE_FILE_RE must
+    // serve -- same retry-before-try ordering as outbound-handler.ts's
+    // EVIDENCE_RE and leg-env.ts's evidenceKeyFor.
+    const key = `gate/${CANONICAL}/runs/${PR}/${RUN}/evidence/shard-e2e.retry-try2/console.json`;
+    await env.STUDIO_ARCHIVE.put(key, "{}");
+    const file = `https://worker/studio/gate/evidence/${key.split("/").map(encodeURIComponent).join("/")}`;
+    const res = await handleGateRoute(new Request(file), logEnv());
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("{}");
+  });
 });
 
 // #1343 MED5: a @head leg's evidence link encodes @ as %40; the serve path
