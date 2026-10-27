@@ -13,7 +13,7 @@ let seen: Array<{ method: string; path: string; token: string | null; body: unkn
 let server: ReturnType<typeof Bun.serve>;
 let hangMs = 0;
 
-beforeAll(() => {
+beforeAll(async () => {
   server = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -26,6 +26,23 @@ beforeAll(() => {
       return Response.json({ id: "websites--web-studio--5", state: "running", number: 71, url: "https://example.test/71" });
     },
   });
+  // #1398 side-PR: the gate container's CPU contention makes a COLD
+  // `bun container/studio-fleet` child miss the 5 s default on its first 1-2
+  // spawns (later tests run warm and pass). Warm it once here so the first
+  // real test is not the one paying the JIT/startup cost. --help exits 0 with
+  // no server, so this is a cheap warm, bounded at 30 s.
+  const warm = Bun.spawn(["bun", BIN, "--help"], { stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH! } });
+  await Promise.race([
+    warm.exited.then(() => undefined),
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => {
+        try { warm.kill(); } catch { /* already gone */ }
+        reject(new Error("studio-fleet --help warm timed out after 30 s"));
+      }, 30_000);
+      // Keep the timer from keeping the process alive once the child exits.
+      warm.exited.then(() => clearTimeout(timer));
+    }),
+  ]);
 });
 afterAll(() => server.stop(true));
 
@@ -47,31 +64,31 @@ describe("studio-fleet spawn — instance targeting", () => {
     const r = await run(["spawn", "web-studio"]);
     expect(r.code).toBe(0);
     expect(seen).toEqual([{ method: "POST", path: "/fleet/spawn", token: TOKEN, body: { role: "web-studio" } }]);
-  });
+  }, { timeout: 15_000 });
 
   test("`spawn <role>--<n>` splits into {role, instance}", async () => {
     const r = await run(["spawn", "web-studio--5"]);
     expect(r.code).toBe(0);
     expect(seen[0].body).toEqual({ role: "web-studio", instance: 5 });
-  });
+  }, { timeout: 15_000 });
 
   test("`spawn <role> --instance <n>` and `--instance next`", async () => {
     await run(["spawn", "web-studio", "--instance", "3"]);
     expect(seen[0].body).toEqual({ role: "web-studio", instance: 3 });
     await run(["spawn", "web-studio", "--instance", "next"]);
     expect(seen[0].body).toEqual({ role: "web-studio", instance: "next" });
-  });
+  }, { timeout: 15_000 });
 
   test("a compound id naming a repo is sent verbatim — the Worker refuses it, the CLI never rewrites it", async () => {
     await run(["spawn", "otherrepo--web-studio"]);
     expect(seen[0].body).toEqual({ role: "otherrepo--web-studio" });
-  });
+  }, { timeout: 15_000 });
 
   test("two instances at once is a usage error, no request", async () => {
     const r = await run(["spawn", "web-studio--5", "--instance", "3"]);
     expect(r.code).toBe(1);
     expect(seen).toEqual([]);
-  });
+  }, { timeout: 15_000 });
 });
 
 describe("studio-fleet resume", () => {
