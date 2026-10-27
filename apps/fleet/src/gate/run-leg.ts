@@ -164,6 +164,25 @@ export async function prepareAndStartContainer(
  *  container afterwards. Every infra failure returns an infra outcome (503,
  *  retried twice by the Workflow step); a real gate-server body returns as a
  *  result. Never a throw. */
+/** #1398: the async path's own container start -- returns the moment
+ *  prepareAndStartContainer resolves, NEVER waiting for "running" and NEVER
+ *  polling /result. do.ts's alarm() (a later task) does all of that, one
+ *  tick at a time, independent of whichever Workflow invocation made this
+ *  call. Unlike runLegInContainer, this function does NOT destroy the
+ *  container on return -- the container is meant to keep running after this
+ *  call returns; the DO's own alarm loop owns its teardown. */
+export async function startLegContainer(
+  req: GateLegRequest,
+  deps: { container: GateContainer | undefined; outbound: OutboundBinding; secretValues?: Record<string, string>; inactivityTimeoutMs?: number },
+): Promise<{ kind: "started" } | { kind: "infra"; description: string }> {
+  const c = deps.container;
+  if (!c) return { kind: "infra", description: "gate container binding missing" };
+  const prepared = await prepareAndStartContainer(req, {
+    container: c, outbound: deps.outbound, secretValues: deps.secretValues, inactivityTimeoutMs: deps.inactivityTimeoutMs,
+  });
+  return prepared.kind === "infra" ? prepared : { kind: "started" };
+}
+
 export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): Promise<LegOutcome> {
   const c = deps.container;
   if (!c) return { kind: "infra", description: "gate container binding missing" };
