@@ -168,3 +168,23 @@ describe("legAttemptKeys: @head legs (#1318 r1)", () => {
     ]);
   });
 });
+
+// #1398 Task 2: tryRank must recognize the retry step's OWN internal
+// infra-retry shape (`.retry-tryN`), produced by retryResultKey then
+// infraRetryResultKey composed -- the retry step always runs LAST, and a later
+// internal try of IT is later still.
+describe("tryRank: .retry-tryN ranks above every plain -tryN and the bare .retry (#1398)", () => {
+  it("ranks .retry-tryN ABOVE the bare .retry (try 1), not below", () => {
+    expect(finalLegKey(
+      ["gate/o/r/runs/1/i/shard-vitest-8.retry.json", "gate/o/r/runs/1/i/shard-vitest-8.retry-try2.json"],
+      "vitest-8",
+    )).toBe("gate/o/r/runs/1/i/shard-vitest-8.retry-try2.json");
+  });
+
+  it("still ranks a plain -tryN (start step's own infra retry) correctly against .retry-tryN", () => {
+    expect(finalLegKey(
+      ["gate/o/r/runs/1/i/shard-vitest-8-try2.json", "gate/o/r/runs/1/i/shard-vitest-8.retry-try2.json"],
+      "vitest-8",
+    )).toBe("gate/o/r/runs/1/i/shard-vitest-8.retry-try2.json"); // the retry step's own try always runs LAST
+  });
+});

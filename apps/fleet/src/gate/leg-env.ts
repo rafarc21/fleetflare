@@ -113,7 +113,11 @@ export async function legGitToken(
  *  Pure so it is pinned by a test and shared by every caller (the container
  *  env, the outbound props and the verdict link). */
 export function evidenceKeyFor(resultKey: string): string | null {
-  const m = /^(gate\/[^/]+\/[^/]+\/runs\/[^/]+\/[^/]+\/)(shard-[a-z0-9-]+(?:@head)?(?:-try\d+)?(?:\.retry)?)\.json$/.exec(resultKey);
+  // #1398: (?:\.retry)?(?:-try\d+)? -- retry BEFORE try, matching the shape
+  // the retry step's own internal infra-retries actually produce
+  // (retryResultKey then infraRetryResultKey composed). The old ordering
+  // (-try\d+ before .retry) never matched that shape at all.
+  const m = /^(gate\/[^/]+\/[^/]+\/runs\/[^/]+\/[^/]+\/)(shard-[a-z0-9-]+(?:@head)?(?:\.retry)?(?:-try\d+)?)\.json$/.exec(resultKey);
   if (m === null) return null;
   return `${m[1]}evidence/${m[2]}/`;
 }

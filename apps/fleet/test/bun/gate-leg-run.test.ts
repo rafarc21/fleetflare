@@ -3,7 +3,7 @@
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
 import { describe, it, expect, spyOn } from "bun:test";
-import { combineCauses, gateRunnerName, LEG_STEP_CONFIG, legResultReader, MAX_COMBINED_CAUSE_CHARS, runLegStep, type LegStepConfig, type LegStepContext } from "../../src/gate/leg-run";
+import { combineCauses, gateRunnerName, infraRetryResultKey, LEG_STEP_CONFIG, legResultReader, MAX_COMBINED_CAUSE_CHARS, retryResultKey, runLegStep, type LegStepConfig, type LegStepContext } from "../../src/gate/leg-run";
 import { isInfraLegFailure } from "../../src/gate/infra-rerun";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
@@ -1008,5 +1008,50 @@ describe("runLegStep: total wall-time cap (#1387)", () => {
     const result = await runLegStep(step, dispatch, PLANNED, { totalDeadlineMs: 1_000_000 });
     expect(result).toMatchObject({ leg: "lint", state: "success" });
     expect(sent).toBe(3);
+  });
+});
+
+// #1398 Task 2: one unique key per try, including the retry step's OWN
+// internal infra-retries. The retry-<leg> step runs after a red (or
+// install/clone-failed) first attempt, and its own infra-retry loop (three
+// tries) must never reuse one .retry.json key -- the collision shape #1393
+// measures, one step further into the code than the start step's
+// already-fixed infraRetryResultKey usage.
+describe("runLegStep: the retry step's own infra-retries get unique keys (#1398)", () => {
+  it("the retry step's OWN internal infra-retries get unique keys too, never sharing .retry.json", async () => {
+    const step = fakeGenericStep();
+    const seenKeys: string[] = [];
+    let startAttempts = 0;
+    const spyDispatch = async (planned: PlannedLeg) => {
+      seenKeys.push(planned.resultKey);
+      startAttempts++;
+      if (startAttempts === 1) {
+        // start-<leg>'s own first (and only) try: a RED test, not infra --
+        // this is what makes isRetryable true and advances to the retry-<leg>
+        // phase at all. Everything AFTER this is the retry phase's own
+        // internal infra-retry loop, which is what this test exercises.
+        return reply({ state: "failure", description: "3 failed" });
+      }
+      // Every retry-<leg> internal try answers infra, so it exhausts its OWN
+      // 3-try budget and we can observe every key it used.
+      return reply({ state: "error", description: "gate container exited mid-leg" }, 503);
+    };
+    await runLegStep(step, spyDispatch, PLANNED);
+    const retryKeys = seenKeys.filter((k) => k.includes(".retry"));
+    expect(retryKeys).toEqual([
+      "gate/o/r/runs/1/i/shard-lint.retry.json",
+      "gate/o/r/runs/1/i/shard-lint.retry-try2.json",
+      "gate/o/r/runs/1/i/shard-lint.retry-try3.json",
+    ]);
+    expect(new Set(retryKeys).size).toBe(retryKeys.length); // no duplicate keys
+  });
+
+  it("retryTargetFor composes .retry-tryN for the retry step's 2nd/3rd internal try", () => {
+    // Exercises the SAME key-derivation logic runLegStep uses internally, via
+    // its own exported building blocks -- retryResultKey then infraRetryResultKey,
+    // composed, is exactly what the fix must produce.
+    const base = retryResultKey("gate/o/r/runs/1/i/shard-vitest-8.json");
+    expect(base).toBe("gate/o/r/runs/1/i/shard-vitest-8.retry.json");
+    expect(infraRetryResultKey(base, 2)).toBe("gate/o/r/runs/1/i/shard-vitest-8.retry-try2.json");
   });
 });

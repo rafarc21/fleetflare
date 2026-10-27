@@ -20,19 +20,25 @@ export interface LegOutput {
 }
 
 /** The try suffixes a leg result key may carry. `@head` is a DIFFERENT leg
- *  (the union leg), never a try of the same one. */
-const TRY_SUFFIX = /(?:-try(\d+)\.json|\.retry\.json)$/;
+ *  (the union leg), never a try of the same one. #1398: a RETRY step's own
+ *  internal infra-retry (`.retry-tryN.json`) is checked BEFORE the plain
+ *  `-tryN.json` alternative, so it never falls through to the wrong branch
+ *  (a bare `-try(\d+)\.json$` tail-match would otherwise also match THIS
+ *  shape's own tail). */
+const TRY_SUFFIX = /(?:\.retry-try(\d+)\.json|-try(\d+)\.json|\.retry\.json)$/;
 
-/** A key's final-try rank: higher wins. `.retry` ranks above every `-tryN`
- *  because leg-run.ts writes `.retry.json` LAST (the red-first retry runs
- *  after the infra-try sequence); a higher `-tryN` beats a lower one, and the
- *  base ranks lowest. A key that is not this leg's own shape ranks 0. */
+/** A key's final-try rank: higher wins. #1398: `.retry-tryN` ranks ABOVE
+ *  every plain `-tryN` (the start step's own infra retries) AND above the
+ *  bare `.retry` (the retry step's own try 1) -- the retry step always runs
+ *  LAST, and a later internal try of IT is later still. A plain `-tryN`
+ *  ranks above the bare first attempt; a key that is not this leg's own
+ *  shape ranks 0. */
 function tryRank(key: string): number {
   const m = TRY_SUFFIX.exec(key);
   if (m === null) return key.endsWith(".json") ? 1 : 0;
-  if (m[1] !== undefined) return Number(m[1]) + 1;
-  // .retry is the last write: rank it above every -tryN (1 + a large floor).
-  return 10_000;
+  if (m[1] !== undefined) return 10_000 + Number(m[1]); // .retry-tryN
+  if (m[2] !== undefined) return Number(m[2]) + 1;       // plain -tryN
+  return 10_000;                                          // bare .retry
 }
 
 /** The final-try key for one leg from the full set of keys under its run

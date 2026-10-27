@@ -4,7 +4,7 @@
 // body only ever carries names, req.secretNames).
 import { describe, it, expect } from "bun:test";
 import {
-  buildLegEnvVars, buildSecretEnvVars, gateOutboundProps, secretEnvVarName, type GateLegRequest,
+  buildLegEnvVars, buildSecretEnvVars, evidenceKeyFor, gateOutboundProps, secretEnvVarName, type GateLegRequest,
 } from "../../src/gate/leg-env";
 
 const BASE: GateLegRequest = {
@@ -70,5 +70,12 @@ describe("gateOutboundProps: secretValues carries VALUES only, never names", () 
     expect(props).toEqual({
       resultKey: BASE.resultKey, repo: "acme/example", gitToken: "tok", secretValues: ["sup3r-s3cret"],
     });
+  });
+});
+
+describe("evidenceKeyFor: the retry step's own internal try key (#1398)", () => {
+  it("resolves a retry step's own 2nd/3rd internal try", () => {
+    expect(evidenceKeyFor("gate/acme/widgets/runs/3/run-id/shard-browser.retry-try2.json"))
+      .toBe("gate/acme/widgets/runs/3/run-id/evidence/shard-browser.retry-try2/");
   });
 });
