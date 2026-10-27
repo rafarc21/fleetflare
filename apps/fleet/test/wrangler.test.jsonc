@@ -80,14 +80,16 @@
       { "name": "AGENT", "class_name": "AgentDO" },
       { "name": "DEPLOY", "class_name": "DeployDO" },
       { "name": "STUDIO", "class_name": "StudioDO" },
-      { "name": "STUDIO_BIG", "class_name": "StudioBigDO" }
+      { "name": "STUDIO_BIG", "class_name": "StudioBigDO" },
+      { "name": "GATE_RUNNER", "class_name": "GateRunnerDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["AgentDO"] },
     { "tag": "v2", "new_sqlite_classes": ["DeployDO"] },
     { "tag": "v3", "new_sqlite_classes": ["StudioDO"] },
-    { "tag": "v4", "new_sqlite_classes": ["StudioBigDO"] }
+    { "tag": "v4", "new_sqlite_classes": ["StudioBigDO"] },
+    { "tag": "v5", "new_sqlite_classes": ["GateRunnerDO"] }
   ],
   "containers": [
     {
