@@ -17,15 +17,54 @@ approved as right. **Decision: the Workflow side uses POLLING
 way, so the event layer added a second, race-prone path to the same fact
 without buying anything a plain poll doesn't already give for free — dropped
 entirely, along with the `instanceId`/`attemptId`-in-the-request plumbing
-that only existed to address an event back to the right instance. This
-revision also fixes one latent replay bug this redesign would otherwise have
-made much worse (today's `legStarted = Date.now()` sits outside any
-`step.do`, #1 below), reuses the EXISTING result-key scheme instead of
-inventing a parallel one, and adds five sections review r1 found missing
-entirely: container lifetime across alarm gaps, secrets across alarm ticks,
-a write-once race between the DO and the Workflow's own give-up path,
-checking for a superseded run, and a concrete migration/cost budget with
-real numbers instead of "likely cheaper."
+that only existed to address an event back to the right instance. r1 also
+fixed one latent replay bug this redesign would otherwise have made much
+worse (today's `legStarted = Date.now()` sits outside any `step.do`), had
+this doc reuse the EXISTING result-key scheme instead of inventing a
+parallel one, and added five sections it found missing entirely: container
+lifetime across alarm gaps, secrets across alarm ticks, a write-once race
+between the DO and the Workflow's own give-up path, checking for a
+superseded run, and a concrete migration/cost budget with real numbers
+instead of "likely cheaper."
+
+**Revised again after design review r2 on PR
+https://github.com/rafarc21/fleetflare/pull/1397 — final pass, no round 3.**
+8 of r1's 10 items were right; r2 found 3 blockers in how they were
+expressed and moved 5 smaller gaps into a new "Leftovers for the
+implementation plan" section rather than blocking on them:
+
+1. **The Workflow's NORMAL poll read must use the raw, unprefixed,
+   summary-preserving reader** (`legResultReader`), never the
+   transport-loss-recovery wrapper (`storedLegResult`, which drops `summary`
+   and unconditionally marks every read as "recovered," wrongly triggering
+   the SIGTERM/SIGKILL signal-kill reclassification on a container's own
+   genuine report and turning a real red into an unwanted whole-run
+   auto-rerun). r1's "Reusing the existing result-key scheme" section
+   conflated the two readers; this revision separates them precisely —
+   see that section, rewritten below.
+2. **Every individual try needs its own unique result key, including a
+   retry-step's OWN internal infra-retries** — r1 fixed this for the
+   `start-<leg>` step (`infraRetryResultKey`, already correct today) but
+   left the `retry-<leg>` step's internal tries sharing one `.retry.json`
+   key, exactly the collision #1393 already measures (a stale try's write
+   blocking a later try's real result). Fixed below, along with the R2
+   key-regex update this actually requires (r1 incorrectly called
+   `finalLegKey`/`evidenceKeyFor`/the result-key regex "untouched").
+3. **No `Date.now()`/elapsed-time read in the Workflow function's own body
+   between steps** — r1 stated the governing invariant correctly but then
+   broke it in its OWN pseudocode (`now() - dispatch.startedAt`,
+   `elapsedMs()`, both outside any `step.do`). Fixed below: every deadline
+   decision is now made INSIDE the poll step itself, which already has a
+   safe, in-callback `Date.now()` to work with.
+
+The "Leftovers" section (new, near the end) explicitly carries the 5
+smaller gaps r2 named but did not block on — the real step-count cost once
+every try gets a unique key, `touch()`'s exact call site, a precise
+"superseded" status check, the `@head`+`-tryN` key-regex interaction, and
+having the DO write a live `/result` 200 straight to R2 itself rather than
+depending on the container's own separate write landing in time — each
+named for the implementation PR to resolve, not asserted as already solved
+here.
 
 ## Non-goals
 
@@ -162,42 +201,51 @@ each `attempt()` call, return it, thread it through).
 
 ```
 Workflow (GateWorkflow.run), one try:
-  dispatch = await step.do("dispatch-<leg>-try<n>", async () => {
+  dispatch = await step.do(`dispatch-${leg}-try${tryNo}`, async () => {
     // mints attemptId + startedAt HERE, inside the step -- the governing
     // invariant, above. Starts the container; does NOT wait for it to be
     // ready (#1396 review r1 item 10 -- waitUntilRunning moves into the
-    // DO's own alarm, not this step).
+    // DO's own alarm, not this step). resultKey is THIS try's own unique
+    // key (review r2 item 2 -- see "Reusing the existing result-key scheme"
+    // for exactly how it's derived for both the start AND retry steps).
     const res = await stub.fetch("/run-leg", { body: {...} });
-    return parseDispatchReply(res, attemptId, startedAt);    // see below
+    return parseDispatchReply(res, attemptId, startedAt, resultKey); // below
   });
   if (dispatch.kind === "terminal") return dispatch.result;  // DID-NOT-RUN,
                                                                // PAT-only
                                                                // refusal: no
                                                                // container
                                                                // ever ran
-  // dispatch.kind === "accepted": poll loop, R2 only.
-  for (;;) {
+  // dispatch.kind === "accepted": poll loop, R2 only. Review r2 item 3:
+  // NO now()/elapsedMs() read lives in this surrounding loop -- the poll
+  // step itself reads the clock (safe: it's INSIDE a step.do) and returns
+  // its own verdict, including whether ITS OWN read put this attempt past
+  // its deadline. The loop only ever reads an already-resolved step result.
+  for (let i = 1; ; i++) {
     await step.sleep("60 seconds");                           // free: does
                                                                 // not count
                                                                 // toward the
                                                                 // step budget
-    const found = await step.do(`poll-<leg>-try<n>-<i>`, () =>
-      readResultKey(dispatch.resultKey));                      // the SAME
-                                                                // storedLegResult/
-                                                                // legResultReader
-                                                                // this repo
-                                                                // already has
-    if (found !== undefined) return found;                     // real result
-                                                                // OR an
-                                                                // infra
-                                                                // outcome the
-                                                                // DO wrote
-                                                                // (below)
-    if (now() - dispatch.startedAt >= attemptDeadlineMs) {
+    const tick = await step.do(`poll-${leg}-try${tryNo}-${i}`, async () => {
+      const found = await readResultKey(dispatch.resultKey);   // raw read,
+                                                                 // see below
+      if (found !== undefined) return { kind: "found", result: found };
+      const pastDeadline = Date.now() - dispatch.startedAt >= attemptDeadlineMs;
+      return pastDeadline ? { kind: "deadline" } : { kind: "not-yet" };
+    });
+    if (tick.kind === "found") return tick.result;              // real result
+                                                                 // OR a DO-
+                                                                 // written
+                                                                 // infra
+                                                                 // outcome
+    if (tick.kind === "deadline") {
       return await claimGiveUp(dispatch.resultKey, causes);     // write-once
                                                                  // race, see
                                                                  // "Deadline"
     }
+    // "not-yet": loop, sleep again. A replay of this exact step returns its
+    // cached "not-yet"/"found"/"deadline" verdict -- never re-reads R2 or
+    // re-checks the clock for a tick that already resolved.
   }
 
 GateRunnerDO.fetch("/run-leg")
@@ -236,31 +284,140 @@ one cheap R2 read.
 An earlier draft of this design (PR #1397, pre-review) invented a brand-new
 R2 key per attempt (`outcome-<leg>-<attemptId>.json`) to hold a
 discriminated `{kind: "result" | "infra", ...}` envelope. **Dropped per
-review r1 item 6.** There is no need for a second key or a second shape:
+review r1 item 6**, and r2 corrected two things r1 got wrong about HOW the
+existing scheme is reused: which reader the Workflow's NORMAL read uses
+(item 1), and that every individual try — not just `start-<leg>`'s own
+internal infra-retries — needs its own unique key (item 2).
 
-- **A real result** (success/failure/a container-side error) is ALREADY
-  written by the container itself, to the SAME key it writes today
-  (`outbound-handler.ts`'s `shard-<leg>.json`/`-tryN.json`/`.retry.json`,
-  `req.resultKey`/`infraRetryResultKey`/`retryResultKey` — unchanged). The
-  Workflow's poll step reads it with the EXISTING
-  `legResultReader`/`storedLegResult` (`leg-run.ts:357-386`) — no new reader
-  code, R2_PREFIX marking and SIGTERM/SIGKILL signal-kill rules
-  (`isSignalKill`, #1321) apply exactly as they do today, because it is
-  LITERALLY the same function reading the same key shape.
-- **An infra outcome** (container never started, server unreachable, exited
-  mid-leg, or the leg's own deadline) has no container around to write
-  anything for it — today it only ever exists as the 503 body of the one
-  synchronous call, nothing persists it. This design's one real addition:
-  the DO's `alarm()`, on reaching a terminal infra classification, writes
-  `{state: "error", description: "<cause>"}` to THAT SAME `resultKey` itself
-  (never a different key), using the SAME write-once contract
-  (`onlyIf: { etagDoesNotMatch: "*" }`) `outbound-handler.ts` already applies
-  to every other result write.
+### The normal read: `legResultReader`, never `storedLegResult` (review r2 item 1)
 
-One key, one shape, one reader, for both producers (container, or the DO on
-its behalf) — `finalLegKey`/`evidenceKeyFor` (`log.ts`/`leg-env.ts`, #1360/
-#1384) are untouched, because nothing about WHICH key a leg's result lives
-at has changed.
+`storedLegResult` (`leg-run.ts:371-386`) is NOT a general-purpose R2 reader —
+it is a specific TRANSPORT-LOSS-RECOVERY wrapper: it unconditionally prefixes
+every description with `R2_PREFIX` ("result read from R2 after transport
+loss: ") and DROPS `summary` entirely, because its one existing call site
+(`leg-run.ts`'s `catch` block, today) only ever runs when the Workflow's OWN
+call to the DO has already failed — "this is a recovery, not the normal
+answer" is true by construction there. Wrapping EVERY poll read in this same
+function, as r1's draft did, would make it true of literally every leg,
+including the overwhelming common case where the container finished cleanly
+and the Workflow's poll step is just the FIRST and only place anything reads
+R2 at all:
+
+- `summary` would be silently dropped from every successful leg's own
+  result — a real regression, not a recovery-path compromise.
+- Every description would read as "recovered after a transport loss" even
+  when nothing was ever lost — misleading in a live incident.
+- Worse, correctness: `isSignalKill` + the `R2_PREFIX` check
+  (`leg-run.ts:271-279`, today) would fire on a container's OWN deliberate,
+  live self-report of `"exited 143/137"` (e.g. a `timeout -s KILL`-wrapped
+  leg command hitting its own timeout, a real, deterministic red) and
+  reclassify it as infra — exactly the bug review r2 named: *"a real OOM /
+  'exited 137/143' into infra → whole-run auto-rerun on real red."*
+
+**Fix:** the Workflow's poll step reads with the RAW reader,
+`legResultReader` (`leg-run.ts:357-366`), widened (type-only — the runtime
+JSON already carries it) to expose `summary`. A value found this way is a
+CONTAINER-authored record (the container is the only party that ever
+computes a `summary`, or decides `state`, by actually running the leg's own
+command) and is trusted exactly as-is — no prefix, no reclassification, the
+same "a live response is the real answer" rule #1321 already applies to a
+LIVE gate-server response, generalized here to "any record the container
+itself wrote is as good as a live response," because in this design the
+container's own R2 write IS the only channel left; there is no longer a
+separate "live" channel for the Workflow to prefer over it.
+
+`storedLegResult`'s OWN prefix+signal-kill logic still exists, SCOPED
+NARROWLY: only the DO's own synthesized "I could not reach this container at
+all" conclusion (below) ever carries that marking — and since the DO's own
+fixed infra-description strings (`"gate container did not start within 180
+s"`, `"gate container exited mid-leg"`, etc.) never contain `"exited
+143/137"`, `isSignalKill` never actually fires on a DO-authored record in
+practice. The rule is kept for audit-trail consistency with today's
+wording, not because it changes an outcome — see "Leftovers," below, for the
+narrower case (the DO's own container-transport-loss recovery INSIDE
+`alarm()`, `run-leg.ts`'s existing `storedLegResult` call sites) this
+doc resolves via the write-once race, next.
+
+### Who writes what, and the write-once race between a container's own report and the DO's own guess
+
+- **A real result** (success/failure/a container-side error, INCLUDING the
+  container's own live-observed `"exited 143/137"`) is written by the
+  container itself, to this try's own key (below) — completely unchanged
+  from today.
+- **An infra outcome** the DO itself concludes — no container ever started
+  (image not bound, no instance available), the container never answered
+  past its own retry budgets, or this try hit its own leg-timeout deadline
+  with nothing ever written — has no container around to report it. Today
+  this only ever exists as the 503 body of the one synchronous call;
+  nothing persists it. This design's one real addition: `alarm()`, upon
+  concluding infra, ATTEMPTS a write-once PUT of
+  `{state: "error", description: "<R2_PREFIX><cause>"}` to this try's key
+  (`onlyIf: { etagDoesNotMatch: "*" }`, the SAME contract
+  `outbound-handler.ts` already applies to every result write) — **before**
+  assuming its own conclusion is correct.
+  - If the write SUCCEEDS: nothing else exists at this key — the DO's own
+    infra conclusion stands.
+  - If the write CONFLICTS: the container's OWN record landed there first
+    (it finished and reported, even if the DO's own `/result` poll happened
+    to lose contact around the same time, e.g. a transient network blip
+    between the DO and the container rather than an actual platform kill).
+    `alarm()` reads the key back and treats THAT as the answer — a genuine
+    container self-report always outranks the DO's own uncertain guess.
+
+This is the write-once RACE pattern (review r1 item 5, review r2 extends it
+to this second, narrower race) doing double duty: it is what makes "the DO
+isn't sure, but will guess infra unless proven otherwise" both SAFE (never
+clobbers a real container report, by construction — write-once literally
+cannot) and CORRECT (prefers the container's own definitive answer whenever
+it exists) without needing the DO to somehow "know" whether its own
+transport hiccup really was a platform-level kill — it just doesn't matter
+which one happened; whichever party had something concrete to report wins.
+
+### One unique key per try, including the retry step's own internal retries (review r2 item 2)
+
+Today, `leg-run.ts`'s `attempt()` closure already gives the `start-<leg>`
+step's OWN internal infra-retries unique keys
+(`targetFor = (tryNo) => tryNo === 1 ? planned : {...planned, resultKey:
+infraRetryResultKey(planned.resultKey, tryNo)}`) — but the `retry-<leg>`
+step's `targetFor` ignores `tryNo` entirely (`() => retryTarget`, always the
+SAME `.retry.json` key). In the OLD synchronous design this was never a real
+collision: each try's container lifecycle was fully sequential and
+synchronous, so only one try was ever "live" at a time. In THIS design, an
+earlier try's DO can still be independently polling (and could still
+conclude and write) WHILE a later try has already started on a fresh
+container — #1393's own measured failure is exactly this shape (three
+independent attempts, overlapping in real time). Without a unique key per
+try, try 2's real result (a genuine success!) could find `.retry.json`
+ALREADY claimed by try 1's stale infra write, and be silently discarded —
+the exact bug class this whole redesign exists to eliminate, reintroduced
+by a key collision instead of an invocation kill.
+
+**Fix:** apply `infraRetryResultKey` to the retry step's own tries too, the
+same way the start step already does:
+
+```ts
+const retryTargetFor = (tryNo: number): PlannedLeg => {
+  const base = { ...planned, resultKey: retryResultKey(planned.resultKey) };
+  return tryNo === 1 ? base : { ...base, resultKey: infraRetryResultKey(base.resultKey, tryNo) };
+};
+```
+
+— producing, for example, `shard-vitest-8.retry.json` (try 1, unchanged) and
+`shard-vitest-8.retry-try2.json` (try 2, new). **This requires updating the
+result-key regex, not leaving it "untouched"** (r1's draft incorrectly
+claimed `finalLegKey`/`evidenceKeyFor`/the key regex needed no change):
+`outbound-handler.ts`'s `RUN_RESULT_RE` today is
+`` shard-[a-z0-9-]+(@head)?(\.retry)?\.json$ `` — the optional `(\.retry)?`
+group must be immediately followed by `\.json$`, so it does NOT currently
+accept a `-tryN` suffix AFTER `.retry` at all. The regex needs a
+`(-try\d+)?` group added after `(\.retry)?`, e.g.
+`` shard-[a-z0-9-]+(@head)?(\.retry)?(-try\d+)?\.json$ ``, so the container
+is actually AUTHORIZED to PUT to its own try's key once this scheme is in
+place. `finalLegKey` (`log.ts`) and `evidenceKeyFor` (`leg-env.ts`, #1360/
+#1384) need the equivalent review, not a blanket "unaffected" — flagged
+precisely (not resolved) under "Leftovers," below, for the one remaining
+interaction (`@head` union legs combined with a retry-step's own `-tryN`)
+this doc does not fully work through.
 
 ## Coverage, point by point (per the task's own list, plus review r1's additions)
 
@@ -289,12 +446,20 @@ becomes EXPLICIT application code around the dispatch+poll pair, rather than
 implicit Workflows step-retry:
 
 ```ts
+let legStartedAt: number | undefined;  // set from the FIRST dispatch step's own return value, never Date.now() here
 for (let tryNo = 1; tryNo <= MAX_TRIES; tryNo++) {
-  const dispatch = await step.do(`dispatch-${leg}-try${tryNo}`, () => dispatchRunLeg(...));
+  const dispatch = await step.do(`dispatch-${leg}-try${tryNo}`, () => dispatchRunLeg(..., targetFor(tryNo)));
+  legStartedAt ??= dispatch.startedAt;  // review r2 item 3: read from a resolved step, never computed here
   if (dispatch.kind === "terminal") return dispatch.result;       // DID-NOT-RUN etc, no container ran
-  const outcome = await pollUntilDone(step, dispatch, attemptDeadlineMs);
+  const outcome = await pollUntilDone(step, dispatch, attemptDeadlineMs); // the step.sleep+step.do loop above;
+                                                                           // every clock read happens INSIDE
+                                                                           // its own poll step, never here
   if (outcome.state !== "error" || !isInfraDescription(outcome.description)) return outcome; // real body
-  if (elapsedMs() >= totalDeadlineMs) return finalInfraError(causes); // #1390's own total cap
+  // The total-deadline check is itself a step.do: it reads dispatch.startedAt (a resolved
+  // value) and its OWN Date.now() inside the callback, never a bare elapsedMs() in this loop.
+  const budget = await step.do(`budget-${leg}-try${tryNo}`, async () =>
+    Date.now() - legStartedAt >= totalDeadlineMs);
+  if (budget) return finalInfraError(causes);                     // #1390's own total cap
   causes.push(outcome.description);                                  // infra: loop, same as today's catch
 }
 ```
@@ -303,9 +468,13 @@ This is a faithful, deliberate re-expression of the SAME state machine
 `runLegStep` already encodes (`start-<leg>` → maybe `retry-<leg>`, each with
 its own up-to-3-try infra loop, `totalLegWallMs` capping the whole thing) —
 just with the try-loop made explicit in `leg-run.ts`'s own code instead of
-split between there and Workflows' automatic step-retry semantics, and with
+split between there and Workflows' automatic step-retry semantics, with
 `pollUntilDone` itself built from the `step.sleep`+`step.do` loop shown in
-"New architecture," above. The public shape of `runLegStep` (one
+"New architecture," above, with every try (including the retry step's own
+internal tries) getting its own unique key via `targetFor` (review r2 item
+2, "Reusing the existing result-key scheme"), and with every deadline
+decision made INSIDE a `step.do` callback, never a bare clock read in this
+surrounding loop (review r2 item 3). The public shape of `runLegStep` (one
 `LegRunResult` out, the same `redFirst`/flaky-retry/combined-causes
 behavior) does not need to change; its INTERNALS do.
 
@@ -388,10 +557,12 @@ stays comfortably under `GATE_STALL_MS` (37 min, `auto-run.ts:58`) by
 construction, rather than by coincidence of the leg's own timeout staying
 under it. This tightens the external watchdog's real detection latency for
 a GENUINELY stuck run (no DO, no alarm, no Workflow activity at all) at
-zero extra cost — `touch()` already never throws and is cheap. The exact
-cadence (every poll tick vs. every Nth) is an implementation choice to pin
-with a test, not a correctness question either way, since 60s between
-touches is already far under 37 min regardless.
+zero extra cost — `touch()` already never throws and is cheap. It must be
+called FROM INSIDE the poll step's own `step.do` callback (the same
+governing invariant as every other side effect in this design), never from
+the surrounding loop — a call outside a step would re-fire on every replay.
+The exact cadence (every poll tick vs. every Nth) is named, not pinned,
+here — see "Leftovers," below.
 
 ### Carry/union legs
 
@@ -529,13 +700,15 @@ billing) a container for a run nobody is waiting on anymore.
 **Fix:** every FEW alarm ticks (not every tick — this is a real extra RPC
 cost per check, review r1's own framing), the DO calls
 `env.GATE_WORKFLOW.get(instanceId).status()` (the same `GateRunInstance`
-shape `auto-run.ts` already defines) and, if the status is no longer live
-(terminated, errored — not `running`/`queued`/whatever Workflows' own
-healthy-states are), destroys its own container and stops re-arming. This
-needs `instanceId` to remain in the request body for THIS purpose alone
-(unrelated to the dropped `sendEvent` plumbing) — the DO still needs to know
-which instance it is working on behalf of, just never to address an event
-back to it.
+shape `auto-run.ts` already defines) and, if the status is no longer live,
+destroys its own container and stops re-arming. This needs `instanceId` to
+remain in the request body for THIS purpose alone (unrelated to the dropped
+`sendEvent` plumbing) — the DO still needs to know which instance it is
+working on behalf of, just never to address an event back to it. The exact
+set of Workflows status values this check should treat as "still live" (a
+`waiting`/`paused` instance — e.g. one of its OTHER legs is mid-`step.sleep`
+— must count as live, never as superseded) is named precisely under
+"Leftovers," below, as `isLiveStatus`, rather than asserted here.
 
 ### Cost
 
@@ -551,19 +724,24 @@ invocations (review r1 item 10: **15-30s per tick**, not the container's own
 ever needed to be) — the DO object is not "open" between ticks at all.
 
 **Workflows step count — a concrete budget, not a guess (review r1 item
-11).** Workflows bills (and caps) STEPS, not wall time: 10,000 steps per
-instance on the paid plan, 25,000 max — and `step.sleep` does not count
-toward that limit, only `step.do` does. At the review's own 60s poll
-interval, a worst-case 35-min wait (25-min leg timeout + 10-min grace) is
-`35 * 60 / 60 = 35` `step.do` poll calls for ONE attempt. A leg's worst case
-(one `start` attempt plus up to 2 infra retries, #1231/#1321, each
-independently capped by `totalLegWallMs`) stays within roughly `3 * 35 = 105`
-poll steps plus `3` dispatch steps ≈ **~108 steps per leg, worst case.** A
-run with 30 parallel legs (a large PR) is then `~3,240` steps worst case —
-comfortably inside the 10,000-step paid-plan budget, with real headroom even
-if the max-tier 25,000 cap were the limit instead. This is the number that
-makes "polling instead of an event" an easy call: the step cost of polling
-every 60s is small and bounded, known in advance, not a guess.
+11, revised by review r2's own count once every try gets a unique key).**
+Workflows bills (and caps) STEPS, not wall time: 10,000 steps per instance
+on the paid plan, 25,000 max — and `step.sleep` does not count toward that
+limit, only `step.do` does. At the review's own 60s poll interval, a
+worst-case 35-min wait (25-min leg timeout + 10-min grace) is
+`35 * 60 / 60 = 35` `step.do` poll calls for ONE try. Review r2 item 2's own
+fix (every try gets its own unique key, including the `retry-<leg>` step's
+internal infra-retries, not just `start-<leg>`'s) means a leg's worst case
+is up to 3 tries in `start-<leg>` (1 initial + 2 infra-retries) PLUS up to 3
+tries in `retry-<leg>` (same shape) = **6 total tries**, each up to 35 poll
+steps plus 1 dispatch step: `6 * 36 = 216` steps per leg, worst case. A run
+with 30 parallel legs (a large PR) is then `~6,480` steps worst case —
+still comfortably inside the 10,000-step paid-plan budget, though with
+real headroom reduced from r1's (incorrect, 3-tries-not-6) ~3,240 estimate.
+This is still the number that makes "polling instead of an event" an easy
+call: the step cost of polling every 60s is small and bounded, known in
+advance, not a guess — it is simply a tighter budget than r1 first
+calculated, now that every try correctly gets its own key.
 
 **Net:** this design is motivated by correctness (#1393), not cost, but the
 real expectation — now backed by the arithmetic above, not just intuition —
@@ -624,18 +802,29 @@ for the replay/alarm semantics bun test structurally cannot exercise:
    (`gate-leg-run.test.ts:123-128`) into its positive form: *"a retryable
    infra outcome re-dispatches a fresh attemptId, up to `totalLegWallMs`,
    via the poll loop, never a long-held single call."*
-3. **Write-once race**: both the DO's write and the Workflow's own give-up
-   write attempt the same key; whichever the FAKE bucket already holds wins,
-   and the loser reads it back — a pure test of `claimGiveUp`'s own
-   conflict-then-read-back logic.
-4. **touch() call-count**: once per NEW `tryNo`, and per review r1 item 8,
-   also across poll ticks within one healthy attempt — the direct descendant
-   of #1387's existing `touch`-gating test.
+3. **Write-once races, both of them**: (a) the DO's write and the Workflow's
+   own give-up write attempting the same key ("Deadline," above); (b) the
+   DO's own "container unreachable, guessing infra" write racing a
+   container's own genuine self-report arriving at the same key ("Who
+   writes what," above) — in BOTH cases, whichever the fake bucket already
+   holds wins, and the loser reads it back, never overwrites. Also: a value
+   found via the normal poll read is NEVER run through `isSignalKill`/
+   `R2_PREFIX` reclassification unless it carries the DO's own "I never
+   reached this container" marking — a direct regression test for review r2
+   item 1's bug (a container's own live-observed `"exited 143/137"` must
+   stay `state: "failure"`, never get reclassified to infra).
+4. **touch() call-count**: once per NEW `tryNo`, called from inside its own
+   `step.do`, and per review r1 item 8, also across poll ticks within one
+   healthy attempt — the direct descendant of #1387's existing
+   `touch`-gating test.
 5. **Container lifetime / dormant-alarm guards**: `setInactivityTimeout` is
    called with the container start, sized past the tick interval; `alarm()`'s
    own error-handling always re-arms or writes a terminal outcome, never
    neither.
-6. Every existing `infra-rerun.ts`/`verdict.ts`/`fanout.ts` test stays green
+6. **Unique key per try**: the retry step's own 2nd/3rd internal tries never
+   reuse `.retry.json` — a direct regression test for review r2 item 2's
+   collision (two tries' results must never be able to clobber each other).
+7. Every existing `infra-rerun.ts`/`verdict.ts`/`fanout.ts` test stays green
    unchanged: none of those modules' own inputs or contracts move.
 
 **Real-engine tests (`@cloudflare/vitest-pool-workers`, review r1 item 11)** —
@@ -679,6 +868,53 @@ as its own separate, later PR. This is a one-way-door-adjacent change (it
 touches the one file that bridges every gate run, `workflow.ts`) and should
 be reviewed with that weight, same as #1390 was labeled.
 
+## Leftovers for the implementation plan (review r2, named not solved)
+
+Five gaps review r2 found but did not block on — each is a precise question
+the implementation plan (the task's own "design doc first... then plan")
+must answer, not a design decision this doc is making:
+
+1. **Real step count at 6 tries, not 3** — already folded into "Cost,"
+   above (~216/leg, ~6,480 for a 30-leg run); called out again here because
+   it changes the HEADROOM argument (r1's ~3,240 estimate had roughly 3x the
+   margin r2's corrected ~6,480 does) enough that the implementation plan
+   should re-check it against this fleet's actual largest real PRs, not just
+   a round "30 legs" estimate.
+2. **`touch()`'s exact call site** — "Watchdog touch," above, states it must
+   fire from inside a `step.do` callback, never the surrounding loop, but
+   does not pin whether that is every poll tick or every Nth. Pin with a
+   test once the poll step's own shape is implemented.
+3. **A precise `isLiveStatus` helper** — "Superseded runs," above, needs an
+   exact set of Workflows instance statuses that count as "still live" for
+   the DO's own supersede check. A `waiting`/`paused` instance (mid-`step.
+   sleep` on a DIFFERENT leg, say) must count as live; only a genuinely
+   `terminated`/`errored` instance should trigger the DO stopping its own
+   container. Pin this against the real Workflows API, not a guess.
+4. **`@head` union legs combined with a retry-step's own `-tryN` suffix** —
+   "One unique key per try," above, fixes the plain-leg case
+   (`shard-<leg>.retry-try2.json`) and names the regex fix it needs; a
+   union leg's own `@head` marker (`shard-<leg>@head.retry-try2.json`) is
+   a further combination this doc does not fully work through against
+   `RUN_RESULT_RE`/`EVIDENCE_RE`'s own existing `(-try\d+)?` handling
+   (`outbound-handler.ts`'s `EVIDENCE_RE` already has this group; the main
+   result regex needs the equivalent, per "One unique key per try," above —
+   the COMBINATION with `@head` is the part left open here).
+5. **The DO writing a live `/result` 200 straight to R2 itself** — today,
+   and in every branch described above, the CONTAINER is the one that PUTs
+   its own result to R2, on its own separate outbound channel, independent
+   of whatever the DO's `/result` poll receives over HTTP. The DO's alarm
+   loop, when it gets a LIVE 200 from `/result`, already HAS the full
+   `LegResult` body in hand at that moment — rather than depending on the
+   container's own, separately-timed R2 write landing before the Workflow's
+   next poll tick (a race this design has not needed to assume away yet,
+   but which the implementation should close), the DO could simply write
+   that body (redacted, using the `secretValues` it already holds in
+   `ctx.storage` per "Secrets across alarm ticks," above) to R2 itself,
+   immediately, the moment it receives it. This removes a timing assumption
+   rather than relying on it — named here for the implementation plan to
+   decide, not asserted as required by this doc's own correctness argument
+   (the design is correct either way; this would only make it tighter).
+
 ## Open questions for operator review
 
 1. Real Durable Objects alarm billing, to replace "likely cheaper" with a
@@ -686,4 +922,5 @@ be reviewed with that weight, same as #1390 was labeled.
    number is not independently verified in this doc).
 2. The exact Workflows `status()` values this fleet's live API version
    returns for an instance parked between poll steps — needed to implement
-   "superseded" detection (above) precisely, not assumed here.
+   "superseded" detection (above) precisely, not assumed here (see
+   "Leftovers" item 3, above, for the specific helper this becomes).
