@@ -3,7 +3,7 @@
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
 import { describe, it, expect, spyOn } from "bun:test";
-import { combineCauses, gateRunnerName, infraRetryResultKey, LEG_STEP_CONFIG, legResultReader, MAX_COMBINED_CAUSE_CHARS, recoverCandidateKeys, retryResultKey, runLegStep, type LegStepConfig, type LegStepContext } from "../../src/gate/leg-run";
+import { claimOrReadBack, combineCauses, gateRunnerName, infraRetryResultKey, LEG_STEP_CONFIG, legResultReader, MAX_COMBINED_CAUSE_CHARS, recoverCandidateKeys, retryResultKey, runLegStep, type LegStepConfig, type LegStepContext } from "../../src/gate/leg-run";
 import { isInfraLegFailure } from "../../src/gate/infra-rerun";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
@@ -1070,9 +1070,18 @@ describe("runLegStep: the retry step's own infra-retries get unique keys (#1398)
 // #1395: a Workflows invocation cut at ~20 min dies as WorkflowInternalError,
 // and every in-flight step replays from zero. But the container may already
 // have written its result to R2. Before failing a start/retry step whose infra
-// retries are spent, run a recover-<leg> step that reads the leg's stored
-// results newest-first and returns a terminal result if one exists.
+// retries are spent, run a recover-start-<leg> / recover-retry-<leg> step that
+// reads the leg's stored results newest-first and returns a terminal result if
+// one exists. Each phase reads only its OWN keys (start: base + -tryN; retry:
+// .retry*), so a stale value from an earlier instance never reads back as this
+// run's result, and the split step names can never collide across legs.
 const CUT = "Attempt failed due to internal workflows error";
+const BASE_KEY = "gate/o/r/runs/1/i/shard-lint.json";
+const TRY2_KEY = "gate/o/r/runs/1/i/shard-lint-try2.json";
+const TRY3_KEY = "gate/o/r/runs/1/i/shard-lint-try3.json";
+const RETRY_KEY = "gate/o/r/runs/1/i/shard-lint.retry.json";
+const RETRY_TRY2_KEY = "gate/o/r/runs/1/i/shard-lint.retry-try2.json";
+const RETRY_TRY3_KEY = "gate/o/r/runs/1/i/shard-lint.retry-try3.json";
 
 // A fake step engine that models the invocation cut: the step's callback rejects
 // with a WorkflowInternalError on every attempt, so its 3 tries are spent and
@@ -1095,81 +1104,69 @@ function cutStep() {
   };
 }
 
-// An R2 store for one leg: keys map to stored bodies, exactly as the container
-// wrote them. readResult answers undefined for any key not in the map, so a
-// test seeds ONLY the key it wants the recovery to find.
-function r2Store(seed: Record<string, { state: "success" | "failure" | "error"; description?: string }>) {
+// A readResult that misses `target` for its first `misses` reads, then returns
+// `value` -- models a container whose R2 write lands late, after the step's own
+// per-attempt read already gave up on that key. Every other key is absent.
+function lateRead(target: string, value: { state: "success" | "failure" | "error"; description?: string }, misses = 1) {
   const readKeys: string[] = [];
+  let reads = 0;
   return {
     readKeys,
-    readResult: async (key: string) => { readKeys.push(key); return seed[key]; },
+    readResult: async (key: string) => {
+      readKeys.push(key);
+      if (key === target) {
+        reads++;
+        return reads > misses ? value : undefined;
+      }
+      return undefined;
+    },
   };
 }
 
 describe("runLegStep: a Workflows invocation cut recovers the leg's stored result (#1395)", () => {
-  // Store the result at the .retry key: the start step's own per-attempt reads
-  // (base, -try2, -try3) never touch it, so ONLY the new recover-<leg> sweep can
-  // find it — the per-attempt #1094 catch is already exercised elsewhere.
-  const RETRY_KEY = "gate/o/r/runs/1/i/shard-lint.retry.json";
-
   it("stored success recovers to success, not error, when the start step dies as WorkflowInternalError 3x", async () => {
     const step = cutStep();
-    const { readKeys, readResult } = r2Store({ [RETRY_KEY]: { state: "success" } });
+    // The start phase's own candidate is -try3: a container that finished its
+    // THIRD infra attempt before the cut wrote there. The recover-start sweep
+    // reads -try3, -try2, base and finds it.
+    const { readKeys, readResult } = lateRead(TRY3_KEY, { state: "success" }, 1);
     const dispatch = async () => { throw new Error(CUT); };
     const result = await runLegStep(step, dispatch, PLANNED, { readResult });
     expect(result).toMatchObject({
       leg: "lint", state: "success",
       description: "result read from R2 after transport loss: success",
     });
-    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "recover-lint"]);
-    // The recovery swept the retry-phase candidates newest-first and stopped at
-    // the .retry key, which held the success.
-    expect(readKeys.filter((k) => k.includes(".retry"))).toEqual([
-      "gate/o/r/runs/1/i/shard-lint.retry-try3.json",
-      "gate/o/r/runs/1/i/shard-lint.retry-try2.json",
-      RETRY_KEY,
-    ]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "recover-start-lint"]);
+    // The start phase reads ONLY base + -tryN keys, never a .retry* key.
+    expect(readKeys.filter((k) => k.includes(".retry"))).toEqual([]);
   });
 
-  it("stored failure recovers to failure (a red first try), still eligible for the flaky retry", async () => {
+  it("a stale .retry result from an earlier instance is never read by the start phase (review r1 item 2)", async () => {
     const step = cutStep();
-    const { readResult } = r2Store({ [RETRY_KEY]: { state: "failure", description: "lint 3 errors" } });
+    // An earlier instance with the same run id left a green .retry.json. The
+    // start phase must NOT read it: this run has not seen a red first attempt.
+    const { readKeys, readResult } = lateRead(RETRY_KEY, { state: "success" }, 0);
     const dispatch = async () => { throw new Error(CUT); };
     const result = await runLegStep(step, dispatch, PLANNED, { readResult });
-    // The recovered red is data: the leg still takes its one flaky retry. The
-    // retry phase's own first attempt reads .retry (its key) and finds the stored
-    // failure via the existing #1094 per-attempt path, so the final result is
-    // that failure, flagged redFirst (a red first try stays real, #1119).
-    expect(result).toMatchObject({
-      leg: "lint", state: "failure", redFirst: true,
-      description: "result read from R2 after transport loss: lint 3 errors",
-    });
-    expect(step.calls.map((c) => c.name)).toEqual([
-      "leg-started-lint", "start-lint", "recover-lint", "retry-lint",
-    ]);
+    expect(result.state).toBe("error");
+    expect(result.description).toContain("internal workflows err");
+    // The start phase never touched a .retry* key, so the stale green never
+    // turned this cut leg green.
+    expect(readKeys.filter((k) => k.includes(".retry"))).toEqual([]);
   });
 
-  it("the retry phase's recover-retry step reads a result the retry's own attempts missed (late write)", async () => {
+  it("the retry phase recovers a .retry result its own attempts missed (late write)", async () => {
     const step = cutStep();
-    // A live red first attempt makes the leg retryable. The retry phase then dies
-    // as WorkflowInternalError. Its attempt 1 reads .retry and misses (the
-    // container's late write had not landed yet), then the recover-retry-<leg>
-    // sweep re-reads .retry and finds the success — the exact #1393 race a
-    // shared key would otherwise lose to a stale earlier value.
+    // A live red first attempt makes the leg retryable; the retry phase then dies
+    // as WorkflowInternalError. Its attempt 1 reads .retry and misses (the late
+    // write had not landed), then recover-retry re-reads .retry and finds it.
     let sent = 0;
-    let retryReads = 0;
     const dispatch = async () => {
       sent++;
       if (sent === 1) return reply({ state: "failure", description: "timing" });
       throw new Error(CUT);
     };
-    const readResult = async (key: string) => {
-      if (key === RETRY_KEY) {
-        retryReads++;
-        return retryReads === 1 ? undefined : { state: "success" as const };
-      }
-      return undefined;
-    };
+    const { readResult } = lateRead(RETRY_KEY, { state: "success" }, 1);
     const result = await runLegStep(step, dispatch, PLANNED, { readResult });
     // The recovered success passes the retry: a flaky pass, first cause noted.
     expect(result).toMatchObject({
@@ -1181,7 +1178,7 @@ describe("runLegStep: a Workflows invocation cut recovers the leg's stored resul
     ]);
   });
 
-  it("no stored result: the error is unchanged, and the recover step is the only extra step", async () => {
+  it("no stored result: the error is unchanged, and the recover-start step is the only extra step", async () => {
     const step = cutStep();
     const dispatch = async () => { throw new Error(CUT); };
     const result = await runLegStep(step, dispatch, PLANNED, { readResult: async () => undefined });
@@ -1189,12 +1186,12 @@ describe("runLegStep: a Workflows invocation cut recovers the leg's stored resul
     // The thrown message is the three attempts' causes combined (#1231), each
     // cut with an ellipsis when the budget is tight; the marker stays present.
     expect(result.description).toContain("internal workflows err");
-    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "recover-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "recover-start-lint"]);
   });
 
   it("a stored SIGTERM result recovers to infra (error), never a red test (#1321)", async () => {
     const step = cutStep();
-    const { readResult } = r2Store({ [RETRY_KEY]: { state: "failure", description: "lint exited 143" } });
+    const { readResult } = lateRead(TRY2_KEY, { state: "failure", description: "lint exited 143" }, 1);
     const dispatch = async () => { throw new Error(CUT); };
     const result = await runLegStep(step, dispatch, PLANNED, { readResult });
     expect(result).toMatchObject({
@@ -1202,7 +1199,47 @@ describe("runLegStep: a Workflows invocation cut recovers the leg's stored resul
       description: "result read from R2 after transport loss: lint exited 143",
     });
     // No flaky retry: the platform kill is infra, so no retry step.
-    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "recover-lint"]);
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "recover-start-lint"]);
+  });
+
+  it("a newer kill result is skipped for an older real result (review r1 item 3)", async () => {
+    const step = cutStep();
+    // Per-attempt reads all miss. The recovery sweep then reads -try3 (a SIGTERM
+    // kill) then -try2 (a real, non-retryable error): it must skip the kill and
+    // return the real error, never a needless infra rerun on the kill.
+    const seen: Record<string, number> = {};
+    const readResult = async (key: string) => {
+      seen[key] = (seen[key] ?? 0) + 1;
+      // Second read of -try3 (the recovery sweep's pass) is the kill; second read
+      // of -try2 is the real error. Every per-attempt read (first pass) misses.
+      if (key === TRY3_KEY && seen[key] === 2) return { state: "failure" as const, description: "lint exited 143" };
+      if (key === TRY2_KEY && seen[key] === 2) return { state: "error" as const, description: "disk quota exceeded" };
+      return undefined;
+    };
+    const dispatch = async () => { throw new Error(CUT); };
+    const result = await runLegStep(step, dispatch, PLANNED, { readResult });
+    // The real error is the recovered result -- the kill was skipped, never read
+    // back as infra and never returned in place of the real answer.
+    expect(result).toMatchObject({
+      leg: "lint", state: "error",
+      description: "result read from R2 after transport loss: disk quota exceeded",
+    });
+    expect(result.description).not.toContain("exited 143");
+    // A non-retryable error: no retry phase, so only the start recovery ran.
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint", "recover-start-lint"]);
+  });
+
+  it("leg retry-foo's start recovery is recover-start-retry-foo, never leg foo's recover-retry-foo (review r1 item 1)", async () => {
+    // The split step names mean leg "retry-foo"'s START-phase recovery step is
+    // recover-start-retry-foo -- distinct from leg "foo"'s RETRY-phase
+    // recover-retry-foo, so a leg named retry-foo can never reuse another leg's
+    // cached recovery step result (leg names allow [a-z0-9-]).
+    const planned = { ...PLANNED, leg: "retry-foo", resultKey: "gate/o/r/runs/1/i/shard-retry-foo.json" };
+    const step = cutStep();
+    const dispatch = async () => { throw new Error(CUT); };
+    const result = await runLegStep(step, dispatch, planned, { readResult: async () => undefined });
+    expect(result.state).toBe("error");
+    expect(step.calls.map((c) => c.name)).toEqual(["leg-started-retry-foo", "start-retry-foo", "recover-start-retry-foo"]);
   });
 
   it("a stored result whose read throws still leaves the error unchanged", async () => {
@@ -1217,7 +1254,7 @@ describe("runLegStep: a Workflows invocation cut recovers the leg's stored resul
 
   it("the returned leg result is structuredClone-safe: plain data, no functions or class instances", async () => {
     const step = cutStep();
-    const { readResult } = r2Store({ [RETRY_KEY]: { state: "success" } });
+    const { readResult } = lateRead(TRY2_KEY, { state: "success" }, 1);
     const dispatch = async () => { throw new Error(CUT); };
     const result = await runLegStep(step, dispatch, PLANNED, { readResult });
     expect(result.state).toBe("success");
@@ -1228,33 +1265,49 @@ describe("runLegStep: a Workflows invocation cut recovers the leg's stored resul
   });
 });
 
-describe("recoverCandidateKeys: the whole leg's result keys, newest first (#1395)", () => {
-  it("lists .retry-tryN newest, then .retry, then -tryN, then the base key", () => {
-    expect(recoverCandidateKeys("gate/o/r/runs/1/i/shard-lint.json")).toEqual([
-      "gate/o/r/runs/1/i/shard-lint.retry-try3.json",
-      "gate/o/r/runs/1/i/shard-lint.retry-try2.json",
-      "gate/o/r/runs/1/i/shard-lint.retry.json",
-      "gate/o/r/runs/1/i/shard-lint-try3.json",
-      "gate/o/r/runs/1/i/shard-lint-try2.json",
-      "gate/o/r/runs/1/i/shard-lint.json",
+describe("recoverCandidateKeys: each phase reads only its own keys, newest first (#1395)", () => {
+  it("start phase: -tryN newest first, then the base key -- never .retry*", () => {
+    expect(recoverCandidateKeys(BASE_KEY, "start")).toEqual([
+      TRY3_KEY,
+      TRY2_KEY,
+      BASE_KEY,
     ]);
   });
 
-  it("reads newest first: a later key's stored result wins over an earlier one", async () => {
-    const step = cutStep();
-    const { readKeys, readResult } = r2Store({ "gate/o/r/runs/1/i/shard-lint.retry.json": { state: "success" } });
-    const dispatch = async () => { throw new Error("Attempt failed due to internal workflows error"); };
-    await runLegStep(step, dispatch, PLANNED, { readResult });
-    // The three per-attempt reads (base, try2, try3) come first, each finding
-    // nothing, then the recovery reads the retry-phase candidates newest-first:
-    // .retry-try3, .retry-try2, .retry -- which holds the success.
-    expect(readKeys).toEqual([
-      "gate/o/r/runs/1/i/shard-lint.json",
-      "gate/o/r/runs/1/i/shard-lint-try2.json",
-      "gate/o/r/runs/1/i/shard-lint-try3.json",
-      "gate/o/r/runs/1/i/shard-lint.retry-try3.json",
-      "gate/o/r/runs/1/i/shard-lint.retry-try2.json",
-      "gate/o/r/runs/1/i/shard-lint.retry.json",
+  it("retry phase: .retry-tryN newest first, then .retry -- never base/-tryN", () => {
+    expect(recoverCandidateKeys(BASE_KEY, "retry")).toEqual([
+      RETRY_TRY3_KEY,
+      RETRY_TRY2_KEY,
+      RETRY_KEY,
     ]);
+  });
+});
+
+describe("claimOrReadBack (#1398)", () => {
+  it("the write wins when nothing is there yet", async () => {
+    const store = new Map<string, string>();
+    const bucket = {
+      put: async (key: string, value: string) => {
+        if (store.has(key)) return null;
+        store.set(key, value);
+        return {};
+      },
+      get: async (key: string) => {
+        const v = store.get(key);
+        return v === undefined ? null : { json: async () => JSON.parse(v) };
+      },
+    };
+    const result = await claimOrReadBack(bucket, "k", { state: "error", description: "guessed infra" });
+    expect(result).toEqual({ state: "error", description: "guessed infra" });
+  });
+
+  it("a conflict defers to whatever is already there, never the caller's own value", async () => {
+    const store = new Map<string, string>([["k", JSON.stringify({ state: "success" })]]);
+    const bucket = {
+      put: async () => null, // already written -- simulates a container's own report winning the race
+      get: async (key: string) => ({ json: async () => JSON.parse(store.get(key)!) }),
+    };
+    const result = await claimOrReadBack(bucket, "k", { state: "error", description: "guessed infra" });
+    expect(result).toEqual({ state: "success" }); // NEVER the guessed infra value
   });
 });
