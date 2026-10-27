@@ -3,7 +3,7 @@
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
 import { describe, it, expect, spyOn } from "bun:test";
-import { combineCauses, gateRunnerName, legResultReader, MAX_COMBINED_CAUSE_CHARS, runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
+import { combineCauses, gateRunnerName, LEG_STEP_CONFIG, legResultReader, MAX_COMBINED_CAUSE_CHARS, runLegStep, type LegStepConfig, type LegStepContext } from "../../src/gate/leg-run";
 import { isInfraLegFailure } from "../../src/gate/infra-rerun";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
@@ -45,6 +45,27 @@ function fakeStep() {
 // returns something other than LegResult.
 const fakeGenericStep = fakeStep;
 
+// #1398 review r1: models a REAL Workflows REPLAY (after an engine crash or
+// deploy), not a step RETRY. A step name that has already completed returns
+// its cached result WITHOUT invoking the callback again -- distinct from
+// fakeStep/fakeGenericStep above, whose retry loop re-invokes the callback
+// every call (that models Workflows' own automatic step-retry, a different
+// mechanism). Lets a test seed a step as "already done" from a prior run,
+// then call runLegStep again as the replay, to prove deadline math reads the
+// CACHED mint time, never a second live clock read.
+function fakeReplayingStep() {
+  const cache = new Map<string, unknown>();
+  return {
+    cache,
+    do: async <T>(name: string, _config: LegStepConfig, fn: (ctx?: LegStepContext) => Promise<T>): Promise<T> => {
+      if (cache.has(name)) return cache.get(name) as T;
+      const result = await fn(undefined);
+      cache.set(name, result);
+      return result;
+    },
+  };
+}
+
 const reply = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
@@ -62,6 +83,29 @@ describe("runLegStep", () => {
     expect(result.state).toBe("success");
     expect(step.calls.map((c) => c.name)[0]).toBe("leg-started-lint");
     expect(step.calls.map((c) => c.name)).toEqual(["leg-started-lint", "start-lint"]);
+  });
+
+  it("a replay after a crash reuses the leg-started step's CACHED mint time for deadline math, never a fresh now() read between steps (review r1, #1398)", async () => {
+    const step = fakeReplayingStep();
+    // The first run: the leg-started step mints and caches 0, then the engine
+    // crashes before start-lint ever completes (modeled by never calling
+    // runLegStep at all that first time -- only the one step Workflows itself
+    // would already have durably recorded gets seeded).
+    await step.do("leg-started-lint", LEG_STEP_CONFIG, async () => 0);
+
+    // The replay: a fresh now() of 5000ms and a 1000ms total deadline. If
+    // legStarted truly comes from the step's CACHED return (0), elapsed
+    // (5000) already exceeds totalDeadlineMs -- zero dispatches, immediate
+    // error. A mutant that reads now() fresh OUTSIDE the step and assigns
+    // legStarted from THAT instead of step.do's return value would see
+    // elapsed as 0 (5000 - 5000) and dispatch anyway -- this is exactly what
+    // review r1 reported surviving the suite as written.
+    let dispatches = 0;
+    const dispatch = async () => { dispatches++; return reply({ state: "success" }); };
+    const result = await runLegStep(step, dispatch, PLANNED, { now: () => 5000, totalDeadlineMs: 1000 });
+
+    expect(dispatches).toBe(0);
+    expect(result.state).toBe("error");
   });
 
   it("a leg deadline (200, state error) is final: no infra retry and no flaky retry", async () => {
