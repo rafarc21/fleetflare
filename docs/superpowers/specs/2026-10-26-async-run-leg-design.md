@@ -413,11 +413,46 @@ accept a `-tryN` suffix AFTER `.retry` at all. The regex needs a
 `(-try\d+)?` group added after `(\.retry)?`, e.g.
 `` shard-[a-z0-9-]+(@head)?(\.retry)?(-try\d+)?\.json$ ``, so the container
 is actually AUTHORIZED to PUT to its own try's key once this scheme is in
-place. `finalLegKey` (`log.ts`) and `evidenceKeyFor` (`leg-env.ts`, #1360/
-#1384) need the equivalent review, not a blanket "unaffected" — flagged
-precisely (not resolved) under "Leftovers," below, for the one remaining
-interaction (`@head` union legs combined with a retry-step's own `-tryN`)
-this doc does not fully work through.
+place. Two more call sites read this same key shape and MUST change too —
+named precisely here, not deferred:
+
+- **`log.ts`'s `tryRank`/`finalLegKey` (review r3).** `TRY_SUFFIX` today is
+  `` /(?:-try(\d+)\.json|\.retry\.json)$/ `` — two alternatives, `-tryN.json`
+  (ranked `N + 1`) or bare `.retry.json` (ranked `10_000`, "above every
+  `-tryN`" because today `.retry` is always the LAST write). A key shaped
+  `shard-vitest-8.retry-try2.json` matches the FIRST alternative (its tail is
+  still literally `-try2.json`), ranking it `3` — LOWER than the plain
+  `shard-vitest-8.retry.json`'s rank of `10_000`. `finalLegKey` keeps the
+  HIGHER-ranked key, so it would pick the STALE try-1 `.retry` record over
+  try 2's own, later, correct result — exactly backwards, and exactly the
+  kind of silent wrong-answer `fleet gate log`'s own header comment warns
+  against ("reading a stale SIGTERM try... misleads"). **Fix:** `TRY_SUFFIX`
+  needs a THIRD alternative, `` \.retry-try(\d+)\.json$ ``, checked before the
+  plain `-tryN.json` alternative (so it does not fall through to the wrong
+  branch), ranked `10_000 + N` — strictly above the bare `.retry` (try 1) and
+  strictly ordered among themselves by `N`, matching the real write order
+  (try 2 happens after try 1, same as `-tryN` already orders against the
+  bare first attempt).
+- **`evidenceKeyFor` (`leg-env.ts:115-119`) and its outbound-handler
+  counterpart `EVIDENCE_RE` (review r3).** Both today expect
+  `(?:-try\d+)?(?:\.retry)?` — try-suffix BEFORE retry — the opposite order
+  from the key this design actually produces (`.retry` then `-tryN`, since
+  the try number belongs to the RETRY step's own internal attempts). For a
+  browser leg, `evidenceKeyFor` returning `null` on `shard-vitest-8.retry-
+  try2.json` means `GATE_EVIDENCE_DIR` is never set for that container at
+  all — its spec evidence has nowhere authorized to land, and
+  `browser-leg.ts`'s own evidence-based verdict contract (#1343) would then
+  mark a perfectly fine run as DID-NOT-RUN for missing evidence. **Fix:**
+  reorder both regexes to `(?:\.retry)?(?:-try\d+)?` — `evidenceKeyFor`'s own
+  pattern AND `outbound-handler.ts`'s `EVIDENCE_RE` (`:56`), which authorizes
+  the container's actual PUT under the exact directory `evidenceKeyFor`
+  computed — fixing one without the other would leave the DO naming a
+  directory the container is still refused from writing to.
+
+The one interaction this doc does NOT fully resolve — `@head` union legs
+combined with a retry-step's own `-tryN` (e.g. `shard-vitest-8@head.retry-
+try2.json`) — is named precisely under "Leftovers," below, as its own item;
+every NON-`@head` case above is fully specified here, not deferred.
 
 ## Coverage, point by point (per the task's own list, plus review r1's additions)
 
@@ -891,14 +926,14 @@ must answer, not a design decision this doc is making:
    `terminated`/`errored` instance should trigger the DO stopping its own
    container. Pin this against the real Workflows API, not a guess.
 4. **`@head` union legs combined with a retry-step's own `-tryN` suffix** —
-   "One unique key per try," above, fixes the plain-leg case
-   (`shard-<leg>.retry-try2.json`) and names the regex fix it needs; a
-   union leg's own `@head` marker (`shard-<leg>@head.retry-try2.json`) is
-   a further combination this doc does not fully work through against
-   `RUN_RESULT_RE`/`EVIDENCE_RE`'s own existing `(-try\d+)?` handling
-   (`outbound-handler.ts`'s `EVIDENCE_RE` already has this group; the main
-   result regex needs the equivalent, per "One unique key per try," above —
-   the COMBINATION with `@head` is the part left open here).
+   "One unique key per try," above, now fully resolves the PLAIN-leg case
+   (`shard-<leg>.retry-try2.json`) across `RUN_RESULT_RE`, `EVIDENCE_RE`,
+   `evidenceKeyFor`, and `log.ts`'s `tryRank`/`finalLegKey` (review r3). A
+   union leg's own `@head` marker COMBINED with this same suffix
+   (`shard-<leg>@head.retry-try2.json`) is the one remaining case this doc
+   does not work through to the same level of precision — named here for the
+   implementation PR to verify against each of those four call sites
+   directly, not re-derived from scratch.
 5. **The DO writing a live `/result` 200 straight to R2 itself** — today,
    and in every branch described above, the CONTAINER is the one that PUTs
    its own result to R2, on its own separate outbound channel, independent
@@ -914,6 +949,17 @@ must answer, not a design decision this doc is making:
    rather than relying on it — named here for the implementation plan to
    decide, not asserted as required by this doc's own correctness argument
    (the design is correct either way; this would only make it tighter).
+6. **Step names must phase-qualify, not just try-number-qualify (review r3
+   plan nit).** This doc's own pseudocode names every dispatch step
+   `` dispatch-${leg}-try${tryNo} `` for BOTH the `start-<leg>` phase and the
+   `retry-<leg>` phase — a real name COLLISION (Workflows step names must be
+   unique per instance; `start`'s own try 1 and `retry`'s own try 1 would
+   otherwise both be named `dispatch-<leg>-try1`). The implementation plan
+   should name them `` dispatch-start-${leg}-try${tryNo} `` /
+   `` dispatch-retry-${leg}-try${tryNo} `` (and the matching
+   `poll-start-...`/`poll-retry-...` names), mirroring the EXISTING
+   `start-<leg>`/`retry-<leg>` step-name split this design otherwise
+   preserves.
 
 ## Open questions for operator review
 
