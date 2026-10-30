@@ -21,7 +21,7 @@ import { mintPrivateCloneToken } from "../github/auth";
 import { gateOutboundProps, legGitToken, type GateLegRequest } from "./leg-env";
 import { GATE_CONTAINER_PORT, legResponse, runLegInContainer, runLegWithSecrets, startAsyncLeg, startLegContainer, type LegResult } from "./run-leg";
 import { legResultReader, type ClaimableBucket } from "./leg-run";
-import { alarmTick, type PollSignal, type RunLegAlarmState } from "./run-leg-alarm";
+import { abandonAttempt, alarmTick, observeOnce, type RunLegAlarmState } from "./run-leg-alarm";
 import { legTimeoutMin } from "./config";
 import { resolveGrantedSecrets } from "./secrets-registry";
 import { mintRunToken } from "./secrets-ai-token";
@@ -123,6 +123,29 @@ export class GateRunnerDO extends DurableObject<Env> {
         }));
       return legResponse(outcome);
     }
+    // #1428 item 1: the Workflow's own give-up (leg-run.ts's dispatchAndPollOnce
+    // giveup step) calls this idempotent RPC once it concludes this DO may
+    // have gone dormant -- cleans up promptly instead of leaving secretValues
+    // to the far slower one-shot sweep backstop (run-leg-alarm.ts's
+    // SECRET_SWEEP_MS). blockConcurrencyWhile for the same reason /run-leg's
+    // own idempotency check above uses it: without it, an in-flight alarm()
+    // tick and this request could both read "a state exists" and each act on
+    // it, one destroying the container out from under the other's own
+    // in-progress work.
+    if (url.pathname === "/abandon" && req.method === "POST") {
+      const { resultKey } = (await req.json()) as { resultKey: string };
+      const result = await this.ctx.blockConcurrencyWhile(() => abandonAttempt({
+        storage: {
+          getState: () => this.ctx.storage.get<RunLegAlarmState>("alarmState").then((v) => v ?? undefined),
+          deleteSecretValues: () => this.ctx.storage.delete("secretValues").then(() => undefined),
+          deleteState: () => this.ctx.storage.delete("alarmState").then(() => undefined),
+          scheduleAlarm: (at) => this.ctx.storage.setAlarm(at),
+        },
+        container: this.ctx.container,
+        now: () => Date.now(),
+      }, resultKey));
+      return Response.json({ result });
+    }
     return new Response("not found", { status: 404 });
   }
 
@@ -143,36 +166,18 @@ export class GateRunnerDO extends DurableObject<Env> {
       container: this.ctx.container,
       bucket: this.env.STUDIO_ARCHIVE as unknown as ClaimableBucket,
       instanceStatus: async (instanceId) => (await this.env.GATE_WORKFLOW.get(instanceId)).status().then((s) => s.status),
-      observe: (state) => this.observeOnce(state),
+      // #1428 item 5: both running() and getPort() are LAZY callbacks, not
+      // values resolved once up front -- observeOnce itself decides when to
+      // call each (getPort only after confirming not-running, running()
+      // again fresh in its own catch), so a container that changes state
+      // mid-call is never judged by a stale snapshot taken before the fetch.
+      observe: (state) => observeOnce({
+        state,
+        running: () => this.ctx.container?.running ?? false,
+        getPort: () => this.ctx.container?.getTcpPort(GATE_CONTAINER_PORT),
+      }),
       now: () => Date.now(),
+      log: (message) => { console.error(message); },
     });
-  }
-
-  /** #1398: the ONE piece of real I/O an alarm tick needs -- talk to the
-   *  container once, per `state.phase`, and translate the raw response into
-   *  a PollSignal. Kept separate from alarmTick/nextAlarmStep so those stay
-   *  pure and bun-testable; this method is the thin, untested-by-bun glue,
-   *  kept as small as possible on purpose. */
-  private async observeOnce(state: RunLegAlarmState): Promise<PollSignal> {
-    const c = this.ctx.container;
-    if (c === undefined) return { kind: "poll-failed" };
-    if (state.phase === "waiting-for-ready" && !c.running) return { kind: "not-running" };
-    const port = c.getTcpPort(GATE_CONTAINER_PORT);
-    try {
-      if (state.phase !== "polling") {
-        const res = await port.fetch("http://container/run", { method: "POST", signal: AbortSignal.timeout(15_000) });
-        if (res.status === 200) return { kind: "run-result", result: (await res.json()) as LegResult };
-        if (res.status === 202) return { kind: "run-accepted" };
-        return { kind: "running-not-listening" };
-      }
-      const res = await port.fetch("http://container/result", { signal: AbortSignal.timeout(15_000) });
-      if (res.status === 200) return { kind: "poll-result", result: (await res.json()) as LegResult };
-      return { kind: "poll-pending" };
-    } catch (err) {
-      if (/no container instance|container instance that can be provided|no instances? available/i.test(err instanceof Error ? err.message : String(err))) {
-        return { kind: "no-instance" };
-      }
-      return state.phase === "polling" && !c.running ? { kind: "poll-failed" } : { kind: "running-not-listening" };
-    }
   }
 }

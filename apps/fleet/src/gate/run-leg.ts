@@ -13,7 +13,7 @@ import { buildLegEnvVars } from "./leg-env";
 import { DEFAULT_GATE_IMAGE, GATE_IMAGES, legTimeoutMin } from "./config";
 import { storedLegResult, type StoredLegResult } from "./leg-run";
 import { firstUnresolvedSecret } from "./secrets-registry";
-import { redactLegResultFields } from "./secrets-redact";
+import { redactKnownSecretValues, redactLegResultFields } from "./secrets-redact";
 // #1398: the alarm tick interval and attempt state, for the async branch's
 // own start helper (startAsyncLeg, below). This closes the run-leg <->
 // run-leg-alarm cycle, but only through function BODIES (neither module
@@ -40,7 +40,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 /** A host with no spare container instance refuses start() (or the port fetch)
  *  with this wording. It is account capacity, not a leg defect: fail fast and
  *  back off, never spend the port-retry budget thrashing a saturated host. */
-const NO_INSTANCE_RE = /no container instance|container instance that can be provided|no instances? available/i;
+export const NO_INSTANCE_RE = /no container instance|container instance that can be provided|no instances? available/i;
 
 /** The infra description a no-instance leg returns. Named so the step's
  *  exponential retry backs off the same saturated host, and infra-rerun.ts still
@@ -256,8 +256,18 @@ export async function startAsyncLeg(
   }
   const existing = await storage.getAlarmState();
   if (existing !== undefined) return { kind: "accepted" };
+  // #1428 item 4: unlike runLegWithSecrets (the sync path's own leg RESULT,
+  // redacted before it leaves the DO), this whole function's INFRA outcomes
+  // had no redaction pass at all -- an arm-failure error message (or a
+  // container-start failure's own description) that happens to echo a
+  // granted secret's value would reach the Workflow step's own result/logs
+  // unscrubbed. secretValues is already a parameter here; both return points
+  // below redact against its values before answering.
+  const values = Object.values(secretValues);
   const started = await start();
-  if (started.kind === "infra") return started;
+  if (started.kind === "infra") {
+    return { kind: "infra", description: redactKnownSecretValues(started.description, values) };
+  }
   const startMs = now();
   const state: RunLegAlarmState = {
     phase: "waiting-for-ready", resultKey: body.resultKey, leg: body.leg, timeoutMin: body.timeoutMin,
@@ -273,9 +283,12 @@ export async function startAsyncLeg(
     try {
       await destroy();
     } catch (destroyErr) {
-      console.error("gate-runner: destroy after arm failure failed", errorText(destroyErr));
+      // #1436 re-review item 3: redacted too, not just the returned
+      // description below -- a destroy error's message can echo a granted
+      // secret value just as easily as the one that landed in `err` above.
+      console.error("gate-runner: destroy after arm failure failed", redactKnownSecretValues(errorText(destroyErr), values));
     }
-    return { kind: "infra", description: `gate container failed: ${errorText(err)}` };
+    return { kind: "infra", description: redactKnownSecretValues(`gate container failed: ${errorText(err)}`, values) };
   }
   return { kind: "accepted" };
 }

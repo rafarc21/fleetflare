@@ -689,6 +689,17 @@ function runLeg(
         readResult: legResultReader(env.STUDIO_ARCHIVE),
         retryJitterMs: RETRY_LEG_JITTER_MS,
         touch,
+        // #1428 item 1: the SAME DO instance the dispatch call above
+        // addressed (gateRunnerName keyed on leg + attemptId) -- best-effort,
+        // idempotent; dispatchAndPollOnce itself swallows any failure here,
+        // never letting it affect the give-up result already decided.
+        abandon: async (leg, attemptId, resultKey) => {
+          const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(gateRunnerName(instanceId, leg.leg, attemptId)));
+          await stub.fetch("https://gate-runner/abandon", {
+            method: "POST",
+            body: JSON.stringify({ resultKey }),
+          });
+        },
       },
     );
   }

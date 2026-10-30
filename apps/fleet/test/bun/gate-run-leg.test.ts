@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   runLegInContainer, runLegWithSecrets, legResponse, prepareAndStartContainer, startLegContainer, startAsyncLeg,
   NO_INSTANCE_DESCRIPTION, type AsyncLegStorage, type GateContainer, type OutboundBinding,
@@ -301,6 +301,84 @@ describe("startAsyncLeg (#1398 async branch)", () => {
     expect(destroyed).toBe(1);
     expect(storage.alarmAt).toBe(5000 + 20_000); // setAlarm already ran before putAttempt threw
     expect(storage.alarmState).toBeUndefined();
+  });
+
+  // #1428 item 4: unlike runLegWithSecrets (which redacts a "result" outcome's
+  // free-text fields before it leaves the DO), startAsyncLeg's own "infra"
+  // outcomes went straight from errorText(err) to the response with NO
+  // redaction pass -- an arm-failure error message that happens to echo a
+  // granted secret's value (e.g. a storage error quoting what it tried to
+  // write) would leak it to the Workflow step's own result/logs unscrubbed.
+  test("a setAlarm throw whose message echoes a granted secret value comes back redacted, never raw (#1428 item 4)", async () => {
+    const storage = new FakeStorage();
+    storage.setAlarmThrows = new Error("no alarm() handler for token sup3r-s3cret");
+    const decision = await startAsyncLeg(
+      ASYNC_LEG, { "staging-login": "sup3r-s3cret" }, storage,
+      async () => ({ kind: "started" as const }), async () => {}, () => 5000,
+    );
+    expect(decision.kind).toBe("infra");
+    const description = decision.kind === "infra" ? decision.description : "";
+    expect(description).not.toContain("sup3r-s3cret");
+    expect(description).toContain("«redacted»");
+  });
+
+  test("a putAttempt throw whose message echoes a granted secret value comes back redacted too (#1428 item 4)", async () => {
+    const storage = new FakeStorage();
+    storage.putAttemptThrows = new Error("storage down: last good value was sup3r-s3cret");
+    const decision = await startAsyncLeg(
+      ASYNC_LEG, { "staging-login": "sup3r-s3cret" }, storage,
+      async () => ({ kind: "started" as const }), async () => {}, () => 5000,
+    );
+    const description = decision.kind === "infra" ? decision.description : "";
+    expect(description).not.toContain("sup3r-s3cret");
+    expect(description).toContain("«redacted»");
+  });
+
+  // The OTHER infra return point -- a failing start() itself -- carries the
+  // same risk: `start`'s own description can echo a granted value (e.g. the
+  // container runtime quoting an env var it failed to apply).
+  test("a start() infra description that echoes a granted secret value comes back redacted too (#1428 item 4)", async () => {
+    const storage = new FakeStorage();
+    const decision = await startAsyncLeg(
+      ASYNC_LEG, { "staging-login": "sup3r-s3cret" }, storage,
+      async () => ({ kind: "infra" as const, description: "gate container failed: boom sup3r-s3cret" }),
+      async () => {},
+    );
+    const description = decision.kind === "infra" ? decision.description : "";
+    expect(description).not.toContain("sup3r-s3cret");
+    expect(description).toContain("«redacted»");
+  });
+
+  // #1436 re-review item 3: the RETURNED description is redacted (above), but
+  // the destroy-after-arm-failure path ALSO logs via a bare console.error --
+  // that second site echoed errorText(destroyErr) raw, unredacted.
+  test("a destroy-after-arm-failure's own console.error is redacted too, not just the returned description", async () => {
+    const storage = new FakeStorage();
+    storage.setAlarmThrows = new Error("no alarm() handler");
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await startAsyncLeg(
+        ASYNC_LEG, { "staging-login": "sup3r-s3cret" }, storage,
+        async () => ({ kind: "started" as const }),
+        async () => { throw new Error("destroy failed: last token was sup3r-s3cret"); },
+        () => 5000,
+      );
+      const logged = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(logged).not.toContain("sup3r-s3cret");
+      expect(logged).toContain("«redacted»");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("no granted secrets: an infra description passes through unchanged (no allocation, no behavior change)", async () => {
+    const storage = new FakeStorage();
+    const decision = await startAsyncLeg(
+      ASYNC_LEG, {}, storage,
+      async () => ({ kind: "infra" as const, description: "gate image not bound (images.gate)" }),
+      async () => {},
+    );
+    expect(decision).toEqual({ kind: "infra", description: "gate image not bound (images.gate)" });
   });
 });
 

@@ -59,6 +59,30 @@ describe("redactKnownSecretValues: common encodings", () => {
     const text = `embedded: ${jsonEscaped}`;
     expect(redactKnownSecretValues(text, [value])).toBe("embedded: «redacted»");
   });
+
+  it("redacts the lowercase-hex form (UTF-8 bytes as a plain lowercase hex string)", () => {
+    const value = "sup3r-s3cret";
+    const hex = [...new TextEncoder().encode(value)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const text = `raw bytes: ${hex}`;
+    expect(redactKnownSecretValues(text, [value])).toBe("raw bytes: «redacted»");
+  });
+
+  it("redacts the lowercase percent-encoding form (hex digits a-f, unlike encodeURIComponent's A-F)", () => {
+    const value = "sup3r s3cret/val";
+    const lowerPct = encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase());
+    const text = `GET /login?token=${lowerPct}`;
+    expect(redactKnownSecretValues(text, [value])).toBe("GET /login?token=«redacted»");
+  });
+
+  // #1436 re-review: a tool that dumps raw bytes as hex may print UPPERCASE
+  // digits (many hex-dump utilities' default) rather than the lowercase form
+  // above -- a distinct string, so it needs its own form in the set.
+  it("redacts the UPPERCASE-hex form (UTF-8 bytes as an uppercase hex string)", () => {
+    const value = "sup3r-s3cret";
+    const hex = [...new TextEncoder().encode(value)].map((b) => b.toString(16).padStart(2, "0").toUpperCase()).join("");
+    const text = `raw bytes: ${hex}`;
+    expect(redactKnownSecretValues(text, [value])).toBe("raw bytes: «redacted»");
+  });
 });
 
 // #1346 security review r2: container/gate-server.ts's own 32k tail cut can

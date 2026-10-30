@@ -432,6 +432,13 @@ async function dispatchAndPollOnce(
      *  already applied at the call site (0 for the start phase and for
      *  tryNo > 1); this just waits it out inside the dispatch callback. */
     jitterMs: number;
+    /** #1428 item 1: the Workflow's own give-up calls this idempotent DO RPC
+     *  (do.ts's /abandon route) so a truly dormant DO's secretValues are
+     *  cleaned up promptly rather than waiting for the far slower one-shot
+     *  secret-sweep backstop. Best-effort: a throw here never affects the
+     *  give-up result already decided below. Absent = an older caller; the
+     *  sweep backstop alone still covers it. */
+    abandon?: (planned: PlannedLeg, attemptId: string, resultKey: string) => Promise<void>;
   },
 ): Promise<LegRunResult> {
   // #1398 plan review r2 item 3: minted in its OWN step, BEFORE the dispatch
@@ -556,6 +563,15 @@ async function dispatchAndPollOnce(
           const message = err instanceof Error ? err.message : String(err);
           result = { state: "error", description: `gate result write failed: ${message.slice(0, MAX_INFRA_CAUSE_CHARS)}` };
         }
+        // #1428 item 1: this IS the moment the Workflow concludes the DO may
+        // have gone dormant -- tell it to clean up now via the idempotent
+        // /abandon RPC, rather than leaving its secretValues to the far
+        // slower one-shot sweep backstop. Best-effort: a throw here (the DO
+        // genuinely unreachable, which is plausible -- that is WHY the
+        // Workflow gave up) must never affect the give-up result above.
+        try {
+          await deps.abandon?.(target, attemptId, dispatched.resultKey);
+        } catch { /* best-effort: the sweep backstop still covers this */ }
         return { leg: target.leg, ...result, ms: deps.now() - dispatched.startedAt };
       });
       return claimed;
@@ -576,7 +592,13 @@ export async function runLegStepPolling(
   step: PollingLegStepRunner,
   dispatch: (planned: PlannedLeg, attemptId: string) => Promise<DispatchOutcome>,
   planned: PlannedLeg,
-  deps: LegRunDeps & { bucket: ClaimableBucket; pollIntervalSeconds?: number },
+  deps: LegRunDeps & {
+    bucket: ClaimableBucket;
+    pollIntervalSeconds?: number;
+    /** #1428 item 1: see dispatchAndPollOnce's own deps field -- threaded
+     *  straight through to it at both runPhase call sites below. */
+    abandon?: (planned: PlannedLeg, attemptId: string, resultKey: string) => Promise<void>;
+  },
 ): Promise<LegRunResult> {
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -633,7 +655,7 @@ export async function runLegStepPolling(
       const jitterMs = phaseName === "retry" && tryNo === 1 ? retryJitterMs : 0;
       const result = await dispatchAndPollOnce(
         step, dispatch, target, `dispatch-${phaseName}-${planned.leg}-try${tryNo}`, tryDeadlineMs,
-        { bucket: deps.bucket, now, pollIntervalSeconds, readResult, touch: deps.touch, sleep, random, jitterMs },
+        { bucket: deps.bucket, now, pollIntervalSeconds, readResult, touch: deps.touch, sleep, random, jitterMs, abandon: deps.abandon },
       );
       const isInfra = result.state === "error" && isLegInfraDescription(result.description);
       if (!isInfra) return result;
