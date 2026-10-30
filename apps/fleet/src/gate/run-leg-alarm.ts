@@ -39,6 +39,13 @@ export interface RunLegAlarmState {
   /** Wall-clock time this attempt's dispatch step itself minted (the
    *  governing invariant) -- when `phase` entered "waiting-for-ready". */
   readyStartedAt: number;
+  /** #1409 (a): the leg's OWN start — minted the moment /run is first
+   *  attempted (the waiting-for-ready -> port-retry or -> polling
+   *  transition). The polling deadline anchors HERE, not at pollStartedAt:
+   *  a leg can spend up to 90 s in port-retry before /run is accepted, and
+   *  that time counts against timeoutMin, exactly as runOnServer's
+   *  `legStarted` does. */
+  legStartedAt?: number;
   /** Set once `phase` enters "port-retry". */
   portRetryStartedAt?: number;
   /** Set once `phase` enters "polling". */
@@ -108,14 +115,14 @@ export function nextAlarmStep(state: RunLegAlarmState, now: number, signal: Poll
     case "waiting-for-ready": {
       if (signal.kind === "run-result") return { kind: "terminal", outcome: { kind: "result", result: signal.result } };
       if (signal.kind === "run-accepted") {
-        return { kind: "re-arm", afterMs: ALARM_TICK_MS, state: { ...state, phase: "polling", pollStartedAt: now } };
+        return { kind: "re-arm", afterMs: ALARM_TICK_MS, state: { ...state, phase: "polling", pollStartedAt: now, legStartedAt: state.legStartedAt ?? now } };
       }
       // #1398 plan review r1 item 7: the container IS running and the DO DID
       // attempt /run -- a refusal here means "listening not yet bound," the
       // port-retry phase's own job, never a reason to keep calling this
       // "waiting for ready" (which only means "c.running is still false").
       if (signal.kind === "running-not-listening") {
-        return { kind: "re-arm", afterMs: ALARM_TICK_MS, state: { ...state, phase: "port-retry", portRetryStartedAt: now } };
+        return { kind: "re-arm", afterMs: ALARM_TICK_MS, state: { ...state, phase: "port-retry", portRetryStartedAt: now, legStartedAt: state.legStartedAt ?? now } };
       }
       // "not-running": the container itself has not come up yet.
       if (now - state.readyStartedAt >= READY_TIMEOUT_MS) {
@@ -127,7 +134,7 @@ export function nextAlarmStep(state: RunLegAlarmState, now: number, signal: Poll
       const startedAt = state.portRetryStartedAt ?? now;
       if (signal.kind === "run-result") return { kind: "terminal", outcome: { kind: "result", result: signal.result } };
       if (signal.kind === "run-accepted") {
-        return { kind: "re-arm", afterMs: ALARM_TICK_MS, state: { ...state, phase: "polling", pollStartedAt: now } };
+        return { kind: "re-arm", afterMs: ALARM_TICK_MS, state: { ...state, phase: "polling", pollStartedAt: now, legStartedAt: state.legStartedAt ?? now } };
       }
       if (now - startedAt >= PORT_RETRY_BUDGET_MS) {
         return {
@@ -138,7 +145,19 @@ export function nextAlarmStep(state: RunLegAlarmState, now: number, signal: Poll
       return { kind: "re-arm", afterMs: ALARM_TICK_MS, state: { ...state, portRetryStartedAt: startedAt } };
     }
     case "polling": {
-      const startedAt = state.pollStartedAt ?? now;
+      // #1409 (b): a container that is not running any more during the poll
+      // phase ends the leg NOW as infra — never a silent re-arm that keeps
+      // burning ticks until the leg's own deadline. runOnServer's own poll
+      // loop checks c.running FIRST and returns infra the moment it turns
+      // false; the alarm mirrors that.
+      if (signal.kind === "not-running") {
+        return { kind: "terminal", outcome: { kind: "infra", description: "gate container exited mid-leg" } };
+      }
+      // #1409 (a): the leg's deadline anchors at legStartedAt (when /run was
+      // first attempted), not pollStartedAt. Port-retry can spend up to 90 s
+      // before /run is accepted; that time counts against timeoutMin, exactly
+      // as runOnServer's legStarted does.
+      const startedAt = state.legStartedAt ?? state.pollStartedAt ?? now;
       // #1398 plan review r1 item 7: checked FIRST -- a real result wins over
       // a same-tick deadline, never the reverse.
       if (signal.kind === "poll-result") return { kind: "terminal", outcome: { kind: "result", result: signal.result } };
