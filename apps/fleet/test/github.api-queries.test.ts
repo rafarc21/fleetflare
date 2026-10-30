@@ -687,7 +687,8 @@ describe("issueState", () => {
   });
 
   it("refuses a slug with a dot-dot segment", async () => {
-    await expect(issueState("tok", "..//o", 126)).rejects.toThrow(/not an owner\/name repo/);
+    // "../o" passes the owner/name shape but names a path traversal, not a repo.
+    await expect(issueState("tok", "../o", 126)).rejects.toThrow(/not an owner\/name repo/);
     expect(calls).toHaveLength(0);
   });
 

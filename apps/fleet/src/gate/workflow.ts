@@ -27,7 +27,7 @@ import {
   type GateSecretsAllowlist,
 } from "./secrets-config";
 import { trustedForSecrets } from "./secrets-scope";
-import { capStatusDescription, closedCommitRefs, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
+import { capStatusDescription, closedCommitRefs, commitRefWarningSummary, mergePrecheckFailures, precheckBlobs, recheckFailures } from "./merge-precheck";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import {
@@ -283,7 +283,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // before the skip return so a docs-only PR with a keyword still goes red.
     // Fail closed: a missing denylist or scanner error is a red verdict, never
     // a silent pass (leak-gate.ts's own rule).
-    const precheckFailure = await step.do("precheck", async () => {
+    const precheck = await step.do("precheck", async () => {
       const token = await mintToken(repo);
       const compare = await comparePrecheckData(token, repo, resolved.baseSha, resolved.headSha);
       const opsRepo = resolveOpsRepo(this.env);
@@ -296,20 +296,29 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // #1434 r2: each ref is looked up under its OWN repo's token (memoized) —
       // a foreign repo the App is not installed on fails the mint, which
       // closedCommitRefs reads as an unreadable foreign ref and downgrades to a
-      // warning instead of a permanent red.
+      // warning instead of a permanent red. #1434 r3: the warning also rides the
+      // success/pending status description, not just the log.
       const { closed: closedRefs, warnings, overCap } = await closedCommitRefs(
         commitMessages, repo,
         async (n, refRepo) => issueState(await mintToken(refRepo), refRepo, n),
       );
-      for (const warning of warnings) console.warn(warning);
-      return mergePrecheckFailures({
-        title: resolved.title, body: resolved.body, patterns,
-        blobs: precheckBlobs({ title: resolved.title, body: resolved.body, files: compare.files, commits: compare.commits }),
-        private: resolved.private, truncated: compare.truncated,
-        commitMessages, repo, closedRefs, closedRefsOverCap: overCap,
-        files: compare.files,
-      });
-    }).catch(() => ["gate precheck failed closed"] as string[]);
+      for (const warning of warnings) console.warn(`gate precheck: ${warning} unreadable — foreign ref treated as already closed, not red`);
+      return {
+        failures: mergePrecheckFailures({
+          title: resolved.title, body: resolved.body, patterns,
+          blobs: precheckBlobs({ title: resolved.title, body: resolved.body, files: compare.files, commits: compare.commits }),
+          private: resolved.private, truncated: compare.truncated,
+          commitMessages, repo, closedRefs, closedRefsOverCap: overCap,
+          files: compare.files,
+        }),
+        warningSummary: commitRefWarningSummary(warnings),
+      };
+    }).catch(() => ({ failures: ["gate precheck failed closed"] as string[], warningSummary: null }));
+
+    const precheckFailure = precheck.failures;
+    // #1434 r3: the warning suffix for a clean precheck, appended to the
+    // success/pending status description so an operator sees it, not just logs.
+    const warnSuffix = precheck.warningSummary === null ? "" : `${precheck.warningSummary}; `;
 
     if (precheckFailure.length > 0) {
       const description = capStatusDescription(precheckFailure[0]);
@@ -349,7 +358,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // #1214 round 2: return the GUARDED (state, description), so the status
       // route and CLI report the same red the downgraded skip posts to GitHub.
       const guarded = guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
-        { state: "success", description: "no gated paths changed" });
+        { state: "success", description: capStatusDescription(`${warnSuffix}no gated paths changed`) });
       await step.do("post-skip-status", STATUS_POST_STEP_CONFIG, async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, guarded));
       return { ...guarded, statusPostFailed: false, legs: [] };
@@ -398,8 +407,11 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // A reattach starts no instance and never reaches here, so it posts nothing.
     // Fail-closed since #1226: postGateStatus throws, this step retries 5x, and
     // exhausted retries error the run rather than leaving an unconfirmed head.
-    await step.do("post-pending", STATUS_POST_STEP_CONFIG, async () =>
-      postGateStatus(this.statusPort(), repo, resolved.headSha, pendingStatusArgs(event.instanceId, legs.length)));
+    await step.do("post-pending", STATUS_POST_STEP_CONFIG, async () => {
+      const pending = pendingStatusArgs(event.instanceId, legs.length);
+      return postGateStatus(this.statusPort(), repo, resolved.headSha,
+        { ...pending, description: capStatusDescription(`${warnSuffix}${pending.description}`) });
+    });
 
     // #1080: one bundle for the run, built by one leg before the others start,
     // so the legs read it instead of each cloning (the clone 429 burst). A bundle
@@ -570,7 +582,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       .catch(() => SHARED_HEAD_LOOKUP_FAILED);
     const guarded = verdictArgs.state === "success"
       ? guardSuccessStatus(resolved.headSha, resolved.baseRef, pr, shared,
-        { state: "success", description: verdictArgs.description })
+        { state: "success", description: capStatusDescription(`${warnSuffix}${verdictArgs.description}`) })
       : verdictArgs;
     await step.do("post-verdict", STATUS_POST_STEP_CONFIG, async () =>
       postGateStatus(this.statusPort(), repo, resolved.headSha, {

@@ -19,7 +19,11 @@ export const DENYLIST_UNAVAILABLE = "gate precheck: denylist unavailable";
 // #1434 r2: a promotion PR can name hundreds of refs; reading each serially
 // blows the Worker subrequest/time budget. Unique refs beyond the cap are not
 // read at all — the run goes red naming the count, never a partial scan.
-export const COMMIT_REFS_CAP = 50;
+// #1434 r3: 200, not 50 — a promotion re-presenting 50+ merged commits with
+// keyword refs is the #1430 use case itself, so a 50 cap false-positives it
+// red forever. The Worker subrequest budget is 1000/step and the compare tops
+// ~250 commits, so 200 keeps the serial lookups inside budget.
+export const COMMIT_REFS_CAP = 200;
 export const COMMIT_REFS_CAP_FAILURE = "gate precheck: commit refs over cap: ";
 export const LEAK_SCAN_ERROR = "gate precheck: leak scan error";
 export const COMPARE_TRUNCATED_FAILURE = "gate precheck: compare truncated, cannot scan full diff";
@@ -60,11 +64,22 @@ function commitClosingRefs(messages: string[], repo: string): { repo: string; nu
  *  "foreign refs pass" behaviour instead of a permanent new red surface. */
 export interface ClosedCommitRefsResult {
   closed: ReadonlySet<string>;
-  /** #1434 r2: foreign refs whose state could not be read, each one line. */
+  /** #1434 r2: the `repo#number` of foreign refs whose state could not be read,
+   *  treated as already closed (a warning, never red). */
   warnings: string[];
   /** #1434 r2: present when unique refs exceeded {@link COMMIT_REFS_CAP}; the
    *  lookups were skipped and the caller goes red naming this count. */
   overCap?: number;
+}
+
+/** #1434 r3: the short status-description suffix for unreadable foreign refs —
+ *  the precheck's warnings are otherwise only a log line, invisible to an
+ *  operator watching the gate status. Null when there is nothing to say. */
+export function commitRefWarningSummary(warnings: string[]): string | null {
+  if (warnings.length === 0) return null;
+  return warnings.length === 1
+    ? `warn: 1 foreign ref unreadable: ${warnings[0]}`
+    : `warn: ${warnings.length} foreign refs unreadable`;
 }
 
 export async function closedCommitRefs(
@@ -93,7 +108,7 @@ export async function closedCommitRefs(
         console.error(`gate precheck: ref state of ${ref.repo}#${ref.number} unreadable, keeping it red`, message);
       } else {
         closed.add(`${ref.repo}#${ref.number}`);
-        warnings.push(`gate precheck: ${ref.repo}#${ref.number} unreadable — foreign ref treated as already closed, not red`);
+        warnings.push(`${ref.repo}#${ref.number}`);
       }
     }
   }

@@ -7,7 +7,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   closedCommitRefs, mergePrecheckFailures, CLOSING_KEYWORD_COMMIT_FAILURE,
-  COMMIT_REFS_CAP, COMMIT_REFS_CAP_FAILURE,
+  COMMIT_REFS_CAP, COMMIT_REFS_CAP_FAILURE, commitRefWarningSummary,
 } from "../../src/gate/merge-precheck";
 
 const REPO = "acme/example";
@@ -137,18 +137,27 @@ describe("#1430: commit-message closing keyword fails only on an OPEN ref", () =
   // A base-repo unreadable ref stays red (fail closed).
   describe("#1434 r2: unreadable foreign ref warns, base ref stays red", () => {
     it("a foreign ref whose lookup throws is treated as closed, not red", async () => {
-      const warnings: string[] = [];
-      const result = await closedCommitRefs(["fixes other/repo#5"], REPO, async (n, repo) => {
+      const result = await closedCommitRefs(["fixes other/repo#5"], REPO, async () => {
         throw new Error("GitHub 404");
       });
       expect(result.closed.has("other/repo#5")).toBe(true);
-      expect(result.warnings).toHaveLength(1);
-      expect(result.warnings[0]).toContain("other/repo#5");
+      expect(result.warnings).toEqual(["other/repo#5"]);
+      // #1434 r3: the warning has a short status-description summary.
+      expect(commitRefWarningSummary(result.warnings)).toBe("warn: 1 foreign ref unreadable: other/repo#5");
       // The pure decision then passes the keyword: every ref is "closed".
       expect(mergePrecheckFailures({
         title: "plain title", body: "", patterns: [], blobs: [], private: true,
         repo: REPO, commitMessages: ["fixes other/repo#5"], closedRefs: result.closed,
       })).toEqual([]);
+    });
+
+    it("two foreign refs warn with a count, not a list", async () => {
+      const result = await closedCommitRefs(
+        ["fixes other/repo#5", "fixes other/repo#6"], REPO, async () => { throw new Error("404"); },
+      );
+      expect(result.warnings).toEqual(["other/repo#5", "other/repo#6"]);
+      expect(commitRefWarningSummary(result.warnings)).toBe("warn: 2 foreign refs unreadable");
+      expect(commitRefWarningSummary([])).toBeNull();
     });
 
     it("a base-repo ref whose lookup throws stays red (fail closed)", async () => {

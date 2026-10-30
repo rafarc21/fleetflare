@@ -403,7 +403,8 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
       await instance.waitForStatus("complete");
 
       const out = await instance.getOutput() as { state: string; description?: string };
-      expect(out).toMatchObject({ state: "success", description: "no gated paths changed" });
+      // #1434 r3: the warning rides the success description, not just the log.
+      expect(out).toMatchObject({ state: "success", description: "warn: 1 foreign ref unreadable: other/repo#5; no gated paths changed" });
       // The foreign ref's lookup went to other/repo, not acme/example.
       expect(issueLookups).toContain("other/repo#5");
       expect(issueLookups).not.toContain("acme/example#5");
