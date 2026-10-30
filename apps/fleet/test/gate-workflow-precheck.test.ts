@@ -107,9 +107,12 @@ let pullsCalls = 0;
 // The compare's commit message, so a test can hold the precheck clean (the
 // default "Fix #9" fails it before the recheck could ever run).
 let commitMessage = "Fix #9";
-// #1430: the issues-API state served per ref. A ref absent here rejects, so the
-// default "Fix #9" fails closed on an unreadable ref.
-let issueStates: Record<number, string> = {};
+// #1430: the issues-API state served per ref, keyed `repo#number` or (for a
+// base-repo ref) the bare number. A ref absent here rejects, so the default
+// "Fix #9" fails closed on an unreadable ref. #1434: the repo path of each
+// issue lookup is recorded, so a qualified ref is proven to hit its own repo.
+let issueStates: Record<string, string> = {};
+let issueLookups: string[] = [];
 // The fleet.json body served (FLEET_JSON or RUN_FLEET_JSON), so a test can
 // pick the skip path or the run path.
 let fleetJson = FLEET_JSON;
@@ -199,10 +202,14 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     }
     return Promise.resolve(new Response(JSON.stringify(openPullsBody), { status: 200, headers }));
   }
-  const issue = method === "GET" ? /\/issues\/(\d+)$/.exec(url) : null;
+  const issue = method === "GET" ? /\/repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)$/.exec(url) : null;
   if (issue !== null) {
-    // #1430: issueState — the commit-keyword ref lookup.
-    const state = issueStates[Number(issue[1])];
+    // #1430/#1434: issueState — the commit-keyword ref lookup. Keyed by
+    // `repo#number`, with a bare-number fallback for the base-repo default.
+    const repoKey = issue[1];
+    const number = Number(issue[2]);
+    issueLookups.push(`${repoKey}#${number}`);
+    const state = issueStates[`${repoKey}#${number}`] ?? issueStates[String(number)];
     return state === undefined ? Promise.reject(new Error("issue lookup 502")) : Promise.resolve(json({ state }));
   }
   if (method === "GET" && /\/commits\/main$/.test(url)) {
@@ -272,6 +279,7 @@ beforeEach(() => {
   pullsCalls = 0;
   commitMessage = "Fix #9";
   issueStates = {};
+  issueLookups = [];
   fleetJson = FLEET_JSON;
   openPullsCalls = 0;
   openPullsBody = [];
@@ -372,6 +380,122 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
 
       const out = await instance.getOutput() as { state: string; description?: string };
       expect(out).toMatchObject({ state: "failure", description: CLOSING_KEYWORD_COMMIT_FAILURE });
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("#1434 r2: a foreign ref whose lookup throws is a warning, not red (skip path green)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    titleFlipsOnRecheck = false;
+    // The base repo's token cannot read other/repo (no issueStates entry for it),
+    // so its lookup rejects — the foreign ref downgrades to a warning, not red.
+    commitMessage = "fixes other/repo#5";
+    issueStates = {}; // every lookup rejects
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-foreign-unreadable");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-foreign-unreadable", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      // #1434 r3: the warning rides the success description, not just the log.
+      expect(out).toMatchObject({ state: "success", description: "warn: 1 foreign ref unreadable: other/repo#5; no gated paths changed" });
+      // The foreign ref's lookup went to other/repo, not acme/example.
+      expect(issueLookups).toContain("other/repo#5");
+      expect(issueLookups).not.toContain("acme/example#5");
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("#1434: a qualified ref is looked up in its OWN repo, never the base repo", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    titleFlipsOnRecheck = false;
+    // The base repo's #5 is closed, but other/repo#5 is still open — the
+    // qualified ref must go red, proving it hit its own repo, not the base.
+    commitMessage = "fixes other/repo#5 and fixes #5";
+    issueStates = { "acme/example#5": "closed", "other/repo#5": "open" };
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-qualified-ref");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-qualified-ref", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out).toMatchObject({ state: "failure", description: CLOSING_KEYWORD_COMMIT_FAILURE });
+      // The qualified ref's lookup went to other/repo, not acme/example.
+      expect(issueLookups).toContain("other/repo#5");
+      expect(issueLookups).toContain("acme/example#5");
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  // #1434 r3 review: a run STARTED on the pre-r3 Worker has `precheck` cached
+  // as the old string[] shape; after deploy it replays that cache. The
+  // normalization must read both shapes so a replay neither throws (undefined
+  // .length) nor injects "undefined; " into the status description.
+  it("#1434 r3: a replayed precheck cached as the old string[] shape (failure) posts it, no TypeError, no 'undefined; '", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    delete e.FLEET_OPS_REPO;
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-replay-old-failure");
+    try {
+      await instance.modify(async (m) => {
+        await m.disableSleeps();
+        // The old precheck step returned the failures array directly.
+        await m.mockStepResult({ name: "precheck" }, [CLOSING_KEYWORD_COMMIT_FAILURE]);
+      });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-replay-old-failure", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("failure");
+      expect(out.description).toBe(CLOSING_KEYWORD_COMMIT_FAILURE);
+
+      const post = recorded.find((r) => r.method === "POST" && /\/statuses\//.test(r.url));
+      expect(post).toBeDefined();
+      expect(post!.body).toEqual({
+        state: "failure",
+        context: GATE_STATUS_CONTEXT,
+        description: CLOSING_KEYWORD_COMMIT_FAILURE,
+      });
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("#1434 r3: a replayed precheck cached as the old string[] shape (clean) posts success without 'undefined; '", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    titleFlipsOnRecheck = false;
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-replay-old-clean");
+    try {
+      await instance.modify(async (m) => {
+        await m.disableSleeps();
+        // The old precheck step returned an empty failures array when clean.
+        await m.mockStepResult({ name: "precheck" }, []);
+      });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-replay-old-clean", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      // No warning summary on the old shape, so no "undefined; " prefix.
+      expect(out).toMatchObject({ state: "success", description: "no gated paths changed" });
     } finally {
       await instance.dispose();
     }

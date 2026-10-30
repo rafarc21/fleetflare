@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  resolveIssuesForPushCommits, closesIssueByKeyword,
+  resolveIssuesForPushCommits, closesIssueByKeyword, closingKeywordRefsDetailed,
   type PromoteCloseApi,
   type BatchedPull,
 } from "../src/github/promote-close";
@@ -47,6 +47,36 @@ describe("closesIssueByKeyword (#248)", () => {
     expect(closesIssueByKeyword("Fixes other/repo#107", 107, names)).toBe(false);
     // K3: names in GitHub's case still match a lower-case ref.
     expect(closesIssueByKeyword("Fixes new/name#107", 107, ["Old/Name", "New/Name"])).toBe(true);
+  });
+});
+
+// #1434: the qualifier-preserving raw read the merge precheck needs to look a
+// foreign ref up in its own repo, never the base repo.
+describe("closingKeywordRefsDetailed (#1434)", () => {
+  it("keeps the qualifier on a owner/repo#N ref", () => {
+    expect(closingKeywordRefsDetailed("fixes other/repo#5 and fixes #5")).toEqual([
+      { repo: "other/repo", number: 5 },
+      { repo: null, number: 5 },
+    ]);
+  });
+
+  it("lowercases a qualified ref and reads a full URL to the same shape", () => {
+    expect(closingKeywordRefsDetailed("resolves https://github.com/Other/Repo/issues/5")).toEqual([
+      { repo: "other/repo", number: 5 },
+    ]);
+    expect(closingKeywordRefsDetailed("Fixes OWNER/REPO#5")).toEqual([{ repo: "owner/repo", number: 5 }]);
+  });
+
+  it("reads the colon form", () => {
+    expect(closingKeywordRefsDetailed("fixes: other/repo#5")).toEqual([{ repo: "other/repo", number: 5 }]);
+  });
+
+  it("reads a GH- prefix ref", () => {
+    expect(closingKeywordRefsDetailed("Fixes GH-7")).toEqual([{ repo: null, number: 7 }]);
+  });
+
+  it("a keyword with no readable ref yields an empty list", () => {
+    expect(closingKeywordRefsDetailed("v2fixes #1")).toEqual([]);
   });
 });
 
