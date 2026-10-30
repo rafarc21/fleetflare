@@ -440,6 +440,67 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
     }
   }, 60_000);
 
+  // #1434 r3 review: a run STARTED on the pre-r3 Worker has `precheck` cached
+  // as the old string[] shape; after deploy it replays that cache. The
+  // normalization must read both shapes so a replay neither throws (undefined
+  // .length) nor injects "undefined; " into the status description.
+  it("#1434 r3: a replayed precheck cached as the old string[] shape (failure) posts it, no TypeError, no 'undefined; '", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    delete e.FLEET_OPS_REPO;
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-replay-old-failure");
+    try {
+      await instance.modify(async (m) => {
+        await m.disableSleeps();
+        // The old precheck step returned the failures array directly.
+        await m.mockStepResult({ name: "precheck" }, [CLOSING_KEYWORD_COMMIT_FAILURE]);
+      });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-replay-old-failure", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out.state).toBe("failure");
+      expect(out.description).toBe(CLOSING_KEYWORD_COMMIT_FAILURE);
+
+      const post = recorded.find((r) => r.method === "POST" && /\/statuses\//.test(r.url));
+      expect(post).toBeDefined();
+      expect(post!.body).toEqual({
+        state: "failure",
+        context: GATE_STATUS_CONTEXT,
+        description: CLOSING_KEYWORD_COMMIT_FAILURE,
+      });
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("#1434 r3: a replayed precheck cached as the old string[] shape (clean) posts success without 'undefined; '", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    titleFlipsOnRecheck = false;
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-replay-old-clean");
+    try {
+      await instance.modify(async (m) => {
+        await m.disableSleeps();
+        // The old precheck step returned an empty failures array when clean.
+        await m.mockStepResult({ name: "precheck" }, []);
+      });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-replay-old-clean", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      // No warning summary on the old shape, so no "undefined; " prefix.
+      expect(out).toMatchObject({ state: "success", description: "no gated paths changed" });
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
   it("a precheck compare that throws fails closed: posts the fail-closed description (#1203)", async () => {
     const e = workflowEnv();
     e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";

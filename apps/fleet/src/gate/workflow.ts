@@ -315,13 +315,18 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       };
     }).catch(() => ({ failures: ["gate precheck failed closed"] as string[], warningSummary: null }));
 
-    const precheckFailure = precheck.failures;
+    // #1434 r3: a run started before this deploy has `precheck` cached as the
+    // old string[] shape; after deploy it replays that cache. Normalize both
+    // shapes so a replay never throws (undefined .length) nor injects
+    // "undefined; " into the status description.
+    const failures = Array.isArray(precheck) ? precheck : precheck.failures;
+    const warningSummary = Array.isArray(precheck) ? null : (precheck.warningSummary ?? null);
     // #1434 r3: the warning suffix for a clean precheck, appended to the
     // success/pending status description so an operator sees it, not just logs.
-    const warnSuffix = precheck.warningSummary === null ? "" : `${precheck.warningSummary}; `;
+    const warnSuffix = warningSummary === null ? "" : `${warningSummary}; `;
 
-    if (precheckFailure.length > 0) {
-      const description = capStatusDescription(precheckFailure[0]);
+    if (failures.length > 0) {
+      const description = capStatusDescription(failures[0]);
       await step.do("post-precheck-failure", STATUS_POST_STEP_CONFIG, async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description }));
       return { state: "failure", description, statusPostFailed: false, legs: [] };
