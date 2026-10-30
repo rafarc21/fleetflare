@@ -5,6 +5,7 @@ import { RESCUE_MARKER_PATHSPECS } from "./rescue-gc";
 import { KILL_GRACE_SECONDS } from "./exec-deadline";
 import { STUDIO_REAL_GIT_PATH } from "./credentials";
 import { MintTokenError } from "../github/mint-token-error";
+import { canPushRepo } from "./push-probe";
 
 /**
  * Issue #1 piece 5: origin can be PUBLIC, so rescued work goes to a PRIVATE
@@ -68,6 +69,12 @@ export async function resolveRescueTarget(
   // Issue #7: the rescue token WRITES and rides into the container, past
   // every scan -- only for a rescue repo confirmed private. Absent = no check.
   rescueRepoIsPrivate?: (repo: string) => Promise<boolean>,
+  // Issue #1422: confirms a freshly minted PUSH token can actually push,
+  // before it is handed to the container -- same gate as do.ts's
+  // runRefreshCredential, same 10-27 outage (a clean mint that still could
+  // not push). Never probed for "discovery" (read-only; never pushes).
+  // Absent = canPushRepo (github.com, real fetch).
+  canPush: (token: string, repo: string) => Promise<boolean> = canPushRepo,
 ): Promise<RescueTarget> {
   const discovery = purpose === "discovery";
   const discoveryFailed = (what: string, err: unknown) => console.error(
@@ -114,6 +121,12 @@ export async function resolveRescueTarget(
   try {
     const token = await mintRescuePushToken(mint, slug, rescueMintPermissions(purpose));
     if (token === null) return toOrigin(`no write token for ${slug} (PAT fleet: set FLEET_RESCUE_GITHUB_TOKEN)`);
+    // Issue #1422: discovery's own token is read-only (rescueMintPermissions
+    // above) and never pushes -- probing it for push would refuse every
+    // discovery. Only the push purpose's token is probed.
+    if (!discovery && !(await canPush(token, slug))) {
+      return toOrigin(`push probe failed for ${slug}: receive-pack did not answer 200 -- credential not swapped`);
+    }
     return { remoteUrl: `https://github.com/${slug}.git`, env: { [RESCUE_TOKEN_ENV]: token } };
   } catch (err) {
     if (discovery) {

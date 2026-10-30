@@ -106,6 +106,11 @@ function fakeRefreshDeps(overrides: Partial<RefreshDeps> = {}): RefreshDeps & { 
   return {
     mintToken: vi.fn(async () => "ghs_freshtoken000"),
     sbExec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+    // Issue #1422: every pre-existing test exercises something OTHER than
+    // the push probe itself, so the default is "always passes" — a real
+    // network call here would make every one of them flaky against the
+    // actual internet. Tests for the probe gate itself override this.
+    canPush: vi.fn(async () => true),
     recordStudio: vi.fn(async () => {}),
     notify: vi.fn(async (message: string) => {
       notified.push(message);
@@ -350,6 +355,79 @@ describe("runRefreshCredential", () => {
       )),
     });
     expect((await runRefreshCredential(deps)).ok).toBe(true);
+  });
+
+  // Issue #1422: the 10-27 outage. A mint that succeeds can still carry a
+  // token GitHub refuses to push with — the existing verify above only
+  // proves git serves the minted token, never that GitHub accepts it. The
+  // probe gate catches that BEFORE the credential write replaces a
+  // last-good token.
+  describe("push probe gate (issue #1422)", () => {
+    it("direct mode, probe fails: refused, last-good credential never overwritten, canPush got the minted token and repo", async () => {
+      const calls: string[] = [];
+      const canPush = vi.fn(async () => false);
+      const deps = fakeRefreshDeps({
+        workRepo: "acme-org/websites",
+        canPush,
+        sbExec: vi.fn(async (cmd: string) => { calls.push(cmd); return { code: 0, stdout: "", stderr: "" }; }),
+      });
+      const result = await runRefreshCredential(deps);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("push probe failed");
+      expect(canPush).toHaveBeenCalledWith("ghs_freshtoken000", "acme-org/websites");
+      // The write exec (and everything after it) never ran: the file on disk
+      // keeps whatever credential was already there.
+      expect(calls).toEqual([]);
+    });
+
+    it("direct mode, probe passes: refresh proceeds exactly as before", async () => {
+      const canPush = vi.fn(async () => true);
+      const deps = fakeRefreshDeps({
+        workRepo: "acme-org/websites",
+        canPush,
+        sbExec: vi.fn(async (cmd: string) => (
+          cmd === workCredentialVerifyCmd("acme-org/websites")
+            ? { code: 0, stdout: "password=ghs_freshtoken000\n", stderr: "" } : { code: 0, stdout: "", stderr: "" }
+        )),
+      });
+      const result = await runRefreshCredential(deps);
+      expect(result.ok).toBe(true);
+      expect(canPush).toHaveBeenCalledTimes(1);
+    });
+
+    it("proxy mode: never probed, even when it would refuse — the proxy credential is read-only by design and never pushes directly", async () => {
+      const URL = "https://fleet.example.workers.dev";
+      const canPush = vi.fn(async () => false);
+      const deps = fakeRefreshDeps({
+        workRepo: "acme-org/websites",
+        writeProxy: { workerUrl: URL, mode: vi.fn(async () => "proxy" as const) },
+        mintToken: vi.fn(async () => "ghs_read"),
+        canPush,
+        sbExec: vi.fn(async (cmd: string) => (
+          cmd === workCredentialVerifyCmd("acme-org/websites")
+            ? { code: 0, stdout: "password=ghs_read\n", stderr: "" } : { code: 0, stdout: "", stderr: "" }
+        )),
+      });
+      const result = await runRefreshCredential(deps);
+      expect(result.ok).toBe(true);
+      expect(canPush).not.toHaveBeenCalled();
+    });
+
+    it("a null token (proxy mode, no read grant) is never probed — nothing to push with", async () => {
+      const canPush = vi.fn(async () => false);
+      const deps = fakeRefreshDeps({ workRepo: "acme-org/websites", mintToken: vi.fn(async () => null), canPush });
+      const result = await runRefreshCredential(deps);
+      expect(result.ok).toBe(true);
+      expect(canPush).not.toHaveBeenCalled();
+    });
+
+    it("no workRepo (a caller that predates issue #1187): never probed — there is no repo to probe", async () => {
+      const canPush = vi.fn(async () => false);
+      const deps = fakeRefreshDeps({ canPush });
+      const result = await runRefreshCredential(deps);
+      expect(result.ok).toBe(true);
+      expect(canPush).not.toHaveBeenCalled();
+    });
   });
 });
 
