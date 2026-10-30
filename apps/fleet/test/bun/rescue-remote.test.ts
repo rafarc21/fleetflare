@@ -36,7 +36,7 @@ describe("resolveRescueTarget", () => {
     const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async (repo) => {
       minted.push(repo);
       return "ghs_fake";
-    }, PUBLIC);
+    }, PUBLIC, "push", undefined, async () => true);
     expect(minted).toEqual(["acme/rescue-vault"]);
     // The literal env var name, not RESCUE_TOKEN_ENV's own computed key —
     // rescue.ts's shell credential helper (test/bun/rescue-push.test.ts's
@@ -141,7 +141,7 @@ describe("resolveRescueTarget, purpose discovery", () => {
   });
 
   test("confirmed-private rescue repo + token: the private target", async () => {
-    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => "ghs_fake", PUBLIC, "push", async () => true);
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => "ghs_fake", PUBLIC, "push", async () => true, async () => true);
     expect(t.remoteUrl).toBe("https://github.com/acme/rescue-vault.git");
   });
 });
@@ -163,7 +163,7 @@ describe("resolveRescueTarget, push-purpose mint retries without workflows on a 
       if (permissions?.workflows !== undefined) throw new MintTokenError(422, "Validation Failed");
       return "ghs_narrow";
     };
-    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, mint, PUBLIC, "push", async () => true);
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, mint, PUBLIC, "push", async () => true, async () => true);
     expect(calls).toEqual([
       { repo: "acme/rescue-vault", permissions: { contents: "write", workflows: "write" } },
       { repo: "acme/rescue-vault", permissions: { contents: "write" } },
@@ -214,6 +214,45 @@ describe("resolveRescueTarget, push-purpose mint retries without workflows on a 
     const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, mint, PUBLIC, "discovery");
     expect(calls).toBe(1);
     expect(t).toEqual({});
+  });
+});
+
+// Issue #1422: the 10-27 outage. Same gate as do.ts's runRefreshCredential
+// (same outage: a mint that succeeds yet the token still cannot push) —
+// applied here too, since a rescue push rides a separately-minted token.
+describe("resolveRescueTarget: push probe gate (issue #1422)", () => {
+  test("push purpose, probe fails: falls back to origin, loudly, same as any other mint failure", async () => {
+    const canPush = async () => false;
+    const t = await resolveRescueTarget(
+      { FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => "ghs_fake", PUBLIC, "push", async () => true, canPush,
+    );
+    expect(t).toEqual({});
+    expect(logged()).toMatch(/push probe failed for acme\/rescue-vault.*origin.*leak-gated/);
+  });
+
+  test("push purpose, probe passes: the private target, as before", async () => {
+    const t = await resolveRescueTarget(
+      { FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => "ghs_fake", PUBLIC, "push", async () => true, async () => true,
+    );
+    expect(t).toEqual({ remoteUrl: "https://github.com/acme/rescue-vault.git", env: { [RESCUE_TOKEN_ENV]: "ghs_fake" } });
+  });
+
+  test("discovery purpose: never probed, even when it would refuse -- discovery's own token is read-only and never pushes", async () => {
+    const canPush = async () => false;
+    const t = await resolveRescueTarget(
+      { FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => "ghs_fake", PUBLIC, "discovery", undefined, canPush,
+    );
+    expect(t).toEqual({ remoteUrl: "https://github.com/acme/rescue-vault.git", env: { [RESCUE_TOKEN_ENV]: "ghs_fake" } });
+  });
+
+  test("no write token minted: never probed -- nothing to push with (same early-return as before this gate existed)", async () => {
+    let called = false;
+    const canPush = async () => { called = true; return false; };
+    const t = await resolveRescueTarget(
+      { FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => null, PUBLIC, "push", async () => true, canPush,
+    );
+    expect(t).toEqual({});
+    expect(called).toBe(false);
   });
 });
 

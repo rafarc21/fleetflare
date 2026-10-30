@@ -1,10 +1,12 @@
 import { describe, it, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { MAX_LEG_TIMEOUT_MIN } from "../../src/gate/config";
 import {
   parseGateRunnerRepos, isGateRunnerRepo, isAsyncLegsRepo, parseGateBlock, gateMapEntry, matchesPathRules,
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR, legTimeoutMin,
   GATE_IMAGES, fleetJsonChanged, gateDecision, decideGateRun, headFleetJsonFailure,
-  gateMapHasInvalidEntry,
+  gateMapHasInvalidEntry, FIXED_STEP_NAMES,
   guardSuccessStatus, sharedHeadFailure,
 } from "../../src/gate/config";
 import FLEET_JSON from "../../../../fleet.json";
@@ -162,6 +164,34 @@ describe("parseGateBlock: leg names", () => {
   });
   it("keeps names that only look like the reserved ones", () => {
     expect(parseGateBlock({ ...BLOCK, legs: ["bun", "bun-lint", "vitest-only"] })).not.toBeNull();
+  });
+  // #1412: a leg whose minted `<prefix>-<leg>` step equals a fixed workflow
+  // step must be rejected — "infra-rerun" → `start-infra-rerun`, which is the
+  // workflow's own infra-rerun launch step.
+  it("rejects a leg whose minted start-/retry-/recover- step would shadow a fixed step", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: ["infra-rerun"] })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, legs: [{ name: "infra-rerun", cmd: "c" }] })).toBeNull();
+  });
+  // #1412: a leg name is only reserved when it actually shadows a step. A fixed
+  // step name that no leg prefix produces (e.g. "resolve-pr" mints
+  // "start-resolve-pr", never a fixed step) stays a valid leg name.
+  it("keeps fixed-step names that no minted leg step would equal", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: ["resolve-pr", "list-bun-lane", "post-verdict", "leg-mode"] })).not.toBeNull();
+  });
+  // #1412: FIXED_STEP_NAMES claims KEEP IN SYNC with workflow.ts, but nothing
+  // enforced that. Read the two sources that mint fixed steps and extract every
+  // double-quoted step.do("...") literal — a fixed step added without a matching
+  // FIXED_STEP_NAMES entry fails here, so a future fixed step that collides with
+  // a leg name is caught in CI instead of at parse time of some fleet.json.
+  it("FIXED_STEP_NAMES stays in sync with every fixed step.do literal in workflow.ts and leg-run.ts", () => {
+    const stepDoLiteral = /\.do\(\s*"([a-z0-9-]+)"/g;
+    const extracted = new Set<string>();
+    for (const rel of ["../../src/gate/workflow.ts", "../../src/gate/leg-run.ts"]) {
+      const src = readFileSync(join(import.meta.dir, rel), "utf8");
+      for (const m of src.matchAll(stepDoLiteral)) extracted.add(m[1]);
+    }
+    const fixed = new Set<string>(FIXED_STEP_NAMES);
+    for (const name of extracted) expect(fixed.has(name)).toBe(true);
   });
 });
 

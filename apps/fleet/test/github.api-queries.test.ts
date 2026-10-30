@@ -5,7 +5,7 @@ import {
   pullsWithClosingIssuesForCommits, pullClaimsIssue,
   listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES, listOpenPulls, OPEN_PULLS_MAX_PAGES,
   getCommitContextStatus, COMMIT_STATUSES_MAX_PAGES,
-  pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
+  pullRequestExists, branchExists, commitExists, issueExists, issueState, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
   setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict, setBranchProtectionRequiredStatusChecks, disableBranchProtectionEnforceAdmins,
   getBranchProtection, findPullRequestsReferencingTask, getAuthenticatedAppSlug,
@@ -662,6 +662,39 @@ describe("commitExists", () => {
     } catch (err) {
       expect((err as Error).message).toBe("read o/r@abc123 failed (500): boom");
     }
+  });
+});
+
+describe("issueState", () => {
+  it("reads the state, GETting the issues endpoint", async () => {
+    respond = () => Response.json({ state: "closed" });
+    expect(await issueState("tok", "o/r", 126)).toBe("closed");
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/issues/126");
+  });
+
+  it("returns empty string when GitHub sends no state field", async () => {
+    respond = () => Response.json({});
+    expect(await issueState("tok", "o/r", 126)).toBe("");
+  });
+
+  // #1434 r2: the slug is validated before any request — a qualified commit
+  // ref is attacker-shaped text, so a `.`/`..` segment or a missing slash must
+  // fail closed here, never smuggle a request elsewhere.
+  it("refuses a slug with a dot-only segment", async () => {
+    await expect(issueState("tok", "o/.", 126)).rejects.toThrow(/not an owner\/name repo/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses a slug with a dot-dot segment", async () => {
+    // "../o" passes the owner/name shape but names a path traversal, not a repo.
+    await expect(issueState("tok", "../o", 126)).rejects.toThrow(/not an owner\/name repo/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses a slug with no slash", async () => {
+    await expect(issueState("tok", "no-slash", 126)).rejects.toThrow(/not an owner\/name repo/);
+    expect(calls).toHaveLength(0);
   });
 });
 

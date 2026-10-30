@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Issue #59: the in-container `fleet` (container/studio-fleet) gains
@@ -12,6 +14,29 @@ const TOKEN = `fsp_${"a".repeat(64)}`;
 let seen: Array<{ method: string; path: string; token: string | null; body: unknown }> = [];
 let server: ReturnType<typeof Bun.serve>;
 let hangMs = 0;
+
+// The gate container runs bun-test under PID1 with no init, so a child's
+// exit event is never reaped: `p.exited` can hang forever on a dead child,
+// and pipe EOF is unreliable — the write end can leak into an unrelated
+// live process (a grandchild), so the reader never sees EOF. Exit is
+// signalled by a FILE the wrapper writes last, polled until it appears:
+// the file is a plain readdir/stat on a private tmpdir, no pipe fds at all.
+function markerDir(): string {
+  return mkdtempSync(join(tmpdir(), "studio-fleet-directs-"));
+}
+
+async function readMarker(dir: string, file: string): Promise<string> {
+  const path = join(dir, file);
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    if (existsSync(path)) {
+      const text = readFileSync(path, "utf8");
+      if (text.trim() !== "") return text;
+    }
+    if (Date.now() > deadline) throw new Error(`marker ${file} never appeared within 20 s`);
+    await Bun.sleep(20);
+  }
+}
 
 beforeAll(async () => {
   server = Bun.serve({
@@ -31,43 +56,48 @@ beforeAll(async () => {
   // spawns (later tests run warm and pass). Warm it once here so the first
   // real test is not the one paying the JIT/startup cost. --help exits 0 with
   // no server, so this is a cheap warm, bounded at 30 s.
-  // Same sh-wrapper trick as run(): EOF on the child's pipes is the exit
-  // signal, never p.exited (which can hang on a dead child under the gate's
-  // no-init PID1).
-  const warm = Bun.spawn(["sh", "-c", 'bun "$0" "$@"; echo "__EXIT=$?" >&2', BIN, "--help"], {
-    stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH! },
+  // Exit signalled by a marker file, never p.exited or pipe EOF (both can
+  // hang under the gate's no-init PID1).
+  const warmDir = markerDir();
+  const warmCode = join(warmDir, "code");
+  Bun.spawn(["sh", "-c", 'bun "$0" "$@" >"$O" 2>"$E"; echo "$?" >"$C"', BIN, "--help"], {
+    stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    env: { PATH: process.env.PATH!, O: `${warmDir}/out`, E: `${warmDir}/err`, C: warmCode },
   });
-  await Promise.race([
-    Promise.all([new Response(warm.stdout).text(), new Response(warm.stderr).text()]).then(() => undefined),
-    new Promise<never>((_, reject) => {
-      const timer = setTimeout(() => {
-        try { warm.kill(); } catch { /* already gone */ }
-        reject(new Error("studio-fleet --help warm timed out after 30 s"));
-      }, 30_000);
-    }),
-  ]);
+  const warmExit = Number((await readMarker(warmDir, "code")).trim());
+  if (warmExit !== 0) {
+    throw new Error(`studio-fleet --help warm exited ${warmExit}`);
+  }
+  rmSync(warmDir, { recursive: true, force: true });
 }, { timeout: 35_000 });
 afterAll(() => server.stop(true));
 
 async function run(args: string[], stdin = "", extraEnv: Record<string, string> = {}) {
   seen = [];
-  // #1398 side-PR: run the child under sh, which echoes its real exit code to
-  // stderr after it returns. EOF on both pipes means the shell has closed its
-  // fds — i.e. the child has exited — even when bun never delivers the exit
-  // event (gate PID1 has no init, so p.exited can hang forever on a dead child).
-  const p = Bun.spawn(["sh", "-c", 'bun "$0" "$@"; echo "__EXIT=$?" >&2', BIN, ...args], {
-    stdin: new Blob([stdin]), stdout: "pipe", stderr: "pipe",
-    env: {
-      PATH: process.env.PATH!, FLEET_WORKER_URL: `http://127.0.0.1:${server.port}`, FLEET_SPAWN_TOKEN: TOKEN,
-      ...extraEnv,
-    },
-  });
-  const [out, errRaw] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
-  const m = /__EXIT=(\d+)\s*$/.exec(errRaw);
-  // No marker = sh never reached the echo (its own failure); treat as failure.
-  const code = m ? Number(m[1]) : 1;
-  const err = errRaw.replace(/__EXIT=\d+\s*$/, "").trimEnd();
-  return { out, err, code };
+  // Exit signalled by a marker file written last by the sh wrapper, polled
+  // until it appears — never p.exited and never pipe EOF, both of which can
+  // hang under the gate's no-init PID1 (pipe EOF is the rarer flake: the
+  // child's write end can leak into an unrelated live process, so the reader
+  // never sees it). stdout/stderr go to files in a private tmpdir; the child
+  // never inherits a pipe that anything else could hold open.
+  const dir = markerDir();
+  const codePath = join(dir, "code");
+  try {
+    Bun.spawn(["sh", "-c", 'bun "$0" "$@" >"$O" 2>"$E"; echo "$?" >"$C"', BIN, ...args], {
+      stdin: new Blob([stdin]), stdout: "ignore", stderr: "ignore",
+      env: {
+        PATH: process.env.PATH!, FLEET_WORKER_URL: `http://127.0.0.1:${server.port}`, FLEET_SPAWN_TOKEN: TOKEN,
+        O: `${dir}/out`, E: `${dir}/err`, C: codePath,
+        ...extraEnv,
+      },
+    });
+    const code = Number((await readMarker(dir, "code")).trim());
+    const out = existsSync(join(dir, "out")) ? readFileSync(join(dir, "out"), "utf8") : "";
+    const err = existsSync(join(dir, "err")) ? readFileSync(join(dir, "err"), "utf8").trimEnd() : "";
+    return { out, err, code };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 describe("studio-fleet spawn — instance targeting", () => {

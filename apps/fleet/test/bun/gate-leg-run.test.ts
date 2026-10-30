@@ -1158,6 +1158,31 @@ describe("runLegStep: a Workflows invocation cut recovers the leg's stored resul
     expect(readKeys.filter((k) => k.includes(".retry"))).toEqual([]);
   });
 
+  it("stored failure recovered in the start phase stays retryable: a flaky pass on retry", async () => {
+    const step = cutStep();
+    // The start phase's own candidate -try3 holds the red result a container
+    // wrote before the cut. The recover-start sweep returns it as a red first
+    // try (data, not infra), so the leg still earns its one flaky retry.
+    const { readResult } = lateRead(TRY3_KEY, { state: "failure", description: "lint 3 errors" }, 1);
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      // The start step's three infra attempts all die as WorkflowInternalError;
+      // the retry step's fresh container passes.
+      if (sent <= 3) throw new Error(CUT);
+      return reply({ state: "success" });
+    };
+    const result = await runLegStep(step, dispatch, PLANNED, { readResult });
+    expect(result).toMatchObject({
+      leg: "lint", state: "success",
+      description: "flaky: passed on retry; first: result read from R2 after transport loss: lint 3 errors",
+    });
+    // The recovered red first try is still data: the flaky retry step ran.
+    expect(step.calls.map((c) => c.name)).toEqual([
+      "leg-started-lint", "start-lint", "recover-start-lint", "retry-lint",
+    ]);
+  });
+
   it("a stale .retry result from an earlier instance is never read by the start phase (review r1 item 2)", async () => {
     const step = cutStep();
     // An earlier instance with the same run id left a green .retry.json. The
@@ -1790,6 +1815,62 @@ describe("runLegStepPolling (#1398)", () => {
     const budgets = step.calls.filter((c) => c.includes("total-budget-"));
     expect(budgets).toContain("total-budget-start-lint-try1");
     expect(budgets).toContain("total-budget-retry-lint-try1");
+  });
+
+  // #1423: review r2 flagged two untested paths. A hung poll read must be
+  // bounded by withStepDeadline (a stuck get would otherwise hold the step
+  // open forever); a removed withStepDeadline on that read hangs this test.
+  it("a hung poll read is bounded by withStepDeadline, never a hanging read (review r2: withStepDeadline removable)", async () => {
+    // Fire the 30s read deadline immediately: withStepDeadline's setTimeout is
+    // the ONLY timer in this path, so advancing it synchronously lets the hung
+    // get lose the race deterministically, never a real 30s wait. A mutant that
+    // removes withStepDeadline from the poll read awaits the hung get forever
+    // and hangs the test instead of resolving.
+    const setSpy = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void) => {
+      fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+    const clearSpy = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+    const step = fakePollingStep();
+    // A get that NEVER resolves: under withStepDeadline the deadline fires and
+    // the poll returns read-failed; without it, this Promise races nothing.
+    const bucket = {
+      put: async () => null,
+      get: async () => new Promise<never>(() => {}),
+    };
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+      ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+    const result = await runLegStepPolling(step, dispatch, PLANNED, {
+      bucket, now: () => 0, stepDeadlineMs: 1_000, totalDeadlineMs: 10_000,
+    });
+    setSpy.mockRestore();
+    clearSpy.mockRestore();
+    expect(result.state).toBe("error");
+    // The read-failed tick is infra, so the loop retries it to the cap; the
+    // combined causes carry withStepDeadline's timeout message (truncated per
+    // cause), never the give-up's own "no progress" guess.
+    expect(result.description).toContain("gate result read failed: result read timed");
+    expect(result.description).not.toContain("no progress past its deadline");
+  });
+
+  // #1423: the poll path's MAX_DESCRIPTION_CHARS cap (2000) is exercised here,
+  // the async counterpart of runLegStep's own cap (line 233). The raw R2 body's
+  // description is re-read by the poll step and rebuilt capped, so 32K of
+  // stdout never rides into the step result.
+  it("the poll read caps a container-authored description at MAX_DESCRIPTION_CHARS (2000), the async counterpart of the sync cap", async () => {
+    const step = fakePollingStep();
+    // A success, so the first poll's found result is the FINAL result — the cap
+    // is read straight off the returned description, no retry phase in between.
+    const bucket = fakeBucket({
+      [PLANNED.resultKey]: { state: "success", description: "x".repeat(5000), summary: "42 passed" },
+    });
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+      ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, stepDeadlineMs: 0, totalDeadlineMs: 1_000 });
+    expect(result.state).toBe("success");
+    expect(result.description?.length).toBe(2000);
+    expect(result.description).toBe("x".repeat(2000));
+    expect(result.summary).toBe("42 passed");
   });
 
   it("(D) 'DO alarm failed N times in a row, giving up' IS infra (emitted by run-leg-alarm.ts alarmTick); 'gate result (read|write) failed' IS, and no live description collides with the latter", () => {

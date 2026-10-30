@@ -881,8 +881,17 @@ export async function issueExists(token: string, repo: string, number: number): 
 }
 
 /** #1430: an issue's or PR's `state` ("open" | "closed"; a merged PR reads
- *  "closed"). Throws on any non-2xx, so the caller fails closed. */
+ *  "closed"). Throws on any non-2xx, so the caller fails closed. #1434 r2: the
+ *  repo slug is validated before the URL is built — a qualified commit ref is
+ *  attacker-shaped text, and a malformed slug (a `.`/`..` path segment, a
+ *  missing slash) must fail closed here, never smuggle a request elsewhere. */
+const ISSUE_STATE_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
 export async function issueState(token: string, repo: string, number: number): Promise<string> {
+  const segments = repo.split("/");
+  if (!ISSUE_STATE_REPO.test(repo) || segments.some((s) => s === "." || s === "..")) {
+    throw new Error(`state of ${repo}#${number} refused: not an owner/name repo`);
+  }
   const issue = await ghJson<{ state?: string }>(
     token, `https://api.github.com/repos/${repo}/issues/${number}`, { method: "GET" }, `state of ${repo}#${number}`);
   return issue.state ?? "";
