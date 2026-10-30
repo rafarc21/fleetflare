@@ -124,7 +124,7 @@ function isStringArray(v: unknown): v is string[] {
  *  workflow.ts: every fixed `step.do("...")` literal must appear here. */
 const LEG_STEP_PREFIXES = ["start-", "retry-", "recover-start-", "recover-retry-", "leg-started-"] as const;
 
-const FIXED_STEP_NAMES = [
+export const FIXED_STEP_NAMES = [
   "build-bundle",
   "fleet-json-changed",
   "gate-secrets-allowlist",
