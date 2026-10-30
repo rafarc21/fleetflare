@@ -16,6 +16,10 @@ function deps(overrides: Partial<RefreshDeps> = {}): RefreshDeps {
   return {
     mintToken: vi.fn(async () => "ghs_primary"),
     sbExec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+    // Issue #1422: this suite exercises the read-repos helper, not the push
+    // probe gate -- a real network call here would make it flaky against
+    // the actual internet, so the default is "always passes".
+    canPush: vi.fn(async () => true),
     recordStudio: vi.fn(async () => {}),
     notify: vi.fn(async () => {}),
     now: () => NOW,
