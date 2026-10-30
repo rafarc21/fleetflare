@@ -1817,6 +1817,62 @@ describe("runLegStepPolling (#1398)", () => {
     expect(budgets).toContain("total-budget-retry-lint-try1");
   });
 
+  // #1423: review r2 flagged two untested paths. A hung poll read must be
+  // bounded by withStepDeadline (a stuck get would otherwise hold the step
+  // open forever); a removed withStepDeadline on that read hangs this test.
+  it("a hung poll read is bounded by withStepDeadline, never a hanging read (review r2: withStepDeadline removable)", async () => {
+    // Fire the 30s read deadline immediately: withStepDeadline's setTimeout is
+    // the ONLY timer in this path, so advancing it synchronously lets the hung
+    // get lose the race deterministically, never a real 30s wait. A mutant that
+    // removes withStepDeadline from the poll read awaits the hung get forever
+    // and hangs the test instead of resolving.
+    const setSpy = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void) => {
+      fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+    const clearSpy = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+    const step = fakePollingStep();
+    // A get that NEVER resolves: under withStepDeadline the deadline fires and
+    // the poll returns read-failed; without it, this Promise races nothing.
+    const bucket = {
+      put: async () => null,
+      get: async () => new Promise<never>(() => {}),
+    };
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+      ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+    const result = await runLegStepPolling(step, dispatch, PLANNED, {
+      bucket, now: () => 0, stepDeadlineMs: 1_000, totalDeadlineMs: 10_000,
+    });
+    setSpy.mockRestore();
+    clearSpy.mockRestore();
+    expect(result.state).toBe("error");
+    // The read-failed tick is infra, so the loop retries it to the cap; the
+    // combined causes carry withStepDeadline's timeout message (truncated per
+    // cause), never the give-up's own "no progress" guess.
+    expect(result.description).toContain("gate result read failed: result read timed");
+    expect(result.description).not.toContain("no progress past its deadline");
+  });
+
+  // #1423: the poll path's MAX_DESCRIPTION_CHARS cap (2000) is exercised here,
+  // the async counterpart of runLegStep's own cap (line 233). The raw R2 body's
+  // description is re-read by the poll step and rebuilt capped, so 32K of
+  // stdout never rides into the step result.
+  it("the poll read caps a container-authored description at MAX_DESCRIPTION_CHARS (2000), the async counterpart of the sync cap", async () => {
+    const step = fakePollingStep();
+    // A success, so the first poll's found result is the FINAL result — the cap
+    // is read straight off the returned description, no retry phase in between.
+    const bucket = fakeBucket({
+      [PLANNED.resultKey]: { state: "success", description: "x".repeat(5000), summary: "42 passed" },
+    });
+    const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+      ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+    const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, stepDeadlineMs: 0, totalDeadlineMs: 1_000 });
+    expect(result.state).toBe("success");
+    expect(result.description?.length).toBe(2000);
+    expect(result.description).toBe("x".repeat(2000));
+    expect(result.summary).toBe("42 passed");
+  });
+
   it("(D) 'DO alarm failed N times in a row, giving up' IS infra (emitted by run-leg-alarm.ts alarmTick); 'gate result (read|write) failed' IS, and no live description collides with the latter", () => {
     // #1425: run-leg-alarm.ts:285 now EMITS this as the alarm's own give-up --
     // dropping the pattern would make an alarm give-up read as a real red.
