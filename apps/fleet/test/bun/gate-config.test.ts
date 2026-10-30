@@ -163,6 +163,19 @@ describe("parseGateBlock: leg names", () => {
   it("keeps names that only look like the reserved ones", () => {
     expect(parseGateBlock({ ...BLOCK, legs: ["bun", "bun-lint", "vitest-only"] })).not.toBeNull();
   });
+  // #1412: a leg whose minted `<prefix>-<leg>` step equals a fixed workflow
+  // step must be rejected — "infra-rerun" → `start-infra-rerun`, which is the
+  // workflow's own infra-rerun launch step.
+  it("rejects a leg whose minted start-/retry-/recover- step would shadow a fixed step", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: ["infra-rerun"] })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, legs: [{ name: "infra-rerun", cmd: "c" }] })).toBeNull();
+  });
+  // #1412: a leg name is only reserved when it actually shadows a step. A fixed
+  // step name that no leg prefix produces (e.g. "resolve-pr" mints
+  // "start-resolve-pr", never a fixed step) stays a valid leg name.
+  it("keeps fixed-step names that no minted leg step would equal", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: ["resolve-pr", "list-bun-lane", "post-verdict", "leg-mode"] })).not.toBeNull();
+  });
 });
 
 describe("parseGateBlock: vitestCmd is optional", () => {

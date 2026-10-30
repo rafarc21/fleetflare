@@ -111,9 +111,59 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === "string");
 }
 
+/** #1412: the workflow's fixed step names, audited (workflow.ts's own
+ *  `step.do(...)` literals; "build-bundle" is runBundleStep's, leg-run.ts). A
+ *  leg's OWN steps are minted as `<prefix>-<leg>` for prefix in { start-, retry-,
+ *  recover-start-, recover-retry-, leg-started- } (leg-run.ts); the
+ *  dispatch-…/total-budget-… names always carry a trailing `-tryN`, so they can
+ *  never equal a hand-written fixed step. A leg name that makes one of the five
+ *  simple forms equal a fixed step would shadow it — a leg "infra-rerun" mints
+ *  `start-infra-rerun`, colliding with the infra-rerun launch step. Reserved leg
+ *  names are derived from the real fixed-step names (not hand-listed), so a fixed
+ *  step added later reserves its leg-name shadow for free. KEEP IN SYNC with
+ *  workflow.ts: every fixed `step.do("...")` literal must appear here. */
+const LEG_STEP_PREFIXES = ["start-", "retry-", "recover-start-", "recover-retry-", "leg-started-"] as const;
+
+const FIXED_STEP_NAMES = [
+  "build-bundle",
+  "fleet-json-changed",
+  "gate-secrets-allowlist",
+  "gate-secrets-own-app-slug",
+  "head-gates-map",
+  "leg-mode",
+  "list-browser-evidence",
+  "list-bun-lane",
+  "load-config",
+  "load-head-config",
+  "post-head-invalid",
+  "post-infra-rerun",
+  "post-pending",
+  "post-precheck-failure",
+  "post-recheck-failure",
+  "post-secrets-allowlist-failure",
+  "post-skip-status",
+  "post-verdict",
+  "precheck",
+  "precheck-recheck",
+  "resolve-pr",
+  "shared-head-guard-skip",
+  "shared-head-guard-verdict",
+  "start-infra-rerun",
+] as const;
+
+/** Leg names whose `<prefix>-<name>` step would equal a fixed workflow step. */
+const STEP_SHADOWING_LEG_NAMES: ReadonlySet<string> = new Set(
+  FIXED_STEP_NAMES.flatMap((step) =>
+    LEG_STEP_PREFIXES.filter((prefix) => step.startsWith(prefix)).map((prefix) => step.slice(prefix.length)),
+  ),
+);
+
 function isReservedLegName(name: string): boolean {
   // "bundle" is the #1080 bundle step's leg: its result key is shard-bundle.json, so a block leg of that name would share it.
-  return name === "merge-tree" || name === "bundle" || /^bun-\d+$/.test(name) || /^vitest-\d+$/.test(name);
+  if (name === "merge-tree" || name === "bundle" || /^bun-\d+$/.test(name) || /^vitest-\d+$/.test(name)) return true;
+  // #1412: a leg whose minted step would shadow a fixed workflow step
+  // (e.g. "infra-rerun" → `start-infra-rerun`) is reserved too.
+  return STEP_SHADOWING_LEG_NAMES.has(name);
 }
 
 /** The block's `legs`, normalised to { name, cmd, timeoutMin? }. Each entry is a
