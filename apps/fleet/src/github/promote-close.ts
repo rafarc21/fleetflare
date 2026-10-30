@@ -293,10 +293,10 @@ interface ResolvePushCommitsOptions {
 }
 
 /** GitHub's closing-keyword grammar: close/closes/closed, fix/fixes/fixed,
- *  resolve/resolves/resolved, optional colon, then `#N`, `owner/repo#N` or
- *  the issue URL. */
+ *  resolve/resolves/resolved, optional colon, then `#N`, `GH-N`,
+ *  `owner/repo#N` or the issue URL. */
 const CLOSING_KEYWORD =
-  /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:#|([\w.-]+\/[\w.-]+)#|https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/)(\d+)(?!\d)/gi;
+  /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:#|GH-|([\w.-]+\/[\w.-]+)#|https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/)(\d+)(?!\d)/gi;
 
 /**
  * Issue #248: does this text (a PR's title + body) carry a closing keyword
@@ -308,17 +308,36 @@ export function closesIssueByKeyword(text: string, issue: number, repo: string |
   return closingKeywordRefs(text, repo).includes(issue);
 }
 
+/** #1434: one ref a closing keyword names. `repo` is null for an unqualified
+ *  `#N` (closes in the text's own repo) and the lowercased `owner/repo` for a
+ *  qualified `owner/repo#N` or full-URL ref. A foreign qualified ref is kept,
+ *  not dropped: a caller that cannot prove it closed fails closed instead of
+ *  silently ignoring it. */
+export interface ClosingKeywordRef {
+  repo: string | null;
+  number: number;
+}
+
+/** #1434: every ref a closing keyword names, qualifiers preserved — the raw
+ *  read of the grammar above, before any repo-scoping. See
+ *  {@link ClosingKeywordRef}. */
+export function closingKeywordRefsDetailed(text: string): ClosingKeywordRef[] {
+  const out: ClosingKeywordRef[] = [];
+  for (const m of text.matchAll(CLOSING_KEYWORD)) {
+    const ref = m[1] ?? m[2];
+    out.push({ repo: ref === undefined ? null : ref.toLowerCase(), number: Number(m[3]) });
+  }
+  return out;
+}
+
 /** #1430: every issue in `repo` this text closes by keyword, in order — the
  *  same grammar closesIssueByKeyword asks of one issue. */
 export function closingKeywordRefs(text: string, repo: string | readonly string[]): number[] {
   // #265: a qualified ref may name the caller's slug or the canonical name.
   const known = (typeof repo === "string" ? [repo] : repo).map((r) => r.toLowerCase());
-  const out: number[] = [];
-  for (const m of text.matchAll(CLOSING_KEYWORD)) {
-    const ref = m[1] ?? m[2];
-    if (ref === undefined || known.includes(ref.toLowerCase())) out.push(Number(m[3]));
-  }
-  return out;
+  return closingKeywordRefsDetailed(text)
+    .filter((r) => r.repo === null || known.includes(r.repo))
+    .map((r) => r.number);
 }
 
 /** The primary path, for every commit in one push. */

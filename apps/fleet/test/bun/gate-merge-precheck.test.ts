@@ -47,8 +47,27 @@ describe("closingKeywordFailure", () => {
   });
 
   it("exposes the task's exact regex", () => {
-    expect(CLOSING_KEYWORD_RE.source).toBe("(^|[^a-z])(close[sd]?|fix(es|ed)?|resolve[sd]?) #[0-9]");
+    expect(CLOSING_KEYWORD_RE.source).toBe("(^|[^a-z])(close[sd]?|fix(es|ed)?|resolve[sd]?):?\\s+(?:#|GH-|[\\w.-]+\\/[\\w.-]+#|https:\\/\\/github\\.com\\/[\\w.-]+\\/[\\w.-]+\\/issues\\/)[0-9]");
     expect(CLOSING_KEYWORD_RE.flags).toBe("gim");
+  });
+
+  // #1434: forms GitHub's own grammar closes on, that the crude trigger
+  // previously missed — a keyword in any of them must still go red.
+  it("flags the colon form", () => {
+    expect(closingKeywordFailure("fixes: #7", "")).toBe(CLOSING);
+  });
+
+  it("flags the GH- prefix form", () => {
+    expect(closingKeywordFailure("Fixes GH-7", "")).toBe(CLOSING);
+    expect(closingKeywordFailure("closes GH-12", "")).toBe(CLOSING);
+  });
+
+  it("flags a qualified owner/repo#N form", () => {
+    expect(closingKeywordFailure("fixes owner/repo#5", "")).toBe(CLOSING);
+  });
+
+  it("flags a full issue URL form", () => {
+    expect(closingKeywordFailure("resolves https://github.com/owner/repo/issues/5", "")).toBe(CLOSING);
   });
 });
 

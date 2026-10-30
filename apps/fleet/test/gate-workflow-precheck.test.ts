@@ -107,9 +107,12 @@ let pullsCalls = 0;
 // The compare's commit message, so a test can hold the precheck clean (the
 // default "Fix #9" fails it before the recheck could ever run).
 let commitMessage = "Fix #9";
-// #1430: the issues-API state served per ref. A ref absent here rejects, so the
-// default "Fix #9" fails closed on an unreadable ref.
-let issueStates: Record<number, string> = {};
+// #1430: the issues-API state served per ref, keyed `repo#number` or (for a
+// base-repo ref) the bare number. A ref absent here rejects, so the default
+// "Fix #9" fails closed on an unreadable ref. #1434: the repo path of each
+// issue lookup is recorded, so a qualified ref is proven to hit its own repo.
+let issueStates: Record<string, string> = {};
+let issueLookups: string[] = [];
 // The fleet.json body served (FLEET_JSON or RUN_FLEET_JSON), so a test can
 // pick the skip path or the run path.
 let fleetJson = FLEET_JSON;
@@ -199,10 +202,14 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     }
     return Promise.resolve(new Response(JSON.stringify(openPullsBody), { status: 200, headers }));
   }
-  const issue = method === "GET" ? /\/issues\/(\d+)$/.exec(url) : null;
+  const issue = method === "GET" ? /\/repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)$/.exec(url) : null;
   if (issue !== null) {
-    // #1430: issueState — the commit-keyword ref lookup.
-    const state = issueStates[Number(issue[1])];
+    // #1430/#1434: issueState — the commit-keyword ref lookup. Keyed by
+    // `repo#number`, with a bare-number fallback for the base-repo default.
+    const repoKey = issue[1];
+    const number = Number(issue[2]);
+    issueLookups.push(`${repoKey}#${number}`);
+    const state = issueStates[`${repoKey}#${number}`] ?? issueStates[String(number)];
     return state === undefined ? Promise.reject(new Error("issue lookup 502")) : Promise.resolve(json({ state }));
   }
   if (method === "GET" && /\/commits\/main$/.test(url)) {
@@ -272,6 +279,7 @@ beforeEach(() => {
   pullsCalls = 0;
   commitMessage = "Fix #9";
   issueStates = {};
+  issueLookups = [];
   fleetJson = FLEET_JSON;
   openPullsCalls = 0;
   openPullsBody = [];
@@ -372,6 +380,33 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
 
       const out = await instance.getOutput() as { state: string; description?: string };
       expect(out).toMatchObject({ state: "failure", description: CLOSING_KEYWORD_COMMIT_FAILURE });
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
+  it("#1434: a qualified ref is looked up in its OWN repo, never the base repo", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    titleFlipsOnRecheck = false;
+    // The base repo's #5 is closed, but other/repo#5 is still open — the
+    // qualified ref must go red, proving it hit its own repo, not the base.
+    commitMessage = "fixes other/repo#5 and fixes #5";
+    issueStates = { "acme/example#5": "closed", "other/repo#5": "open" };
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-qualified-ref");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-qualified-ref", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out).toMatchObject({ state: "failure", description: CLOSING_KEYWORD_COMMIT_FAILURE });
+      // The qualified ref's lookup went to other/repo, not acme/example.
+      expect(issueLookups).toContain("other/repo#5");
+      expect(issueLookups).toContain("acme/example#5");
     } finally {
       await instance.dispose();
     }

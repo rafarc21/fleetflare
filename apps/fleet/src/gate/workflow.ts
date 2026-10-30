@@ -293,7 +293,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         await fetchRepoFile(await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }), opsRepo, OPS_DENYLIST_PATH, "HEAD"));
       const commitMessages = compare.commits.map((c) => c.message);
       // #1430: a commit keyword naming only already-closed refs closes nothing.
-      const closedRefs = await closedCommitRefs(commitMessages, repo, (n) => issueState(token, repo, n));
+      const closedRefs = await closedCommitRefs(commitMessages, repo, (n, refRepo) => issueState(token, refRepo, n));
       return mergePrecheckFailures({
         title: resolved.title, body: resolved.body, patterns,
         blobs: precheckBlobs({ title: resolved.title, body: resolved.body, files: compare.files, commits: compare.commits }),
