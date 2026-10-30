@@ -225,6 +225,48 @@ async function armSecretSweep(deps: AlarmTickDeps): Promise<void> {
   await deps.storage.scheduleAlarm(deps.now() + SECRET_SWEEP_MS);
 }
 
+/** #1428 item 1: the slice of real I/O abandonAttempt needs -- a small subset
+ *  of AlarmTickDeps's own storage/container shape (no putState/
+ *  getSecretValues/scheduleAlarm: abandon only ever reads once and deletes,
+ *  it never re-arms anything). do.ts's real /abandon route is the only
+ *  caller built from real bindings. */
+export interface AbandonDeps {
+  storage: {
+    getState(): Promise<RunLegAlarmState | undefined>;
+    deleteSecretValues(): Promise<void>;
+    deleteState(): Promise<void>;
+  };
+  container: { destroy(): Promise<void> } | undefined;
+}
+
+/**
+ * #1428 item 1: the Workflow's own give-up write (leg-run.ts's
+ * dispatchAndPollOnce giveup step) calls this via an idempotent DO RPC
+ * (do.ts's /abandon route), so a truly dormant DO -- CF stopped retrying its
+ * throwing alarm() (the spec's own "Container lifetime" dormancy cliff, ~6
+ * tries) -- is cleaned up promptly instead of waiting for the far slower
+ * one-shot secret-sweep backstop (item a, a 60 min fallback).
+ *
+ * Matched on resultKey: each attempt gets its own DEDICATED DO instance
+ * (gateRunnerName in leg-run.ts), so a stored state for a DIFFERENT
+ * resultKey can only mean this RPC reached the wrong instance -- left
+ * untouched rather than guessed about, never destroying work that is not
+ * this call's own. No state at all (already cleaned up by its own tick, or
+ * a prior abandon call) is a safe no-op -- this IS what makes the RPC
+ * idempotent: the Workflow can call it freely without first proving the DO
+ * is actually still holding this attempt.
+ */
+export async function abandonAttempt(
+  deps: AbandonDeps, resultKey: string,
+): Promise<"abandoned" | "no-op"> {
+  const state = await deps.storage.getState();
+  if (state === undefined || state.resultKey !== resultKey) return "no-op";
+  await deps.container?.destroy();
+  await deps.storage.deleteSecretValues();
+  await deps.storage.deleteState();
+  return "abandoned";
+}
+
 /** #1398: every piece of real I/O one alarm tick needs, injected -- do.ts's
  *  real alarm() is the ONLY caller built from real bindings; every test above
  *  builds this from plain fakes. */
@@ -263,7 +305,24 @@ export interface AlarmTickDeps {
 async function writeTerminalOutcome(
   deps: AlarmTickDeps, resultKey: string, outcome: TerminalOutcome,
 ): Promise<"written" | "write-failed"> {
-  const secretValues = (await deps.storage.getSecretValues()) ?? {};
+  // #1436 item 2/3 (found while testing item 2): this read is NOT the outer
+  // catch's own getSecretValues() call (a different site, used only for
+  // LOGGING) -- it is the redaction corpus for the WRITE itself. Left
+  // unguarded, a storage fault here threw straight out of alarmTick
+  // uncaught, including from the give-up path (inside alarmTick's own outer
+  // catch block), defeating BLOCKER 4's "never let an uncaught exception
+  // propagate silently". Without the real values, redaction cannot be
+  // trusted, so this counts as a failed write rather than risk writing an
+  // unredacted secret.
+  let secretValues: Record<string, string>;
+  try {
+    secretValues = (await deps.storage.getSecretValues()) ?? {};
+  } catch (err) {
+    try {
+      await deps.log(`gate-runner: terminal write failed: could not read secrets for redaction: ${errorText(err)}`);
+    } catch { /* a throwing logger must never turn a write failure into a throw */ }
+    return "write-failed";
+  }
   const values = Object.values(secretValues).filter((v) => v !== "");
   // #1398 plan review r1 BLOCKER 2: EVERY self-made outcome is written --
   // a "result" (a live-observed body, OR the leg's own deadline red) gets
@@ -432,12 +491,18 @@ function errorText(err: unknown): string {
  * calls are injected.
  */
 export async function observeOnce(
-  deps: { state: RunLegAlarmState; running: boolean; port: GateRunnerPort | undefined },
+  deps: { state: RunLegAlarmState; running: () => boolean; getPort: () => GateRunnerPort | undefined },
 ): Promise<PollSignal> {
-  const { state, running, port } = deps;
-  if (port === undefined) return { kind: "poll-failed" };
-  if (state.phase === "waiting-for-ready" && !running) return { kind: "not-running" };
+  const { state, running, getPort } = deps;
+  if (state.phase === "waiting-for-ready" && !running()) return { kind: "not-running" };
   try {
+    // #1428 item 5: getTcpPort moved INSIDE the try, AFTER the not-running
+    // check above -- a not-running container must never even ask for a
+    // port (the old code fetched it unconditionally, before checking
+    // anything), and a throwing getPort() now gets the SAME classification
+    // treatment as a throwing fetch, below, instead of escaping raw.
+    const port = getPort();
+    if (port === undefined) return { kind: "poll-failed" };
     if (state.phase !== "polling") {
       const res = await port.fetch("http://container/run", { method: "POST", signal: AbortSignal.timeout(15_000) });
       if (res.status === 200) return { kind: "run-result", result: (await res.json()) as LegOutcomeResult };
@@ -451,7 +516,13 @@ export async function observeOnce(
     if (NO_INSTANCE_RE.test(err instanceof Error ? err.message : String(err))) {
       return { kind: "no-instance" };
     }
-    return state.phase === "polling" && !running ? { kind: "poll-failed" } : { kind: "running-not-listening" };
+    // #1428 item 5: running() is called again HERE, fresh -- a container
+    // that stops DURING the awaited fetch above (a real race: the only
+    // earlier check was before the call even started) must read as
+    // poll-failed. Reusing a single pre-call snapshot here, as the old code
+    // did, could keep reading a dead container as "still probably fine,
+    // retry" (running-not-listening) forever.
+    return state.phase === "polling" && !running() ? { kind: "poll-failed" } : { kind: "running-not-listening" };
   }
 }
 

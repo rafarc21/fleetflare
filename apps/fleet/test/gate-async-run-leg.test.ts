@@ -273,4 +273,73 @@ describe("gate async /run-leg engine (#1398 Task 12)", () => {
     // which hits the missing-container branch in this environment.
     expect(res.status).toBe(202);
   }, 60_000);
+
+  // #1428 item 1: the Workflow's own give-up calls this idempotent RPC
+  // against the REAL GateRunnerDO. The container cannot boot under vitest
+  // (this file's own header), which makes the no-container assertion here
+  // STRONGER, not weaker: destroy() is a no-op on an unbound container
+  // binding, so the only thing left to prove is the one thing that matters --
+  // the storage deletes themselves -- without a container to mask them.
+  it("/abandon deletes alarmState and secretValues for a matching resultKey, and is a safe no-op called again", async () => {
+    const e = workflowEnv();
+    const instanceId = "gate-abandon-match";
+    const resultKey = `gate/acme/widgets/runs/9/${instanceId}/shard-lint.json`;
+    const stub = e.GATE_RUNNER.get(e.GATE_RUNNER.idFromName(`${instanceId}/lint/attempt-1`));
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const alarmState: RunLegAlarmState = {
+        phase: "polling", resultKey, leg: "lint", timeoutMin: undefined,
+        readyStartedAt: 0, pollStartedAt: 0, instanceId, statusCheckCount: 0, consecutiveFailures: 0,
+      };
+      await state.storage.put("alarmState", alarmState);
+      await state.storage.put("secretValues", { "staging-login": "sup3r-s3cret" });
+    });
+
+    const first = await stub.fetch("https://gate-runner/abandon", {
+      method: "POST",
+      body: JSON.stringify({ resultKey }),
+    });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ result: "abandoned" });
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.get("alarmState")).toBeUndefined();
+      expect(await state.storage.get("secretValues")).toBeUndefined();
+    });
+
+    // Idempotent: calling it again (the real scenario this RPC is FOR -- the
+    // Workflow retries it, or a redelivered call lands twice) is a safe
+    // no-op, never an error.
+    const second = await stub.fetch("https://gate-runner/abandon", {
+      method: "POST",
+      body: JSON.stringify({ resultKey }),
+    });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ result: "no-op" });
+  }, 60_000);
+
+  it("/abandon with a resultKey that does not match the stored attempt's own leaves it untouched", async () => {
+    const e = workflowEnv();
+    const instanceId = "gate-abandon-mismatch";
+    const resultKey = `gate/acme/widgets/runs/9/${instanceId}/shard-lint.json`;
+    const stub = e.GATE_RUNNER.get(e.GATE_RUNNER.idFromName(`${instanceId}/lint/attempt-1`));
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const alarmState: RunLegAlarmState = {
+        phase: "polling", resultKey, leg: "lint", timeoutMin: undefined,
+        readyStartedAt: 0, pollStartedAt: 0, instanceId, statusCheckCount: 0, consecutiveFailures: 0,
+      };
+      await state.storage.put("alarmState", alarmState);
+    });
+
+    const res = await stub.fetch("https://gate-runner/abandon", {
+      method: "POST",
+      body: JSON.stringify({ resultKey: "a completely different key" }),
+    });
+    expect(await res.json()).toEqual({ result: "no-op" });
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.get("alarmState")).toBeDefined(); // untouched
+    });
+  }, 60_000);
 });

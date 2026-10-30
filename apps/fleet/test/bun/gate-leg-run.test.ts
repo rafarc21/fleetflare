@@ -1547,6 +1547,76 @@ describe("runLegStepPolling (#1398)", () => {
     expect(JSON.parse(bucket.store.get(PLANNED.resultKey)!)).toEqual({ state: "error", description: expectedDescription });
   });
 
+  // #1428 item 1: the Workflow's own give-up (this exact path) is the one
+  // moment it concludes the DO may have gone dormant -- it calls the
+  // injected, idempotent abandon RPC so a truly dormant DO's secretValues
+  // are cleaned up promptly, rather than waiting for the far slower one-shot
+  // secret-sweep backstop (run-leg-alarm.ts's SECRET_SWEEP_MS, 60 min).
+  describe("give-up calls the injected abandon RPC (#1428 item 1)", () => {
+    it("a per-try give-up calls abandon with the SAME leg, attemptId and resultKey the dispatch itself used", async () => {
+      const step = fakePollingStep();
+      const bucket = fakeBucket();
+      let now = 0;
+      const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+        const startedAt = now;
+        now += 100;
+        return { kind: "accepted", resultKey: planned.resultKey, startedAt };
+      };
+      const abandonCalls: Array<{ leg: string; attemptId: string; resultKey: string }> = [];
+      const abandon = async (planned: PlannedLeg, attemptId: string, resultKey: string) => {
+        abandonCalls.push({ leg: planned.leg, attemptId, resultKey });
+      };
+      await runLegStepPolling(step, dispatch, PLANNED, {
+        bucket, now: () => now, stepDeadlineMs: 0, totalDeadlineMs: 100, abandon,
+      });
+      expect(abandonCalls).toHaveLength(1);
+      expect(abandonCalls[0].leg).toBe("lint");
+      expect(abandonCalls[0].resultKey).toBe(PLANNED.resultKey);
+      expect(abandonCalls[0].attemptId.length).toBeGreaterThan(0);
+    });
+
+    it("a throwing abandon RPC never affects the give-up's own result -- best-effort, the sweep backstop still covers it", async () => {
+      const step = fakePollingStep();
+      const bucket = fakeBucket();
+      let now = 0;
+      const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+        const startedAt = now;
+        now += 100;
+        return { kind: "accepted", resultKey: planned.resultKey, startedAt };
+      };
+      const abandon = async () => { throw new Error("DO unreachable"); };
+      const result = await runLegStepPolling(step, dispatch, PLANNED, {
+        bucket, now: () => now, stepDeadlineMs: 0, totalDeadlineMs: 100, abandon,
+      });
+      expect(result).toMatchObject({ leg: "lint", state: "error", description: `${R2_PREFIX}lint: no progress past its deadline` });
+    });
+
+    it("no abandon dep at all (an older caller) never throws -- the giveup step works exactly as before", async () => {
+      const step = fakePollingStep();
+      const bucket = fakeBucket();
+      let now = 0;
+      const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> => {
+        const startedAt = now;
+        now += 100;
+        return { kind: "accepted", resultKey: planned.resultKey, startedAt };
+      };
+      const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => now, stepDeadlineMs: 0, totalDeadlineMs: 100 });
+      expect(result.state).toBe("error");
+    });
+
+    it("the common case (a real result found before any deadline) never calls abandon at all", async () => {
+      const step = fakePollingStep();
+      const bucket = fakeBucket({ [PLANNED.resultKey]: { state: "success" } });
+      const dispatch = async (planned: PlannedLeg): Promise<DispatchOutcome> =>
+        ({ kind: "accepted", resultKey: planned.resultKey, startedAt: 0 });
+      let abandonCalls = 0;
+      const abandon = async () => { abandonCalls++; };
+      const result = await runLegStepPolling(step, dispatch, PLANNED, { bucket, now: () => 0, abandon });
+      expect(result.state).toBe("success");
+      expect(abandonCalls).toBe(0);
+    });
+  });
+
   it("the poll step finds a container's own real result before ever reaching the give-up path (the common case)", async () => {
     const step = fakePollingStep();
     const bucket = fakeBucket({ [PLANNED.resultKey]: { state: "success" } }); // pre-populated: the container already wrote it

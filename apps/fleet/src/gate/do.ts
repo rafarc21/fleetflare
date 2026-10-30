@@ -21,7 +21,7 @@ import { mintPrivateCloneToken } from "../github/auth";
 import { gateOutboundProps, legGitToken, type GateLegRequest } from "./leg-env";
 import { GATE_CONTAINER_PORT, legResponse, runLegInContainer, runLegWithSecrets, startAsyncLeg, startLegContainer, type LegResult } from "./run-leg";
 import { legResultReader, type ClaimableBucket } from "./leg-run";
-import { alarmTick, observeOnce, type RunLegAlarmState } from "./run-leg-alarm";
+import { abandonAttempt, alarmTick, observeOnce, type RunLegAlarmState } from "./run-leg-alarm";
 import { legTimeoutMin } from "./config";
 import { resolveGrantedSecrets } from "./secrets-registry";
 import { mintRunToken } from "./secrets-ai-token";
@@ -123,6 +123,27 @@ export class GateRunnerDO extends DurableObject<Env> {
         }));
       return legResponse(outcome);
     }
+    // #1428 item 1: the Workflow's own give-up (leg-run.ts's dispatchAndPollOnce
+    // giveup step) calls this idempotent RPC once it concludes this DO may
+    // have gone dormant -- cleans up promptly instead of leaving secretValues
+    // to the far slower one-shot sweep backstop (run-leg-alarm.ts's
+    // SECRET_SWEEP_MS). blockConcurrencyWhile for the same reason /run-leg's
+    // own idempotency check above uses it: without it, an in-flight alarm()
+    // tick and this request could both read "a state exists" and each act on
+    // it, one destroying the container out from under the other's own
+    // in-progress work.
+    if (url.pathname === "/abandon" && req.method === "POST") {
+      const { resultKey } = (await req.json()) as { resultKey: string };
+      const result = await this.ctx.blockConcurrencyWhile(() => abandonAttempt({
+        storage: {
+          getState: () => this.ctx.storage.get<RunLegAlarmState>("alarmState").then((v) => v ?? undefined),
+          deleteSecretValues: () => this.ctx.storage.delete("secretValues").then(() => undefined),
+          deleteState: () => this.ctx.storage.delete("alarmState").then(() => undefined),
+        },
+        container: this.ctx.container,
+      }, resultKey));
+      return Response.json({ result });
+    }
     return new Response("not found", { status: 404 });
   }
 
@@ -143,7 +164,16 @@ export class GateRunnerDO extends DurableObject<Env> {
       container: this.ctx.container,
       bucket: this.env.STUDIO_ARCHIVE as unknown as ClaimableBucket,
       instanceStatus: async (instanceId) => (await this.env.GATE_WORKFLOW.get(instanceId)).status().then((s) => s.status),
-      observe: (state) => observeOnce({ state, running: this.ctx.container?.running ?? false, port: this.ctx.container?.getTcpPort(GATE_CONTAINER_PORT) }),
+      // #1428 item 5: both running() and getPort() are LAZY callbacks, not
+      // values resolved once up front -- observeOnce itself decides when to
+      // call each (getPort only after confirming not-running, running()
+      // again fresh in its own catch), so a container that changes state
+      // mid-call is never judged by a stale snapshot taken before the fetch.
+      observe: (state) => observeOnce({
+        state,
+        running: () => this.ctx.container?.running ?? false,
+        getPort: () => this.ctx.container?.getTcpPort(GATE_CONTAINER_PORT),
+      }),
       now: () => Date.now(),
       log: (message) => { console.error(message); },
     });
