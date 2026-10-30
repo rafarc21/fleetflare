@@ -293,12 +293,20 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
         await fetchRepoFile(await mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } }), opsRepo, OPS_DENYLIST_PATH, "HEAD"));
       const commitMessages = compare.commits.map((c) => c.message);
       // #1430: a commit keyword naming only already-closed refs closes nothing.
-      const closedRefs = await closedCommitRefs(commitMessages, repo, (n, refRepo) => issueState(token, refRepo, n));
+      // #1434 r2: each ref is looked up under its OWN repo's token (memoized) —
+      // a foreign repo the App is not installed on fails the mint, which
+      // closedCommitRefs reads as an unreadable foreign ref and downgrades to a
+      // warning instead of a permanent red.
+      const { closed: closedRefs, warnings, overCap } = await closedCommitRefs(
+        commitMessages, repo,
+        async (n, refRepo) => issueState(await mintToken(refRepo), refRepo, n),
+      );
+      for (const warning of warnings) console.warn(warning);
       return mergePrecheckFailures({
         title: resolved.title, body: resolved.body, patterns,
         blobs: precheckBlobs({ title: resolved.title, body: resolved.body, files: compare.files, commits: compare.commits }),
         private: resolved.private, truncated: compare.truncated,
-        commitMessages, repo, closedRefs,
+        commitMessages, repo, closedRefs, closedRefsOverCap: overCap,
         files: compare.files,
       });
     }).catch(() => ["gate precheck failed closed"] as string[]);

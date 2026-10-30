@@ -7,6 +7,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   closedCommitRefs, mergePrecheckFailures, CLOSING_KEYWORD_COMMIT_FAILURE,
+  COMMIT_REFS_CAP, COMMIT_REFS_CAP_FAILURE,
 } from "../../src/gate/merge-precheck";
 
 const REPO = "acme/example";
@@ -15,10 +16,10 @@ const REPO = "acme/example";
 async function commitVerdict(
   messages: string[], state: (n: number, repo: string) => Promise<string>,
 ): Promise<string[]> {
-  const closedRefs = await closedCommitRefs(messages, REPO, state);
+  const { closed, overCap } = await closedCommitRefs(messages, REPO, state);
   return mergePrecheckFailures({
     title: "plain title", body: "", patterns: [], blobs: [], private: true,
-    repo: REPO, commitMessages: messages, closedRefs,
+    repo: REPO, commitMessages: messages, closedRefs: closed, closedRefsOverCap: overCap,
   });
 }
 
@@ -113,9 +114,12 @@ describe("#1430: commit-message closing keyword fails only on an OPEN ref", () =
       expect(lookedUp).toEqual(["other/repo#5"]);
     });
 
-    it("a foreign qualified ref whose lookup throws fails closed", async () => {
+    it("a foreign qualified ref whose lookup throws is treated as closed, not red (#1434 r2)", async () => {
       const throwing = async () => { throw new Error("GitHub 404"); };
-      expect(await commitVerdict(["fixes other/repo#5"], throwing)).toEqual([CLOSING_KEYWORD_COMMIT_FAILURE]);
+      // #1434 r2: an unreadable FOREIGN ref is a warning, not red — the base
+      // credential often cannot reach it (no App install), so red would be a
+      // permanent new failure surface, not a fail-closed guard on the base repo.
+      expect(await commitVerdict(["fixes other/repo#5"], throwing)).toEqual([]);
     });
 
     it("a colon form qualifies too: fixes: other/repo#5 in its own repo", async () => {
@@ -126,5 +130,86 @@ describe("#1430: commit-message closing keyword fails only on an OPEN ref", () =
       });
       expect(lookedUp).toEqual(["other/repo#5"]);
     });
+  });
+
+  // #1434 r2: a foreign ref whose state cannot be read (no App install there,
+  // the base token 404s) is treated as already closed — a warning, not red.
+  // A base-repo unreadable ref stays red (fail closed).
+  describe("#1434 r2: unreadable foreign ref warns, base ref stays red", () => {
+    it("a foreign ref whose lookup throws is treated as closed, not red", async () => {
+      const warnings: string[] = [];
+      const result = await closedCommitRefs(["fixes other/repo#5"], REPO, async (n, repo) => {
+        throw new Error("GitHub 404");
+      });
+      expect(result.closed.has("other/repo#5")).toBe(true);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain("other/repo#5");
+      // The pure decision then passes the keyword: every ref is "closed".
+      expect(mergePrecheckFailures({
+        title: "plain title", body: "", patterns: [], blobs: [], private: true,
+        repo: REPO, commitMessages: ["fixes other/repo#5"], closedRefs: result.closed,
+      })).toEqual([]);
+    });
+
+    it("a base-repo ref whose lookup throws stays red (fail closed)", async () => {
+      const result = await closedCommitRefs(["Closes #12"], REPO, async () => {
+        throw new Error("GitHub 502");
+      });
+      expect(result.closed.has("acme/example#12")).toBe(false);
+      expect(result.warnings).toEqual([]);
+    });
+  });
+
+  // #1434 r2: cap the serial lookups — over COMMIT_REFS_CAP unique refs nothing
+  // is read and the run goes red naming the count.
+  describe("#1434 r2: commit-ref cap", () => {
+    it("over the cap no lookup runs and the verdict names the count", async () => {
+      const messages = Array.from({ length: COMMIT_REFS_CAP + 1 }, (_, i) => `fixes #${i}`);
+      const result = await closedCommitRefs(messages, REPO, async () => {
+        throw new Error("must not be called");
+      });
+      expect(result.overCap).toBe(COMMIT_REFS_CAP + 1);
+      expect(result.closed.size).toBe(0);
+      expect(mergePrecheckFailures({
+        title: "plain title", body: "", patterns: [], blobs: [], private: true,
+        repo: REPO, commitMessages: messages, closedRefs: result.closed, closedRefsOverCap: result.overCap,
+      })).toEqual([`${COMMIT_REFS_CAP_FAILURE}${COMMIT_REFS_CAP + 1} refs`]);
+    });
+
+    it("at the cap every ref is looked up, none skipped", async () => {
+      const messages = Array.from({ length: COMMIT_REFS_CAP }, (_, i) => `fixes #${i}`);
+      const lookedUp: string[] = [];
+      const result = await closedCommitRefs(messages, REPO, async (n, repo) => {
+        lookedUp.push(`${repo}#${n}`);
+        return "closed";
+      });
+      expect(result.overCap).toBeUndefined();
+      expect(lookedUp).toHaveLength(COMMIT_REFS_CAP);
+    });
+  });
+
+  // #1434 r2: the crude trigger must NOT read a non-keyword word as a closing
+  // keyword, so these commit messages stay green and never hit the issues API.
+  describe("#1434 r2: non-keyword words do not trip the commit scan", () => {
+    const clean: [string, string][] = [
+      ["prefix #5", "keyword prefix inside a longer word"],
+      ["fixed-width #3", "keyword hyphenated, not followed by a ref"],
+      ["closest #2", "keyword leading a longer word"],
+      ["Refs other/repo#5", "Refs mention of a qualified ref"],
+      ["Refs GH-7", "Refs mention of a GH- ref"],
+    ];
+    for (const [message, why] of clean) {
+      it(`passes: ${why}`, async () => {
+        const result = await closedCommitRefs([message], REPO, async () => {
+          throw new Error("must not be called");
+        });
+        expect(result.closed.size).toBe(0);
+        expect(result.warnings).toEqual([]);
+        expect(mergePrecheckFailures({
+          title: "plain title", body: "", patterns: [], blobs: [], private: true,
+          repo: REPO, commitMessages: [message], closedRefs: result.closed,
+        })).toEqual([]);
+      });
+    }
   });
 });

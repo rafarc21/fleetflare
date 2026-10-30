@@ -385,6 +385,33 @@ describe("GateWorkflow.run() precheck via the Workflows engine (#1191)", () => {
     }
   }, 60_000);
 
+  it("#1434 r2: a foreign ref whose lookup throws is a warning, not red (skip path green)", async () => {
+    const e = workflowEnv();
+    e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";
+    e.GITHUB_REPO_AUTH = "";
+    e.FLEET_OPS_REPO = "acme/ops";
+    titleFlipsOnRecheck = false;
+    // The base repo's token cannot read other/repo (no issueStates entry for it),
+    // so its lookup rejects — the foreign ref downgrades to a warning, not red.
+    commitMessage = "fixes other/repo#5";
+    issueStates = {}; // every lookup rejects
+
+    const instance = await introspectWorkflowInstance(e.GATE_WORKFLOW, "gate-precheck-foreign-unreadable");
+    try {
+      await instance.modify(async (m) => { await m.disableSleeps(); });
+      await e.GATE_WORKFLOW.create({ id: "gate-precheck-foreign-unreadable", params: { repo: REPO, pr: PR } });
+      await instance.waitForStatus("complete");
+
+      const out = await instance.getOutput() as { state: string; description?: string };
+      expect(out).toMatchObject({ state: "success", description: "no gated paths changed" });
+      // The foreign ref's lookup went to other/repo, not acme/example.
+      expect(issueLookups).toContain("other/repo#5");
+      expect(issueLookups).not.toContain("acme/example#5");
+    } finally {
+      await instance.dispose();
+    }
+  }, 60_000);
+
   it("#1434: a qualified ref is looked up in its OWN repo, never the base repo", async () => {
     const e = workflowEnv();
     e.GITHUB_TOKEN = "github_pat_TESTONLY_not_real";

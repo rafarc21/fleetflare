@@ -16,6 +16,11 @@ export const CLOSING_KEYWORD_RE = /(^|[^a-z])(close[sd]?|fix(es|ed)?|resolve[sd]
 export const CLOSING_KEYWORD_FAILURE = "closing keyword in PR title or body";
 export const CLOSING_KEYWORD_COMMIT_FAILURE = "closing keyword in a commit message";
 export const DENYLIST_UNAVAILABLE = "gate precheck: denylist unavailable";
+// #1434 r2: a promotion PR can name hundreds of refs; reading each serially
+// blows the Worker subrequest/time budget. Unique refs beyond the cap are not
+// read at all — the run goes red naming the count, never a partial scan.
+export const COMMIT_REFS_CAP = 50;
+export const COMMIT_REFS_CAP_FAILURE = "gate precheck: commit refs over cap: ";
 export const LEAK_SCAN_ERROR = "gate precheck: leak scan error";
 export const COMPARE_TRUNCATED_FAILURE = "gate precheck: compare truncated, cannot scan full diff";
 export const UNSCANNABLE_FILE_FAILURE = "gate precheck: no diff to scan: ";
@@ -45,25 +50,54 @@ function commitClosingRefs(messages: string[], repo: string): { repo: string; nu
 }
 
 /** #1430/#1434: the commit-message refs already closed (a merged PR reads
- *  "closed" on the issues API). Fail closed: a ref whose lookup throws or
- *  answers anything but "closed" is left out, so it stays red. #1434: a
- *  qualified ref (`other/repo#5`, a URL) is looked up in its OWN repo, never
- *  the base repo — the base `#5` and `other/repo#5` are different issues. */
+ *  "closed" on the issues API). Fail closed: a base-repo ref whose lookup
+ *  throws or answers anything but "closed" is left out, so it stays red.
+ *  #1434: a qualified ref (`other/repo#5`, a URL) is looked up in its OWN
+ *  repo, never the base repo — the base `#5` and `other/repo#5` are different
+ *  issues. #1434 r2: a foreign ref whose lookup throws (the base repo's
+ *  credential often cannot reach it, no App install there) is NOT red — it is
+ *  treated as already closed and returned as a warning, restoring the pre-#1434
+ *  "foreign refs pass" behaviour instead of a permanent new red surface. */
+export interface ClosedCommitRefsResult {
+  closed: ReadonlySet<string>;
+  /** #1434 r2: foreign refs whose state could not be read, each one line. */
+  warnings: string[];
+  /** #1434 r2: present when unique refs exceeded {@link COMMIT_REFS_CAP}; the
+   *  lookups were skipped and the caller goes red naming this count. */
+  overCap?: number;
+}
+
 export async function closedCommitRefs(
   messages: string[], repo: string,
   refState: (n: number, repo: string) => Promise<string>,
-): Promise<Set<string>> {
+): Promise<ClosedCommitRefsResult> {
+  const unique = new Map<string, { repo: string; number: number }>();
+  for (const ref of commitClosingRefs(messages, repo).flat()) {
+    unique.set(`${ref.repo}#${ref.number}`, ref);
+  }
+  // #1434 r2: cap the serial lookups — a promotion PR naming hundreds of refs
+  // would blow the Worker subrequest/time budget one issueState at a time.
+  // Over the cap nothing is read at all; the caller goes red naming the count.
+  if (unique.size > COMMIT_REFS_CAP) {
+    return { closed: new Set<string>(), warnings: [], overCap: unique.size };
+  }
   const closed = new Set<string>();
-  for (const ref of new Map(
-    commitClosingRefs(messages, repo).flat().map((r) => [`${r.repo}#${r.number}`, r]),
-  ).values()) {
+  const warnings: string[] = [];
+  const base = repo.toLowerCase();
+  for (const ref of unique.values()) {
     try {
       if (await refState(ref.number, ref.repo) === "closed") closed.add(`${ref.repo}#${ref.number}`);
     } catch (err) {
-      console.error(`gate precheck: ref state of ${ref.repo}#${ref.number} unreadable, keeping it red`, err instanceof Error ? err.message : err);
+      const message = err instanceof Error ? err.message : String(err);
+      if (ref.repo.toLowerCase() === base) {
+        console.error(`gate precheck: ref state of ${ref.repo}#${ref.number} unreadable, keeping it red`, message);
+      } else {
+        closed.add(`${ref.repo}#${ref.number}`);
+        warnings.push(`gate precheck: ${ref.repo}#${ref.number} unreadable — foreign ref treated as already closed, not red`);
+      }
     }
   }
-  return closed;
+  return { closed, warnings };
 }
 
 /** The leak-scan failure description (pattern indexes only, never terms), or
@@ -160,6 +194,9 @@ export interface MergePrecheckInput {
    *  same number. A keyword passes only when every ref it names is here;
    *  absent = all red. */
   closedRefs?: ReadonlySet<string>;
+  /** #1434 r2: the number of unique commit refs when they exceeded the cap —
+   *  the lookups were skipped, so the run goes red naming this count. */
+  closedRefsOverCap?: number;
   /** #1176: the compare's files, for the patchless-file fail-closed check. */
   files?: { filename: string; previous_filename?: string; patch?: string; status?: string; changes?: number }[];
 }
@@ -181,7 +218,13 @@ export function mergePrecheckFailures(input: MergePrecheckInput): string[] {
   const closedRefs = input.closedRefs ?? new Set<string>();
   const commitClosing = commitClosingRefs(input.commitMessages ?? [], input.repo ?? "")
     .some((refs) => refs.length === 0 || refs.some((r) => !closedRefs.has(`${r.repo}#${r.number}`)));
-  if (commitClosing) out.push(CLOSING_KEYWORD_COMMIT_FAILURE);
+  if (input.closedRefsOverCap !== undefined) {
+    // #1434 r2: over the cap nothing was looked up, so nothing can prove any
+    // ref already closed — red, naming the count rather than a vague keyword hit.
+    out.push(capStatusDescription(`${COMMIT_REFS_CAP_FAILURE}${input.closedRefsOverCap} refs`));
+  } else if (commitClosing) {
+    out.push(CLOSING_KEYWORD_COMMIT_FAILURE);
+  }
   if (input.private === true) {
     // Leaks cannot leave a private repo, so neither the scan nor its truncation
     // guard applies — the same whole-scan skip board/leak.ts makes. Only a
