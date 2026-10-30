@@ -59,6 +59,20 @@ describe("redactKnownSecretValues: common encodings", () => {
     const text = `embedded: ${jsonEscaped}`;
     expect(redactKnownSecretValues(text, [value])).toBe("embedded: «redacted»");
   });
+
+  it("redacts the lowercase-hex form (UTF-8 bytes as a plain lowercase hex string)", () => {
+    const value = "sup3r-s3cret";
+    const hex = [...new TextEncoder().encode(value)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const text = `raw bytes: ${hex}`;
+    expect(redactKnownSecretValues(text, [value])).toBe("raw bytes: «redacted»");
+  });
+
+  it("redacts the lowercase percent-encoding form (hex digits a-f, unlike encodeURIComponent's A-F)", () => {
+    const value = "sup3r s3cret/val";
+    const lowerPct = encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase());
+    const text = `GET /login?token=${lowerPct}`;
+    expect(redactKnownSecretValues(text, [value])).toBe("GET /login?token=«redacted»");
+  });
 });
 
 // #1346 security review r2: container/gate-server.ts's own 32k tail cut can

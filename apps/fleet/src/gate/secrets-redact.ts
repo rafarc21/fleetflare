@@ -38,6 +38,12 @@ function encodedForms(value: string): string[] {
     // form worth adding -- the raw and JSON-escaped forms above still apply.
   }
   forms.add(encodeURIComponent(value));
+  // #1436 security review: a value printed as its plain UTF-8 bytes in
+  // lowercase hex (a raw byte dump), and the same percent-encoding a tool
+  // emits with lowercase hex digits (encodeURIComponent's own hex is
+  // UPPERCASE) -- both escape the literal-string match above unless added.
+  forms.add([...new TextEncoder().encode(value)].map((b) => b.toString(16).padStart(2, "0")).join(""));
+  forms.add(encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()));
   return [...forms].filter((f) => f !== "");
 }
 

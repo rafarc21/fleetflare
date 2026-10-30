@@ -252,7 +252,17 @@ export interface AlarmTickDeps {
   log: (message: string) => Promise<void> | void;
 }
 
-async function writeTerminalOutcome(deps: AlarmTickDeps, resultKey: string, outcome: TerminalOutcome): Promise<void> {
+/** #1436 security review item 3: a terminal write that silently swallows an R2
+ *  failure loses the attempt's real result -- the Workflow then waits its own
+ *  ~35 min deadline and re-runs for nothing. Retry the claimOrReadBack write
+ *  up to 3 times inside this tick, and report "write-failed" when the retries
+ *  are spent so alarmTick treats it as a FAILURE (keep state + container,
+ *  count consecutiveFailures) instead of tearing the attempt down on a guess.
+ *  Only a winning write (or the failure cap) tears the attempt down.
+ */
+async function writeTerminalOutcome(
+  deps: AlarmTickDeps, resultKey: string, outcome: TerminalOutcome,
+): Promise<"written" | "write-failed"> {
   const secretValues = (await deps.storage.getSecretValues()) ?? {};
   const values = Object.values(secretValues).filter((v) => v !== "");
   // #1398 plan review r1 BLOCKER 2: EVERY self-made outcome is written --
@@ -266,16 +276,20 @@ async function writeTerminalOutcome(deps: AlarmTickDeps, resultKey: string, outc
     ? { state: "error" as const, description: `${R2_PREFIX}${outcome.description}` }
     : outcome.result;
   const redacted = redactLegResultFields(toWrite, values);
-  // #1428 (c): a throwing R2 write MUST still fall through to the destroy +
-  // delete below, never rethrow into the catch and re-arm an attempt that is
-  // already conclusively over -- a stuck bucket would otherwise leave the
-  // Workflow polling to its own deadline and the container billed for a leg
-  // nobody is concluding. The write is a best-effort audit trail, not a
-  // precondition for tearing the attempt down.
-  try {
-    await claimOrReadBack(deps.bucket, resultKey, redacted);
-  } catch (err) {
-    console.error("gate-runner: terminal write failed", errorText(err));
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await claimOrReadBack(deps.bucket, resultKey, redacted);
+      return "written";
+    } catch (err) {
+      // #1428 (d): every logged error text goes through the injected log with
+      // the redaction pass -- an R2 error message can echo a granted value.
+      try {
+        await deps.log(redactKnownSecretValues(
+          `gate-runner: terminal write failed (attempt ${attempt}): ${errorText(err)}`, values,
+        ));
+      } catch { /* a throwing logger must never turn a write failure into a throw */ }
+      if (attempt >= 3) return "write-failed";
+    }
   }
 }
 
@@ -292,10 +306,15 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
     // record (CF's own ~6-failed-retries dormancy, a superseded/give-up tick
     // whose delete was interrupted) lands here with NO state left, and this
     // is the one chance left to clear the value before it rests forever.
+    // #1428 (d): the secrets are read BEFORE the delete so a failing delete's
+    // own error text can be redacted -- after a successful delete they are gone.
+    const sweepValues = Object.values((await deps.storage.getSecretValues()) ?? {});
     try {
       await deps.storage.deleteSecretValues();
     } catch (err) {
-      console.error("gate-runner: secret sweep failed", errorText(err));
+      try {
+        await deps.log(redactKnownSecretValues(`gate-runner: secret sweep failed: ${errorText(err)}`, sweepValues));
+      } catch { /* a throwing logger must never rethrow out of the sweep */ }
     }
     return "done";
   }
@@ -319,7 +338,16 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
       await deps.storage.scheduleAlarm(deps.now() + decision.afterMs);
       return "re-armed";
     }
-    await writeTerminalOutcome(deps, current.resultKey, decision.outcome);
+    // #1436 item 3: a terminal write that exhausts its retries is a FAILURE,
+    // not a teardown -- the attempt keeps its state and container, increments
+    // consecutiveFailures, and re-arms so the write can be retried next tick.
+    const writeResult = await writeTerminalOutcome(deps, current.resultKey, decision.outcome);
+    if (writeResult === "write-failed") {
+      const failures = (current.consecutiveFailures ?? 0) + 1;
+      await deps.storage.putState({ ...current, consecutiveFailures: failures });
+      await deps.storage.scheduleAlarm(deps.now() + ALARM_TICK_MS);
+      return "re-armed";
+    }
     // r1 item 4: destroy FIRST, guarded -- a throwing destroy must never fall
     // into the catch below and re-arm (which would rewrite the already-deleted
     // state and bill 4 extra ticks). The keys are deleted regardless, so a
@@ -327,7 +355,13 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
     try {
       await deps.container?.destroy();
     } catch (err) {
-      console.error("gate-runner: alarm tick destroy failed", errorText(err));
+      // #1428 (d): the destroy error text gets the redaction pass too.
+      try {
+        await deps.log(redactKnownSecretValues(
+          `gate-runner: alarm tick destroy failed: ${errorText(err)}`,
+          Object.values((await deps.storage.getSecretValues()) ?? {}),
+        ));
+      } catch { /* a throwing logger must never turn a guarded destroy into a throw */ }
     }
     await deps.storage.deleteSecretValues();
     await deps.storage.deleteState();
@@ -338,16 +372,26 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
     // then re-arm (tracking the failure count) unless the cap is reached, in
     // which case give up with a terminal infra result rather than re-arm (and
     // bill) forever.
-    // #1428 (d): even the logged text gets the secret-redaction pass -- a
-    // thrown error's message can carry a granted secret value (e.g. a token
-    // echoed by a container the tick was reaching into), and this log is the
-    // one place that text would otherwise escape unscrubbed.
-    await deps.log(redactKnownSecretValues(errorText(err), Object.values((await deps.storage.getSecretValues()) ?? {})));
+    // #1436 item 2: count the failure FIRST, before the redact+log -- a
+    // storage fault inside getSecretValues() (or the logger) must never stop
+    // the counter advancing. The redact+log is then best-effort: if either
+    // throws, the fallback line is logged instead.
     const failures = (state.consecutiveFailures ?? 0) + 1;
+    try {
+      // #1428 (d): even the logged text gets the secret-redaction pass -- a
+      // thrown error's message can carry a granted secret value (e.g. a token
+      // echoed by a container the tick was reaching into), and this log is the
+      // one place that text would otherwise escape unscrubbed.
+      await deps.log(redactKnownSecretValues(errorText(err), Object.values((await deps.storage.getSecretValues()) ?? {})));
+    } catch {
+      try {
+        await deps.log("error text withheld");
+      } catch { /* a throwing logger is itself a lost cause; never rethrow here */ }
+    }
     if (failures >= MAX_CONSECUTIVE_FAILURES) {
       await writeTerminalOutcome(deps, state.resultKey, {
         kind: "infra", description: `DO alarm failed ${failures} times in a row, giving up`,
-      }).catch(() => {});
+      });
       // #1428 (a): arm the one-shot sweep BEFORE the deletes -- a failing
       // delete below rethrows (r1 item 3) so CF retries, but once this give-up
       // finally completes there is no re-arm to ever run again; this far-future
