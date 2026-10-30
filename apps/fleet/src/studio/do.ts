@@ -153,6 +153,8 @@ export { refreshCredentialExec, studioGitIdentity, gitIdentityCmd, gitIdentityEn
 import { mintSpawnToken, hashSpawnToken } from "./org";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import { containerToken, resolveWriteMode, studioCredential, writeModeFor, type WriteMode } from "../write-proxy/mode";
+import { canPushRepo } from "./push-probe";
+export { canPushRepo };
 import { writeProxyConfigCmd } from "../write-proxy/container-config";
 import {
   fetchRepoFile, createRepoFile, upsertRepoFile, listOpenPullNumbers, repoIsPrivate,
@@ -272,6 +274,10 @@ export interface RefreshDeps {
   /** Issue #1187: the work repo slug, for the shadow drop + post-write verify.
    *  Absent = this caller predates the fix; no heal and no verify run. */
   workRepo?: string;
+  /** Issue #1422: confirms a freshly minted DIRECT-mode token can actually
+   *  push, before the write below replaces the last-good credential. Absent
+   *  = canPushRepo (github.com, real fetch). */
+  canPush?: (token: string, repo: string) => Promise<boolean>;
   recordStudio: (status: StudioStatus) => Promise<void>;
   /** Telegram alert. do.ts's real instance plugs in sendCard against
    *  OPERATOR_ID — see the import comment above for why that recipient. */
@@ -315,6 +321,26 @@ export async function runRefreshCredential(
       }
     }
     const token = await deps.mintToken(mode);
+    // Issue #1422 (10-27 outage, 07:20-08:00Z): a mint can succeed yet the
+    // resulting token still fail to push -- GitHub answered "Repository not
+    // found" / 403 for every studio's push during that outage despite a
+    // clean, error-free mint+write. The post-write verify below only proves
+    // git SERVES the minted token; it was never able to catch this. Probe
+    // receive-pack -- the exact request `git push` itself sends first --
+    // BEFORE the write just below replaces the last-good credential, so a
+    // token that mints fine but cannot push never overwrites one that still
+    // works. Proxy-mode credentials are read-only by design
+    // (write-proxy/mode.ts's studioCredential): a push ALWAYS goes through
+    // the Worker's own write token there, never this one, so probing it for
+    // push would refuse every single proxy-mode refresh -- gated on
+    // `mode !== "proxy"` (mode is `undefined` for a pre-proxy-feature caller,
+    // which is always direct, same as every other check in this function).
+    if (token !== null && deps.workRepo && mode !== "proxy") {
+      const canPush = deps.canPush ?? canPushRepo;
+      if (!(await canPush(token, deps.workRepo))) {
+        throw new Error(`push probe failed for ${deps.workRepo}: receive-pack did not answer 200 -- credential not swapped`);
+      }
+    }
     // Issue #283: the same exec also pins the studio's git identity.
     const exec = refreshCredentialExec(token, deps.gitIdentity ?? STUDIO_GIT_IDENTITY, deps.workRepo);
     const res = await deps.sbExec(exec.cmd, exec.env);
