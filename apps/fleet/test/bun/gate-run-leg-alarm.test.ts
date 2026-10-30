@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { nextAlarmStep, isLiveStatus, asyncAttemptDeadlineMs, ALARM_TICK_MS, alarmTick, type AlarmTickDeps, type RunLegAlarmState } from "../../src/gate/run-leg-alarm";
+import { nextAlarmStep, isLiveStatus, asyncAttemptDeadlineMs, ALARM_TICK_MS, alarmTick, observeOnce, type AlarmTickDeps, type GateRunnerPort, type RunLegAlarmState } from "../../src/gate/run-leg-alarm";
 import { NO_INSTANCE_DESCRIPTION } from "../../src/gate/run-leg";
 import { R2_PREFIX } from "../../src/gate/leg-run";
 
@@ -201,7 +201,7 @@ describe("asyncAttemptDeadlineMs (plan review r1 BLOCKER 2: the Workflow's own b
  *  test or assert on it afterward); `bucketStore`/`destroyCount`/
  *  `scheduledAtMs` are plain, directly-readable records of every call made.
  *  `deps` is the actual AlarmTickDeps object to pass to alarmTick. */
-function fakeAlarmDeps(opts: { observe?: AlarmTickDeps["observe"]; instanceStatus?: AlarmTickDeps["instanceStatus"] } = {}) {
+function fakeAlarmDeps(opts: { observe?: AlarmTickDeps["observe"]; instanceStatus?: AlarmTickDeps["instanceStatus"]; log?: AlarmTickDeps["log"] } = {}) {
   const fixture = {
     state: { ...BASE_STATE, phase: "polling" as const, pollStartedAt: 0, consecutiveFailures: 0 } as RunLegAlarmState | undefined,
     secretValues: undefined as Record<string, string> | undefined,
@@ -212,12 +212,14 @@ function fakeAlarmDeps(opts: { observe?: AlarmTickDeps["observe"]; instanceStatu
     deleteSecretValuesThrows: undefined as Error | undefined,
     scheduleAlarmThrows: undefined as Error | undefined,
     destroyThrows: undefined as Error | undefined,
+    putStateThrows: undefined as Error | undefined,
+    logged: [] as string[],
   };
   const deps: AlarmTickDeps = {
     storage: {
       getState: async () => fixture.state,
       getSecretValues: async () => fixture.secretValues,
-      putState: async (s) => { fixture.state = s; },
+      putState: async (s) => { if (fixture.putStateThrows) throw fixture.putStateThrows; fixture.state = s; },
       deleteSecretValues: async () => { if (fixture.deleteSecretValuesThrows) throw fixture.deleteSecretValuesThrows; fixture.secretValues = undefined; },
       deleteState: async () => { fixture.state = undefined as unknown as RunLegAlarmState; },
       scheduleAlarm: async (at) => { if (fixture.scheduleAlarmThrows) throw fixture.scheduleAlarmThrows; fixture.scheduledAtMs.push(at); },
@@ -237,6 +239,7 @@ function fakeAlarmDeps(opts: { observe?: AlarmTickDeps["observe"]; instanceStatu
     instanceStatus: opts.instanceStatus ?? (async () => "running"),
     observe: opts.observe ?? (async () => ({ kind: "poll-pending" })),
     now: () => fixture.nowMs,
+    log: opts.log ?? (async (m: string) => { fixture.logged.push(m); }),
   };
   return { deps, fixture };
 }
@@ -375,5 +378,107 @@ describe("alarmTick (#1398 plan review r1 BLOCKER 4)", () => {
     expect(fixture.secretValues).toBeUndefined();
     expect(fixture.state).toBeUndefined();
     expect(fixture.scheduledAtMs.length).toBe(0); // no re-arm scheduled
+  });
+
+  // #1428 (a): a secretValues record stranded with no alarmState (e.g. after
+  // CF stops retrying a throwing alarm() at ~6 tries) is cleared by the
+  // stray-tick branch, so a granted secret never rests in DO storage forever.
+  it("a stray tick with no state still clears a leftover secretValues record (r2 leftover a)", async () => {
+    const { deps, fixture } = fakeAlarmDeps();
+    fixture.state = undefined;
+    fixture.secretValues = { "staging-login": "sup3r-s3cret" };
+    expect(await alarmTick(deps)).toBe("done");
+    expect(fixture.secretValues).toBeUndefined();
+  });
+
+  // #1428 (a): the give-up path arms the one-shot sweep alarm BEFORE its
+  // deletes, so a later stray tick has the state-less branch above to run.
+  it("the give-up path arms a far-future sweep alarm before deleting (r2 leftover a)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("stuck"); } });
+    fixture.state = { ...fixture.state!, consecutiveFailures: 4 };
+    fixture.nowMs = 1_000_000;
+    expect(await alarmTick(deps)).toBe("gave-up-after-failures");
+    expect(fixture.scheduledAtMs).toContain(1_000_000 + 3_600_000); // 60 min out
+  });
+
+  // #1428 (b): a putState throw on the re-arm path must rethrow exactly like
+  // scheduleAlarm's -- the plan's original draft swallowed it with .catch,
+  // which returned normally and stranded the attempt (CF never retried).
+  it("a putState throw on the re-arm path rethrows, so CF's own alarm retry takes over (r2 leftover b)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("stuck"); } });
+    fixture.putStateThrows = new Error("storage put rejected");
+    await expect(alarmTick(deps)).rejects.toThrow("storage put rejected");
+  });
+
+  // #1428 (d): the thrown error text logged by the catch is redacted before
+  // it reaches the logger -- a secret value echoed in an error message never
+  // escapes unscrubbed into the log.
+  it("the catch-log redacts a secret value carried in the error text (r2 leftover d)", async () => {
+    const { deps, fixture } = fakeAlarmDeps({ observe: async () => { throw new Error("auth failed with staging-login=sup3r-s3cret"); } });
+    fixture.secretValues = { "staging-login": "sup3r-s3cret" };
+    await alarmTick(deps);
+    const logged = fixture.logged.join("\n");
+    expect(logged).not.toContain("sup3r-s3cret");
+    expect(logged).toContain("«redacted»");
+  });
+});
+
+describe("observeOnce (#1428 leftover e: do.ts's HTTP glue, now bun-tested)", () => {
+  const PORT_PHASE = { phase: "waiting-for-ready" as const, resultKey: "k", leg: "lint", timeoutMin: undefined, readyStartedAt: 0, instanceId: "run-1", statusCheckCount: 0 };
+
+  function portReturning(status: number, body: unknown): GateRunnerPort {
+    return { fetch: async () => new Response(JSON.stringify(body), { status }) };
+  }
+
+  it("no port binding is poll-failed", async () => {
+    expect(await observeOnce({ state: PORT_PHASE, running: false, port: undefined })).toEqual({ kind: "poll-failed" });
+  });
+
+  it("a not-yet-running container in waiting-for-ready is not-running, before any fetch", async () => {
+    let fetched = false;
+    const port: GateRunnerPort = { fetch: async () => { fetched = true; return new Response(null, { status: 200 }); } };
+    expect(await observeOnce({ state: PORT_PHASE, running: false, port })).toEqual({ kind: "not-running" });
+    expect(fetched).toBe(false);
+  });
+
+  it("a /run 200 is a run-result carrying the body", async () => {
+    const res = await observeOnce({ state: { ...PORT_PHASE, phase: "waiting-for-ready" }, running: true, port: portReturning(200, { state: "success" }) });
+    expect(res).toEqual({ kind: "run-result", result: { state: "success" } });
+  });
+
+  it("a /run 202 is run-accepted", async () => {
+    const res = await observeOnce({ state: { ...PORT_PHASE, phase: "waiting-for-ready" }, running: true, port: portReturning(202, {}) });
+    expect(res).toEqual({ kind: "run-accepted" });
+  });
+
+  it("a /run other status is running-not-listening", async () => {
+    const res = await observeOnce({ state: { ...PORT_PHASE, phase: "waiting-for-ready" }, running: true, port: portReturning(500, {}) });
+    expect(res).toEqual({ kind: "running-not-listening" });
+  });
+
+  it("the polling phase hits /result: 200 is a poll-result, 202 is poll-pending", async () => {
+    const polling = { ...PORT_PHASE, phase: "polling" as const, pollStartedAt: 0 };
+    const ok = await observeOnce({ state: polling, running: true, port: portReturning(200, { state: "failure", description: "x" }) });
+    expect(ok).toEqual({ kind: "poll-result", result: { state: "failure", description: "x" } });
+    const pending = await observeOnce({ state: polling, running: true, port: portReturning(202, {}) });
+    expect(pending).toEqual({ kind: "poll-pending" });
+  });
+
+  it("a no-instance fetch throw maps to no-instance in any phase", async () => {
+    const port: GateRunnerPort = { fetch: async () => { throw new Error("no container instance available"); } };
+    const res = await observeOnce({ state: PORT_PHASE, running: true, port });
+    expect(res).toEqual({ kind: "no-instance" });
+  });
+
+  it("a non-no-instance throw during polling with a stopped container is poll-failed", async () => {
+    const port: GateRunnerPort = { fetch: async () => { throw new Error("connection refused"); } };
+    const res = await observeOnce({ state: { ...PORT_PHASE, phase: "polling", pollStartedAt: 0 }, running: false, port });
+    expect(res).toEqual({ kind: "poll-failed" });
+  });
+
+  it("the same throw while still running reads as running-not-listening (retry, not infra)", async () => {
+    const port: GateRunnerPort = { fetch: async () => { throw new Error("connection refused"); } };
+    const res = await observeOnce({ state: { ...PORT_PHASE, phase: "polling", pollStartedAt: 0 }, running: true, port });
+    expect(res).toEqual({ kind: "running-not-listening" });
   });
 });

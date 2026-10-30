@@ -6,9 +6,9 @@
 // branches, UNCHANGED classification, just reached across many short alarm
 // ticks instead of one long poll loop (the design doc's own table, "The DO
 // becomes a tiny state machine").
-import { NO_INSTANCE_DESCRIPTION, type LegOutcome } from "./run-leg";
+import { NO_INSTANCE_DESCRIPTION, NO_INSTANCE_RE, type LegOutcome } from "./run-leg";
 import { claimOrReadBack, R2_PREFIX, type ClaimableBucket } from "./leg-run";
-import { redactLegResultFields } from "./secrets-redact";
+import { redactKnownSecretValues, redactLegResultFields } from "./secrets-redact";
 import { legTimeoutMin } from "./config";
 
 const READY_TIMEOUT_MS = 180_000;
@@ -28,6 +28,11 @@ export const ALARM_TICK_MS = 20_000;
  *  delay -- the Workflow's own give-up backstop (asyncAttemptDeadlineMs,
  *  below) must never fire while the DO could still legitimately be working. */
 const ASYNC_GRACE_MS = 5 * 60_000;
+/** #1428 (a): the one-shot secret sweep's follow-up. Past a leg's own worst
+ *  case (ready 180s + port-retry 90s + max leg 25min, + grace) so the sweep
+ *  can only ever fire for a record already abandoned on a terminal path --
+ *  never for a live attempt whose next tick will legitimately delete it. */
+const SECRET_SWEEP_MS = 60 * 60_000;
 
 export type RunLegAlarmPhase = "waiting-for-ready" | "port-retry" | "polling";
 
@@ -192,6 +197,15 @@ export function asyncAttemptDeadlineMs(timeoutMin: number | undefined): number {
   return READY_TIMEOUT_MS + PORT_RETRY_BUDGET_MS + legTimeoutMin(timeoutMin) * 60_000 + ASYNC_GRACE_MS;
 }
 
+/** #1428 (a): a best-effort one-shot backstop alarm, scheduled far past a
+ *  leg's own worst case (ready 180s + port-retry 90s + max leg 25min, +
+ *  grace) so it can only ever fire for an attempt already abandoned on a
+ *  terminal path -- never a live attempt whose next tick will legitimately
+ *  delete its own secretValues. */
+async function armSecretSweep(deps: AlarmTickDeps): Promise<void> {
+  await deps.storage.scheduleAlarm(deps.now() + SECRET_SWEEP_MS);
+}
+
 /** #1398: every piece of real I/O one alarm tick needs, injected -- do.ts's
  *  real alarm() is the ONLY caller built from real bindings; every test above
  *  builds this from plain fakes. */
@@ -212,6 +226,11 @@ export interface AlarmTickDeps {
    *  pure orchestration. */
   observe: (state: RunLegAlarmState) => Promise<PollSignal>;
   now: () => number;
+  /** #1428 (d): injected logger (do.ts binds console.error) so the redaction
+   *  of every logged error text is itself bun-testable -- a bare console in
+   *  this pure module would let a secret echo through unscrubbed with no test
+   *  able to see it. */
+  log: (message: string) => Promise<void> | void;
 }
 
 async function writeTerminalOutcome(deps: AlarmTickDeps, resultKey: string, outcome: TerminalOutcome): Promise<void> {
@@ -228,7 +247,17 @@ async function writeTerminalOutcome(deps: AlarmTickDeps, resultKey: string, outc
     ? { state: "error" as const, description: `${R2_PREFIX}${outcome.description}` }
     : outcome.result;
   const redacted = redactLegResultFields(toWrite, values);
-  await claimOrReadBack(deps.bucket, resultKey, redacted);
+  // #1428 (c): a throwing R2 write MUST still fall through to the destroy +
+  // delete below, never rethrow into the catch and re-arm an attempt that is
+  // already conclusively over -- a stuck bucket would otherwise leave the
+  // Workflow polling to its own deadline and the container billed for a leg
+  // nobody is concluding. The write is a best-effort audit trail, not a
+  // precondition for tearing the attempt down.
+  try {
+    await claimOrReadBack(deps.bucket, resultKey, redacted);
+  } catch (err) {
+    console.error("gate-runner: terminal write failed", errorText(err));
+  }
 }
 
 /**
@@ -238,7 +267,19 @@ async function writeTerminalOutcome(deps: AlarmTickDeps, resultKey: string, outc
  */
 export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed" | "superseded" | "gave-up-after-failures"> {
   const state = await deps.storage.getState();
-  if (state === undefined) return "done"; // a stray/duplicate tick after this attempt already finished
+  if (state === undefined) {
+    // #1428 (a): a stray/duplicate tick after the attempt already finished --
+    // the secret sweep. Any terminal path that ever stranded a secretValues
+    // record (CF's own ~6-failed-retries dormancy, a superseded/give-up tick
+    // whose delete was interrupted) lands here with NO state left, and this
+    // is the one chance left to clear the value before it rests forever.
+    try {
+      await deps.storage.deleteSecretValues();
+    } catch (err) {
+      console.error("gate-runner: secret sweep failed", errorText(err));
+    }
+    return "done";
+  }
   try {
     let current = state;
     if (current.statusCheckCount >= STATUS_CHECK_EVERY_N_TICKS && current.instanceId !== "") {
@@ -278,12 +319,22 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
     // then re-arm (tracking the failure count) unless the cap is reached, in
     // which case give up with a terminal infra result rather than re-arm (and
     // bill) forever.
-    console.error("gate-runner: alarm tick failed", errorText(err));
+    // #1428 (d): even the logged text gets the secret-redaction pass -- a
+    // thrown error's message can carry a granted secret value (e.g. a token
+    // echoed by a container the tick was reaching into), and this log is the
+    // one place that text would otherwise escape unscrubbed.
+    await deps.log(redactKnownSecretValues(errorText(err), Object.values((await deps.storage.getSecretValues()) ?? {})));
     const failures = (state.consecutiveFailures ?? 0) + 1;
     if (failures >= MAX_CONSECUTIVE_FAILURES) {
       await writeTerminalOutcome(deps, state.resultKey, {
         kind: "infra", description: `DO alarm failed ${failures} times in a row, giving up`,
       }).catch(() => {});
+      // #1428 (a): arm the one-shot sweep BEFORE the deletes -- a failing
+      // delete below rethrows (r1 item 3) so CF retries, but once this give-up
+      // finally completes there is no re-arm to ever run again; this far-future
+      // alarm guarantees one last tick, which the stray-tick branch above turns
+      // into a secretValues delete, however the deletes below resolved.
+      await armSecretSweep(deps);
       // r1 item 3: a failing secret delete MUST rethrow, so CF's own alarm
       // retry takes over -- swallowing it returns "gave-up" with the
       // secretValues still stored, stranded forever.
@@ -292,8 +343,12 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
       await deps.container?.destroy().catch(() => {});
       return "gave-up-after-failures";
     }
-    // r1 item 3: a failing re-arm MUST rethrow -- swallowing it makes alarm()
-    // return normally (CF never retries) and strands the attempt forever.
+    // #1428 (b) / r1 item 3: BOTH a failing re-arm AND its first putState
+    // must rethrow -- the plan's original draft only rethrew the re-arm's
+    // scheduleAlarm, so a putState throw silently resolved and left the
+    // alarm() body returning normally (CF never retries) with the attempt
+    // stranded forever. The putState write is now awaited UNWrapped so its
+    // rejection propagates exactly like scheduleAlarm's.
     await deps.storage.putState({ ...state, consecutiveFailures: failures });
     await deps.storage.scheduleAlarm(deps.now() + ALARM_TICK_MS);
     return "re-armed";
@@ -302,4 +357,43 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * #1428 (e): do.ts's observeOnce, extracted here so the one piece of the
+ * alarm flow that talks to the container over HTTP is bun-tested instead of
+ * living untested in do.ts. Reads a RunnerPort (anything shaped like the
+ * container's getTcpPort result) and translates the raw response into a
+ * PollSignal, with the same classification the old do.ts method made. The
+ * `state` and container-runniness checks stay pure; only the port.fetch
+ * calls are injected.
+ */
+export async function observeOnce(
+  deps: { state: RunLegAlarmState; running: boolean; port: GateRunnerPort | undefined },
+): Promise<PollSignal> {
+  const { state, running, port } = deps;
+  if (port === undefined) return { kind: "poll-failed" };
+  if (state.phase === "waiting-for-ready" && !running) return { kind: "not-running" };
+  try {
+    if (state.phase !== "polling") {
+      const res = await port.fetch("http://container/run", { method: "POST", signal: AbortSignal.timeout(15_000) });
+      if (res.status === 200) return { kind: "run-result", result: (await res.json()) as LegOutcomeResult };
+      if (res.status === 202) return { kind: "run-accepted" };
+      return { kind: "running-not-listening" };
+    }
+    const res = await port.fetch("http://container/result", { signal: AbortSignal.timeout(15_000) });
+    if (res.status === 200) return { kind: "poll-result", result: (await res.json()) as LegOutcomeResult };
+    return { kind: "poll-pending" };
+  } catch (err) {
+    if (NO_INSTANCE_RE.test(err instanceof Error ? err.message : String(err))) {
+      return { kind: "no-instance" };
+    }
+    return state.phase === "polling" && !running ? { kind: "poll-failed" } : { kind: "running-not-listening" };
+  }
+}
+
+/** #1428 (e): the minimal port shape observeOnce needs -- the real container's
+ *  getTcpPort result satisfies it. */
+export interface GateRunnerPort {
+  fetch(input: string, init?: RequestInit): Promise<Response>;
 }

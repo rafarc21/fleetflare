@@ -40,7 +40,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 /** A host with no spare container instance refuses start() (or the port fetch)
  *  with this wording. It is account capacity, not a leg defect: fail fast and
  *  back off, never spend the port-retry budget thrashing a saturated host. */
-const NO_INSTANCE_RE = /no container instance|container instance that can be provided|no instances? available/i;
+export const NO_INSTANCE_RE = /no container instance|container instance that can be provided|no instances? available/i;
 
 /** The infra description a no-instance leg returns. Named so the step's
  *  exponential retry backs off the same saturated host, and infra-rerun.ts still
