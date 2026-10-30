@@ -1158,6 +1158,31 @@ describe("runLegStep: a Workflows invocation cut recovers the leg's stored resul
     expect(readKeys.filter((k) => k.includes(".retry"))).toEqual([]);
   });
 
+  it("stored failure recovered in the start phase stays retryable: a flaky pass on retry", async () => {
+    const step = cutStep();
+    // The start phase's own candidate -try3 holds the red result a container
+    // wrote before the cut. The recover-start sweep returns it as a red first
+    // try (data, not infra), so the leg still earns its one flaky retry.
+    const { readResult } = lateRead(TRY3_KEY, { state: "failure", description: "lint 3 errors" }, 1);
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      // The start step's three infra attempts all die as WorkflowInternalError;
+      // the retry step's fresh container passes.
+      if (sent <= 3) throw new Error(CUT);
+      return reply({ state: "success" });
+    };
+    const result = await runLegStep(step, dispatch, PLANNED, { readResult });
+    expect(result).toMatchObject({
+      leg: "lint", state: "success",
+      description: "flaky: passed on retry; first: result read from R2 after transport loss: lint 3 errors",
+    });
+    // The recovered red first try is still data: the flaky retry step ran.
+    expect(step.calls.map((c) => c.name)).toEqual([
+      "leg-started-lint", "start-lint", "recover-start-lint", "retry-lint",
+    ]);
+  });
+
   it("a stale .retry result from an earlier instance is never read by the start phase (review r1 item 2)", async () => {
     const step = cutStep();
     // An earlier instance with the same run id left a green .retry.json. The
