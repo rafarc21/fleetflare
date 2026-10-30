@@ -39,6 +39,7 @@ describe("nextAlarmStep: waiting-for-ready phase", () => {
     if (decision.kind === "re-arm") {
       expect(decision.state.phase).toBe("port-retry");
       expect(decision.state.portRetryStartedAt).toBe(5_000);
+      expect(decision.state.legStartedAt).toBe(5_000); // the leg's own clock starts here
       expect(decision.afterMs).toBe(ALARM_TICK_MS);
     }
   });
@@ -49,6 +50,7 @@ describe("nextAlarmStep: waiting-for-ready phase", () => {
     if (decision.kind === "re-arm") {
       expect(decision.state.phase).toBe("polling");
       expect(decision.state.pollStartedAt).toBe(5_000);
+      expect(decision.state.legStartedAt).toBe(5_000); // minted at the first /run attempt
       expect(decision.afterMs).toBe(ALARM_TICK_MS);
     }
   });
@@ -152,6 +154,32 @@ describe("nextAlarmStep: polling phase", () => {
   it("the no-instance refusal fails fast in the polling phase too, never spending the leg's own deadline", () => {
     const decision = nextAlarmStep(POLLING_STATE, 5_000, { kind: "no-instance" });
     expect(decision).toEqual({ kind: "terminal", outcome: { kind: "infra", description: NO_INSTANCE_DESCRIPTION } });
+  });
+
+  it("the leg's deadline anchors at legStartedAt, not pollStartedAt (review r1 item a: port-retry time counts against timeoutMin)", () => {
+    // /run was first attempted at t=0 (legStartedAt=0), then spent 90 s in
+    // port-retry before /run was accepted at t=90_000 (pollStartedAt).
+    const state: RunLegAlarmState = { ...POLLING_STATE, timeoutMin: 25, legStartedAt: 0, pollStartedAt: 90_000 };
+    // Only pollStartedAt's 90 s has elapsed, but the leg has been running 91 s.
+    const decision = nextAlarmStep(state, 91_000, { kind: "poll-pending" });
+    expect(decision.kind).toBe("re-arm"); // not yet: 91 s < 25 min
+    // The full 25 min measured from legStartedAt (t=0) elapses at 25*60_000.
+    const atDeadline = nextAlarmStep(state, 25 * 60_000, { kind: "poll-pending" });
+    expect(atDeadline).toEqual({
+      kind: "terminal",
+      outcome: { kind: "result", result: { state: "error", description: "lint exceeded 25 min without a result" } },
+    });
+  });
+
+  it("a not-running signal in the polling phase ends the leg as infra NOW, never a silent re-arm (review r1 item b)", () => {
+    const decision = nextAlarmStep(POLLING_STATE, 5_000, { kind: "not-running" });
+    expect(decision).toEqual({ kind: "terminal", outcome: { kind: "infra", description: "gate container exited mid-leg" } });
+  });
+
+  it("not-running in polling wins over a same-tick deadline as infra, never a red 'exceeded' body (review r1 item b, item 4 ordering)", () => {
+    const state: RunLegAlarmState = { ...POLLING_STATE, timeoutMin: 25, legStartedAt: 0 };
+    const decision = nextAlarmStep(state, 25 * 60_000, { kind: "not-running" });
+    expect(decision).toEqual({ kind: "terminal", outcome: { kind: "infra", description: "gate container exited mid-leg" } });
   });
 });
 
