@@ -221,22 +221,26 @@ export function asyncAttemptDeadlineMs(timeoutMin: number | undefined): number {
  *  grace) so it can only ever fire for an attempt already abandoned on a
  *  terminal path -- never a live attempt whose next tick will legitimately
  *  delete its own secretValues. */
-async function armSecretSweep(deps: AlarmTickDeps): Promise<void> {
+async function armSecretSweep(deps: { storage: { scheduleAlarm(atMs: number): Promise<void> }; now: () => number }): Promise<void> {
   await deps.storage.scheduleAlarm(deps.now() + SECRET_SWEEP_MS);
 }
 
 /** #1428 item 1: the slice of real I/O abandonAttempt needs -- a small subset
  *  of AlarmTickDeps's own storage/container shape (no putState/
- *  getSecretValues/scheduleAlarm: abandon only ever reads once and deletes,
- *  it never re-arms anything). do.ts's real /abandon route is the only
- *  caller built from real bindings. */
+ *  getSecretValues: abandon only ever reads the state once and deletes, it
+ *  never re-arms a normal re-poll). scheduleAlarm + now are needed for the
+ *  #1436 re-review item 1 fallback: a throwing destroy() arms the SAME
+ *  one-shot sweep alarmTick's own give-up path uses. do.ts's real /abandon
+ *  route is the only caller built from real bindings. */
 export interface AbandonDeps {
   storage: {
     getState(): Promise<RunLegAlarmState | undefined>;
     deleteSecretValues(): Promise<void>;
     deleteState(): Promise<void>;
+    scheduleAlarm(atMs: number): Promise<void>;
   };
   container: { destroy(): Promise<void> } | undefined;
+  now: () => number;
 }
 
 /**
@@ -261,9 +265,23 @@ export async function abandonAttempt(
 ): Promise<"abandoned" | "no-op"> {
   const state = await deps.storage.getState();
   if (state === undefined || state.resultKey !== resultKey) return "no-op";
-  await deps.container?.destroy();
+  // #1436 re-review item 1: the ORIGINAL order destroyed the container
+  // FIRST, unguarded -- a throwing destroy skipped BOTH deletes entirely,
+  // leaving a granted secret at rest with no future tick ever revisiting it.
+  // Secrets+state are cleared FIRST, unconditionally; destroy() is then
+  // best-effort. A failing destroy leaves an orphaned, undestroyed
+  // container that nothing else will retry on its own (the next tick, if
+  // any, is the state-less stray-tick branch, which never touches the
+  // container) -- arming the same one-shot sweep alarmTick's own give-up
+  // path uses is a durable signal that cleanup is incomplete, rather than a
+  // silently billing container with zero future signal.
   await deps.storage.deleteSecretValues();
   await deps.storage.deleteState();
+  try {
+    await deps.container?.destroy();
+  } catch {
+    await armSecretSweep(deps);
+  }
   return "abandoned";
 }
 
@@ -353,6 +371,37 @@ async function writeTerminalOutcome(
 }
 
 /**
+ * #1398 plan review r1 BLOCKER 4 / #1436 re-review item 2: the shared
+ * give-up sequence -- a terminal infra write naming the failure count, the
+ * one-shot sweep backstop armed BEFORE the deletes, then the deletes and
+ * destroy. Used by BOTH the outer catch's own cap check AND the write-failed
+ * branch's (a write-failed tick is itself a kind of failure, and an R2
+ * outage that outlasts the cap must give up exactly the same way an
+ * observe()-throwing outage does -- re-arming it forever, as the write-failed
+ * branch did before this fix, bills the DO with no end in sight).
+ */
+async function giveUpAfterFailures(
+  deps: AlarmTickDeps, resultKey: string, failures: number,
+): Promise<"gave-up-after-failures"> {
+  await writeTerminalOutcome(deps, resultKey, {
+    kind: "infra", description: `DO alarm failed ${failures} times in a row, giving up`,
+  });
+  // #1428 (a): arm the one-shot sweep BEFORE the deletes -- a failing delete
+  // below rethrows (r1 item 3) so CF retries, but once this give-up finally
+  // completes there is no re-arm to ever run again; this far-future alarm
+  // guarantees one last tick, which the stray-tick branch above turns into a
+  // secretValues delete, however the deletes below resolved.
+  await armSecretSweep(deps);
+  // r1 item 3: a failing secret delete MUST rethrow, so CF's own alarm retry
+  // takes over -- swallowing it returns "gave-up" with the secretValues still
+  // stored, stranded forever.
+  await deps.storage.deleteSecretValues();
+  await deps.storage.deleteState().catch(() => {});
+  await deps.container?.destroy().catch(() => {});
+  return "gave-up-after-failures";
+}
+
+/**
  * #1398 plan review r1 BLOCKER 4: one alarm tick's FULL orchestration,
  * fully injected, fully bun-testable -- do.ts's real alarm() does nothing but
  * build real deps and call this.
@@ -367,7 +416,18 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
     // is the one chance left to clear the value before it rests forever.
     // #1428 (d): the secrets are read BEFORE the delete so a failing delete's
     // own error text can be redacted -- after a successful delete they are gone.
-    const sweepValues = Object.values((await deps.storage.getSecretValues()) ?? {});
+    // #1436 re-review item 4: this read is now its OWN guarded attempt -- a
+    // storage fault here must never skip the delete below (the whole point
+    // of this branch) or throw out of alarmTick uncaught, the one tick type
+    // with no outer catch of its own to fall back on.
+    let sweepValues: string[] = [];
+    try {
+      sweepValues = Object.values((await deps.storage.getSecretValues()) ?? {});
+    } catch (err) {
+      try {
+        await deps.log(`gate-runner: secret sweep failed: could not read secrets for redaction: ${errorText(err)}`);
+      } catch { /* a throwing logger must never rethrow out of the sweep */ }
+    }
     try {
       await deps.storage.deleteSecretValues();
     } catch (err) {
@@ -403,6 +463,12 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
     const writeResult = await writeTerminalOutcome(deps, current.resultKey, decision.outcome);
     if (writeResult === "write-failed") {
       const failures = (current.consecutiveFailures ?? 0) + 1;
+      // #1436 re-review item 2: the SAME cap the outer catch enforces -- an R2
+      // outage that outlasts MAX_CONSECUTIVE_FAILURES must give up here too,
+      // never re-arm forever (the original draft had no check at all).
+      if (failures >= MAX_CONSECUTIVE_FAILURES) {
+        return giveUpAfterFailures(deps, current.resultKey, failures);
+      }
       await deps.storage.putState({ ...current, consecutiveFailures: failures });
       await deps.storage.scheduleAlarm(deps.now() + ALARM_TICK_MS);
       return "re-armed";
@@ -448,22 +514,7 @@ export async function alarmTick(deps: AlarmTickDeps): Promise<"done" | "re-armed
       } catch { /* a throwing logger is itself a lost cause; never rethrow here */ }
     }
     if (failures >= MAX_CONSECUTIVE_FAILURES) {
-      await writeTerminalOutcome(deps, state.resultKey, {
-        kind: "infra", description: `DO alarm failed ${failures} times in a row, giving up`,
-      });
-      // #1428 (a): arm the one-shot sweep BEFORE the deletes -- a failing
-      // delete below rethrows (r1 item 3) so CF retries, but once this give-up
-      // finally completes there is no re-arm to ever run again; this far-future
-      // alarm guarantees one last tick, which the stray-tick branch above turns
-      // into a secretValues delete, however the deletes below resolved.
-      await armSecretSweep(deps);
-      // r1 item 3: a failing secret delete MUST rethrow, so CF's own alarm
-      // retry takes over -- swallowing it returns "gave-up" with the
-      // secretValues still stored, stranded forever.
-      await deps.storage.deleteSecretValues();
-      await deps.storage.deleteState().catch(() => {});
-      await deps.container?.destroy().catch(() => {});
-      return "gave-up-after-failures";
+      return giveUpAfterFailures(deps, state.resultKey, failures);
     }
     // #1428 (b) / r1 item 3: BOTH a failing re-arm AND its first putState
     // must rethrow -- the plan's original draft only rethrew the re-arm's

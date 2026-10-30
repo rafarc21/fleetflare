@@ -73,6 +73,16 @@ describe("redactKnownSecretValues: common encodings", () => {
     const text = `GET /login?token=${lowerPct}`;
     expect(redactKnownSecretValues(text, [value])).toBe("GET /login?token=«redacted»");
   });
+
+  // #1436 re-review: a tool that dumps raw bytes as hex may print UPPERCASE
+  // digits (many hex-dump utilities' default) rather than the lowercase form
+  // above -- a distinct string, so it needs its own form in the set.
+  it("redacts the UPPERCASE-hex form (UTF-8 bytes as an uppercase hex string)", () => {
+    const value = "sup3r-s3cret";
+    const hex = [...new TextEncoder().encode(value)].map((b) => b.toString(16).padStart(2, "0").toUpperCase()).join("");
+    const text = `raw bytes: ${hex}`;
+    expect(redactKnownSecretValues(text, [value])).toBe("raw bytes: «redacted»");
+  });
 });
 
 // #1346 security review r2: container/gate-server.ts's own 32k tail cut can

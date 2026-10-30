@@ -283,7 +283,10 @@ export async function startAsyncLeg(
     try {
       await destroy();
     } catch (destroyErr) {
-      console.error("gate-runner: destroy after arm failure failed", errorText(destroyErr));
+      // #1436 re-review item 3: redacted too, not just the returned
+      // description below -- a destroy error's message can echo a granted
+      // secret value just as easily as the one that landed in `err` above.
+      console.error("gate-runner: destroy after arm failure failed", redactKnownSecretValues(errorText(destroyErr), values));
     }
     return { kind: "infra", description: redactKnownSecretValues(`gate container failed: ${errorText(err)}`, values) };
   }

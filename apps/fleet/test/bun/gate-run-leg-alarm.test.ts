@@ -429,6 +429,22 @@ describe("alarmTick (#1398 plan review r1 BLOCKER 4)", () => {
     expect(fixture.secretValues).toBeUndefined();
   });
 
+  // #1436 re-review item 4: the stray-tick branch's own getSecretValues()
+  // read (for redacting the sweep-failure log, not for the delete itself)
+  // sat OUTSIDE any try/catch -- a storage fault there threw straight out of
+  // alarmTick entirely uncaught, for the one tick type (no state at all)
+  // that has nowhere else to be caught at all.
+  it("a stray tick whose getSecretValues() itself throws still returns 'done' and still clears secretValues, never an uncaught throw", async () => {
+    const { deps, fixture } = fakeAlarmDeps();
+    fixture.state = undefined;
+    fixture.secretValues = { "staging-login": "sup3r-s3cret" };
+    fixture.getSecretValuesThrows = new Error("storage read down");
+    const result = await alarmTick(deps);
+    expect(result).toBe("done");
+    expect(fixture.secretValues).toBeUndefined(); // the delete itself doesn't need the read to have succeeded
+    expect(fixture.logged.join("\n")).toContain("could not read secrets for redaction");
+  });
+
   // #1428 (a): the give-up path arms the one-shot sweep alarm BEFORE its
   // deletes, so a later stray tick has the state-less branch above to run.
   it("the give-up path arms a far-future sweep alarm before deleting (r2 leftover a)", async () => {
@@ -547,7 +563,7 @@ describe("alarmTick (#1398 plan review r1 BLOCKER 4)", () => {
       expect(fixture.logged.join("\n")).toContain("could not read secrets for redaction");
     });
 
-    it("repeated write-failed ticks accumulate consecutiveFailures toward the cap, eventually giving up", async () => {
+    it("repeated write-failed ticks accumulate consecutiveFailures toward the cap", async () => {
       const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-failed" }) });
       fixture.putFailTimes = 3;
       expect(await alarmTick(deps)).toBe("re-armed");
@@ -555,6 +571,38 @@ describe("alarmTick (#1398 plan review r1 BLOCKER 4)", () => {
       fixture.putFailTimes = 3;
       expect(await alarmTick(deps)).toBe("re-armed");
       expect(fixture.state?.consecutiveFailures).toBe(2);
+    });
+
+    // #1436 re-review item 2: the write-failed branch bumped
+    // consecutiveFailures and re-armed WITHOUT ever checking
+    // MAX_CONSECUTIVE_FAILURES -- an R2 outage that outlasted the cap meant
+    // infinite 20s ticks, billing the DO forever, never giving up. This is
+    // the EXACT bug class BLOCKER 4 exists to close for the outer catch path;
+    // the write-failed branch (added later, #1436 item 3) never got the
+    // same cap check.
+    it("reaching the cap from a write-failed tick gives up instead of re-arming forever -- never infinite 20s ticks on an R2 outage", async () => {
+      const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-failed" }) });
+      fixture.state = { ...fixture.state!, consecutiveFailures: 4 }; // one more failure trips the cap (5)
+      fixture.putFailTimes = 5; // R2 stays down -- every write attempt fails
+      const result = await alarmTick(deps);
+      expect(result).toBe("gave-up-after-failures");
+      expect(fixture.destroyCount).toBe(1); // torn down, not left running forever
+      expect(fixture.state).toBeUndefined();
+      expect(fixture.secretValues).toBeUndefined();
+      // The one-shot sweep backstop is still armed, same as the outer
+      // catch's own give-up path -- belt-and-braces in case anything above
+      // still left something stranded.
+      expect(fixture.scheduledAtMs.length).toBe(1);
+    });
+
+    it("one BELOW the cap still re-arms, never gives up prematurely (the exact boundary)", async () => {
+      const { deps, fixture } = fakeAlarmDeps({ observe: async () => ({ kind: "poll-failed" }) });
+      fixture.state = { ...fixture.state!, consecutiveFailures: 3 }; // one more failure = 4, still under the cap of 5
+      fixture.putFailTimes = 5;
+      const result = await alarmTick(deps);
+      expect(result).toBe("re-armed");
+      expect(fixture.destroyCount).toBe(0);
+      expect(fixture.state?.consecutiveFailures).toBe(4);
     });
   });
 });
@@ -662,19 +710,24 @@ describe("observeOnce (#1428 leftover e: do.ts's HTTP glue, now bun-tested)", ()
 });
 
 /** A minimal, directly-inspectable fake for AbandonDeps. */
-function fakeAbandonDeps(opts: { state?: RunLegAlarmState } = {}) {
+function fakeAbandonDeps(opts: { state?: RunLegAlarmState; destroyThrows?: Error } = {}) {
   const fixture = {
     state: opts.state as RunLegAlarmState | undefined,
     secretValues: { x: "y" } as Record<string, string> | undefined,
     destroyCount: 0,
+    destroyThrows: opts.destroyThrows as Error | undefined,
+    scheduledAtMs: [] as number[],
+    nowMs: 0,
   };
   const deps = {
     storage: {
       getState: async () => fixture.state,
       deleteSecretValues: async () => { fixture.secretValues = undefined; },
       deleteState: async () => { fixture.state = undefined; },
+      scheduleAlarm: async (at: number) => { fixture.scheduledAtMs.push(at); },
     },
-    container: { destroy: async () => { fixture.destroyCount++; } },
+    container: { destroy: async () => { fixture.destroyCount++; if (fixture.destroyThrows) throw fixture.destroyThrows; } },
+    now: () => fixture.nowMs,
   };
   return { deps, fixture };
 }
@@ -729,5 +782,39 @@ describe("abandonAttempt (#1428 item 1: Workflow-driven idempotent DO RPC)", () 
     expect(result).toBe("abandoned");
     expect(fixture.secretValues).toBeUndefined();
     expect(fixture.state).toBeUndefined();
+  });
+
+  // #1436 re-review item 1: the ORIGINAL order destroyed the container FIRST,
+  // unguarded -- a throwing destroy skipped BOTH deletes entirely, leaving a
+  // granted secret at rest with nothing left to ever clean it up (the next
+  // tick, if any, is the state-less stray-tick branch, which has nothing to
+  // find once state itself still exists... and nothing ever deletes it since
+  // this call already crashed). Secrets+state must be cleared FIRST,
+  // unconditionally; destroy() is then best-effort.
+  it("a throwing destroy() still clears secretValues AND alarmState -- the delete order, not the destroy outcome, decides whether secrets are at rest", async () => {
+    const { deps, fixture } = fakeAbandonDeps({
+      state: { ...BASE_STATE, resultKey: "k1" },
+      destroyThrows: new Error("container unreachable"),
+    });
+    const result = await abandonAttempt(deps, "k1");
+    expect(result).toBe("abandoned"); // the core job -- secrets cleared -- still succeeded
+    expect(fixture.secretValues).toBeUndefined();
+    expect(fixture.state).toBeUndefined();
+  });
+
+  it("a throwing destroy() arms the one-shot sweep alarm -- a durable signal, since nothing else will retry destroying an orphaned container", async () => {
+    const { deps, fixture } = fakeAbandonDeps({
+      state: { ...BASE_STATE, resultKey: "k1" },
+      destroyThrows: new Error("container unreachable"),
+    });
+    fixture.nowMs = 1_000_000;
+    await abandonAttempt(deps, "k1");
+    expect(fixture.scheduledAtMs).toContain(1_000_000 + 3_600_000); // 60 min out, same SECRET_SWEEP_MS as the alarmTick give-up path
+  });
+
+  it("a SUCCEEDING destroy() never arms the sweep -- nothing stray to clean up, no reason to burn a future tick", async () => {
+    const { deps, fixture } = fakeAbandonDeps({ state: { ...BASE_STATE, resultKey: "k1" } });
+    await abandonAttempt(deps, "k1");
+    expect(fixture.scheduledAtMs).toEqual([]);
   });
 });

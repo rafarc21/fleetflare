@@ -139,8 +139,10 @@ export class GateRunnerDO extends DurableObject<Env> {
           getState: () => this.ctx.storage.get<RunLegAlarmState>("alarmState").then((v) => v ?? undefined),
           deleteSecretValues: () => this.ctx.storage.delete("secretValues").then(() => undefined),
           deleteState: () => this.ctx.storage.delete("alarmState").then(() => undefined),
+          scheduleAlarm: (at) => this.ctx.storage.setAlarm(at),
         },
         container: this.ctx.container,
+        now: () => Date.now(),
       }, resultKey));
       return Response.json({ result });
     }

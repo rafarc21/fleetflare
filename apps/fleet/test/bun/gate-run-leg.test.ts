@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   runLegInContainer, runLegWithSecrets, legResponse, prepareAndStartContainer, startLegContainer, startAsyncLeg,
   NO_INSTANCE_DESCRIPTION, type AsyncLegStorage, type GateContainer, type OutboundBinding,
@@ -347,6 +347,28 @@ describe("startAsyncLeg (#1398 async branch)", () => {
     const description = decision.kind === "infra" ? decision.description : "";
     expect(description).not.toContain("sup3r-s3cret");
     expect(description).toContain("«redacted»");
+  });
+
+  // #1436 re-review item 3: the RETURNED description is redacted (above), but
+  // the destroy-after-arm-failure path ALSO logs via a bare console.error --
+  // that second site echoed errorText(destroyErr) raw, unredacted.
+  test("a destroy-after-arm-failure's own console.error is redacted too, not just the returned description", async () => {
+    const storage = new FakeStorage();
+    storage.setAlarmThrows = new Error("no alarm() handler");
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await startAsyncLeg(
+        ASYNC_LEG, { "staging-login": "sup3r-s3cret" }, storage,
+        async () => ({ kind: "started" as const }),
+        async () => { throw new Error("destroy failed: last token was sup3r-s3cret"); },
+        () => 5000,
+      );
+      const logged = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(logged).not.toContain("sup3r-s3cret");
+      expect(logged).toContain("«redacted»");
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   test("no granted secrets: an infra description passes through unchanged (no allocation, no behavior change)", async () => {

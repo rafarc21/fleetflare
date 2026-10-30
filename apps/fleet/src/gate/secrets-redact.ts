@@ -42,7 +42,11 @@ function encodedForms(value: string): string[] {
   // lowercase hex (a raw byte dump), and the same percent-encoding a tool
   // emits with lowercase hex digits (encodeURIComponent's own hex is
   // UPPERCASE) -- both escape the literal-string match above unless added.
-  forms.add([...new TextEncoder().encode(value)].map((b) => b.toString(16).padStart(2, "0")).join(""));
+  const hexBytes = [...new TextEncoder().encode(value)];
+  forms.add(hexBytes.map((b) => b.toString(16).padStart(2, "0")).join(""));
+  // #1436 re-review: many hex-dump tools default to UPPERCASE digits -- a
+  // distinct string from the lowercase form above, worth its own entry.
+  forms.add(hexBytes.map((b) => b.toString(16).padStart(2, "0").toUpperCase()).join(""));
   forms.add(encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()));
   return [...forms].filter((f) => f !== "");
 }
