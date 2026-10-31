@@ -371,7 +371,7 @@ describe("handleBoard", () => {
   function reconcilePort(overrides: Partial<ReconcilePort> = {}): ReconcilePort {
     return {
       referencingPrs: vi.fn(async () => []),
-      prState: vi.fn(async () => ({ merged: false, open: false })),
+      prState: vi.fn(async () => ({ merged: false, open: false, landed: false })),
       studioStopped: vi.fn(async () => false),
       hasComment: vi.fn(async () => false),
       ...overrides,
@@ -380,11 +380,11 @@ describe("handleBoard", () => {
 
   it("#1447: POST /tasks/reconcile dry-runs by default and completes only with apply:true", async () => {
     authorized();
-    const getIssue = vi.fn(async () => task({ state: "awaiting_merge", labels: ["awaiting_merge", "studio:acme--web-studio"] }));
-    const listIssues = vi.fn(async () => [task({ number: 12, state: "awaiting_merge", labels: ["awaiting_merge", "studio:acme--web-studio"] })]);
+    const getIssue = vi.fn(async () => task({ state: "awaiting_merge", assignee: "acme--web-studio", labels: ["awaiting_merge", "studio:acme--web-studio"] }));
+    const listIssues = vi.fn(async () => [task({ number: 12, state: "awaiting_merge", assignee: "acme--web-studio", labels: ["awaiting_merge", "studio:acme--web-studio"] })]);
     const port = reconcilePort({
       referencingPrs: vi.fn(async () => [40]),
-      prState: vi.fn(async () => ({ merged: true, open: false })),
+      prState: vi.fn(async () => ({ merged: true, open: false, landed: true })),
     });
     const api = fakeApi({ getIssue, listIssues });
     const dry = await handleBoard(

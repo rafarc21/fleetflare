@@ -104,6 +104,11 @@
     "FLEET_TELEGRAM": "off",
     "FLEET_DIRECTUS": "off",
     "FLEET_AUTO_FAILOVER": "off",
+    // Board #1448: auto-park a running studio whose only open task is
+    // awaiting_merge and whose lead has sat idle past AUTO_PARK_IDLE_MINUTES.
+    // Off by default; AUTO_PARK_IDLE_MINUTES defaults to 30 when absent.
+    "FLEET_AUTO_PARK": "off",
+    "AUTO_PARK_IDLE_MINUTES": "30",
     // FLEET_JUNIOR gates BOTH Workers-AI-spending routes: the junior skill
     // (Workers AI delegation, see skills/junior/SKILL.md — studios get the
     // skill and /fleet/junior answers) AND the glm-lead LLM route

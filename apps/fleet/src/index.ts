@@ -12,8 +12,8 @@ import { handleStudio, handleFleetSpawn } from "./studio/routes";
 import { listStudios } from "./studio/registry";
 import { getStudioStubForRow } from "./studio/profile";
 import { isWatchMinute, watchStoppedContainers } from "./studio/container-watch";
-import { handleBoard, handleFleetBoard, githubBoardApi, realReconcilePort, reconcileDeps } from "./board/routes";
-import { runBoardReconcile } from "./board/reconcile";
+import { autoParkSweepFromEnv } from "./studio/auto-park-env";
+import { handleBoard, handleFleetBoard, githubBoardApi, realReconcilePort, reconcileScheduledSweep } from "./board/routes";
 import { handleMemory } from "./memory/routes";
 import { handleFleetJunior } from "./junior/route";
 import { handleJuniorUsageStats, handleLeadUsageStats } from "./junior/usage";
@@ -270,6 +270,16 @@ async function handleScheduled(controller: ScheduledController, env: Env, ctx: E
     }
   }
 
+  // Board #1448: auto-park a running studio whose only open task(s) are
+  // awaiting_merge and whose lead has sat idle past the configured budget.
+  // Same fail-closed posture as every other cron block: a board/DO hiccup
+  // skips that studio, never parks it blind.
+  try {
+    await autoParkSweepFromEnv(env, controller.scheduledTime ? new Date(controller.scheduledTime) : new Date());
+  } catch (err) {
+    console.error("auto-park sweep failed", err);
+  }
+
   // Issue #95: every 5th minute, ask each stopped studio's DO whether its
   // container is running anyway (observation only — see container-watch.ts).
   // AFTER the watchdog above: a hung DO call here must not delay a re-arm.
@@ -284,13 +294,15 @@ async function handleScheduled(controller: ScheduledController, env: Env, ctx: E
   }
 
   // Board issue #1447: the scheduled reconcile — merged PRs auto-complete
-  // their task, in-flight tasks on stopped/parked studios fall back. Every
-  // 5th minute too (same cadence as the container watch), apply: true. The
-  // rule is runBoardReconcile's; reconcileDeps/realReconcilePort are the same
-  // wiring the CLI route uses, so there is exactly one real implementation.
-  if (isWatchMinute(controller.scheduledTime ?? Date.now())) {
+  // their task, in-flight tasks on stopped/parked studios fall back. OFF by
+  // default: runs only when env FLEET_BOARD_RECONCILE is exactly "on" (same
+  // posture as FLEET_AUTO_PARK above), on the 5th-minute cadence shared with
+  // the container watch. The sweep applies for real, capped per run by a
+  // persisted rotating cursor (reconcileScheduledSweep), so a mass of drift
+  // never turns one tick into unbounded GitHub work.
+  if (env.FLEET_BOARD_RECONCILE === "on" && isWatchMinute(controller.scheduledTime ?? Date.now())) {
     try {
-      await runBoardReconcile(reconcileDeps(githubBoardApi(env), env.AGENT_REPO, realReconcilePort(env)), true);
+      await reconcileScheduledSweep(env, githubBoardApi(env), realReconcilePort(env), env.AGENT_REPO);
     } catch (err) {
       console.error("board reconcile sweep failed", err);
     }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { runBoardReconcile, type ReconcileDeps, type ReconcileTask } from "../src/board/reconcile";
+import { runBoardReconcile, rotateReconcileSlice, type ReconcileDeps, type ReconcileTask } from "../src/board/reconcile";
 
 // Board issue #1447: the Worker reconcile. Three cases over open tasks:
 //   (a) a task whose linked PR is MERGED -> completed;
@@ -21,7 +21,7 @@ function deps(overrides: Partial<ReconcileDeps> = {}): ReconcileDeps {
     repo: "acme/websites",
     listOpenTasks: async () => [],
     linkedPrs: async () => [],
-    prState: async () => ({ merged: false, open: false }),
+    prState: async () => ({ merged: false, open: false, landed: false }),
     studioStopped: async () => false,
     hasComment: async () => false,
     transition: vi.fn(async () => ({ ok: true as const })),
@@ -39,7 +39,7 @@ describe("runBoardReconcile — case (a): linked PR merged -> completed", () => 
     const d = deps({
       listOpenTasks: async () => [task()],
       linkedPrs: async () => [40],
-      prState: async () => ({ merged: true, open: false }),
+      prState: async () => ({ merged: true, open: false, landed: true }),
     });
     const out = await runBoardReconcile(d, false);
     expect(out).toEqual([{ taskNumber: 12, prNumber: 40, outcome: "would-complete" }]);
@@ -51,7 +51,7 @@ describe("runBoardReconcile — case (a): linked PR merged -> completed", () => 
     const d = deps({
       listOpenTasks: async () => [task()],
       linkedPrs: async () => [40],
-      prState: async () => ({ merged: true, open: false }),
+      prState: async () => ({ merged: true, open: false, landed: true }),
     });
     const out = await runBoardReconcile(d, true);
     expect(out).toEqual([{ taskNumber: 12, prNumber: 40, outcome: "completed" }]);
@@ -63,7 +63,7 @@ describe("runBoardReconcile — case (a): linked PR merged -> completed", () => 
     const d = deps({
       listOpenTasks: async () => [task({ state: "working" })],
       linkedPrs: async () => [7],
-      prState: async () => ({ merged: true, open: false }),
+      prState: async () => ({ merged: true, open: false, landed: true }),
     });
     const out = await runBoardReconcile(d, true);
     expect(out).toEqual([{ taskNumber: 12, prNumber: 7, outcome: "completed" }]);
@@ -74,7 +74,7 @@ describe("runBoardReconcile — case (a): linked PR merged -> completed", () => 
     const d = deps({
       listOpenTasks: async () => [task()],
       linkedPrs: async () => [40, 41],
-      prState: async (n: number) => (n === 41 ? { merged: true, open: false } : { merged: false, open: true }),
+      prState: async (n: number) => (n === 41 ? { merged: true, open: false, landed: true } : { merged: false, open: true, landed: false }),
     });
     const out = await runBoardReconcile(d, true);
     expect(out).toEqual([{ taskNumber: 12, prNumber: 41, outcome: "completed" }]);
@@ -85,7 +85,7 @@ describe("runBoardReconcile — case (a): linked PR merged -> completed", () => 
     const d = deps({
       listOpenTasks: async () => [task()],
       linkedPrs: async () => [40],
-      prState: async () => ({ merged: true, open: false }),
+      prState: async () => ({ merged: true, open: false, landed: true }),
       hasComment: async (n: number, marker: string) => n === 12 && marker === completeComment(40),
     });
     const out = await runBoardReconcile(d, true);
@@ -98,7 +98,7 @@ describe("runBoardReconcile — case (a): linked PR merged -> completed", () => 
     const d = deps({
       listOpenTasks: async () => [task()],
       linkedPrs: async () => [40],
-      prState: async () => ({ merged: true, open: false }),
+      prState: async () => ({ merged: true, open: false, landed: true }),
       transition: async () => ({ ok: false, message: "drifted" }),
     });
     const out = await runBoardReconcile(d, true);
@@ -123,7 +123,7 @@ describe("runBoardReconcile — case (b): stopped studio, no open PR -> submitte
     const d = deps({
       listOpenTasks: async () => [task()],
       linkedPrs: async () => [40],
-      prState: async () => ({ merged: false, open: false }),
+      prState: async () => ({ merged: false, open: false, landed: false }),
       studioStopped: async () => true,
     });
     const out = await runBoardReconcile(d, true);
@@ -157,7 +157,7 @@ describe("runBoardReconcile — case (c): awaiting_merge + open PR on a stopped 
     const d = deps({
       listOpenTasks: async () => [task()],
       linkedPrs: async () => [40],
-      prState: async () => ({ merged: false, open: true }),
+      prState: async () => ({ merged: false, open: true, landed: false }),
       studioStopped: async () => true,
     });
     const out = await runBoardReconcile(d, true);
@@ -170,7 +170,7 @@ describe("runBoardReconcile — case (c): awaiting_merge + open PR on a stopped 
     const d = deps({
       listOpenTasks: async () => [task()],
       linkedPrs: async () => [40],
-      prState: async () => ({ merged: false, open: true }),
+      prState: async () => ({ merged: false, open: true, landed: false }),
       studioStopped: async () => true,
       hasComment: async (n: number, marker: string) => n === 12 && marker === noteComment(STUDIO, 40),
     });
@@ -183,7 +183,7 @@ describe("runBoardReconcile — case (c): awaiting_merge + open PR on a stopped 
     const d = deps({
       listOpenTasks: async () => [task()],
       linkedPrs: async () => [40],
-      prState: async () => ({ merged: false, open: true }),
+      prState: async () => ({ merged: false, open: true, landed: false }),
       studioStopped: async () => true,
     });
     const out = await runBoardReconcile(d, false);
@@ -207,7 +207,7 @@ describe("runBoardReconcile — every other task is skipped with a reason", () =
     const d = deps({
       listOpenTasks: async () => [task({ state: "working" })],
       linkedPrs: async () => [40],
-      prState: async () => ({ merged: false, open: true }),
+      prState: async () => ({ merged: false, open: true, landed: false }),
       studioStopped: async () => true,
     });
     expect(await runBoardReconcile(d, true)).toEqual([
@@ -282,5 +282,81 @@ describe("runBoardReconcile — every other task is skipped with a reason", () =
       { taskNumber: 12, outcome: "skipped", reason: "reading studio state failed: d1 down" },
     ]);
     expect(d.transition).not.toHaveBeenCalled();
+  });
+
+  it("a prState failure fails closed — the task is skipped, never completed", async () => {
+    const d = deps({
+      listOpenTasks: async () => [task()],
+      linkedPrs: async () => [40],
+      prState: async () => { throw new Error("github down"); },
+    });
+    expect(await runBoardReconcile(d, true)).toEqual([
+      { taskNumber: 12, outcome: "skipped", reason: "reading PR #40 failed: github down" },
+    ]);
+    expect(d.transition).not.toHaveBeenCalled();
+  });
+});
+
+describe("runBoardReconcile — review #1447 fixes", () => {
+  it("an unassigned task skips the PR search entirely", async () => {
+    const linkedPrs = vi.fn(async () => [40]);
+    const d = deps({ listOpenTasks: async () => [task({ assignee: null })], linkedPrs });
+    expect(await runBoardReconcile(d, true)).toEqual([
+      { taskNumber: 12, outcome: "skipped", reason: "unassigned" },
+    ]);
+    expect(linkedPrs).not.toHaveBeenCalled();
+  });
+
+  it("a PR merged into a non-default branch is skipped, not completed", async () => {
+    const d = deps({
+      listOpenTasks: async () => [task()],
+      linkedPrs: async () => [40],
+      prState: async () => ({ merged: true, open: false, landed: false }),
+    });
+    expect(await runBoardReconcile(d, true)).toEqual([
+      { taskNumber: 12, outcome: "skipped", reason: "PR #40 merged but not on default branch yet" },
+    ]);
+    expect(d.transition).not.toHaveBeenCalled();
+  });
+
+  it("a task whose studio has no registry row is skipped, not reset", async () => {
+    const d = deps({
+      listOpenTasks: async () => [task({ state: "working" })],
+      studioStopped: async () => null,
+    });
+    expect(await runBoardReconcile(d, true)).toEqual([
+      { taskNumber: 12, outcome: "skipped", reason: "unknown studio" },
+    ]);
+    expect(d.transition).not.toHaveBeenCalled();
+  });
+});
+
+describe("rotateReconcileSlice", () => {
+  const nums = (ns: number[]): ReconcileTask[] => ns.map((n) => ({ taskNumber: n, state: "awaiting_merge", assignee: STUDIO }));
+
+  it("an empty list yields an empty slice and no cursor", () => {
+    expect(rotateReconcileSlice([], 25, null)).toEqual({ slice: [], nextCursor: null });
+  });
+
+  it("no cursor takes the first `limit` tasks", () => {
+    const out = rotateReconcileSlice(nums([10, 9, 8, 7]), 2, null);
+    expect(out.slice.map((t) => t.taskNumber)).toEqual([10, 9]);
+    expect(out.nextCursor).toBe(9);
+  });
+
+  it("a cursor resumes just after it, wrapping at the end", () => {
+    const out = rotateReconcileSlice(nums([10, 9, 8, 7]), 2, 9);
+    expect(out.slice.map((t) => t.taskNumber)).toEqual([8, 7]);
+    expect(out.nextCursor).toBe(7);
+  });
+
+  it("a stale cursor (task gone) starts from the head", () => {
+    const out = rotateReconcileSlice(nums([10, 9, 8]), 2, 99);
+    expect(out.slice.map((t) => t.taskNumber)).toEqual([10, 9]);
+  });
+
+  it("caps at the list length when limit exceeds it", () => {
+    const out = rotateReconcileSlice(nums([10, 9]), 25, null);
+    expect(out.slice.map((t) => t.taskNumber)).toEqual([10, 9]);
   });
 });

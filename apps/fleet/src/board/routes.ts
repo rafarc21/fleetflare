@@ -20,6 +20,7 @@
 
 import type { Env } from "../env";
 import { verifyAccess } from "../studio/auth";
+import { getFlag, setFlag } from "../state";
 import { redactSecrets } from "../studio/redact";
 import { reachRepo, repoTokenMinter, mintRepoToken } from "../github/auth";
 import type { RepoReachFetch } from "../github/reach";
@@ -60,7 +61,7 @@ import { runTaskReap, type ReapDeps, type LandedCheck } from "../studio/task-rea
 import { isGateRunnerRepo } from "../gate/config";
 import { GATE_STATUS_CONTEXT } from "../gate/status-post";
 import { runRescueGc, type RescueBranch } from "../studio/rescue-gc";
-import { runBoardReconcile, RECONCILE_COMPLETE_MARKER, RECONCILE_RESET_MARKER, RECONCILE_NOTE_MARKER, type ReconcileDeps } from "./reconcile";
+import { runBoardReconcile, rotateReconcileSlice, RECONCILE_DEFAULT_LIMIT, RECONCILE_COMPLETE_MARKER, RECONCILE_RESET_MARKER, RECONCILE_NOTE_MARKER, type ReconcileDeps, type ReconcileOutcome, type ReconcilePrState, type ReconcileTask } from "./reconcile";
 import { listStudios } from "../studio/registry";
 import {
   isSpawnTokenShaped, resolveSpawnParent, resolveSpawnPolicy, mayDirect, SPAWN_TOKEN_HEADER,
@@ -367,12 +368,18 @@ function realCompletedGatePort(env: Env): CompletedGatePort {
  *  One credential per repo owner, minted lazily, same as the reap/rescue/
  *  completed-gate ports. `studioStopped` resolves every studio id against ONE
  *  `listStudios` read, cached per run so N tasks cost one D1 pass, not N; a
- *  studio with no row reads as stopped (nothing running to hold the work). */
+ *  studio with no row resolves to `null` (unknown, skip) — never "stopped"
+ *  (review #1447 item 3). `prState` answers open/merged/landed, where landed
+ *  means "merged into the DEFAULT branch" (squash-safe), the completion
+ *  condition — same verdict reap's checkLanded reaches. */
 export interface ReconcilePort {
+  /** Every PR that references the task via `refs #N` (`#N` word-boundary in
+   *  title or body) — newest first. */
   referencingPrs: (repo: string, taskNumber: number) => Promise<number[]>;
-  prState: (repo: string, prNumber: number) => Promise<{ merged: boolean; open: boolean }>;
-  /** Is this studio stopped or parked? */
-  studioStopped: (studioId: string) => Promise<boolean>;
+  /** One linked PR's open/merged/landed state. */
+  prState: (repo: string, prNumber: number) => Promise<ReconcilePrState>;
+  /** Is this studio stopped or parked? `null` when the registry has no row. */
+  studioStopped: (studioId: string) => Promise<boolean | null>;
   hasComment: (repo: string, taskNumber: number, marker: string) => Promise<boolean>;
 }
 
@@ -380,18 +387,26 @@ export function realReconcilePort(env: Env): ReconcilePort {
   const mint = repoTokenMinter(env);
   // One registry read for the whole run, memoized on first use.
   let stopped: Map<string, boolean> | null = null;
+  let defaultBranch: string | null = null;
   return {
     referencingPrs: async (repo, taskNumber) => findPullRequestsReferencingTask(await mint(repo), repo, taskNumber),
     prState: async (repo, prNumber) => {
-      const pr = await getPullRequest(await mint(repo), repo, prNumber);
-      return { merged: pr.merged, open: pr.open };
+      const token = await mint(repo);
+      const pr = await getPullRequest(token, repo, prNumber);
+      let landed = false;
+      if (pr.merged && pr.mergeCommitSha !== null) {
+        if (defaultBranch === null) defaultBranch = await getDefaultBranch(token, repo);
+        if (pr.baseRef === defaultBranch) landed = true;
+        else landed = await commitReachableFromBranch(token, repo, defaultBranch, pr.mergeCommitSha);
+      }
+      return { open: pr.open, merged: pr.merged, landed };
     },
     studioStopped: async (studioId) => {
       if (stopped === null) {
         const rows = await listStudios(env);
         stopped = new Map(rows.map((s) => [s.id, s.state === "stopped" || s.parked === true]));
       }
-      return stopped.get(studioId) ?? true;
+      return stopped.get(studioId) ?? null;
     },
     hasComment: async (repo, taskNumber, marker) => {
       const comments = await listComments(await mint(repo), repo, taskNumber);
@@ -508,13 +523,14 @@ async function handleTaskReapRoute(
  * posture as reap. The rule is `runBoardReconcile`'s; this is only the wiring,
  * same split every other route here draws between rule and plumbing.
  *
- * Rate-limit-safe by construction: one `listTasks` (paginated by the board
- * layer), one `listStudios` read memoized across the run, and a bounded
- * per-task set of `getPullRequest` / `findPullRequestsReferencingTask` /
- * `listComments` calls. `linkedPrs` unions
- * the search-based `refs #N` result with the task's envelope PR, because
- * `awaiting_merge` is set from a PR ready for review (pr-awaiting-merge.ts)
- * WITHOUT persisting that PR's number — the search is the durable link.
+ * The CLI route applies no task cap — the operator asked for a full pass, and
+ * an explicit human-invoked sweep is its own rate-limit budget. The scheduled
+ * sweep (see src/index.ts) instead calls `reconcileScheduledSweep`, which
+ * reads its persisted cursor, slices `RECONCILE_DEFAULT_LIMIT` tasks, and
+ * applies for real. `linkedPrs` unions the task's envelope PR (its own
+ * reported PR — the durable "this task's PR") with the search-based
+ * `refs #N` result, because `awaiting_merge` is set from a PR ready for
+ * review (pr-awaiting-merge.ts) WITHOUT persisting that PR's number.
  */
 async function handleReconcileRoute(
   req: Request, env: Env, api: BoardApi, reach: RepoReachFetch, port: ReconcilePort,
@@ -534,21 +550,58 @@ async function handleReconcileRoute(
   }
 }
 
+/** The D1 cursor key for the scheduled reconcile sweep, namespaced per repo
+ *  (reconcile never touches another repo's cursor). */
+export function reconcileCursorKey(repo: string): string {
+  return `board.reconcile.cursor:${repo.toLowerCase()}`;
+}
+
+/**
+ * One scheduled reconcile pass: read the persisted cursor, slice the newest-
+ * first task list down to `RECONCILE_DEFAULT_LIMIT` (rotating, so a run starts
+ * just after the cursor), apply for real, then persist the next cursor. The
+ * `rotateReconcileSlice` cursor always advances to the LAST considered task
+ * (skips included), so a task that is skipped repeatedly cannot hold the
+ * cursor and starve the rest of the list. The set/clear flags live on the
+ * env boundary (src/index.ts), not here.
+ */
+export async function reconcileScheduledSweep(
+  env: Env, api: BoardApi, port: ReconcilePort, repo: string,
+): Promise<ReconcileOutcome[]> {
+  const all = await reconcileTasks(api, repo);
+  const cursor = Number.parseInt((await getFlag(env.DB, reconcileCursorKey(repo))) ?? "", 10);
+  const { slice } = rotateReconcileSlice(
+    all, RECONCILE_DEFAULT_LIMIT, Number.isFinite(cursor) && cursor > 0 ? cursor : null,
+  );
+  if (slice.length === 0) return [];
+  const results = await runBoardReconcile({ ...reconcileDeps(api, repo, port), listOpenTasks: async () => slice }, true);
+  const next = slice[slice.length - 1].taskNumber;
+  if (next !== (Number.isFinite(cursor) ? cursor : null)) {
+    await setFlag(env.DB, reconcileCursorKey(repo), String(next), Date.now());
+  }
+  return results;
+}
+
+/** The in-flight task list the reconcile rule runs over: open tasks in
+ *  `working`/`awaiting_merge`. Shared by the CLI route (uncapped) and the
+ *  scheduled sweep (sliced). */
+export async function reconcileTasks(api: BoardApi, repo: string): Promise<ReconcileTask[]> {
+  const result = await listTasks(api, repo, {});
+  if (!result.ok) throw new Error(result.message);
+  // In-flight tasks only: the three reconcile cases never touch a
+  // terminal/submitted/input_required task, so filter them out here.
+  const live = ["working", "awaiting_merge"];
+  return result.value
+    .filter((t) => t.open && t.state !== null && live.includes(t.state))
+    .map((t) => ({ taskNumber: t.number, state: t.state, assignee: t.assignee }));
+}
+
 /** The reconcile rule's dependencies, built once and shared by the CLI route
  *  and the scheduled cron — the single place the real wiring lives. */
 export function reconcileDeps(api: BoardApi, repo: string, port: ReconcilePort): ReconcileDeps {
   return {
     repo,
-    listOpenTasks: async () => {
-      const result = await listTasks(api, repo, {});
-      if (!result.ok) throw new Error(result.message);
-      // In-flight tasks only: the three reconcile cases never touch a
-      // terminal/submitted/input_required task, so filter them out here.
-      const live = ["working", "awaiting_merge"];
-      return result.value
-        .filter((t) => t.open && t.state !== null && live.includes(t.state))
-        .map((t) => ({ taskNumber: t.number, state: t.state, assignee: t.assignee }));
-    },
+    listOpenTasks: async () => reconcileTasks(api, repo),
     linkedPrs: async (taskNumber) => {
       const search = await port.referencingPrs(repo, taskNumber);
       const envelope = await latestEnvelopePr(api, repo, taskNumber);
