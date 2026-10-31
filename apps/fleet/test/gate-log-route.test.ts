@@ -160,6 +160,70 @@ describe("GET /studio/gate/log (#1277)", () => {
     expect((await res.json() as { error: string }).error).toContain("no result");
   });
 });
+
+// #1449: `fleet gate log` tells a skipped leg (no result expected) apart from
+// a hung one (the run is still going). Both 404; the error text names which.
+describe("GET /studio/gate/log: skipped vs hung (#1449)", () => {
+  const pulls = (): void => {
+    realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/pulls/")) {
+        return new Response(JSON.stringify({
+          number: PR, merged: false, state: "open",
+          base: { ref: "main", repo: { full_name: CANONICAL, private: false } },
+          head: { ref: "feature" }, title: "t", body: "",
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+  };
+
+  const withWorkflow = (status: { status: string; output?: unknown }): Env => {
+    const e = logEnv();
+    (e as unknown as { GATE_WORKFLOW: { get: () => Promise<{ status: () => Promise<{ status: string; output?: unknown }> }> } })
+      .GATE_WORKFLOW = { get: async () => ({ status: async () => status }) };
+    return e;
+  };
+
+  it("a live run with no result yet reads 'no result yet', never a bare 'no result'", async () => {
+    pulls();
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=merge-tree&run=${RUN}`);
+    const res = await handleGateRoute(req, withWorkflow({ status: "running" }));
+    expect(res.status).toBe(404);
+    expect((await res.json() as { error: string }).error).toBe("no result yet for leg merge-tree (run in progress)");
+  });
+
+  it("a finished run that did not plan the leg reads 'skipped: not planned'", async () => {
+    pulls();
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=merge-tree&run=${RUN}`);
+    const res = await handleGateRoute(req, withWorkflow({
+      status: "complete",
+      output: { legs: [{ leg: "vitest-1", state: "success" }] },
+    }));
+    expect(res.status).toBe(404);
+    expect((await res.json() as { error: string }).error).toBe("no result for leg merge-tree (skipped: not planned)");
+  });
+
+  it("a finished run that planned the leg but has no result stays the plain 'no result'", async () => {
+    pulls();
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=merge-tree&run=${RUN}`);
+    const res = await handleGateRoute(req, withWorkflow({
+      status: "complete",
+      output: { legs: [{ leg: "merge-tree", state: "success" }] },
+    }));
+    expect(res.status).toBe(404);
+    expect((await res.json() as { error: string }).error).toBe("no result for leg merge-tree");
+  });
+
+  it("an errored run stays the plain 'no result', never a wrong skipped claim", async () => {
+    pulls();
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=merge-tree&run=${RUN}`);
+    const res = await handleGateRoute(req, withWorkflow({ status: "errored" }));
+    expect(res.status).toBe(404);
+    expect((await res.json() as { error: string }).error).toBe("no result for leg merge-tree");
+  });
+});
 describe("GET /studio/gate/log --all (#1318)", () => {
   it("lists every attempt of a flaky leg, oldest first, each with status and first failing test", async () => {
     realFetch = globalThis.fetch;

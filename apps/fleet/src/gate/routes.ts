@@ -35,6 +35,36 @@ type GateWorkflowBinding = {
 
 const workflow = (env: Env) => (env as unknown as { GATE_WORKFLOW: GateWorkflowBinding }).GATE_WORKFLOW;
 
+/** #1449: what a leg with no R2 result can be told about the run behind it.
+ *  "live" means the run is still in progress (the honest "no result yet");
+ *  "done" means a finished run whose plan is known (the leg was or was not
+ *  planned); "unknown" means the run is unreadable (errored/terminated, or the
+ *  instance is gone) and the caller must fall back to the ambiguous text. */
+type LegPlanRead =
+  | { kind: "live" }
+  | { kind: "done"; planned: string[] }
+  | { kind: "unknown" };
+
+/** Reads a run's planned legs without throwing: the leg-log route uses it only
+ *  to tell "skipped (no result expected)" from "no result yet" when a leg has
+ *  no result, and it must never turn that 404 into a 500. */
+async function readLegPlan(env: Env, runId: string): Promise<LegPlanRead> {
+  try {
+    const instance = await workflow(env).get(runId);
+    const status = await instance.status();
+    // A run that ended without a verdict (errored/terminated) has no definitive
+    // plan: "no result" stays ambiguous there, never a wrong "skipped".
+    if (status.status === "errored" || status.status === "terminated") return { kind: "unknown" };
+    if (status.status !== "complete") return { kind: "live" };
+    const out = status.output as { legs?: { leg?: unknown }[] } | undefined;
+    const legs = Array.isArray(out?.legs) ? out.legs : [];
+    const planned = legs.map((l) => l.leg).filter((l): l is string => typeof l === "string");
+    return { kind: "done", planned };
+  } catch {
+    return { kind: "unknown" };
+  }
+}
+
 const j = (v: unknown, status = 200) =>
   new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
 
@@ -121,6 +151,16 @@ async function gateRunStatusSafe(env: Env, runId: string): Promise<Response> {
   }
 }
 
+/** #1449: the leg-log "no result" text, telling a skipped leg (no result
+ *  expected) apart from a hung one (the run is still going — no result yet).
+ *  A finished run whose plan names the leg was supposed to report: a genuinely
+ *  missing result. The ambiguous text stays only when the run is unreadable. */
+function noResultError(read: LegPlanRead, leg: string): string {
+  if (read.kind === "live") return `no result yet for leg ${leg} (run in progress)`;
+  if (read.kind === "done" && !read.planned.includes(leg)) return `no result for leg ${leg} (skipped: not planned)`;
+  return `no result for leg ${leg}`;
+}
+
 /** #1277: read one leg's final R2 output for `fleet gate log`. The runId comes
  *  from `--run`, else the PR's latest run pointer in D1. The canonical repo
  *  name is resolved via GitHub (R2 keys are case-sensitive, #1119), the leg's
@@ -159,7 +199,7 @@ async function gateLegLogSafe(
       return j({ repo, pr, leg, runId: run.runId, attempts });
     }
     const key = finalLegKey(keys, leg);
-    if (key === null) return j({ error: `no result for leg ${leg}`, runId: run.runId }, 404);
+    if (key === null) return j({ error: noResultError(await readLegPlan(env, run.runId), leg), runId: run.runId }, 404);
     if (all) {
       // #1318: every attempt of the leg, oldest first. The first-attempt shard
       // is always written by the container's putResult (runSteps returns on
