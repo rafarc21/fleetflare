@@ -27,7 +27,7 @@
  * block spliced in above the prompt, in place of nothing (the idle pane has
  * no status line to replace).
  */
-import { RULE_PROMPT } from "./rate-limit-panes";
+import { RULE_PROMPT, V1_STOP_AND_WAIT_PANE } from "./rate-limit-panes";
 
 /** The real shape, as reported (see this file's own doc comment above). */
 export const SURVEY_OVERLAY_PANE = [
@@ -57,4 +57,20 @@ export const LEAD_NUMBERED_LIST_PANE = [
   "2. Merged",
   "",
   ...RULE_PROMPT,
+].join("\n");
+
+/**
+ * Issue #1391 — a pane showing BOTH the feedback-survey overlay AND a
+ * V1 rate-limit select modal. The hard guard is: a `0` may dismiss the
+ * survey, but NEVER when a limit/upgrade/spend modal is also on screen —
+ * a digit sent there can select a paid option. This is the fixture that
+ * proves the survey dismiss refuses when the two coincide.
+ */
+export const SURVEY_AND_LIMIT_PANE = [
+  "⏺ Resumed.",
+  "",
+  "● How is Claude doing this session? (optional)",
+  "1: Bad    2: Fine   3: Good   0: Dismiss",
+  "",
+  V1_STOP_AND_WAIT_PANE,
 ].join("\n");
