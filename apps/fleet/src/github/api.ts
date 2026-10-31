@@ -1727,13 +1727,27 @@ export async function getBranchSha(token: string, repo: string, branch: string):
   return raw.sha;
 }
 
+/** The task numbers a PR body names with a LINE-ANCHORED `refs #N`
+ *  (case-insensitive) — the completion link a board reconcile acts on, and
+ *  stricter than the `\brefs #N\b` word-boundary read elsewhere
+ *  (pr-awaiting-merge.ts). A passing mention ("see #N", "(#N)", "fixes #N")
+ *  must never complete a task: only a ref standing at the start of its own
+ *  line (after optional whitespace) counts. */
+export function lineRefsInBody(body: string): number[] {
+  const seen = new Set<number>();
+  for (const m of body.matchAll(/^\s*refs #(\d+)\b/gim)) seen.add(Number(m[1]));
+  return [...seen];
+}
+
 /** PR numbers referencing a task, newest first, via GitHub's issue search. A
  *  BARE number is a hazard: it matches ANY word that happens to equal N (e.g.
  *  task #258 completing on a PR whose body says "258 passed tests"), so the
- *  search is only a broad net here. Each hit is post-filtered to the ones that
- *  actually REFERENCE the task with a `#N` word-boundary token in title or body
- *  ("Refs #N", "(#N)", "#N") — the search result ships title+body but not the
- *  head ref, so `#N` is the reference filter. */
+ *  search is only a broad net here. Each hit is post-filtered to the ones whose
+ *  BODY carries a line-anchored `Refs #N` for this task (see lineRefsInBody) —
+ *  the search result ships title+body but not the head ref, so the body is the
+ *  reference filter. A title mention or an inline `(#N)`/`see #N` is NOT a
+ *  reference: it reads as a passing mention, and completing on it would let a
+ *  follow-up or prior-round PR auto-close a task that never finished. */
 export async function findPullRequestsReferencingTask(
   token: string, repo: string, taskNumber: number,
 ): Promise<number[]> {
@@ -1744,8 +1758,7 @@ export async function findPullRequestsReferencingTask(
     { method: "GET", headers: GH_HEADERS_GET(token) },
     `search ${repo} PRs referencing task #${taskNumber}`,
   );
-  const ref = new RegExp(`#${taskNumber}\\b`);
   return (raw.items ?? [])
-    .filter((i) => i.pull_request != null && Number.isInteger(i.number) && ref.test(`${i.title ?? ""}\n${i.body ?? ""}`))
+    .filter((i) => i.pull_request != null && Number.isInteger(i.number) && lineRefsInBody(i.body ?? "").includes(taskNumber))
     .map((i) => i.number);
 }

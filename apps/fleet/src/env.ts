@@ -522,6 +522,14 @@ export interface Env {
    */
   FLEET_AUTO_PARK?: string;
   /**
+   * Board #1447: enable the scheduled board reconcile (merged PRs
+   * auto-complete, in-flight tasks on stopped/parked studios fall back). Off
+   * (absent) by default; exactly "on" enables the scheduled sweep in
+   * src/index.ts's handleScheduled. The `fleet task reconcile` CLI is always
+   * available regardless — this only gates the cron.
+   */
+  FLEET_BOARD_RECONCILE?: string;
+  /**
    * Board #1448: the idle budget, in minutes, before a studio whose only open
    * task is awaiting_merge is auto-parked. Absent or garbage falls back to
    * src/studio/auto-park.ts's DEFAULT_AUTO_PARK_IDLE_MINUTES (30).

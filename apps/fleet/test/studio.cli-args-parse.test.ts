@@ -359,6 +359,15 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["task", "junior-sweep", "--force"]).cmd).toBe("usage");
   });
 
+  // Board issue #1447.
+  it("task reconcile: bare/--dry-run is a dry run, --apply applies, anything else is usage", () => {
+    expect(parseCliArgs(["task", "reconcile"])).toEqual({ cmd: "task-reconcile", apply: false });
+    expect(parseCliArgs(["task", "reconcile", "--dry-run"])).toEqual({ cmd: "task-reconcile", apply: false });
+    expect(parseCliArgs(["task", "reconcile", "--apply"])).toEqual({ cmd: "task-reconcile", apply: true });
+    expect(parseCliArgs(["task", "reconcile", "--force"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "reconcile", "--apply", "--dry-run"]).cmd).toBe("usage");
+  });
+
   it("recycle: any other trailing token, or the flag in the id slot, is a usage error", () => {
     expect(parseCliArgs(["recycle", "websites--scratch", "--force"]).cmd).toBe("usage");
     expect(parseCliArgs(["recycle", "--discard-unsynced"])).toEqual({ cmd: "usage", message: CLI_USAGE });

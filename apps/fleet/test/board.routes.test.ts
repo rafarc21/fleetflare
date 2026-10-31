@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import type { RepoReach, RepoReachFetch } from "../src/github/reach";
 import { env } from "cloudflare:test";
 import * as authModule from "../src/studio/auth";
-import { handleBoard, githubAwareVerifyFetch, openTaskChecker, type GithubUrlExistenceChecks, type ReapPort, type RescueGcPort } from "../src/board/routes";
+import { handleBoard, githubAwareVerifyFetch, openTaskChecker, type GithubUrlExistenceChecks, type ReapPort, type RescueGcPort, type ReconcilePort } from "../src/board/routes";
 import type { VerifyFetch } from "../src/board/verify";
 import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
 import { GitHubError } from "../src/board/api";
@@ -365,6 +365,62 @@ describe("handleBoard", () => {
   it("#35: junior-sweep is POST only", async () => {
     authorized();
     expect((await handleBoard(req("/studio/board/tasks/junior-sweep"), testEnv, { api: fakeApi(), reach })).status).toBe(405);
+  });
+
+  // Board issue #1447: the reconcile route — same shape as tasks/reap.
+  function reconcilePort(overrides: Partial<ReconcilePort> = {}): ReconcilePort {
+    return {
+      referencingPrs: vi.fn(async () => []),
+      prState: vi.fn(async () => ({ merged: false, open: false, landed: false })),
+      studioStopped: vi.fn(async () => false),
+      hasComment: vi.fn(async () => false),
+      ...overrides,
+    };
+  }
+
+  it("#1447: POST /tasks/reconcile dry-runs by default and completes only with apply:true", async () => {
+    authorized();
+    const getIssue = vi.fn(async () => task({ state: "awaiting_merge", assignee: "acme--web-studio", labels: ["awaiting_merge", "studio:acme--web-studio"] }));
+    const listIssues = vi.fn(async () => [task({ number: 12, state: "awaiting_merge", assignee: "acme--web-studio", labels: ["awaiting_merge", "studio:acme--web-studio"] })]);
+    const port = reconcilePort({
+      referencingPrs: vi.fn(async () => [40]),
+      prState: vi.fn(async () => ({ merged: true, open: false, landed: true })),
+    });
+    const api = fakeApi({ getIssue, listIssues });
+    const dry = await handleBoard(
+      req("/studio/board/tasks/reconcile", { method: "POST", body: "{}" }), testEnv, { api, reach, reconcilePort: port },
+    );
+    expect(dry.status).toBe(200);
+    expect(await dry.json()).toMatchObject({ repo: "acme-org/websites", apply: false, results: [{ taskNumber: 12, outcome: "would-complete" }] });
+    expect(api.addLabels).not.toHaveBeenCalled();
+
+    const applied = await handleBoard(
+      req("/studio/board/tasks/reconcile", { method: "POST", body: JSON.stringify({ apply: true }) }), testEnv, { api, reach, reconcilePort: port },
+    );
+    expect(await applied.json()).toMatchObject({ results: [{ taskNumber: 12, outcome: "completed" }] });
+    expect(api.removeLabel).toHaveBeenCalledWith("acme-org/websites", 12, "awaiting_merge");
+    expect(api.addLabels).toHaveBeenCalledWith("acme-org/websites", 12, ["completed"]);
+    expect(api.createComment).toHaveBeenCalledWith("acme-org/websites", 12, "auto-completed: PR #40 merged");
+  });
+
+  it("#1447: a stopped studio's working task with no PR resets to submitted with apply", async () => {
+    authorized();
+    const working = task({ number: 12, state: "working", assignee: "acme--web-studio", labels: ["working", "studio:acme--web-studio"] });
+    const listIssues = vi.fn(async () => [working]);
+    const port = reconcilePort({ studioStopped: vi.fn(async () => true) });
+    const api = fakeApi({ getIssue: vi.fn(async () => working), listIssues });
+    const applied = await handleBoard(
+      req("/studio/board/tasks/reconcile", { method: "POST", body: JSON.stringify({ apply: true }) }), testEnv, { api, reach, reconcilePort: port },
+    );
+    expect(await applied.json()).toMatchObject({ results: [{ taskNumber: 12, outcome: "reset" }] });
+    expect(api.removeLabel).toHaveBeenCalledWith("acme-org/websites", 12, "working");
+    expect(api.addLabels).toHaveBeenCalledWith("acme-org/websites", 12, ["submitted"]);
+  });
+
+  it("#1447: reconcile is POST only", async () => {
+    authorized();
+    const res = await handleBoard(req("/studio/board/tasks/reconcile"), testEnv, { api: fakeApi(), reach, reconcilePort: reconcilePort() });
+    expect(res.status).toBe(405);
   });
 
   it("409s a transition the Worker did not initiate", async () => {

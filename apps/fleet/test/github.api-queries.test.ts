@@ -8,7 +8,7 @@ import {
   pullRequestExists, branchExists, commitExists, issueExists, issueState, pathExists, compareExists,
   repoIsWritable, deleteBranch, compareAhead, ghRequest,
   setBranchProtectionRule, addBranchProtectionContexts, setBranchProtectionStrict, setBranchProtectionRequiredStatusChecks, disableBranchProtectionEnforceAdmins,
-  getBranchProtection, findPullRequestsReferencingTask, getAuthenticatedAppSlug,
+  getBranchProtection, findPullRequestsReferencingTask, lineRefsInBody, getAuthenticatedAppSlug,
 } from "../src/github/api";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
 
@@ -1338,15 +1338,24 @@ describe("findPullRequestsReferencingTask", () => {
     expect(calls[0].url).toBe("https://api.github.com/search/issues?q=repo%3Ao%2Fr%20is%3Apr%2042&per_page=30&sort=created&order=desc");
   });
 
-  it("returns only PR numbers that reference #N in title or body (Refs #N, (#N))", async () => {
+  it("returns only PRs whose body carries a line-anchored Refs #N", async () => {
     respond = () => Response.json({ items: [
       { number: 7, pull_request: {}, title: "fix gate", body: "Refs #42" },
       { number: 9, title: "issue, not a PR" },
       { number: 12, pull_request: {}, title: "(#42) patch protect" },
       { number: 13, pull_request: {}, title: "x", body: "Fixes #43" },
-      { number: "14", pull_request: {}, title: "y", body: "Refs #42" },
+      { number: 14, pull_request: {}, title: "y", body: "Refs #42" },
+      { number: 15, pull_request: {}, title: "z", body: "  Refs #42\n\nmore" },
     ] });
-    expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([7, 12]);
+    expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([7, 14, 15]);
+  });
+
+  it("an inline Refs #N (not line-anchored) is a passing mention, not a reference", async () => {
+    respond = () => Response.json({ items: [
+      { number: 21, pull_request: {}, title: "x", body: "see Refs #42 for the follow-up" },
+      { number: 22, pull_request: {}, title: "y", body: "Fixes #43 (Refs #42)" },
+    ] });
+    expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([]);
   });
 
   it("drops an unrelated merged PR that mentions bare N with no # (gate-bypass regression)", async () => {
@@ -1361,6 +1370,22 @@ describe("findPullRequestsReferencingTask", () => {
       { number: 99, pull_request: {}, title: "x", body: "Refs #420" },
     ] });
     expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([]);
+  });
+
+  it("a title mention alone (no body Refs) is a passing mention, not a reference", async () => {
+    respond = () => Response.json({ items: [
+      { number: 31, pull_request: {}, title: "(#42) patch protect", body: "no refs here" },
+      { number: 32, pull_request: {}, title: "Refs #42", body: "no refs here" },
+    ] });
+    expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([]);
+  });
+
+  it("drops a PR whose number is a string (not an integer)", async () => {
+    respond = () => Response.json({ items: [
+      { number: "41", pull_request: {}, title: "y", body: "Refs #42" },
+      { number: 42, pull_request: {}, title: "z", body: "Refs #42" },
+    ] });
+    expect(await findPullRequestsReferencingTask("tok", "o/r", 42)).toEqual([42]);
   });
 
   it("an empty or missing items answer is []", async () => {

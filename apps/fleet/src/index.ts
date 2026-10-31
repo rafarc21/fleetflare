@@ -13,7 +13,7 @@ import { listStudios } from "./studio/registry";
 import { getStudioStubForRow } from "./studio/profile";
 import { isWatchMinute, watchStoppedContainers } from "./studio/container-watch";
 import { autoParkSweepFromEnv } from "./studio/auto-park-env";
-import { handleBoard, handleFleetBoard } from "./board/routes";
+import { handleBoard, handleFleetBoard, githubBoardApi, realReconcilePort, reconcileScheduledSweep } from "./board/routes";
 import { handleMemory } from "./memory/routes";
 import { handleFleetJunior } from "./junior/route";
 import { handleJuniorUsageStats, handleLeadUsageStats } from "./junior/usage";
@@ -290,6 +290,21 @@ async function handleScheduled(controller: ScheduledController, env: Env, ctx: E
       );
     } catch (err) {
       console.error("container watch sweep failed", err);
+    }
+  }
+
+  // Board issue #1447: the scheduled reconcile — merged PRs auto-complete
+  // their task, in-flight tasks on stopped/parked studios fall back. OFF by
+  // default: runs only when env FLEET_BOARD_RECONCILE is exactly "on" (same
+  // posture as FLEET_AUTO_PARK above), on the 5th-minute cadence shared with
+  // the container watch. The sweep applies for real, capped per run by a
+  // persisted rotating cursor (reconcileScheduledSweep), so a mass of drift
+  // never turns one tick into unbounded GitHub work.
+  if (env.FLEET_BOARD_RECONCILE === "on" && isWatchMinute(controller.scheduledTime ?? Date.now())) {
+    try {
+      await reconcileScheduledSweep(env, githubBoardApi(env), realReconcilePort(env), env.AGENT_REPO);
+    } catch (err) {
+      console.error("board reconcile sweep failed", err);
     }
   }
 
