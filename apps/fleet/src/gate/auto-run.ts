@@ -448,7 +448,7 @@ export async function startManualGateRun(
   return recordRun(wf, input, index, baseId, now, postSuperseded);
 }
 
-export type AutoRunOutcome = "started" | "reused";
+export type AutoRunOutcome = "started" | "reused" | "skipped";
 
 export interface AutoRunDeps {
   workflow: GateRunStarter;
@@ -466,7 +466,14 @@ export interface AutoRunDeps {
 /** Starts the gate run for a gated PR. No precheck of the base's gate config
  *  (#1132): the Workflow decides, the one place that reads both the base block
  *  and the #1091 head path. A base with no block gets a visible failure on the
- *  head from that run, never silence. */
+ *  head from that run, never silence.
+ *
+ *  #1446: a delivery for a head sha that already has a LIVE or QUEUED run
+ *  (from a merge queue or a manual `fleet gate run`, whose run may live under a
+ *  different id than the plain sha id) skips instead of starting a duplicate.
+ *  The pointer is the record of the run that gates this head, whatever id it
+ *  holds. A fresh head — a run that is finished or absent — falls through to
+ *  startGateRun, which starts or reuses the sha's own run. */
 export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDeps): Promise<AutoRunOutcome> {
   if (pr.edited === true) {
     await startEditedGateRun(
@@ -474,6 +481,16 @@ export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDe
       Date.now, deps.postPending,
     );
     return "started";
+  }
+  const latest = await deps.index.latest(pr.repo, pr.pr);
+  // #1446: a live run that is STALLED (or retired, progressedAt -1) is not a
+  // healthy gate of the head — it would block ready_for_review forever. Fall
+  // through to startGateRun, which starts a fresh run and ends the hung one.
+  if (pr.reopened !== true && latest !== null && latest.headSha === pr.headSha
+    && !isStalled(latest, Date.now())
+    && isLiveStatus(await statusOf(deps.workflow, latest.runId))) {
+    console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: skipped (live run ${latest.runId})`);
+    return "skipped";
   }
   const { reused } = await startGateRun(
     deps.workflow,
@@ -484,7 +501,9 @@ export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDe
 }
 
 /** #1241 (a): the release path's auto-run: idempotent for edited PRs (reattach
- *  a live -e run), ordinary dedupe-by-sha for everything else. */
+ *  a live -e run), ordinary dedupe-by-sha for everything else, and the same
+ *  #1446 live/queued skip before it, so a queued ready_for_review released
+ *  after a manual start does not duplicate the manual run either. */
 export async function autoRunPullRequestIdempotent(pr: PullRequestAutoRun, deps: AutoRunDeps): Promise<AutoRunOutcome> {
   if (pr.edited === true) {
     await startEditedGateRunIdempotent(
@@ -492,6 +511,16 @@ export async function autoRunPullRequestIdempotent(pr: PullRequestAutoRun, deps:
       Date.now, deps.postPending,
     );
     return "started";
+  }
+  const latest = await deps.index.latest(pr.repo, pr.pr);
+  // #1446: a live run that is STALLED (or retired, progressedAt -1) is not a
+  // healthy gate of the head — it would block ready_for_review forever. Fall
+  // through to startGateRun, which starts a fresh run and ends the hung one.
+  if (pr.reopened !== true && latest !== null && latest.headSha === pr.headSha
+    && !isStalled(latest, Date.now())
+    && isLiveStatus(await statusOf(deps.workflow, latest.runId))) {
+    console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: skipped (live run ${latest.runId})`);
+    return "skipped";
   }
   const { reused } = await startGateRun(
     deps.workflow,

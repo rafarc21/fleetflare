@@ -27,7 +27,7 @@ import { reconnectDelayMs, nextAttempt, attachRefusal } from "./backoff";
 import { postTaskNew, taskNewFailureLine } from "./task-new-retry";
 import { grabClipboardPng } from "./paste-mac";
 import { classifyInput, CTRL_V } from "./input";
-import { parseCliArgs, renderHelp } from "../src/studio/cli-args";
+import { parseCliArgs, renderHelp, renderVerbHelp } from "../src/studio/cli-args";
 import { parseStudioId } from "../src/studio/ids";
 import { parseGitRemote, parseRepoSlug, refuseBadSegment, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
 import { runOnboardPreflight } from "../src/studio/onboard";
@@ -2231,6 +2231,22 @@ async function cmdRecycle(
 async function cmdDestroy(
   creds: Credentials, id: string, force: boolean, discardUnsynced: boolean, park = false, strictUnmerged = false,
 ): Promise<void> {
+  // Board issue #1445 (b): the repo for BOTH the strict pre-check and the
+  // post-destroy park warning must come from the PRE-destroy status row. The
+  // stopped row the destroy itself answers omits `repoSlug`, so reading the
+  // repo off `report.status` after the fact degraded to the default repo (no
+  // ?repo=), the route's map no longer covered this studio, and the warning
+  // printed "route unavailable" on every non-default-repo destroy. One
+  // bounded read, taken only when the id parses (a malformed id never blocks
+  // and never warns), reused by both halves below.
+  let repoSlug: string | null = null;
+  if (parseStudioId(id) !== null) {
+    const row = await readStatus(
+      studioUrl(creds, id, "/status"), accessHeaders(creds), fetch, DESTROY_STATUS_TIMEOUT_MS,
+    );
+    repoSlug = row.ok ? row.status.repoSlug : null;
+  }
+
   // Board issue #332: --strict-unmerged refuses CLIENT-side, BEFORE any
   // destroy request fires — a refusal that let the destroy through would
   // not be a refusal. The check asks the board's open-prs route for this
@@ -2240,16 +2256,12 @@ async function cmdDestroy(
   if (strictUnmerged && parseStudioId(id) !== null) {
     // The route needs the studio's repo as `owner/name`, which the id's own
     // repo HALF cannot name (parseStudioId's segment is a folded id
-    // segment, not a slug) — so the row is read bounded, the same status
-    // read requestDestroy's own poll path already makes, and repoSlug is
-    // the only client-side source of the full slug. A row that cannot be
-    // read still asks the DEFAULT repo (a null repoParam below): a
+    // segment, not a slug) — so the repo is the pre-destroy row's `repoSlug`
+    // read above, the only client-side source of the full slug. A row that
+    // cannot be read still asks the DEFAULT repo (a null repoParam below): a
     // default-repo studio keeps a real answer, any other reads as unknown.
-    const row = await readStatus(
-      studioUrl(creds, id, "/status"), accessHeaders(creds), fetch, DESTROY_STATUS_TIMEOUT_MS,
-    );
     const answer = await fetchStudioOpenPrs(
-      creds, row.ok ? row.status.repoSlug : null, id,
+      creds, repoSlug, id,
     );
     if (!answer.ok) {
       if (answer.unknown) {
@@ -2302,10 +2314,12 @@ async function cmdDestroy(
     // exactly as much as for --park: an unmerged, bounced PR needs this
     // lane's history alive either way. Never affects the exit code; a
     // malformed id skips the warning entirely (never blocked anything
-    // either). The repo comes from the confirmed row this side already
-    // holds — no extra round trip.
+    // either). The repo is the PRE-destroy row's `repoSlug` (read above,
+    // before the destroy), NOT the stopped row the destroy answered — that
+    // row omits `repoSlug`, and reading the default would drop this
+    // studio out of the route's map (#1445).
     if (parseStudioId(id) !== null) {
-      const answer = await fetchStudioOpenPrs(creds, report.status?.repoSlug ?? null, id);
+      const answer = await fetchStudioOpenPrs(creds, repoSlug, id);
       if (!answer.ok) {
         // #332 review H2: the scan ran and failed for THIS studio — its own
         // line, never the route-unavailable one.
@@ -3975,6 +3989,16 @@ async function main(): Promise<void> {
   // that has none.
   if (parsed.cmd === "help") {
     console.log(renderHelp());
+    return;
+  }
+
+  // Issue #1445: `fleet <verb> -h|--help` — the one verb's own usage, resolved
+  // locally and exit 0, before credentials (same reasoning as `help` above):
+  // a help flag must never reach the Worker, and must answer with no
+  // ~/.fleet/credentials at all. An unknown verb word falls back to the full
+  // help rather than a usage error.
+  if (parsed.cmd === "verb-help") {
+    console.log(renderVerbHelp(parsed.verb) ?? renderHelp());
     return;
   }
 

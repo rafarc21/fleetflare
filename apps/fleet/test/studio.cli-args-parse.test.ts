@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCliArgs, CLI_USAGE, VERBS, renderHelp } from "../src/studio/cli-args";
+import { parseCliArgs, CLI_USAGE, VERBS, renderHelp, renderVerbHelp } from "../src/studio/cli-args";
 
 // Fleet Spawn P3, Task 3: the Mac CLI's argv parser — see cli-args.ts's own
 // header for why this pure logic lives outside cli/fleet.ts (which is never
@@ -508,6 +508,76 @@ describe("parseCliArgs", () => {
     for (const name of ["ls", "attach", "paste", "spawn", "provision", "recycle"]) {
       expect(CLI_USAGE).toContain(name);
     }
+  });
+});
+
+// Issue #1445: `fleet <verb> -h|--help` prints that verb's own usage locally
+// and exits 0 — never a Worker call. The parser's job is to return a
+// `verb-help` command (main prints it before credentials); the "zero fetches"
+// half is pinning that this command is NOT the verb itself (which would
+// reach the Worker) and NOT a usage error (which would exit 1).
+describe("parseCliArgs: per-verb --help (#1445)", () => {
+  const DESTRUCTIVE = ["destroy", "recycle", "provision", "rescue-all"] as const;
+
+  it("every destructive verb's -h and --help become verb-help, not the verb", () => {
+    for (const verb of DESTRUCTIVE) {
+      expect(parseCliArgs([verb, "--help"])).toEqual({ cmd: "verb-help", verb });
+      expect(parseCliArgs([verb, "-h"])).toEqual({ cmd: "verb-help", verb });
+    }
+  });
+
+  it("--help rides wherever flags may sit, without changing the answer", () => {
+    expect(parseCliArgs(["destroy", "websites--scratch", "--help"])).toEqual({ cmd: "verb-help", verb: "destroy" });
+    expect(parseCliArgs(["recycle", "websites--scratch", "-h"])).toEqual({ cmd: "verb-help", verb: "recycle" });
+  });
+
+  it("a help flag only wins when it is the whole flag list — a mixed list is the ordinary parse", () => {
+    // --help beside a real flag is the ordinary verb parse, not a help
+    // short-circuit that would drop the real flag.
+    expect(parseCliArgs(["destroy", "websites--scratch", "--help", "--force"]).cmd).toBe("usage");
+  });
+
+  it("renderVerbHelp resolves one verb's usage from the VERBS table", () => {
+    const help = renderVerbHelp("destroy");
+    expect(help).not.toBeNull();
+    expect(help!).toContain("fleet destroy <id>");
+    expect(help!).toContain("--park");
+  });
+
+  it("renderVerbHelp folds a prefix to its whole verb family", () => {
+    expect(renderVerbHelp("task")).toContain("fleet task new");
+    expect(renderVerbHelp("task")).toContain("fleet task ls");
+  });
+
+  it("an unknown verb word yields no verb help (main falls back to fleet help)", () => {
+    expect(renderVerbHelp("nonsense")).toBeNull();
+  });
+});
+
+// Issue #1445: an unknown --flag on a destructive verb refuses LOCALLY —
+// before any Worker request. The refusal names the offending token and says
+// it stopped before a request fired.
+describe("parseCliArgs: destructive unknown-flag refusal (#1445)", () => {
+  it("every destructive verb refuses an unknown flag with the before-any-request note", () => {
+    const cases: [string, string[]][] = [
+      ["destroy", ["destroy", "websites--scratch", "--bogus"]],
+      ["recycle", ["recycle", "websites--scratch", "--bogus"]],
+      ["provision", ["provision", "websites--scratch", "--bogus"]],
+      ["rescue-all", ["rescue-all", "--bogus"]],
+    ];
+    for (const [verb, argv] of cases) {
+      const parsed = parseCliArgs(argv);
+      expect(parsed.cmd).toBe("usage");
+      if (parsed.cmd === "usage") {
+        expect(parsed.message).toMatch(/unexpected "--bogus"/);
+        expect(parsed.message).toContain("before any request");
+      }
+    }
+  });
+
+  it("an unknown flag in the id slot still refuses, never becomes the id", () => {
+    const parsed = parseCliArgs(["destroy", "--bogus"]);
+    expect(parsed.cmd).toBe("usage");
   });
 });
 
