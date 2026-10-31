@@ -291,6 +291,78 @@ describe("startGateRun: a new head sha ends the still-live run of the sha it rep
   });
 });
 
+// #1385: a new head sha ends the still-live run of the sha it replaces, but the
+// old head's gate/verdict stayed "pending" forever — the new run overwrote the
+// per-PR pointer, so the watchdog never sees the old run to reconcile it. On a
+// supersede, post the terminal error verdict on the OLD head, best-effort.
+describe("startGateRun: a superseded head gets a terminal error verdict (#1385)", () => {
+  const T1 = 1_700_000_000_000;
+  const postSuperseded = (posts: { repo: string; headSha: string; description: string }[]) =>
+    async (repo: string, headSha: string, description: string) => { posts.push({ repo, headSha, description }); };
+
+  it("a new head sha posts error 'superseded by <new head short>' on the old head", async () => {
+    const { wf } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const posts: { repo: string; headSha: string; description: string }[] = [];
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index, () => T1, undefined,
+      postSuperseded(posts));
+    expect(second.supersededRunId).toBeDefined();
+    expect(posts).toEqual([{ repo: PR_REPO, headSha: HEAD, description: `superseded by ${BASE.slice(0, 8)}` }]);
+  });
+
+  it("posts on the OLD head only, never the new head", async () => {
+    const { wf } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const posts: { headSha: string }[] = [];
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index, () => T1, undefined,
+      async (_repo, headSha) => { posts.push({ headSha }); });
+    expect(posts).toEqual([{ headSha: HEAD }]);
+  });
+
+  it("a previous run that already finished posts nothing", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    runs.get(first.runId)!.status = "complete";
+    const posts: { repo: string; headSha: string; description: string }[] = [];
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index, () => T1, undefined, postSuperseded(posts));
+    expect(posts).toEqual([]);
+  });
+
+  it("a terminate that fails posts nothing (no superseded run reported)", async () => {
+    const { wf } = fakeWorkflow({ terminateError: new Error("instance busy") });
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const posts: { repo: string; headSha: string; description: string }[] = [];
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index, () => T1, undefined,
+      postSuperseded(posts));
+    expect(second.supersededRunId).toBeUndefined();
+    expect(posts).toEqual([]);
+  });
+
+  it("a superseded-post failure is swallowed: the new run still starts", async () => {
+    const { wf } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index, () => T1, undefined,
+      async () => { throw new Error("status post down"); });
+    expect(second.reused).toBe(false);
+    expect(second.supersededRunId).toBeDefined();
+  });
+
+  it("a reopen (same head) posts nothing: the new run re-gates the head, never a 'superseded by'", async () => {
+    const { wf } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const posts: { repo: string; headSha: string; description: string }[] = [];
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD, reopened: true }, index, () => T1, undefined,
+      postSuperseded(posts));
+    expect(posts).toEqual([]);
+  });
+});
+
 // #1085 (refs #715): a manual start (`fleet gate run`, /studio/gate/start)
 // reattaches ONLY to a live run of the sha. A finished run of that sha gets a
 // fresh instance under a new id, so a rerun after base drift or an infra flake

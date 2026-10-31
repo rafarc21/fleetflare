@@ -91,6 +91,18 @@ function pendingPost(env: Env, description: string) {
   };
 }
 
+/** #1385: the terminal error verdict a superseded head gets when a newer head sha
+ *  ends its still-live run. One best-effort attempt; the failure is swallowed in
+ *  recordRun (the new run still starts and posts its own verdict), so this only
+ *  logs. */
+function supersededPost(env: Env) {
+  return async (repo: string, oldHeadSha: string, description: string): Promise<void> => {
+    await postGateStatus(realStatusPort(env), repo, oldHeadSha, { state: "error", description }).catch((err: unknown) => {
+      console.error(`gate auto-run ${repo} ${oldHeadSha.slice(0, 8)}: superseded status post failed`, err);
+    });
+  };
+}
+
 /** Starts the gate run for one gated PR. Logs and never throws: GitHub gets 200
  *  whatever a run did. */
 export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<void> {
@@ -112,6 +124,7 @@ export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<
       workflow: env.GATE_WORKFLOW,
       index: d1RunIndex(env.DB),
       postPending: pendingPost(env, pr.edited === true ? "running (edited title/body recheck)" : "running (fresh gate run)"),
+      postSuperseded: supersededPost(env),
     });
     console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: ${outcome}`);
   } catch (err) {
@@ -133,6 +146,7 @@ export async function drainPendingGateRuns(env: Env): Promise<void> {
         workflow: env.GATE_WORKFLOW,
         index: d1RunIndex(env.DB),
         postPending: pendingPost(env, pr.edited === true ? "running (edited title/body recheck)" : "running (fresh gate run)"),
+        postSuperseded: supersededPost(env),
       });
       console.log(`gate drain release ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: ${outcome}`);
       // Remove only after the run started: a crash mid-loop keeps the rest queued.
