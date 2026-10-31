@@ -259,6 +259,11 @@ export type CliCommand =
   // flag, so it reads like every other command AND so the VERBS table below
   // can be typed against this union — which is what stops the help drifting.
   | { cmd: "help" }
+  // Board issue #1445: `fleet <verb> -h|--help` — the ONE verb's own usage,
+  // resolved locally and exit 0, never a Worker call (a `destroy --help` that
+  // reached the Worker used to send "--help" as the studio id). `verb` is the
+  // verb word as typed, so main() can print exactly this verb's usage.
+  | { cmd: "verb-help"; verb: string }
   // Task 8: purely local opt-in — `fleet junior enable [--account <id>] |
   // disable | status`. Never reaches the Worker or any studio; cli/junior.ts
   // (a symlink + one config file under $HOME) does the actual work.
@@ -362,7 +367,7 @@ export interface VerbHelp {
   summary: string;
 }
 
-export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHelp> = {
+export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help" | "verb-help">, VerbHelp> = {
   ls: {
     args: "[--fresh] [--prs] [--json]",
     summary: "Every studio: id, repo, state, READY (provisioned/bare/\"?\" unknown, do.ts's periodic container check — the registry's own state/error can be stale, trust READY; READY may also read replaced/unreachable/unverified, issue #85, when the ship tick's own evidence contradicts the last container-side check), SESSION (resumed/fresh/LOST/\"?\", whether the live lead actually continued its history or started over, plus how old the last shipped snapshot is), CHECKED (how old that verdict is — up to 300s by default), INFER (<ok>/<calls> of lead inference calls ok in the last 30min, '-' when the studio is Claude-led or idle; >=10 calls under 50% ok marks the row inference-blocked in READY), tailnet host, burn, last activity (git commits — a quiet LAST ACTIVITY column means no recent commits, not that the studio is unhealthy; check READY/SESSION for that), error. Read-only. --fresh re-checks every studio live first (one container exec each, slower) instead of reading the last recorded verdict. --json prints only a JSON array: per studio id, state, repo, lead (working/idle/waiting-members/waiting-question/limit/modal/unknown/stopped/dead), leadSince, limitResetsAt, lastLine (the lead's last visible message line), openPrs (only with --prs; absent means no data), infer (lead calls in the last 30min; absent means no data) and the ACTIVITY text (issue #70). `--prs` fills the PRS column — one live open-prs read per distinct repo (live GitHub calls behind the Worker, so it is opt-in; a 10s client timeout bounds the wait; without the flag the column reads `-`).",
@@ -563,6 +568,30 @@ export const CLI_USAGE =
   Object.entries(VERBS).map(([cmd, help]) => verbLine(cmd, help)).join("\n       ") +
   "\n       fleet help";
 
+/** Issue #1445: one verb's own usage, for `fleet <verb> -h|--help`. Resolved
+ * from the VERBS table (the one source of truth) the same way renderHelp and
+ * CLI_USAGE resolve their lines — a folded prefix (`task-`, `memory-`,
+ * `accounts-`, `models-`, `gate-`, `sprint-`) expands to its full set of
+ * sub-command lines, so `fleet task --help` is the whole task surface exactly
+ * as `fleet help` renders it, not one line. Returns null for a verb word with
+ * no entry (main falls back to the full `fleet help`). */
+export function renderVerbHelp(verb: string): string | null {
+  const entries = (Object.entries(VERBS) as [string, VerbHelp][])
+    .filter(([cmd]) => cmd === verb || cmd.startsWith(`${verb}-`));
+  if (entries.length === 0) return null;
+  // One verb: its usage line plus the summary that renders under it in
+  // `fleet help` — the usage is what an agent needs, the summary is what makes
+  // it a help rather than a bare arg list.
+  if (entries.length === 1 && entries[0]![0] === verb) {
+    const [cmd, help] = entries[0]!;
+    return `${verbLine(cmd, help)}\n  ${help.summary}`;
+  }
+  // A family head word (`task`, `gate`, ...) that is not itself a verb, or a
+  // partial match like `rescue`: every matching usage line, one per line —
+  // the same set `fleet help` renders for that family.
+  return entries.map(([cmd, help]) => verbLine(cmd, help)).join("\n");
+}
+
 /**
  * `fleet help` — the whole fleet surface, written for an agent to read.
  *
@@ -686,6 +715,27 @@ function parseIssueNumber(raw: string | undefined): number | null {
  *  type satisfies. */
 function usage(message: string): { cmd: "usage"; message: string } {
   return { cmd: "usage", message: `${message}\n${CLI_USAGE}` };
+}
+
+/** Issue #1445: `fleet <verb> -h|--help` — that verb's own usage, resolved
+ * locally (exit 0 in main), never a Worker call. A help flag may only sit
+ * where flags sit (after any positional); a help flag in the id slot is a
+ * bare `<verb> --help`, which the same rule covers. */
+function verbHelp(verb: string): { cmd: "verb-help"; verb: string } {
+  return { cmd: "verb-help", verb };
+}
+
+/** Issue #1445: `fleet <verb> -h|--help` — true when the only token after any
+ * positional is a help flag, in which case the whole command is that verb's
+ * help (exit 0, no Worker call), whatever else was given. */
+function isVerbHelp(rest: string[]): boolean {
+  return rest.length > 0 && rest.every((t) => t === "-h" || t === "--help");
+}
+
+/** The one shared unknown-flag refusal for the destructive verbs: names the
+ * offending token and says it stopped BEFORE any request fired. */
+function destructiveUnknown(verb: string, token: string): { cmd: "usage"; message: string } {
+  return usage(`unexpected ${JSON.stringify(token)} — fleet ${verb} refuses an unknown flag locally, before any request`);
 }
 
 /** Issue #567: the one-argument grammar every id-taking verb shares — the
@@ -1162,6 +1212,7 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // (never both honored on the same call — see ProvisionConfig
     // .cancelFreshSession's own doc comment).
     case "provision": {
+      if (arg === "-h" || arg === "--help") return verbHelp("provision");
       if (!arg || arg.startsWith("--")) return { cmd: "usage", message: CLI_USAGE };
       // Issue #1074 ask 2: `--account mapped`, pulled out of `rest` BEFORE the
       // boolean-flag scan — same bespoke shape and same literal-"mapped" rule
@@ -1170,6 +1221,8 @@ export function parseCliArgs(argv: string[]): CliCommand {
       // it is value-taking, so the boolean scan below must never see either
       // of its tokens (`--repo` itself, or its value).
       const rest0 = argv.slice(2);
+      // Issue #1445: `provision <id> --help` is the same help, local and exit 0.
+      if (isVerbHelp(rest0)) return verbHelp("provision");
       let forceMappedAccount = false;
       let repo: string | undefined;
       let rest = rest0;
@@ -1203,7 +1256,7 @@ export function parseCliArgs(argv: string[]): CliCommand {
       }
       const known = ["--fresh-session", "--no-fresh-session", "--discard-session"];
       const stray = rest.find((f, i) => !known.includes(f) || rest.indexOf(f) !== i);
-      if (stray !== undefined) return usage(`unexpected ${JSON.stringify(stray)}`);
+      if (stray !== undefined) return destructiveUnknown("provision", stray);
       const freshSession = rest.includes("--fresh-session");
       const cancelFreshSession = rest.includes("--no-fresh-session");
       const discardSession = rest.includes("--discard-session");
@@ -1233,8 +1286,10 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // is task-only today and widening it for this one caller costs more than
     // the lines below.
     case "recycle": {
+      if (arg === "-h" || arg === "--help") return verbHelp("recycle");
       if (!arg || arg.startsWith("--")) return { cmd: "usage", message: CLI_USAGE };
       const rest = argv.slice(2);
+      if (isVerbHelp(rest)) return verbHelp("recycle");
       const accountIdx = rest.indexOf("--account");
       let forceMappedAccount = false;
       let flagTokens = rest;
@@ -1247,7 +1302,7 @@ export function parseCliArgs(argv: string[]): CliCommand {
       }
       const known = ["--discard-unsynced", "--fresh-session"];
       const stray = flagTokens.find((f, i) => !known.includes(f) || flagTokens.indexOf(f) !== i);
-      if (stray !== undefined) return usage(`unexpected ${JSON.stringify(stray)}`);
+      if (stray !== undefined) return destructiveUnknown("recycle", stray);
       return {
         cmd: "recycle", id: arg,
         discardUnsynced: flagTokens.includes("--discard-unsynced"), freshSession: flagTokens.includes("--fresh-session"),
@@ -1278,15 +1333,26 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // own comment already says must never be silently ignored, just at the
     // position 0 (id) instead of position 1 (rest[0]).
     case "destroy": {
+      if (arg === "-h" || arg === "--help") return verbHelp("destroy");
+      // An unknown --flag in the id slot refuses too — it must never become
+      // the id (a destroy of a studio literally named "--bogus"). A KNOWN
+      // flag in the id slot (--force, ...) keeps its old bare-usage refusal.
+      if (
+        arg !== undefined && arg.startsWith("--") &&
+        arg !== "--force" && arg !== "--discard-unsynced" && arg !== "--park" && arg !== "--strict-unmerged"
+      ) {
+        return destructiveUnknown("destroy", arg);
+      }
       if (!arg || arg === "--force" || arg === "--discard-unsynced" || arg === "--park" || arg === "--strict-unmerged") {
         return { cmd: "usage", message: CLI_USAGE };
       }
       const rest = argv.slice(2);
+      if (isVerbHelp(rest)) return verbHelp("destroy");
       const flags = new Set(rest);
       const unknown = rest.find(
         (t) => t !== "--force" && t !== "--discard-unsynced" && t !== "--park" && t !== "--strict-unmerged",
       );
-      if (unknown !== undefined) return usage(`unexpected ${JSON.stringify(unknown)}`);
+      if (unknown !== undefined) return destructiveUnknown("destroy", unknown);
       if (flags.size !== rest.length) return usage("a flag was given twice");
       // Issue #59 review round 1: `park` only when given, so every existing
       // destroy parses to the same shape it always did. Board issue #332:
@@ -1320,6 +1386,7 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // Issue #251.
     case "rescue-all": {
       const rest = argv.slice(1);
+      if (isVerbHelp(rest)) return verbHelp("rescue-all");
       let repo: string | null = null;
       let dryRun = false;
       for (let i = 0; i < rest.length; i++) {
@@ -1332,7 +1399,7 @@ export function parseCliArgs(argv: string[]): CliCommand {
           continue;
         }
         if (token.startsWith("--repo=")) { repo = token.slice("--repo=".length); continue; }
-        return usage(`unexpected ${JSON.stringify(token)}`);
+        return destructiveUnknown("rescue-all", token);
       }
       return { cmd: "rescue-all", repo, dryRun };
     }

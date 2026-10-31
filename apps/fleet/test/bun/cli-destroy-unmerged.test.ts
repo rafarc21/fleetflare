@@ -136,6 +136,20 @@ describe("fetchStudioOpenPrs — one studio's live answer (#332)", () => {
     expect(await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl)).toEqual({ ok: false });
   });
 
+  // Issue #1445 (b): the unmerged-PR read must hit the REAL Worker route —
+  // /studio/board/open-prs — the same path src/board/routes.ts mounts. A
+  // renamed/moved route is the whole "route unavailable" failure, so this
+  // pins the CLI path against the Worker's own registration string.
+  test("hits the real route /studio/board/open-prs, not a stale path (#1445)", async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      seen.push(String(input));
+      return Response.json({ repo: "acme-org/websites", prs: { "websites--web-studio": TWO } });
+    }) as unknown as typeof fetch;
+    await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl);
+    expect(seen).toEqual(["https://worker.test/studio/board/open-prs?repo=acme-org%2Fwebsites"]);
+  });
+
   // #332 review H2: a 200 whose body names THIS studio in `unknown` — the
   // scan ran and failed for it. A different fact from a 404 (route not
   // there) and from an uncovered map (mismatched answer): strict refuses on
@@ -369,4 +383,102 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
       failServer.stop(true);
     }
   });
+
+  // Issue #1445 (b): the post-destroy park warning read the STOPPED row for
+  // its repo. A stopped row of the DEPLOYED shape omits `repoSlug`, so the
+  // read degraded to the default repo (no ?repo=), the route's map no longer
+  // covered the studio, and the warning printed "route unavailable" every
+  // time. The fix reads the repo from the PRE-destroy status row instead.
+  // The stand-in models the deployed split exactly: /status answers repoSlug
+  // BEFORE the destroy, /destroy answers the stopped row WITHOUT it, and the
+  // open-prs route answers prs ONLY for the correctly-named repo — a wrong or
+  // missing ?repo= reads `prs: {}`, which the CLI renders as "route
+  // unavailable".
+  test("the park warning reads the repo from the PRE-destroy row, so the real repo is named and the warning prints", async () => {
+    const requests: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const u = new URL(req.url);
+        requests.push(`${req.method} ${u.pathname}${u.search}`);
+        if (u.pathname === `/studio/${ID}/status` && req.method === "GET") {
+          return Response.json({ id: ID, state: "running", error: null, repoSlug: "acme-org/websites" });
+        }
+        if (u.pathname === `/studio/${ID}/destroy` && req.method === "POST") {
+          // The deployed stopped-row shape: no repoSlug field at all.
+          return Response.json({ id: ID, state: "stopped", error: null });
+        }
+        if (u.pathname === "/studio/board/open-prs" && req.method === "GET") {
+          const repo = u.searchParams.get("repo");
+          return Response.json({
+            repo: repo ?? "acme-org/fleet",
+            prs: repo === "acme-org/websites" ? { [ID]: [pr(9)] } : {},
+            unknown: [],
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
+    try {
+      const r = await runFleet(["destroy", ID], home);
+      // The repo came from the pre-destroy row, so the route was asked for
+      // the studio's real repo — not the default, which would read prs: {}.
+      expect(requests).toContain("GET /studio/board/open-prs?repo=acme-org%2Fwebsites");
+      // The warning that names the PR printed — never the "route unavailable"
+      // degrade line.
+      expect(r.err).toContain("park warning: websites--web-studio still has 1 unmerged PR(s)");
+      expect(r.err).not.toContain("route unavailable");
+      expect(r.code).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+// Issue #1445 (a): `fleet <verb> --help` answers LOCALLY — the verb's usage
+// on stdout, exit 0, and ZERO Worker requests. The Worker stand-in records
+// every request, so "no request" is an assertion, not an inference from the
+// exit code. Each destructive verb is driven as a real subprocess with a
+// credentials file pointing at the stand-in: if --help reached the Worker it
+// would 400 as a bad studio id, which the recorded requests would catch.
+describe("destructive verb --help makes zero fetches (#1445)", () => {
+  const DESTRUCTIVE = ["destroy", "recycle", "provision", "rescue-all"] as const;
+
+  const tempDirs: string[] = [];
+  afterEach(() => {
+    while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  });
+
+  for (const verb of DESTRUCTIVE) {
+    test(`fleet ${verb} --help prints that verb's usage, exits 0, and makes zero fetches`, async () => {
+      const requests: string[] = [];
+      const server = Bun.serve({
+        port: 0,
+        async fetch(req) {
+          requests.push(`${req.method} ${new URL(req.url).pathname}`);
+          return Response.json({ id: "x", state: "stopped", error: null });
+        },
+      });
+
+      const home = mkdtempSync(join(tmpdir(), "destroy-help-home-"));
+      tempDirs.push(home);
+      mkdirSync(join(home, ".fleet"), { recursive: true });
+      const path = join(home, ".fleet", "credentials");
+      writeFileSync(path, JSON.stringify({ workerUrl: `http://127.0.0.1:${server.port}`, accessClientId: "cid", accessClientSecret: "csecret" }));
+      chmodSync(path, 0o600);
+
+      try {
+        const r = await runFleet([verb, "--help"], home);
+        // Exit 0, not a usage-error 1, not a Worker 400.
+        expect(r.code).toBe(0);
+        // The verb's OWN usage, not the whole fleet help: each names the verb.
+        expect(r.out).toContain(`fleet ${verb}`);
+        // No Worker request ever fired.
+        expect(requests).toEqual([]);
+      } finally {
+        server.stop(true);
+      }
+    });
+  }
 });
