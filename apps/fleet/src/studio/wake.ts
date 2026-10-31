@@ -233,6 +233,48 @@ function surveyOverlayOnScreen(screen: string): boolean {
   return false;
 }
 
+/** Prefix of the one verdict line surveyDismissCmd prints — did it send the
+ *  `0` that dismisses the survey, refuse for a limit modal, or find nothing? */
+export const SURVEY_VERDICT = "__FLEET_SURVEY__";
+
+/**
+ * Issue #1391 — the one sanctioned keystroke into Claude Code's own
+ * feedback-survey overlay: a single `0` (Dismiss), no Enter, no text, no
+ * digit that could select a paid option. The shape mirrors
+ * failover.ts's dismissModalCmd exactly — ONE shell invocation, re-capture
+ * the pane, re-confirm, send ONE keystroke — for the same reason that
+ * function states: a modal that clears between an earlier probe and this
+ * exec must not get answered by the keystroke.
+ *
+ * HARD GUARD FIRST, then the survey. A limit/upgrade/spend modal — the SAME
+ * LOOSE_LIMIT_PATTERNS the wake gate's own loose check and dismissModalCmd's
+ * DISMISS_LIMIT_PATTERNS run — sends NOTHING: the survey's `0` is a digit,
+ * and a digit into a select modal can pick a paid option (issue #99). The
+ * survey header pattern alone is the dismiss trigger (SURVEY_HEADER_PATTERN's
+ * own doc comment: safe standalone); the full two-row proximity check stays
+ * JS-side in runGatedWake.
+ *
+ * Prints ONE verdict line (SURVEY_VERDICT …) so the caller can tell which
+ * branch ran: `dismissed` (sent `0`), `limit-modal` (a spend modal is on
+ * screen — nothing sent), `no-survey` (no survey header — nothing sent).
+ */
+export function surveyDismissCmd(): string {
+  const limitEs = LOOSE_LIMIT_PATTERNS.map((p) => `-e ${shellQuote(p)}`).join(" ");
+  const surveyEs = `-e ${shellQuote(SURVEY_HEADER_PATTERN)}`;
+  return withStudioTmux([
+    `__ffs_c=$(${STUDIO_TMUX} capture-pane -p -t ${WAKE_TARGET} 2>/dev/null);`,
+    `__ffs_t=$(printf '%s\\n' "$__ffs_c" | sed '/^[[:space:]]*$/d' | tail -n ${LOOSE_TAIL_LINES});`,
+    `if printf '%s\\n' "$__ffs_t" | grep -E -m 1 ${limitEs} >/dev/null 2>&1; then`,
+    `  echo '${SURVEY_VERDICT} limit-modal';`,
+    `elif printf '%s\\n' "$__ffs_t" | grep -E -m 1 ${surveyEs} >/dev/null 2>&1; then`,
+    `  ${STUDIO_TMUX} send-keys -t ${WAKE_TARGET} -l 0;`,
+    `  echo '${SURVEY_VERDICT} dismissed';`,
+    `else`,
+    `  echo '${SURVEY_VERDICT} no-survey';`,
+    `fi`,
+  ].join("\n"));
+}
+
 /** Prefix of the one verdict line the in-container guard prints. */
 const WAKE_VERDICT = "__FLEET_WAKE__";
 
@@ -743,7 +785,7 @@ export async function runGatedWake(deps: GatedWakeDeps, prompt: string, opts?: {
   }
   const now = (deps.now ?? (() => new Date()))();
   const sighting = deps.limitSighting ? await deps.limitSighting().catch(() => null) ?? null : null;
-  const limit = detectLimitOnScreen(screen.stdout, now, sighting);
+  let limit = detectLimitOnScreen(screen.stdout, now, sighting);
 
   // Issue #158 — Claude Code's own feedback-survey overlay. Checked FIRST,
   // before the modal branch below, still against the SAME `screen` capture
@@ -763,11 +805,46 @@ export async function runGatedWake(deps: GatedWakeDeps, prompt: string, opts?: {
   // shape and why it is a SEPARATE check from the modal gate below and from
   // LOOSE_LIMIT_PATTERNS (afterLimitGate's own loose check, further below).
   if (surveyOverlayOnScreen(screen.stdout)) {
-    return {
-      ok: false, skipped: true,
-      error: `feedback survey on screen in ${WAKE_TARGET}; no keystroke sent — ` +
-        `Dismiss by hand: ff ${deps.studioId ?? "<id>"}, press Esc, detach, re-assign.`,
-    };
+    // Issue #1391 — auto-dismiss, then re-read and deliver the wake in the
+    // same gated run. The one keystroke is `0` (Dismiss), never a digit that
+    // could select a paid option: surveyDismissCmd re-confirms the survey and
+    // refuses outright when a limit/upgrade/spend modal is also on screen.
+    let dismissed: { code: number; stdout: string; stderr: string };
+    try {
+      dismissed = await deps.exec(surveyDismissCmd());
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    const verdict = dismissed.stdout.match(new RegExp(`${SURVEY_VERDICT} (\\S+)`));
+    if (dismissed.code !== 0 || verdict?.[1] !== "dismissed") {
+      return {
+        ok: false, skipped: true,
+        error: verdict?.[1] === "limit-modal"
+          ? `feedback survey and a limit modal on screen in ${WAKE_TARGET}; no keystroke sent (spend options on screen). ` +
+            `Dismiss by hand: ff ${deps.studioId ?? "<id>"}, press Esc, detach, re-assign.`
+          : `feedback survey on screen in ${WAKE_TARGET}, and the dismiss could not be confirmed; no keystroke sent — ` +
+            `Dismiss by hand: ff ${deps.studioId ?? "<id>"}, press Esc, detach, re-assign.`,
+      };
+    }
+    // Re-read the pane: only a clean screen (no survey, no limit modal) may
+    // receive the wake. Reusing PANE_SCREEN_CMD and the same gates as the
+    // first capture, never the pre-dismiss text.
+    try {
+      screen = await deps.exec(PANE_SCREEN_CMD);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    if (screen.code !== 0 || surveyOverlayOnScreen(screen.stdout)) {
+      return {
+        ok: false, skipped: true,
+        error: `feedback survey still on screen in ${WAKE_TARGET} after the dismiss; no wake sent — ` +
+          `Dismiss by hand: ff ${deps.studioId ?? "<id>"}, press Esc, detach, re-assign.`,
+      };
+    }
+    // A limit modal that survived the dismiss (or appeared in its wake) must
+    // refuse exactly like the first capture did — never press a digit into a
+    // select modal. Re-run the SAME strict detector over the re-read pane.
+    limit = detectLimitOnScreen(screen.stdout, now, sighting);
   }
 
   if (limit.kind === "modal") {

@@ -7,7 +7,7 @@ import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
   runGatedWake, runWake, singleFlightWake, logWakeOutcome, looseLimitOnScreen, LOOSE_TAIL_LINES,
-  PANE_PROBE_CMD, PANE_SCREEN_CMD,
+  PANE_PROBE_CMD, PANE_SCREEN_CMD, surveyDismissCmd,
 } from "../src/studio/wake";
 import { runAccountFailover, paneCaptureCmd, PANE_CAPTURE_MARKER, type FailoverDeps } from "../src/studio/failover";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
@@ -16,7 +16,7 @@ import {
   V1_STOP_AND_WAIT_PANE, V2_SESSION_LIMIT_PANE, REAL_PILOT_PANE, REAL_PANE_CAPTURED_AT,
 } from "./fixtures/rate-limit-panes";
 import { REAL_PERMISSION_PROMPT_TAIL_PANE, REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE } from "./fixtures/activity-panes";
-import { SURVEY_OVERLAY_PANE, RECOVERED_IDLE_PANE, LEAD_NUMBERED_LIST_PANE } from "./fixtures/survey-panes";
+import { SURVEY_OVERLAY_PANE, RECOVERED_IDLE_PANE, LEAD_NUMBERED_LIST_PANE, SURVEY_AND_LIMIT_PANE } from "./fixtures/survey-panes";
 import { methodBody } from "./helpers/src-pin";
 
 const NOW = new Date("2026-09-24T12:20:00.000Z");
@@ -343,12 +343,35 @@ describe("gate 3 loose check covers the switched-block redraw too (#144)", () =>
 // --- Issue #158: a new, separate gate refuses a wake onto Claude Code's own
 // feedback-survey overlay — zero keystrokes, for every runGatedWake caller.
 
-describe("gate 3 also refuses Claude Code's own feedback-survey overlay (#158)", () => {
-  it("survey overlay on screen: refused, skipped, and NOTHING typed", async () => {
-    const { cmds, exec } = container(SURVEY_OVERLAY_PANE);
+describe("gate 3 auto-dismisses Claude Code's own feedback-survey overlay (#1391)", () => {
+  // surveyDismissCmd's own shell: `send-keys … -l 0`, never Enter, never a digit
+  // bound to Enter, never Esc.
+  it("survey overlay on screen: `0` is sent (no Enter), the pane is re-read, then the wake lands", async () => {
+    const cmds: string[] = [];
+    let screenReads = 0;
+    const exec = vi.fn(async (cmd: string) => {
+      cmds.push(cmd);
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude claude\n", stderr: "" };
+      if (cmd === PANE_SCREEN_CMD) {
+        screenReads++;
+        return { code: 0, stdout: screenReads === 1 ? `${SURVEY_OVERLAY_PANE}\n` : `${RECOVERED_IDLE_PANE}\n`, stderr: "" };
+      }
+      if (cmd === surveyDismissCmd()) return { code: 0, stdout: "__FLEET_SURVEY__ dismissed\n", stderr: "" };
+      return { code: 0, stdout: "__FLEET_WAKE__ sent\n", stderr: "" };
+    });
+    const outcome = await gated(exec);
+    expect(outcome.ok).toBe(true);
+    // probe, first screen, survey dismiss, re-read, wake.
+    expect(cmds).toEqual([PANE_PROBE_CMD, PANE_SCREEN_CMD, surveyDismissCmd(), PANE_SCREEN_CMD, cmds[cmds.length - 1]]);
+    expect(cmds[cmds.length - 1]).toContain("send-keys");
+  });
+
+  it("survey + limit modal on the same screen: the dismiss refuses, NOTHING typed, and the spend guard names the reason", async () => {
+    const { cmds, exec } = container(SURVEY_AND_LIMIT_PANE);
     const outcome = await gated(exec);
     expect(outcome.ok).toBe(false);
     expect(outcome.skipped).toBe(true);
+    expect(outcome.error).toContain("no keystroke sent");
     expect(cmds).toEqual([PANE_PROBE_CMD, PANE_SCREEN_CMD]);
     expect(cmds.some((c) => c.includes("WAKE"))).toBe(false);
   });
@@ -372,19 +395,11 @@ describe("gate 3 also refuses Claude Code's own feedback-survey overlay (#158)",
   });
 
   // Review of #158 (fresh-context, this same PR), finding 2: the #144
-  // switched-block early return (`if (switched === limitBlockKey(limit))
-  // return afterLimitGate(...)`) sits INSIDE the `limit.kind === "modal"`
-  // branch, which runs BEFORE this survey check — so a stale switched-block
-  // redraw and a feedback-survey overlay coinciding on the same screen used
-  // to skip the survey gate entirely. Reuses the #144 describe block's own
-  // SWITCHED fixture/pane (REAL_PILOT_PANE already proven to trigger that
-  // early return) with the survey fixture's own bare numbered rows spliced
-  // in at the exact point #144's own `withQueued` above splices queued rows.
-  it("a stale switched-block redraw AND a survey overlay on the same screen: the survey gate wins, nothing typed", async () => {
+  // switched-block early return sits INSIDE the `limit.kind === "modal"`
+  // branch, which runs BEFORE the survey check — the survey gate must run
+  // first, and with #1391's auto-dismiss it must still dismiss and deliver.
+  it("a stale switched-block redraw AND a survey overlay on the same screen: the survey gate runs first, dismisses, and delivers", async () => {
     const SWITCHED = "You've hit your session limit · 1:30pm (UTC)";
-    // Maestro round-2 review (PR #170), finding 1: the real survey shape
-    // (header + one `N: label` choice row), not the first-round's invented
-    // stacked bare rows.
     const withSurvey = REAL_PILOT_PANE.replace(
       /❯\s+keep going/u,
       [
@@ -392,7 +407,18 @@ describe("gate 3 also refuses Claude Code's own feedback-survey overlay (#158)",
         "1: Bad    2: Fine   3: Good   0: Dismiss",
       ].join("\n"),
     );
-    const { cmds, exec } = container(withSurvey);
+    const cmds: string[] = [];
+    let screenReads = 0;
+    const exec = vi.fn(async (cmd: string) => {
+      cmds.push(cmd);
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude claude\n", stderr: "" };
+      if (cmd === PANE_SCREEN_CMD) {
+        screenReads++;
+        return { code: 0, stdout: screenReads === 1 ? `${withSurvey}\n` : `${REAL_PILOT_PANE}\n`, stderr: "" };
+      }
+      if (cmd === surveyDismissCmd()) return { code: 0, stdout: "__FLEET_SURVEY__ dismissed\n", stderr: "" };
+      return { code: 0, stdout: "__FLEET_WAKE__ sent\n", stderr: "" };
+    });
 
     const outcome = await runGatedWake({
       recordedState: async () => "running", exec, studioId: STUDIO_ID,
@@ -400,9 +426,27 @@ describe("gate 3 also refuses Claude Code's own feedback-survey overlay (#158)",
       switchedBlock: async () => SWITCHED,
     }, "WAKE");
 
-    expect(outcome.ok).toBe(false);
-    expect(outcome.skipped).toBe(true);
-    expect(cmds).toEqual([PANE_PROBE_CMD, PANE_SCREEN_CMD]);
-    expect(cmds.some((c) => c.includes("WAKE"))).toBe(false);
+    expect(outcome.ok).toBe(true);
+    expect(cmds).toContain(surveyDismissCmd());
+    expect(cmds[cmds.length - 1]).toContain("send-keys");
+  });
+});
+
+describe("surveyDismissCmd — one `0`, no Enter, hard spend guard (#1391)", () => {
+  it("the emitted shell sends `send-keys -l 0`, never Enter, never a bare digit", () => {
+    const cmd = surveyDismissCmd();
+    expect(cmd).toContain(`send-keys -t ${"studio:claude"} -l 0`);
+    expect(cmd).not.toContain("send-keys -t studio:claude 0");
+    expect(cmd).not.toContain(" Enter");
+    expect(cmd).not.toContain("Escape");
+  });
+
+  it("the limit-modal check runs BEFORE the survey check in the emitted shell", () => {
+    const cmd = surveyDismissCmd();
+    const limitIdx = cmd.indexOf("__FLEET_SURVEY__ limit-modal");
+    const surveyIdx = cmd.indexOf("__FLEET_SURVEY__ dismissed");
+    expect(limitIdx).toBeGreaterThan(-1);
+    expect(surveyIdx).toBeGreaterThan(-1);
+    expect(limitIdx).toBeLessThan(surveyIdx);
   });
 });
