@@ -187,11 +187,20 @@ export async function statusOf(wf: Pick<GateRunStarter, "get">, runId: string): 
   }
 }
 
+/** #1385: the terminal verdict description a superseded head gets when a newer
+ *  head sha ends its still-live run. Names the new head by its short sha (8 hex),
+ *  the same width the gate config and webhook already use for a head in prose. */
+export function supersededStatusDescription(newHeadSha: string): string {
+  return `superseded by ${newHeadSha.slice(0, 8)}`;
+}
+
 /** Records a newly created run as the PR's latest, and ends the previous sha's
  *  run if that one is still live (#1082). */
 async function recordRun(
   wf: GateRunStarter, input: { repo: string; pr: number; headSha: string }, index: GateRunIndex, runId: string,
   now: () => number,
+  postSuperseded?: (repo: string, oldHeadSha: string, description: string) => Promise<void>,
+  isCurrentHead?: (repo: string, pr: number, headSha: string) => Promise<boolean>,
 ): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
   const previous = await index.latest(input.repo, input.pr);
   await index.record(input.repo, input.pr, { headSha: input.headSha, runId, progressedAt: now() });
@@ -205,6 +214,34 @@ async function recordRun(
   } catch (err) {
     console.error("gate: previous run not ended", err);
     superseded = false;
+  }
+  // #1385: a superseded run's head keeps its pending gate/verdict forever — the
+  // new run owns the per-PR pointer, so the watchdog never sees the old run to
+  // reconcile it. Post the terminal error verdict on the OLD head here,
+  // best-effort (never blocks the new run). Only when the head actually moved: a
+  // same-head supersede (reopen, manual rerun) re-gates the head, and the new
+  // run posts its own status over it.
+  if (superseded && previous.headSha !== input.headSha) {
+    // #1385 out-of-order guard: a stale delivery (sha2 arriving after sha3
+    // already landed) must never mark the real head sha3 "superseded by sha2".
+    // Post only while the incoming head is still the PR's live head. A failed
+    // read is fail-closed (skip the post), never a wrong head marked terminal.
+    let current = true;
+    if (isCurrentHead) {
+      try {
+        current = await isCurrentHead(input.repo, input.pr, input.headSha);
+      } catch (err) {
+        console.error(`gate: current-head read failed for ${input.repo}#${input.pr}`, err);
+        current = false;
+      }
+    }
+    if (current) {
+      try {
+        await postSuperseded?.(input.repo, previous.headSha, supersededStatusDescription(input.headSha));
+      } catch (err) {
+        console.error(`gate: superseded status post failed for ${input.repo} ${previous.headSha.slice(0, 8)}`, err);
+      }
+    }
   }
   return { runId, reused: false, supersededRunId: superseded ? previous.runId : undefined };
 }
@@ -226,6 +263,8 @@ export async function startGateRun(
   wf: GateRunStarter, input: { repo: string; pr: number; headSha: string; reopened?: boolean }, index: GateRunIndex,
   now: () => number = Date.now,
   postPending?: (repo: string, headSha: string) => Promise<void>,
+  postSuperseded?: (repo: string, oldHeadSha: string, description: string) => Promise<void>,
+  isCurrentHead?: (repo: string, pr: number, headSha: string) => Promise<boolean>,
 ): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
   const runId = await gateRunId(input.repo, input.headSha);
   try {
@@ -266,11 +305,11 @@ export async function startGateRun(
       if (isLiveStatus(status) && input.reopened !== true) return { runId: freshId, reused: true };
       const rerunId = `${freshId}-r${now().toString(36)}`;
       await wf.create({ id: rerunId, params: { repo: input.repo, pr: input.pr } });
-      return recordRun(wf, input, index, rerunId, now);
+      return recordRun(wf, input, index, rerunId, now, postSuperseded, isCurrentHead);
     }
-    return recordRun(wf, input, index, freshId, now);
+    return recordRun(wf, input, index, freshId, now, postSuperseded, isCurrentHead);
   }
-  return recordRun(wf, input, index, runId, now);
+  return recordRun(wf, input, index, runId, now, postSuperseded, isCurrentHead);
 }
 
 /** #1176/#1214: a title/body/base edit re-runs the precheck under its own id.
@@ -367,6 +406,7 @@ export async function startEditedGateRunIdempotent(
 export async function startManualGateRun(
   wf: GateRunStarter, input: { repo: string; pr: number; headSha: string; carryGreen?: CarryGreen }, index: GateRunIndex,
   now: () => number = Date.now,
+  postSuperseded?: (repo: string, oldHeadSha: string, description: string) => Promise<void>,
 ): Promise<{ runId: string; reused: boolean; supersededRunId?: string }> {
   const baseId = await gateRunId(input.repo, input.headSha);
   const latest = await index.latest(input.repo, input.pr);
@@ -374,7 +414,7 @@ export async function startManualGateRun(
   const startFresh = async () => {
     const runId = `${baseId}-r${now().toString(36)}`;
     await wf.create({ id: runId, params });
-    return recordRun(wf, input, index, runId, now);
+    return recordRun(wf, input, index, runId, now, postSuperseded);
   };
   if (input.carryGreen !== undefined) return startFresh();
   if (latest?.headSha === input.headSha && isLiveStatus(await statusOf(wf, latest.runId))) {
@@ -405,7 +445,7 @@ export async function startManualGateRun(
     }
     return startFresh();
   }
-  return recordRun(wf, input, index, baseId, now);
+  return recordRun(wf, input, index, baseId, now, postSuperseded);
 }
 
 export type AutoRunOutcome = "started" | "reused" | "skipped";
@@ -415,6 +455,12 @@ export interface AutoRunDeps {
   index: GateRunIndex;
   /** #1191: the pending-status post for an edited run, injected by the env wiring. */
   postPending?: (repo: string, headSha: string) => Promise<void>;
+  /** #1385: posts the terminal error verdict on a superseded head. Best-effort;
+   *  failure is swallowed in recordRun, never blocks the new run. */
+  postSuperseded?: (repo: string, oldHeadSha: string, description: string) => Promise<void>;
+  /** #1385: whether `headSha` is still the PR's live head. A stale delivery
+   *  (sha2 arriving after sha3 landed) must not mark the real head superseded. */
+  isCurrentHead?: (repo: string, pr: number, headSha: string) => Promise<boolean>;
 }
 
 /** Starts the gate run for a gated PR. No precheck of the base's gate config
@@ -449,7 +495,7 @@ export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDe
   const { reused } = await startGateRun(
     deps.workflow,
     { repo: pr.repo, pr: pr.pr, headSha: pr.headSha, ...(pr.reopened === true ? { reopened: true } : {}) },
-    deps.index, Date.now, deps.postPending,
+    deps.index, Date.now, deps.postPending, deps.postSuperseded, deps.isCurrentHead,
   );
   return reused ? "reused" : "started";
 }
@@ -479,7 +525,7 @@ export async function autoRunPullRequestIdempotent(pr: PullRequestAutoRun, deps:
   const { reused } = await startGateRun(
     deps.workflow,
     { repo: pr.repo, pr: pr.pr, headSha: pr.headSha, ...(pr.reopened === true ? { reopened: true } : {}) },
-    deps.index, Date.now, deps.postPending,
+    deps.index, Date.now, deps.postPending, deps.postSuperseded, deps.isCurrentHead,
   );
   return reused ? "reused" : "started";
 }

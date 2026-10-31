@@ -153,11 +153,13 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
     if (status === "complete" || status === "errored" || status === "terminated") {
       // #1226: an "errored" run may have ended before it ever got to post its
       // OWN verdict (the exact production bug: the post throws, the step's
-      // retries exhaust, the Workflow instance errors). One best-effort
-      // reconciliation post, ONLY while the head has no status or a pending
-      // that still names THIS run. Every status this system posts wraps the
-      // run id in parentheses — "running (run <id>) — N legs", "rerun after
-      // infra error (run <id>)", "(run <id>)" — so the token is matched
+      // retries exhaust, the Workflow instance errors). #1385: a "terminated"
+      // run is superseded (ended by a newer head's recordRun) and may likewise
+      // still carry a pending head status, so it gets the same reconciliation.
+      // One best-effort reconciliation post, ONLY while the head has no status
+      // or a pending that still names THIS run. Every status this system posts
+      // wraps the run id in parentheses — "running (run <id>) — N legs", "rerun
+      // after infra error (run <id>)", "(run <id>)" — so the token is matched
       // DELIMITED, never as a prefix (run ids extend each other on the same
       // head: <id> ⊂ <id>-p<pr> ⊂ ...-r<t>/...-e<t>). A pending naming a
       // different run is a newer same-head run's status, never clobbered.
@@ -171,7 +173,7 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
       // pointer move): it lacks the "running (" prefix and is never clobbered.
       // A failure here is logged and swallowed: the run is already dead either
       // way, and the row is retired regardless.
-      if (status === "errored") {
+      if (status === "errored" || status === "terminated") {
         const current = await deps.headStatus(repo, headSha).catch(() => undefined);
         const description = current?.state === "pending" && typeof current.description === "string"
           ? current.description : undefined;
@@ -179,7 +181,19 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
         const idlessPending = description !== undefined
           && description.startsWith("running (")
           && !description.includes("(run ");
-        if (current === undefined || stillThisRun || idlessPending) {
+        // #1385 (edited-restart race): a "terminated" run shares its head with
+        // the run that just replaced it — the new run's id-less pre-create
+        // pending ("running (edited title/body recheck)") lands before the new
+        // run's own status, while the pointer still names the old run. An
+        // id-less "running (" on a terminated run is therefore never ITS OWN
+        // (its own pending gained a run id once the run existed), so it is not
+        // reconciled: only a missing status or a pending naming THIS run is. An
+        // "errored" run keeps the id-less case (it can error before its own
+        // post-pending lands, the original #1226 bug).
+        const reconcilable = status === "errored"
+          ? current === undefined || stillThisRun || idlessPending
+          : current === undefined || stillThisRun;
+        if (reconcilable) {
           await deps.post(repo, headSha, {
             state: "error", description: `gate: run ended without a verdict (run ${runId})`,
           }).catch((err) => console.error(`gate watchdog: reconciliation post failed for ${runId}`, err));

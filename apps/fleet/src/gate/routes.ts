@@ -15,7 +15,7 @@ import { redactSecrets } from "../studio/redact";
 import { runGateProtect, type ProtectPort } from "./protect";
 import { repoTokenMinter } from "../github/auth";
 import { startManualGateRun, type GateRunIndex, type GateRunParams } from "./auto-run";
-import { d1RunIndex } from "./auto-run-env";
+import { d1RunIndex, supersededPost } from "./auto-run-env";
 import { isGateRunnerRepo } from "./config";
 import { gateDraining } from "./drain";
 import { greenLegsOf, type CarryGreen, type OutcomeLeg } from "./fanout";
@@ -456,10 +456,10 @@ export async function handleGateRoute(
     if (body.failedOnly === true) {
       const carryGreen = await carryGreenFromLatestRun(env, body.repo, body.pr, index);
       if (carryGreen instanceof Response) return carryGreen;
-      const run = await startManualGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha, carryGreen }, index);
+      const run = await startManualGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha, carryGreen }, index, Date.now, supersededPost(env));
       return j({ started: true, runId: run.runId, reused: run.reused });
     }
-    const run = await startManualGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha }, index);
+    const run = await startManualGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha }, index, Date.now, supersededPost(env));
     return j({ started: true, runId: run.runId, reused: run.reused });
   }
 

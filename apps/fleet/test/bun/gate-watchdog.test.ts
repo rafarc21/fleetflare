@@ -520,6 +520,52 @@ describe("sweepStalledRuns: an errored run that never posted its own verdict is 
   });
 });
 
+describe("sweepStalledRuns: a terminated run still carrying a pending head is reconciled (#1385)", () => {
+  it("a terminated run with a pending head naming THIS run gets one reconciliation post, then is retired", async () => {
+    const h = harness({
+      runs: { "gate-x": "terminated" },
+      headStatus: async () => ({ state: "pending", description: "running (run gate-x) — 2 legs" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([{ repo: REPO, headSha: HEAD, state: "error", description: expect.stringContaining("ended without a verdict") }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a terminated run with no landed head status is reconciled once, then retired", async () => {
+    const h = harness({ runs: { "gate-x": "terminated" }, headStatus: async () => undefined });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([{ repo: REPO, headSha: HEAD, state: "error", description: expect.stringContaining("ended without a verdict") }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a terminated run whose head already shows a terminal status is never clobbered, still retired", async () => {
+    const h = harness({ runs: { "gate-x": "terminated" }, headStatus: async () => ({ state: "error" }) });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a terminated run whose head shows a pending for a DIFFERENT run is never clobbered, still retired", async () => {
+    const h = harness({
+      runs: { "gate-x": "terminated" },
+      headStatus: async () => ({ state: "pending", description: "running (run gate-y) — 2 legs" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+
+  it("a terminated run with an id-less 'running (' pending is the replacing run's marker, never reconciled (#1385)", async () => {
+    const h = harness({
+      runs: { "gate-x": "terminated" },
+      headStatus: async () => ({ state: "pending", description: "running (edited title/body recheck)" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
+});
+
 // #1343 MED6: the watchdog lists a run's results under the `shard-` prefix,
 // so an evidence .json (PR-controlled) is never read as a result, and
 // evidence volume never crowds results out of one listing page.
