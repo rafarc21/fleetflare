@@ -12,7 +12,8 @@ import { handleStudio, handleFleetSpawn } from "./studio/routes";
 import { listStudios } from "./studio/registry";
 import { getStudioStubForRow } from "./studio/profile";
 import { isWatchMinute, watchStoppedContainers } from "./studio/container-watch";
-import { handleBoard, handleFleetBoard } from "./board/routes";
+import { handleBoard, handleFleetBoard, githubBoardApi, realReconcilePort, reconcileDeps } from "./board/routes";
+import { runBoardReconcile } from "./board/reconcile";
 import { handleMemory } from "./memory/routes";
 import { handleFleetJunior } from "./junior/route";
 import { handleJuniorUsageStats, handleLeadUsageStats } from "./junior/usage";
@@ -279,6 +280,19 @@ async function handleScheduled(controller: ScheduledController, env: Env, ctx: E
       );
     } catch (err) {
       console.error("container watch sweep failed", err);
+    }
+  }
+
+  // Board issue #1447: the scheduled reconcile — merged PRs auto-complete
+  // their task, in-flight tasks on stopped/parked studios fall back. Every
+  // 5th minute too (same cadence as the container watch), apply: true. The
+  // rule is runBoardReconcile's; reconcileDeps/realReconcilePort are the same
+  // wiring the CLI route uses, so there is exactly one real implementation.
+  if (isWatchMinute(controller.scheduledTime ?? Date.now())) {
+    try {
+      await runBoardReconcile(reconcileDeps(githubBoardApi(env), env.AGENT_REPO, realReconcilePort(env)), true);
+    } catch (err) {
+      console.error("board reconcile sweep failed", err);
     }
   }
 

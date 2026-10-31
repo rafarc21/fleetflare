@@ -50,7 +50,7 @@ import {
 import { wakeOnAssign, checkAssignRepo, type AssignWakeDeps, type AssignWakeReport } from "./assign-wake";
 import { sendTaskMessage } from "./task-message";
 import { realWakeDeps } from "./wake-deps";
-import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify";
+import { attemptVerification, parseGithubUrl, findLatestResultEnvelope, type VerifyFetch } from "./verify";
 import { openTasksWithLatestPr } from "./pr-landed";
 import { closeTaskOnPromote } from "./close-action";
 import { studioOpenPrs, type OpenPr } from "./open-prs";
@@ -60,6 +60,7 @@ import { runTaskReap, type ReapDeps, type LandedCheck } from "../studio/task-rea
 import { isGateRunnerRepo } from "../gate/config";
 import { GATE_STATUS_CONTEXT } from "../gate/status-post";
 import { runRescueGc, type RescueBranch } from "../studio/rescue-gc";
+import { runBoardReconcile, RECONCILE_COMPLETE_MARKER, RECONCILE_RESET_MARKER, RECONCILE_NOTE_MARKER, type ReconcileDeps } from "./reconcile";
 import { listStudios } from "../studio/registry";
 import {
   isSpawnTokenShaped, resolveSpawnParent, resolveSpawnPolicy, mayDirect, SPAWN_TOKEN_HEADER,
@@ -362,6 +363,43 @@ function realCompletedGatePort(env: Env): CompletedGatePort {
   };
 }
 
+/** Board issue #1447: the real GitHub + registry reads behind the reconcile.
+ *  One credential per repo owner, minted lazily, same as the reap/rescue/
+ *  completed-gate ports. `studioStopped` resolves every studio id against ONE
+ *  `listStudios` read, cached per run so N tasks cost one D1 pass, not N; a
+ *  studio with no row reads as stopped (nothing running to hold the work). */
+export interface ReconcilePort {
+  referencingPrs: (repo: string, taskNumber: number) => Promise<number[]>;
+  prState: (repo: string, prNumber: number) => Promise<{ merged: boolean; open: boolean }>;
+  /** Is this studio stopped or parked? */
+  studioStopped: (studioId: string) => Promise<boolean>;
+  hasComment: (repo: string, taskNumber: number, marker: string) => Promise<boolean>;
+}
+
+export function realReconcilePort(env: Env): ReconcilePort {
+  const mint = repoTokenMinter(env);
+  // One registry read for the whole run, memoized on first use.
+  let stopped: Map<string, boolean> | null = null;
+  return {
+    referencingPrs: async (repo, taskNumber) => findPullRequestsReferencingTask(await mint(repo), repo, taskNumber),
+    prState: async (repo, prNumber) => {
+      const pr = await getPullRequest(await mint(repo), repo, prNumber);
+      return { merged: pr.merged, open: pr.open };
+    },
+    studioStopped: async (studioId) => {
+      if (stopped === null) {
+        const rows = await listStudios(env);
+        stopped = new Map(rows.map((s) => [s.id, s.state === "stopped" || s.parked === true]));
+      }
+      return stopped.get(studioId) ?? true;
+    },
+    hasComment: async (repo, taskNumber, marker) => {
+      const comments = await listComments(await mint(repo), repo, taskNumber);
+      return comments.some((c) => c.body.includes(marker));
+    },
+  };
+}
+
 /** Default age before a rescue branch may go: two weeks of someone reading it. */
 const RESCUE_GC_DEFAULT_DAYS = 14;
 
@@ -462,6 +500,87 @@ async function handleTaskReapRoute(
   } catch (err) {
     return upstreamFailure(err, req.method, new URL(req.url).pathname);
   }
+}
+
+/**
+ * `POST /studio/board/tasks/reconcile {apply?: boolean, repo?: string}` —
+ * board issue #1447. `apply` missing or falsy is a dry-run, the same default
+ * posture as reap. The rule is `runBoardReconcile`'s; this is only the wiring,
+ * same split every other route here draws between rule and plumbing.
+ *
+ * Rate-limit-safe by construction: one `listTasks` (paginated by the board
+ * layer), one `listStudios` read memoized across the run, and a bounded
+ * per-task set of `getPullRequest` / `findPullRequestsReferencingTask` /
+ * `listComments` calls. `linkedPrs` unions
+ * the search-based `refs #N` result with the task's envelope PR, because
+ * `awaiting_merge` is set from a PR ready for review (pr-awaiting-merge.ts)
+ * WITHOUT persisting that PR's number — the search is the durable link.
+ */
+async function handleReconcileRoute(
+  req: Request, env: Env, api: BoardApi, reach: RepoReachFetch, port: ReconcilePort,
+): Promise<Response> {
+  if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+  const body = await jsonBody(req);
+  const apply = body.apply === true;
+  const repoResult = await resolveBoardRepo({ reachRepo: reach }, { requested: body.repo, defaultSlug: env.AGENT_REPO });
+  if (!repoResult.ok) return respond(repoResult);
+  const repo = repoResult.value;
+
+  try {
+    const results = await runBoardReconcile(reconcileDeps(api, repo, port), apply);
+    return Response.json({ repo, apply, results });
+  } catch (err) {
+    return upstreamFailure(err, req.method, new URL(req.url).pathname);
+  }
+}
+
+/** The reconcile rule's dependencies, built once and shared by the CLI route
+ *  and the scheduled cron — the single place the real wiring lives. */
+export function reconcileDeps(api: BoardApi, repo: string, port: ReconcilePort): ReconcileDeps {
+  return {
+    repo,
+    listOpenTasks: async () => {
+      const result = await listTasks(api, repo, {});
+      if (!result.ok) throw new Error(result.message);
+      // In-flight tasks only: the three reconcile cases never touch a
+      // terminal/submitted/input_required task, so filter them out here.
+      const live = ["working", "awaiting_merge"];
+      return result.value
+        .filter((t) => t.open && t.state !== null && live.includes(t.state))
+        .map((t) => ({ taskNumber: t.number, state: t.state, assignee: t.assignee }));
+    },
+    linkedPrs: async (taskNumber) => {
+      const search = await port.referencingPrs(repo, taskNumber);
+      const envelope = await latestEnvelopePr(api, repo, taskNumber);
+      return envelope === null ? search : [...search, envelope];
+    },
+    prState: (prNumber) => port.prState(repo, prNumber),
+    studioStopped: (studioId) => port.studioStopped(studioId),
+    hasComment: (taskNumber, marker) => port.hasComment(repo, taskNumber, marker),
+    transition: async (taskNumber, from, to) => {
+      const result = await transitionTask(api, repo, taskNumber, { from, to });
+      return result.ok ? { ok: true as const } : { ok: false as const, message: result.message };
+    },
+    comment: async (taskNumber, text) => {
+      await api.createComment(repo, taskNumber, text);
+    },
+  };
+}
+
+/** The PR number a task's latest result envelope names, or `null`. Reuses
+ *  pr-landed.ts's own envelope scan (`findLatestResultEnvelope`) so this
+ *  route never re-derives "which PR did the lead report". */
+async function latestEnvelopePr(api: BoardApi, repo: string, taskNumber: number): Promise<number | null> {
+  const shown = await showTask(api, repo, taskNumber);
+  if (!shown.ok) return null;
+  const envelope = findLatestResultEnvelope(shown.value.comments);
+  if (!envelope) return null;
+  for (const art of envelope.payload.artifacts) {
+    if (art.pr === undefined) continue;
+    const num = Number.parseInt(art.pr.replace(/^#/, ""), 10);
+    if (Number.isInteger(num) && num > 0) return num;
+  }
+  return null;
 }
 
 /**
@@ -981,6 +1100,7 @@ type BoardPorts = {
   assignWake?: AssignWakeDeps;
   rescueGcPort?: RescueGcPort;
   completedGatePort?: CompletedGatePort;
+  reconcilePort?: ReconcilePort;
 };
 
 export async function handleBoard(
@@ -992,7 +1112,8 @@ export async function handleBoard(
     verifyFetch = realVerifyFetch(env), reapPort = realReapPort(env),
     assignWake = realWakeDeps(env),
     rescueGcPort = realRescueGcPort(env),
-    completedGatePort = realCompletedGatePort(env) }: BoardPorts = {},
+    completedGatePort = realCompletedGatePort(env),
+    reconcilePort = realReconcilePort(env) }: BoardPorts = {},
 ): Promise<Response> {
   const authFailure = await verifyAccess(req, env);
   if (authFailure) return authFailure;
@@ -1016,6 +1137,11 @@ export async function handleBoard(
   }
   if (url.pathname === "/studio/board/tasks/rescue-gc") {
     return handleRescueGcRoute(req, env, reach, rescueGcPort);
+  }
+  // Board issue #1447: same "own check, not a BOARD_ROUTE_RE alternative"
+  // reason as reap above — this path names no task number either.
+  if (url.pathname === "/studio/board/tasks/reconcile") {
+    return handleReconcileRoute(req, env, api, reach, reconcilePort);
   }
   // Board issue #332: same "own check, not a BOARD_ROUTE_RE alternative"
   // reason as reap above — this path names no task number.

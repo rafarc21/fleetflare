@@ -40,6 +40,7 @@ import { sweepAllPages, type SweepPage } from "./junior-sweep";
 import { reapTerminalAll, type TerminalPage } from "./reap-terminal";
 import { runTaskStateTransition, type TaskStateFetchResult } from "../src/studio/task-state";
 import type { ReapOutcome } from "../src/studio/task-reap";
+import type { ReconcileOutcome } from "../src/board/reconcile";
 import { formatRescueReport, type RescueWorktree } from "../src/studio/rescue";
 import type { RescueGcOutcome } from "../src/studio/rescue-gc";
 import type { RepoReach } from "../src/github/reach";
@@ -2790,6 +2791,40 @@ async function cmdTaskReap(creds: Credentials, apply: boolean, terminal = false)
 }
 
 /**
+ * `fleet task reconcile [--dry-run|--apply]` — board issue #1447. One POST to
+ * the Worker's `/tasks/reconcile` route; same cwd repo convention as reap.
+ * This side does no computation of its own — prints the Worker's report.
+ */
+async function cmdTaskReconcile(creds: Credentials, apply: boolean): Promise<void> {
+  const detected = await detectRepo();
+  reportRepo("fleet task reconcile", detected);
+  const result = (await boardRequest(creds, "fleet task reconcile", "/tasks/reconcile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apply, ...(detected.slug ? { repo: detected.slug } : {}) }),
+  })) as { repo: string; apply: boolean; results: ReconcileOutcome[] };
+
+  console.log(`fleet task reconcile ${result.apply ? "(--apply)" : "(dry-run)"} — ${result.repo}`);
+  if (result.results.length === 0) {
+    console.log("  (no in-flight tasks)");
+    return;
+  }
+  for (const r of result.results) {
+    if (r.outcome === "failed") {
+      console.log(`  #${r.taskNumber}: failed — ${r.reason}`);
+    } else if (r.outcome === "skipped") {
+      console.log(`  #${r.taskNumber}: skipped — ${r.reason}`);
+    } else if (r.outcome === "would-complete" || r.outcome === "completed") {
+      console.log(`  #${r.taskNumber} (PR #${r.prNumber}): ${r.outcome}`);
+    } else if (r.outcome === "would-reset" || r.outcome === "reset") {
+      console.log(`  #${r.taskNumber}: ${r.outcome} — ${r.reason}`);
+    } else if (r.outcome === "would-note" || r.outcome === "noted") {
+      console.log(`  #${r.taskNumber} (PR #${r.prNumber}): ${r.outcome} — ${r.reason}`);
+    }
+  }
+}
+
+/**
  * `fleet task junior-sweep [--dry-run|--apply]` — issue #35. One POST to the
  * Worker's `/tasks/junior-sweep` route; same cwd repo convention as reap.
  */
@@ -4054,6 +4089,8 @@ async function main(): Promise<void> {
       return cmdTaskReap(creds, parsed.apply, parsed.terminal === true);
     case "task-junior-sweep":
       return cmdTaskJuniorSweep(creds, parsed.apply);
+    case "task-reconcile":
+      return cmdTaskReconcile(creds, parsed.apply);
     case "sprint-ls":
       return cmdSprintLs(creds);
     case "sprint-open":

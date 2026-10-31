@@ -223,6 +223,11 @@ export type CliCommand =
   // the real close through the same idempotent action a push webhook uses.
   // Issue #55: `--terminal` = close open issues already in a terminal state.
   | { cmd: "task-reap"; apply: boolean; terminal?: true }
+  // Board issue #1447: the Worker reconcile — merged PRs auto-complete their
+  // task, and in-flight tasks on stopped/parked studios fall back to
+  // submitted (or are left and noted when a PR is still open). Same
+  // `[--dry-run|--apply]` grammar as reap.
+  | { cmd: "task-reconcile"; apply: boolean }
   // Issue #35: delete junior records whose task is already finished.
   | { cmd: "task-junior-sweep"; apply: boolean }
   // Task #1245: the sprint surface. `sprint` is a noun with operations on it,
@@ -482,6 +487,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   "task-reap": {
     args: "reap [--terminal] [--dry-run|--apply]",
     summary: "Deterministic backfill: every open task whose latest envelope names a PR now on the default branch. Bare (or --dry-run) only REPORTS would-close/skipped(why); --apply actually closes the GitHub issue and moves the board to completed, the SAME idempotent action a push webhook uses. The only coverage for a repo on the token auth path, where no webhook is ever sent. --terminal instead closes every OPEN issue whose board state is already completed (as completed) or canceled/failed (as not planned); labels are left as they are.",
+  },
+  "task-reconcile": {
+    args: "reconcile [--dry-run|--apply]",
+    summary: "Board issue #1447: close the board's state drift. A task whose linked PR is MERGED auto-completes (comment: auto-completed: PR #n merged). A working/awaiting_merge task on a STOPPED or parked studio with no open PR falls back to submitted (commented). An awaiting_merge task on a stopped studio whose PR is still OPEN is left in state and commented once. Every write goes through the Worker's single-writer transition, so re-running is safe. Bare (or --dry-run) only REPORTS would-complete/would-reset/would-note/skipped(why); --apply performs the write.",
   },
   junior: {
     args: "enable [--account <id>] | disable | status | stats [--since <dur|date>]",
@@ -877,6 +886,12 @@ function parseTask(argv: string[]): CliCommand {
   if (sub === "junior-sweep") {
     if (rest.length === 0 || (rest.length === 1 && rest[0] === "--dry-run")) return { cmd: "task-junior-sweep", apply: false };
     if (rest.length === 1 && rest[0] === "--apply") return { cmd: "task-junior-sweep", apply: true };
+    return usage(`unexpected ${JSON.stringify(rest[0])}`);
+  }
+  // Board issue #1447: same bare-flag grammar as `reap`/`junior-sweep` above.
+  if (sub === "reconcile") {
+    if (rest.length === 0 || (rest.length === 1 && rest[0] === "--dry-run")) return { cmd: "task-reconcile", apply: false };
+    if (rest.length === 1 && rest[0] === "--apply") return { cmd: "task-reconcile", apply: true };
     return usage(`unexpected ${JSON.stringify(rest[0])}`);
   }
   if (sub !== "new" && sub !== "ls") return usage(`unknown task command ${JSON.stringify(sub ?? "")}`);
