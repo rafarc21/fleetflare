@@ -115,17 +115,16 @@ describe("pullRequestAutoRun: which deliveries start a run", () => {
     expect(out).toEqual({ ...PR, edited: true });
   });
 
-  it("an edit of the title starts nothing (#1446: only a base change re-runs)", () => {
-    expect(pullRequestAutoRun(payload({ action: "edited", changes: { title: { from: "old" } } }), ON)).toBeNull();
+  it("an edit of the title fires with edited:true (#1176)", () => {
+    expect(pullRequestAutoRun(payload({ action: "edited", changes: { title: { from: "old" } } }), ON)).toEqual({ ...PR, edited: true });
   });
 
-  it("an edit of the body starts nothing (#1446)", () => {
-    expect(pullRequestAutoRun(payload({ action: "edited", changes: { body: { from: "old" } } }), ON)).toBeNull();
+  it("an edit of the body fires with edited:true (#1176)", () => {
+    expect(pullRequestAutoRun(payload({ action: "edited", changes: { body: { from: "old" } } }), ON)).toEqual({ ...PR, edited: true });
   });
 
-  it("an edit with no base change starts nothing (labels, title, body, or none)", () => {
+  it("an edit with no title/body/base change starts nothing (labels, or none)", () => {
     expect(pullRequestAutoRun(payload({ action: "edited", changes: {} }), ON)).toBeNull();
-    expect(pullRequestAutoRun(payload({ action: "edited", changes: { title: { from: "old" }, body: { from: "old" } } }), ON)).toBeNull();
     expect(pullRequestAutoRun(payload({ action: "edited" }), ON)).toBeNull();
   });
 
@@ -814,7 +813,7 @@ describe("autoRunPullRequest: no duplicate run on ready_for_review of a head wit
 
   it("a live run under a DIFFERENT id (a manual -r rerun) is also skipped, not duplicated (#1446)", async () => {
     const { wf, runs, creates } = fakeWorkflow();
-    const { index } = fakeIndex();
+    const { index, heads } = fakeIndex();
     const T1 = 1_700_000_000_000;
     // A manual rerun of a finished head starts a fresh -r run and records it as
     // the PR's latest; the plain sha id stays free.
@@ -823,6 +822,8 @@ describe("autoRunPullRequest: no duplicate run on ready_for_review of a head wit
     const rerun = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1 + 1);
     expect(rerun.runId).not.toBe(await gateRunId(PR_REPO, HEAD));
     expect(runs.get(rerun.runId)!.status).toBe("running");
+    // The rerun is a healthy live run: its progress is fresh, not stalled.
+    heads.set(`${PR_REPO}#7`, { headSha: HEAD, runId: rerun.runId, progressedAt: Date.now() });
     const before = creates.length;
     // The ready webhook on the same head must skip, never start a second live run.
     expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("skipped");
@@ -848,6 +849,54 @@ describe("autoRunPullRequest: no duplicate run on ready_for_review of a head wit
     const before = creates.length;
     expect(await autoRunPullRequestIdempotent(PR, { workflow: wf, index })).toBe("skipped");
     expect(creates.length).toBe(before);
+    expect(runs.size).toBe(1);
+  });
+});
+
+describe("autoRunPullRequest: #1446 review fixes", () => {
+  it("a completed GREEN run + an edited body still starts a new run, never skips", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    runs.get(first.runId)!.status = "complete"; // finished GREEN
+    expect(await autoRunPullRequest({ ...PR, edited: true }, { workflow: wf, index })).toBe("started");
+    expect(runs.size).toBe(2); // the finished run + the fresh -e run
+    expect(runs.get(first.runId)!.status).toBe("complete");
+  });
+
+  it("a stalled live run (no progress for the window) is not trusted: ready_for_review starts a fresh run and ends it", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index, heads } = fakeIndex();
+    const T1 = 1_700_000_000_000;
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    runs.get(first.runId)!.status = "complete";
+    const rerun = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1 + 1);
+    // The -r run is live but hung: its progress is past the stall window.
+    heads.set(`${PR_REPO}#7`, { headSha: HEAD, runId: rerun.runId, progressedAt: T1 - GATE_STALL_MS });
+    expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("started");
+    expect(terminated).toEqual([rerun.runId]);
+    expect(runs.size).toBe(3);
+  });
+
+  it("a retired live run (progressedAt -1) is not trusted: ready_for_review starts a fresh run and ends it", async () => {
+    const { wf, runs, terminated } = fakeWorkflow();
+    const { index, heads } = fakeIndex();
+    const T1 = 1_700_000_000_000;
+    const first = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    runs.get(first.runId)!.status = "complete";
+    const rerun = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1 + 1);
+    heads.set(`${PR_REPO}#7`, { headSha: HEAD, runId: rerun.runId, progressedAt: -1 });
+    expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("started");
+    expect(terminated).toEqual([rerun.runId]);
+    expect(runs.size).toBe(3);
+  });
+
+  it("ready_for_review on a head whose run already FINISHED reuses it, never a duplicate", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    runs.get(await gateRunId(PR_REPO, HEAD))!.status = "complete";
+    expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("reused");
     expect(runs.size).toBe(1);
   });
 });

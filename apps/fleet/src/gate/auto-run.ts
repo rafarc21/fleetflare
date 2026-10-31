@@ -105,13 +105,11 @@ export function pullRequestAutoRun(body: string, env: GateRunnerSwitches): PullR
     pull_request?: { number?: unknown; draft?: unknown; head?: { sha?: unknown }; base?: { sha?: unknown } };
   };
   if (typeof e.action !== "string" || !AUTO_RUN_ACTIONS.has(e.action)) return null;
-  // #1446: an edit re-runs ONLY for a BASE change — GitHub sends a `changes`
-  // object naming what moved. A title or body edit no longer re-runs: the
-  // head sha is unchanged, and the run's own re-read of title/body before its
-  // verdict (#1176) already re-checks those on the SAME head, so a title/body
-  // edit needs no fresh run of its own. A base move re-runs because the gated
-  // base differs, so the prior verdict no longer applies (#1214 round 2).
-  if (e.action === "edited" && e.changes?.base === undefined) return null;
+  // #1176: an edit fires only for a title, body or BASE change — GitHub sends a
+  // `changes` object naming what moved. Any other edit (labels, ...) is the
+  // dedupe case for the unchanged head sha. A base move (#1214 round 2) re-runs:
+  // the gated base differs, so the prior verdict no longer applies.
+  if (e.action === "edited" && e.changes?.title === undefined && e.changes?.body === undefined && e.changes?.base === undefined) return null;
   const pr = e.pull_request;
   const repo = e.repository?.full_name;
   if (pr === undefined || typeof repo !== "string" || typeof pr.number !== "number") return null;
@@ -439,7 +437,11 @@ export async function autoRunPullRequest(pr: PullRequestAutoRun, deps: AutoRunDe
     return "started";
   }
   const latest = await deps.index.latest(pr.repo, pr.pr);
+  // #1446: a live run that is STALLED (or retired, progressedAt -1) is not a
+  // healthy gate of the head — it would block ready_for_review forever. Fall
+  // through to startGateRun, which starts a fresh run and ends the hung one.
   if (pr.reopened !== true && latest !== null && latest.headSha === pr.headSha
+    && !isStalled(latest, Date.now())
     && isLiveStatus(await statusOf(deps.workflow, latest.runId))) {
     console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: skipped (live run ${latest.runId})`);
     return "skipped";
@@ -465,7 +467,11 @@ export async function autoRunPullRequestIdempotent(pr: PullRequestAutoRun, deps:
     return "started";
   }
   const latest = await deps.index.latest(pr.repo, pr.pr);
+  // #1446: a live run that is STALLED (or retired, progressedAt -1) is not a
+  // healthy gate of the head — it would block ready_for_review forever. Fall
+  // through to startGateRun, which starts a fresh run and ends the hung one.
   if (pr.reopened !== true && latest !== null && latest.headSha === pr.headSha
+    && !isStalled(latest, Date.now())
     && isLiveStatus(await statusOf(deps.workflow, latest.runId))) {
     console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: skipped (live run ${latest.runId})`);
     return "skipped";
