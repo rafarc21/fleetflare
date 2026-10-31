@@ -554,6 +554,16 @@ describe("sweepStalledRuns: a terminated run still carrying a pending head is re
     expect(h.posts).toEqual([]);
     expect(h.head()?.progressedAt).toBe(-1);
   });
+
+  it("a terminated run with an id-less 'running (' pending is the replacing run's marker, never reconciled (#1385)", async () => {
+    const h = harness({
+      runs: { "gate-x": "terminated" },
+      headStatus: async () => ({ state: "pending", description: "running (edited title/body recheck)" }),
+    });
+    expect(await h.sweep(T0 + GATE_STALL_MS)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.posts).toEqual([]);
+    expect(h.head()?.progressedAt).toBe(-1);
+  });
 });
 
 // #1343 MED6: the watchdog lists a run's results under the `shard-` prefix,

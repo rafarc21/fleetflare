@@ -6,6 +6,8 @@
 // fails red (#1132).
 import type { Env } from "../env";
 import { autoRunPullRequest, autoRunPullRequestIdempotent, type GateRunIndex, type GateRunRecord, type PullRequestAutoRun } from "./auto-run";
+import { getPullRequestHeadSha } from "../github/api";
+import { repoTokenMinter } from "../github/auth";
 import { postGateStatus } from "./status-post";
 import { realStatusPort } from "./status-post-env";
 import type { StalledRun, WatchdogIndex } from "./watchdog";
@@ -95,11 +97,27 @@ function pendingPost(env: Env, description: string) {
  *  ends its still-live run. One best-effort attempt; the failure is swallowed in
  *  recordRun (the new run still starts and posts its own verdict), so this only
  *  logs. */
-function supersededPost(env: Env) {
+export function supersededPost(env: Env) {
   return async (repo: string, oldHeadSha: string, description: string): Promise<void> => {
     await postGateStatus(realStatusPort(env), repo, oldHeadSha, { state: "error", description }).catch((err: unknown) => {
       console.error(`gate auto-run ${repo} ${oldHeadSha.slice(0, 8)}: superseded status post failed`, err);
     });
+  };
+}
+
+/** #1385: whether `headSha` is still the PR's live head, so a stale out-of-order
+ *  delivery never marks the real head superseded. Fail-closed: a read that
+ *  throws is treated as not-current (the supersede post is skipped), never a
+ *  wrong head marked terminal. */
+export function currentHeadCheck(env: Env) {
+  return async (repo: string, pr: number, headSha: string): Promise<boolean> => {
+    try {
+      const live = await getPullRequestHeadSha(await repoTokenMinter(env)(repo), repo, pr);
+      return live === headSha;
+    } catch (err) {
+      console.error(`gate auto-run ${repo}#${pr}: current-head read failed`, err);
+      return false;
+    }
   };
 }
 
@@ -125,6 +143,7 @@ export async function autoRunFromEnv(env: Env, pr: PullRequestAutoRun): Promise<
       index: d1RunIndex(env.DB),
       postPending: pendingPost(env, pr.edited === true ? "running (edited title/body recheck)" : "running (fresh gate run)"),
       postSuperseded: supersededPost(env),
+      isCurrentHead: currentHeadCheck(env),
     });
     console.log(`gate auto-run ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: ${outcome}`);
   } catch (err) {
@@ -147,6 +166,7 @@ export async function drainPendingGateRuns(env: Env): Promise<void> {
         index: d1RunIndex(env.DB),
         postPending: pendingPost(env, pr.edited === true ? "running (edited title/body recheck)" : "running (fresh gate run)"),
         postSuperseded: supersededPost(env),
+        isCurrentHead: currentHeadCheck(env),
       });
       console.log(`gate drain release ${pr.repo}#${pr.pr} ${pr.headSha.slice(0, 8)}: ${outcome}`);
       // Remove only after the run started: a crash mid-loop keeps the rest queued.

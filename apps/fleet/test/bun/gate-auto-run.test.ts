@@ -361,6 +361,38 @@ describe("startGateRun: a superseded head gets a terminal error verdict (#1385)"
       postSuperseded(posts));
     expect(posts).toEqual([]);
   });
+
+  it("an out-of-order delivery whose head is no longer current posts nothing (isCurrentHead false)", async () => {
+    const { wf } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const posts: { repo: string; headSha: string; description: string }[] = [];
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index, () => T1, undefined,
+      postSuperseded(posts), async () => false);
+    expect(second.supersededRunId).toBeDefined();
+    expect(posts).toEqual([]);
+  });
+
+  it("a current head still posts (isCurrentHead true)", async () => {
+    const { wf } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const posts: { repo: string; headSha: string; description: string }[] = [];
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index, () => T1, undefined,
+      postSuperseded(posts), async () => true);
+    expect(posts).toEqual([{ repo: PR_REPO, headSha: HEAD, description: `superseded by ${BASE.slice(0, 8)}` }]);
+  });
+
+  it("a failed current-head read is fail-closed: no post, the new run still starts", async () => {
+    const { wf } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const posts: { repo: string; headSha: string; description: string }[] = [];
+    const second = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index, () => T1, undefined,
+      postSuperseded(posts), async () => { throw new Error("github down"); });
+    expect(second.supersededRunId).toBeDefined();
+    expect(posts).toEqual([]);
+  });
 });
 
 // #1085 (refs #715): a manual start (`fleet gate run`, /studio/gate/start)
@@ -379,6 +411,17 @@ describe("startManualGateRun: reattach to a live run, start fresh after a finish
     const out = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
     expect(out).toEqual({ runId: await gateRunId(PR_REPO, HEAD), reused: false, supersededRunId: undefined });
     expect(creates).toEqual([{ id: out.runId, params: { repo: PR_REPO, pr: 7 } }]);
+  });
+
+  it("a manual start of a new head posts 'superseded by' on the old live head (#1385)", async () => {
+    const { wf } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    const posts: { repo: string; headSha: string; description: string }[] = [];
+    const second = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: BASE }, index, () => T2,
+      async (repo, headSha, description) => { posts.push({ repo, headSha, description }); });
+    expect(second.supersededRunId).toBeDefined();
+    expect(posts).toEqual([{ repo: PR_REPO, headSha: HEAD, description: `superseded by ${BASE.slice(0, 8)}` }]);
   });
 
   for (const status of LIVE_STATUSES) {
