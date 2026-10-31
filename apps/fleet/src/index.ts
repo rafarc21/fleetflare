@@ -12,6 +12,7 @@ import { handleStudio, handleFleetSpawn } from "./studio/routes";
 import { listStudios } from "./studio/registry";
 import { getStudioStubForRow } from "./studio/profile";
 import { isWatchMinute, watchStoppedContainers } from "./studio/container-watch";
+import { autoParkSweepFromEnv } from "./studio/auto-park-env";
 import { handleBoard, handleFleetBoard } from "./board/routes";
 import { handleMemory } from "./memory/routes";
 import { handleFleetJunior } from "./junior/route";
@@ -267,6 +268,16 @@ async function handleScheduled(controller: ScheduledController, env: Env, ctx: E
         }
       }
     }
+  }
+
+  // Board #1448: auto-park a running studio whose only open task(s) are
+  // awaiting_merge and whose lead has sat idle past the configured budget.
+  // Same fail-closed posture as every other cron block: a board/DO hiccup
+  // skips that studio, never parks it blind.
+  try {
+    await autoParkSweepFromEnv(env, controller.scheduledTime ? new Date(controller.scheduledTime) : new Date());
+  } catch (err) {
+    console.error("auto-park sweep failed", err);
   }
 
   // Issue #95: every 5th minute, ask each stopped studio's DO whether its
