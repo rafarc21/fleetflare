@@ -78,14 +78,18 @@ describe("parseSummaryCounts: executed/skipped from a stored summary (#1449)", (
     expect(parseSummaryCounts("Tests 1 failed")).toBeNull();
   });
 
-  it("bun 'N pass, M fail': run = pass + fail, skipped 0", () => {
-    expect(parseSummaryCounts("1640 pass, 1 fail")).toEqual({ run: 1641, skipped: 0 });
-    expect(parseSummaryCounts("5 pass")).toEqual({ run: 5, skipped: 0 });
+  it("bun 'N pass, M fail': run = pass + fail, skipped unknown", () => {
+    expect(parseSummaryCounts("1640 pass, 1 fail")?.run).toBe(1641);
+    expect(parseSummaryCounts("1640 pass, 1 fail")?.skipped).toBeUndefined();
+    expect(parseSummaryCounts("5 pass")?.run).toBe(5);
+    expect(parseSummaryCounts("5 pass")?.skipped).toBeUndefined();
   });
 
-  it("bun skip lines are not stored, so a bun leg's skipped reads 0", () => {
-    expect(parseSummaryCounts("1640 pass, 1 fail, 2 skip")).toEqual({ run: 1641, skipped: 0 });
-    expect(parseSummaryCounts("0 pass, 0 fail")).toEqual({ run: 0, skipped: 0 });
+  it("bun skip lines are not stored, so a bun leg's skipped reads unknown, never 0", () => {
+    expect(parseSummaryCounts("1640 pass, 1 fail, 2 skip")?.run).toBe(1641);
+    expect(parseSummaryCounts("1640 pass, 1 fail, 2 skip")?.skipped).toBeUndefined();
+    expect(parseSummaryCounts("0 pass, 0 fail")?.run).toBe(0);
+    expect(parseSummaryCounts("0 pass, 0 fail")?.skipped).toBeUndefined();
   });
 
   it("nothing parseable -> null (never a fabricated count)", () => {
@@ -100,12 +104,20 @@ describe("verdictToStatusArgs: executed/skipped totals (#1449)", () => {
   const run = (state: "success" | "failure", results: (LegResult & { summary?: string })[]) =>
     verdictToStatusArgs({ state } as never, { expected: results.map((r) => r.leg), results, runId: RUN_ID });
 
-  it("a green roster appends 'tests N run, M skipped' when counts parse", () => {
+  it("a mixed bun+vitest roster omits the skipped clause (bun's skip is unknown)", () => {
     const args = run("success", [
       { leg: "lint", state: "success", summary: "5 pass" },
       { leg: "bun-1", state: "success", summary: "Tests  1 failed | 1640 passed | 2 skipped (1643)" },
     ]);
-    expect(args.description).toBe(`2/2 green; tests 1646 run, 2 skipped ${ID8}`);
+    expect(args.description).toBe(`2/2 green; tests 1646 run ${ID8}`);
+  });
+
+  it("a vitest-only roster prints its skipped count", () => {
+    const args = run("success", [
+      { leg: "vitest-1", state: "success", summary: "Tests  1 failed | 1640 passed | 2 skipped (1643)" },
+      { leg: "vitest-2", state: "success", summary: "Tests  12 skipped (4210)" },
+    ]);
+    expect(args.description).toBe(`2/2 green; tests 5839 run, 14 skipped ${ID8}`);
   });
 
   it("totals are conditional: no parseable summary keeps the legacy text byte-identical", () => {
@@ -118,7 +130,7 @@ describe("verdictToStatusArgs: executed/skipped totals (#1449)", () => {
       { leg: "lint", state: "success", summary: "5 pass" },
       { leg: "bun-1", state: "success", summary: "0 pass, 0 fail" },
     ]);
-    expect(args.description).toBe(`2/2 green; tests 5 run, 0 skipped; 1 leg ran 0 tests ${ID8}`);
+    expect(args.description).toBe(`2/2 green; tests 5 run; 1 leg ran 0 tests ${ID8}`);
     expect(args.state).toBe("success");
   });
 
@@ -128,7 +140,7 @@ describe("verdictToStatusArgs: executed/skipped totals (#1449)", () => {
       { leg: "vitest-1", state: "failure", description: "x", summary: "Tests  1 failed | 1393 passed (1394)" },
       { leg: "vitest-2", state: "success", summary: "1393 pass" },
     ]);
-    expect(args.description).toBe(`2/3 green; red: vitest-1; tests 2787 run, 0 skipped ${ID8}`);
+    expect(args.description).toBe(`2/3 green; red: vitest-1; tests 2787 run ${ID8}`);
   });
 
   it("totals never push the description past GitHub's 140-char cap", () => {

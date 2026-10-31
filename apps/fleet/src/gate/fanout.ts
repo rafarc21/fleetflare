@@ -73,14 +73,17 @@ function rosterDescription({ expected, results, runId }: RosterInput): string {
   return withLegList(head, names, tail);
 }
 
-/** Executed/skipped test counts parsed from one leg's stored summary. */
-export interface SummaryCounts { run: number; skipped: number }
+/** Executed/skipped test counts parsed from one leg's stored summary. `skipped`
+ *  is undefined when the format does not carry a skip count (bun stores only its
+ *  pass/fail lines), which is not the same as zero: printing "0 skipped" for a
+ *  count we cannot see would be a lie. */
+export interface SummaryCounts { run: number; skipped?: number }
 
 /** The executed/skipped counts from one stored summary line, or null when the
  *  line is not one of the two formats the container writes. vitest's total is
- *  the "(N)" — executed is that minus any "| K skipped". bun's has no total: run
- *  is pass+fail, and its skip line is not stored (the container keeps only the
- *  pass/fail lines), so a bun leg's skipped count reads 0. */
+ *  the "(N)" — executed is that minus any "| K skipped" (no such clause reads 0,
+ *  a genuine zero). bun's has no total: run is pass+fail, and its skip line is
+ *  not stored, so `skipped` stays undefined. */
 export function parseSummaryCounts(summary?: string): SummaryCounts | null {
   if (summary === undefined) return null;
   const line = summary.trim();
@@ -96,7 +99,7 @@ export function parseSummaryCounts(summary?: string): SummaryCounts | null {
   if (pass === null && fail === null) return null;
   const p = pass === null ? 0 : Number(pass[1]);
   const f = fail === null ? 0 : Number(fail[1]);
-  return { run: p + f, skipped: 0 };
+  return { run: p + f };
 }
 
 /** The totals for one expected leg, null when its result carries no summary or
@@ -106,9 +109,12 @@ function legCounts(leg: string, byLeg: Map<string, LegResult & { summary?: strin
   return summary === undefined ? null : parseSummaryCounts(summary);
 }
 
-/** The roster's test-count suffix: "; tests N run, M skipped" plus "; K leg ran
- *  0 tests" when a leg reports zero executed. Empty when no leg's summary parses
- *  — a run with no parseable counts keeps the legacy text byte-identical. */
+/** The roster's test-count suffix: "; tests N run[, M skipped]" plus "; K leg
+ *  ran 0 tests" when a leg reports zero executed. The skipped clause appears
+ *  only when EVERY parsed leg carries a skip count (vitest): a bun leg has no
+ *  stored skip line, so mixing it in hides the clause rather than sum a partial
+ *  total. Empty when no leg's summary parses — a run with no parseable counts
+ *  keeps the legacy text byte-identical. */
 function testCountsSuffix(expected: string[], byLeg: Map<string, LegResult & { summary?: string }>): string {
   const parsed: SummaryCounts[] = [];
   for (const leg of expected) {
@@ -117,9 +123,12 @@ function testCountsSuffix(expected: string[], byLeg: Map<string, LegResult & { s
   }
   if (parsed.length === 0) return "";
   const run = parsed.reduce((n, c) => n + c.run, 0);
-  const skipped = parsed.reduce((n, c) => n + c.skipped, 0);
+  const skipped = parsed.every((c) => c.skipped !== undefined)
+    ? parsed.reduce((n, c) => n + (c.skipped ?? 0), 0)
+    : undefined;
   const zeroLegs = expected.filter((leg) => legCounts(leg, byLeg)?.run === 0).length;
-  let suffix = `; tests ${run} run, ${skipped} skipped`;
+  let suffix = `; tests ${run} run`;
+  if (skipped !== undefined) suffix += `, ${skipped} skipped`;
   if (zeroLegs > 0) suffix += `; ${zeroLegs} leg${zeroLegs === 1 ? "" : "s"} ran 0 tests`;
   return suffix;
 }

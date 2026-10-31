@@ -56,7 +56,14 @@ async function readLegPlan(env: Env, runId: string): Promise<LegPlanRead> {
     // plan: "no result" stays ambiguous there, never a wrong "skipped".
     if (status.status === "errored" || status.status === "terminated") return { kind: "unknown" };
     if (status.status !== "complete") return { kind: "live" };
-    const out = status.output as { legs?: { leg?: unknown }[] } | undefined;
+    const out = status.output as { rerun?: unknown; legs?: { leg?: unknown }[] } | undefined;
+    // A run that handed off to its infra rerun (#1119) reports a `rerun` id and
+    // only the legs it itself ran (its `legs` may be the carried green subset,
+    // greenLegsOf), not the rerun's full plan. Its `legs` must never be read as
+    // "the plan": a planned leg missing from it is just a leg this run did not
+    // finish, not a skipped leg — "no result" stays ambiguous, never a wrong
+    // "skipped: not planned".
+    if (typeof out?.rerun === "string") return { kind: "unknown" };
     const legs = Array.isArray(out?.legs) ? out.legs : [];
     const planned = legs.map((l) => l.leg).filter((l): l is string => typeof l === "string");
     return { kind: "done", planned };

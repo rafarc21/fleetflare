@@ -223,6 +223,17 @@ describe("GET /studio/gate/log: skipped vs hung (#1449)", () => {
     expect(res.status).toBe(404);
     expect((await res.json() as { error: string }).error).toBe("no result for leg merge-tree");
   });
+
+  it("a run that handed off to a rerun never reads a planned leg as 'skipped: not planned'", async () => {
+    pulls();
+    const req = new Request(`https://worker/studio/gate/log?repo=${REPO}&pr=${PR}&leg=merge-tree&run=${RUN}`);
+    const res = await handleGateRoute(req, withWorkflow({
+      status: "complete",
+      output: { rerun: "rerun-gate-abcdef", legs: [{ leg: "vitest-1", state: "success" }] },
+    }));
+    expect(res.status).toBe(404);
+    expect((await res.json() as { error: string }).error).toBe("no result for leg merge-tree");
+  });
 });
 describe("GET /studio/gate/log --all (#1318)", () => {
   it("lists every attempt of a flaky leg, oldest first, each with status and first failing test", async () => {
