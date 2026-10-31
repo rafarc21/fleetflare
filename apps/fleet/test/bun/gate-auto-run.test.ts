@@ -8,7 +8,7 @@ import { describe, it, expect } from "bun:test";
 import { MAX_LEG_TIMEOUT_MIN } from "../../src/gate/config";
 import { legStepDeadlineMs, totalLegWallMs } from "../../src/gate/leg-run";
 import {
-  autoRunPullRequest, gateRunId, GATE_STALL_MS, markRunProgress, pullRequestAutoRun, startGateRun, startManualGateRun, startEditedGateRun, startEditedGateRunIdempotent,
+  autoRunPullRequest, autoRunPullRequestIdempotent, gateRunId, GATE_STALL_MS, markRunProgress, pullRequestAutoRun, startGateRun, startManualGateRun, startEditedGateRun, startEditedGateRunIdempotent,
   type GateRunIndex, type GateRunInstance, type GateRunRecord, type GateRunStarter, type PullRequestAutoRun,
 } from "../../src/gate/auto-run";
 import type { CarryGreen } from "../../src/gate/fanout";
@@ -115,18 +115,17 @@ describe("pullRequestAutoRun: which deliveries start a run", () => {
     expect(out).toEqual({ ...PR, edited: true });
   });
 
-  it("an edit of the title fires with edited:true and the same head sha", () => {
-    const out = pullRequestAutoRun(payload({ action: "edited", changes: { title: { from: "old" } } }), ON);
-    expect(out).toEqual({ ...PR, edited: true });
+  it("an edit of the title starts nothing (#1446: only a base change re-runs)", () => {
+    expect(pullRequestAutoRun(payload({ action: "edited", changes: { title: { from: "old" } } }), ON)).toBeNull();
   });
 
-  it("an edit of the body fires with edited:true", () => {
-    const out = pullRequestAutoRun(payload({ action: "edited", changes: { body: { from: "old" } } }), ON);
-    expect(out).toEqual({ ...PR, edited: true });
+  it("an edit of the body starts nothing (#1446)", () => {
+    expect(pullRequestAutoRun(payload({ action: "edited", changes: { body: { from: "old" } } }), ON)).toBeNull();
   });
 
-  it("an edit with neither a title nor a body change starts nothing", () => {
+  it("an edit with no base change starts nothing (labels, title, body, or none)", () => {
     expect(pullRequestAutoRun(payload({ action: "edited", changes: {} }), ON)).toBeNull();
+    expect(pullRequestAutoRun(payload({ action: "edited", changes: { title: { from: "old" }, body: { from: "old" } } }), ON)).toBeNull();
     expect(pullRequestAutoRun(payload({ action: "edited" }), ON)).toBeNull();
   });
 
@@ -749,11 +748,11 @@ describe("autoRunPullRequest: every gated PR starts a run; the Workflow decides 
     expect(creates).toEqual([{ id: await gateRunId(PR_REPO, HEAD), params: { repo: PR_REPO, pr: 7 } }]);
   });
 
-  it("the same head sha seen twice starts one run, the second reports reused", async () => {
+  it("the same head sha seen twice starts one run, the second is skipped (no duplicate)", async () => {
     const { wf, runs } = fakeWorkflow();
     const { index } = fakeIndex();
     expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("started");
-    expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("reused");
+    expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("skipped");
     expect(runs.size).toBe(1);
   });
 
@@ -773,6 +772,100 @@ describe("autoRunPullRequest: every gated PR starts a run; the Workflow decides 
     await autoRunPullRequest(PR, deps);
     expect(await autoRunPullRequest({ ...PR, headSha: THIRD }, deps)).toBe("started");
     expect(terminated).toEqual([await gateRunId(PR_REPO, HEAD)]);
+  });
+});
+
+describe("autoRunPullRequest: no duplicate run on ready_for_review of a head with a live run (#1446)", () => {
+  it("ready_for_review on a head with a LIVE run starts nothing, creates nothing new", async () => {
+    const { wf, runs, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    // The same head sha already has a live run (from a prior opened/synchronize).
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const liveRunId = await gateRunId(PR_REPO, HEAD);
+    expect(runs.get(liveRunId)!.status).toBe("running");
+    const before = creates.length;
+    const outcome = await autoRunPullRequest(PR, { workflow: wf, index });
+    expect(outcome).toBe("skipped");
+    expect(creates.length).toBe(before);
+    expect(runs.size).toBe(1);
+  });
+
+  it("ready_for_review on a head with a QUEUED run also skips", async () => {
+    const { wf, runs, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    runs.get(await gateRunId(PR_REPO, HEAD))!.status = "queued";
+    const before = creates.length;
+    expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("skipped");
+    expect(creates.length).toBe(before);
+    expect(runs.size).toBe(1);
+  });
+
+  it("ready_for_review on a NEW head still starts a run", async () => {
+    const { wf, runs, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const before = creates.length;
+    const outcome = await autoRunPullRequest({ ...PR, headSha: THIRD }, { workflow: wf, index });
+    expect(outcome).toBe("started");
+    expect(creates.length).toBe(before + 1);
+    expect(runs.size).toBe(2);
+  });
+
+  it("a live run under a DIFFERENT id (a manual -r rerun) is also skipped, not duplicated (#1446)", async () => {
+    const { wf, runs, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const T1 = 1_700_000_000_000;
+    // A manual rerun of a finished head starts a fresh -r run and records it as
+    // the PR's latest; the plain sha id stays free.
+    const manual = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1);
+    runs.get(manual.runId)!.status = "complete";
+    const rerun = await startManualGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index, () => T1 + 1);
+    expect(rerun.runId).not.toBe(await gateRunId(PR_REPO, HEAD));
+    expect(runs.get(rerun.runId)!.status).toBe("running");
+    const before = creates.length;
+    // The ready webhook on the same head must skip, never start a second live run.
+    expect(await autoRunPullRequest(PR, { workflow: wf, index })).toBe("skipped");
+    expect(creates.length).toBe(before);
+    expect(runs.size).toBe(2);
+  });
+
+  it("a reopen is never skipped, even with a live run of the same head", async () => {
+    const { wf, runs } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const first = await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const outcome = await autoRunPullRequest({ ...PR, reopened: true }, { workflow: wf, index });
+    expect(outcome).not.toBe("skipped");
+    expect(runs.size).toBe(2);
+    // The live base-id run is superseded by the reopen's fresh run.
+    expect(runs.get(first.runId)!.status).toBe("terminated");
+  });
+
+  it("the release path's idempotent auto-run skips the same way (#1446)", async () => {
+    const { wf, runs, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const before = creates.length;
+    expect(await autoRunPullRequestIdempotent(PR, { workflow: wf, index })).toBe("skipped");
+    expect(creates.length).toBe(before);
+    expect(runs.size).toBe(1);
+  });
+});
+
+describe("autoRunPullRequest: manual `fleet gate run` still forces a new run (#1446)", () => {
+  it("a live run of the same head does not stop a manual start (unchanged behavior)", async () => {
+    const { wf, runs, creates } = fakeWorkflow();
+    const { index } = fakeIndex();
+    const T1 = 1_700_000_000_000;
+    await startGateRun(wf, { repo: PR_REPO, pr: 7, headSha: HEAD }, index);
+    const before = creates.length;
+    // A manual start with carryGreen always starts fresh, live run or not.
+    const out = await startManualGateRun(
+      wf, { repo: PR_REPO, pr: 7, headSha: HEAD, carryGreen: { headSha: HEAD, baseSha: BASE, planFingerprint: "fp", legs: [] } }, index, () => T1,
+    );
+    expect(out.reused).toBe(false);
+    expect(creates.length).toBe(before + 1);
+    expect(runs.size).toBe(2);
   });
 });
 
