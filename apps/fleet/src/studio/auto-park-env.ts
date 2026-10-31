@@ -13,7 +13,10 @@ import { createComment } from "../board/api";
 import { repoTokenMinter } from "../github/auth";
 import { listStudios } from "./registry";
 import { getStudioStubForRow } from "./profile";
-import { autoParkSweep, DEFAULT_AUTO_PARK_IDLE_MINUTES, type AutoParkSweepDeps } from "./auto-park";
+import {
+  autoParkSweep, AUTO_PARK_ACTIVITY_STALE_MS, DEFAULT_AUTO_PARK_IDLE_MINUTES,
+  DEFAULT_MAX_BOARD_CALLS, DEFAULT_MAX_PARKS, type AutoParkSweepDeps,
+} from "./auto-park";
 import type { Env } from "../env";
 
 /**
@@ -37,6 +40,9 @@ export async function autoParkSweepFromEnv(env: Env, now: Date = new Date()): Pr
   const deps: AutoParkSweepDeps = {
     enabled: true,
     idleThresholdMs,
+    activityStaleMs: AUTO_PARK_ACTIVITY_STALE_MS,
+    maxBoardCalls: DEFAULT_MAX_BOARD_CALLS,
+    maxParks: DEFAULT_MAX_PARKS,
     now: () => now,
     listStudios: () => listStudios(env, now),
     openTasks: async (studio) => {
@@ -46,6 +52,20 @@ export async function autoParkSweepFromEnv(env: Env, now: Date = new Date()): Pr
       return result.value
         .filter((t) => t.open)
         .map((t) => ({ number: t.number, state: t.state }));
+    },
+    inFlight: async (studio) => {
+      // The DO's own status answer reports a destroy already in flight (its
+      // live call counter or the persisted DESTROYING_KEY marker) — the guard
+      // that keeps two overlapping cron ticks from calling destroyStudio on
+      // the same studio. Reads fresh observed too, but the sweep's activity
+      // gate already used the registry row; this is only the destroy marker.
+      try {
+        const detail = await getStudioStubForRow(env, studio).getStatusDetail();
+        return detail.destroyInFlight === true;
+      } catch (err) {
+        console.error(`auto-park: could not read in-flight marker for ${studio.id}`, err);
+        return true; // fail closed: cannot confirm no park in flight
+      }
     },
     park: async (studio) => {
       try {

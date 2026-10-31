@@ -6,7 +6,8 @@
 // network or a Durable Object.
 import { test, expect, describe } from "bun:test";
 import {
-  autoParkSweep, DEFAULT_AUTO_PARK_IDLE_MINUTES,
+  autoParkSweep, AUTO_PARK_ACTIVITY_STALE_MS, DEFAULT_AUTO_PARK_IDLE_MINUTES,
+  DEFAULT_MAX_BOARD_CALLS, DEFAULT_MAX_PARKS,
   type AutoParkOpenTask, type AutoParkSweepDeps,
 } from "../../src/studio/auto-park";
 import type { Activity } from "../../src/studio/activity";
@@ -46,29 +47,41 @@ function task(state: BoardTaskState | null, number = TASK): AutoParkOpenTask {
 interface World {
   enabled?: boolean;
   idleThresholdMs?: number;
+  activityStaleMs?: number;
+  maxBoardCalls?: number;
+  maxParks?: number;
   studios: StudioStatus[];
   /** open tasks per studio, or null = board read failed. */
   openTasks?: (studioId: string) => AutoParkOpenTask[] | null;
   park?: (studioId: string) => { ok: boolean; reason?: string };
+  inFlight?: (studioId: string) => boolean;
 }
 
 function fake(w: World) {
   const parks: string[] = [];
+  const boardCalls: string[] = [];
   const comments: { taskNumber: number; body: string }[] = [];
   const deps: AutoParkSweepDeps = {
     enabled: w.enabled ?? true,
     idleThresholdMs: w.idleThresholdMs ?? DEFAULT_AUTO_PARK_IDLE_MINUTES * MIN,
+    activityStaleMs: w.activityStaleMs ?? AUTO_PARK_ACTIVITY_STALE_MS,
+    maxBoardCalls: w.maxBoardCalls ?? DEFAULT_MAX_BOARD_CALLS,
+    maxParks: w.maxParks ?? DEFAULT_MAX_PARKS,
     now: () => NOW,
     listStudios: async () => w.studios,
-    openTasks: async (studio) => (w.openTasks ? w.openTasks(studio.id) : [task("awaiting_merge")]),
+    openTasks: async (studio) => {
+      boardCalls.push(studio.id);
+      return w.openTasks ? w.openTasks(studio.id) : [task("awaiting_merge")];
+    },
     park: async (studio) => {
       parks.push(studio.id);
       return w.park ? w.park(studio.id) : { ok: true };
     },
+    inFlight: w.inFlight ? async (studio) => w.inFlight!(studio.id) : undefined,
     comment: async (_studio, taskNumber, body) => { comments.push({ taskNumber, body }); },
     log: () => {},
   };
-  return { deps, parks, comments };
+  return { deps, parks, boardCalls, comments };
 }
 
 describe("auto-park sweep (#1448)", () => {
@@ -138,10 +151,62 @@ describe("auto-park sweep (#1448)", () => {
     expect(parks).toHaveLength(0);
   });
 
+  test("does not park when the idle observation is stale (ticker outage)", async () => {
+    const staleObservedAt = new Date(NOW.getTime() - AUTO_PARK_ACTIVITY_STALE_MS - 1000).toISOString();
+    const { deps, parks } = fake({
+      studios: [studio({
+        observed: { activity: { ...activity("idle", 45 * MIN), observedAt: staleObservedAt }, memberAlerts: null },
+      })],
+    });
+    const out = await autoParkSweep(deps);
+    expect(out[0].outcome).toBe("skipped");
+    expect(out[0].outcome === "skipped" && out[0].reason).toContain("stale");
+    expect(parks).toHaveLength(0);
+  });
+
+  test("checks activity before the board: a below-threshold idle studio never calls the board", async () => {
+    const { deps, boardCalls } = fake({
+      studios: [studio({ observed: { activity: activity("idle", 5 * MIN), memberAlerts: null } })],
+    });
+    const out = await autoParkSweep(deps);
+    expect(out[0].outcome).toBe("skipped");
+    expect(boardCalls).toHaveLength(0);
+  });
+
+  test("caps board calls per sweep", async () => {
+    const many = Array.from({ length: DEFAULT_MAX_BOARD_CALLS + 3 }, (_, i) =>
+      studio({ id: `acmeclient--pilot--${i}` }),
+    );
+    const { deps, boardCalls, parks } = fake({ studios: many, maxBoardCalls: DEFAULT_MAX_BOARD_CALLS });
+    const out = await autoParkSweep(deps);
+    expect(boardCalls.length).toBe(DEFAULT_MAX_BOARD_CALLS);
+    expect(parks.length).toBeLessThanOrEqual(DEFAULT_MAX_BOARD_CALLS);
+    expect(out.some((o) => o.outcome === "skipped" && o.reason === "board-call cap reached")).toBe(true);
+  });
+
+  test("caps parks per sweep", async () => {
+    const many = Array.from({ length: DEFAULT_MAX_PARKS + 3 }, (_, i) =>
+      studio({ id: `acmeclient--pilot--${i}` }),
+    );
+    const { deps, parks } = fake({ studios: many, maxParks: DEFAULT_MAX_PARKS });
+    const out = await autoParkSweep(deps);
+    expect(parks.length).toBe(DEFAULT_MAX_PARKS);
+    expect(out.filter((o) => o.outcome === "parked")).toHaveLength(DEFAULT_MAX_PARKS);
+    expect(out.some((o) => o.outcome === "skipped" && o.reason === "park cap reached")).toBe(true);
+  });
+
   test("does not park a studio that is not running", async () => {
     const { deps, parks } = fake({ studios: [studio({ state: "stopped" })] });
     const out = await autoParkSweep(deps);
     expect(out).toEqual([]);
+    expect(parks).toHaveLength(0);
+  });
+
+  test("does not park when a destroy is already in flight", async () => {
+    const { deps, parks } = fake({ studios: [studio()], inFlight: () => true });
+    const out = await autoParkSweep(deps);
+    expect(out[0].outcome).toBe("skipped");
+    expect(out[0].outcome === "skipped" && out[0].reason).toContain("in flight");
     expect(parks).toHaveLength(0);
   });
 

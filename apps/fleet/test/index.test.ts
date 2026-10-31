@@ -352,10 +352,15 @@ describe("scheduled() order (PR #109 review)", () => {
 describe("scheduled() auto-park glue (#1448)", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
-  const idleActivity = (minutes: number) => ({
+  // The cron passes controller.scheduledTime as `now`, so activity timestamps
+  // must be built against that same instant (a mismatch reads as stale).
+  const SCHEDULED_MS = Date.UTC(2026, 9, 31, 12, 40);
+
+  const idleActivity = (minutes: number, observedAgeMs = 0) => ({
     activity: {
-      state: "idle", since: new Date(Date.now() - minutes * 60_000).toISOString(),
-      anchored: true, observedAt: new Date().toISOString(), source: "pane", reason: null, membersTickingAt: null,
+      state: "idle", since: new Date(SCHEDULED_MS - minutes * 60_000).toISOString(),
+      anchored: true, observedAt: new Date(SCHEDULED_MS - observedAgeMs).toISOString(),
+      source: "pane", reason: null, membersTickingAt: null,
     },
     memberAlerts: null,
   });
@@ -387,6 +392,7 @@ describe("scheduled() auto-park glue (#1448)", () => {
       ok: true, value: [{ number: 99, url: "", title: "t", body: "", state: "awaiting_merge", labels: [], assignee: "acme--pilot", milestone: null, open: true, updatedAt: new Date().toISOString(), stale: false }],
     });
     const studioStub = {
+      getStatusDetail: async () => ({ id: "acme--pilot", state: "running", destroyInFlight: false }),
       destroyStudio: async (force: boolean, discardUnsynced: boolean, park: boolean) => {
         calls.push([force, discardUnsynced, park]);
         return { ok: true, status: {} };
@@ -397,6 +403,52 @@ describe("scheduled() auto-park glue (#1448)", () => {
     await worker.scheduled({ scheduledTime: Date.UTC(2026, 9, 31, 12, 40) } as any, fakeEnv, {} as any);
 
     expect(calls).toEqual([[false, false, true]]);
+  });
+
+  it("parks nothing when the sweep flag is off (env-off test)", async () => {
+    const parked: string[] = [];
+    await recordStudio(env, awaitingMergeRow("acme--pilot") as any);
+    const fakeEnv = { ...env, AGENT: fakeAgentReturning(null), FLEET_AUTO_PARK: "off", STUDIO: nsWith((id: string) => ({ destroyStudio: async () => { parked.push(id); return { ok: true, status: {} }; } })) };
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 9, 31, 12, 40) } as any, fakeEnv, {} as any);
+    expect(parked).toEqual([]);
+  });
+
+  it("parks nothing when the idle observation is stale (ticker outage)", async () => {
+    const parked: string[] = [];
+    await recordStudio(env, { ...awaitingMergeRow("acme--pilot"), observed: idleActivity(45, 60_000) } as any);
+    vi.spyOn(boardModule, "listTasks").mockResolvedValue({
+      ok: true, value: [{ number: 99, url: "", title: "t", body: "", state: "awaiting_merge", labels: [], assignee: "acme--pilot", milestone: null, open: true, updatedAt: new Date().toISOString(), stale: false }],
+    });
+    const fakeEnv = { ...env, AGENT: fakeAgentReturning(null), FLEET_AUTO_PARK: "on", STUDIO: nsWith((id: string) => ({ destroyStudio: async () => { parked.push(id); return { ok: true, status: {} }; } })) };
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 9, 31, 12, 40) } as any, fakeEnv, {} as any);
+    expect(parked).toEqual([]);
+  });
+
+  it("parks nothing when a destroy is already in flight", async () => {
+    const parked: string[] = [];
+    await recordStudio(env, awaitingMergeRow("acme--pilot") as any);
+    vi.spyOn(boardModule, "listTasks").mockResolvedValue({
+      ok: true, value: [{ number: 99, url: "", title: "t", body: "", state: "awaiting_merge", labels: [], assignee: "acme--pilot", milestone: null, open: true, updatedAt: new Date().toISOString(), stale: false }],
+    });
+    const fakeEnv = fakeEnvWithStudio({
+      getStatusDetail: async () => ({ id: "acme--pilot", state: "running", destroyInFlight: true }),
+      destroyStudio: async () => { parked.push("acme--pilot"); return { ok: true, status: {} }; },
+    });
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 9, 31, 12, 40) } as any, fakeEnv, {} as any);
+    expect(parked).toEqual([]);
+  });
+
+  it("parks nothing when AUTO_PARK_IDLE_MINUTES is garbage", async () => {
+    const parked: string[] = [];
+    await recordStudio(env, awaitingMergeRow("acme--pilot") as any);
+    vi.spyOn(boardModule, "listTasks").mockResolvedValue({
+      ok: true, value: [{ number: 99, url: "", title: "t", body: "", state: "awaiting_merge", labels: [], assignee: "acme--pilot", milestone: null, open: true, updatedAt: new Date().toISOString(), stale: false }],
+    });
+    // Garbage minutes fall back to the 30-minute default; 45 idle is still past it,
+    // so this asserts the parse-to-default path by parking (not a crash/not-parse).
+    const fakeEnv = { ...env, AGENT: fakeAgentReturning(null), FLEET_AUTO_PARK: "on", AUTO_PARK_IDLE_MINUTES: "banana", STUDIO: nsWith((id: string) => ({ getStatusDetail: async () => ({ id, state: "running", destroyInFlight: false }), destroyStudio: async () => { parked.push(id); return { ok: true, status: {} }; } })) };
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 9, 31, 12, 40) } as any, fakeEnv, {} as any);
+    expect(parked).toEqual(["acme--pilot"]);
   });
 });
 

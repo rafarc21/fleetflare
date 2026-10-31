@@ -16,6 +16,26 @@ import type { StudioStatus } from "./types";
 /** Env AUTO_PARK_IDLE_MINUTES default: park after a lead sits idle this long. */
 export const DEFAULT_AUTO_PARK_IDLE_MINUTES = 30;
 
+/** Per-sweep cap on board reads: the sweep iterates running studios, but a
+ *  board read per studio is the expensive leg, so past this many candidates
+ *  the remaining studios are skipped, not read. Bounds the sweep's GitHub
+ *  budget independent of how many studios are running. */
+export const DEFAULT_MAX_BOARD_CALLS = 10;
+
+/** Per-sweep cap on parks: a park is a multi-minute destroy (probe, sync,
+ *  rescue-push, harvest), so at most this many studios are parked per tick.
+ *  The rest wait for the next minute's sweep — see the in-flight guard. */
+export const DEFAULT_MAX_PARKS = 2;
+
+/** An `Activity.observedAt` older than this is a frozen pane, not evidence of
+ *  idleness. 3 × the 30s ship-tick cadence (ship-cadence.ts) — the same
+ *  "three consecutive ticks with no fresh observation is too stale to trust"
+ *  shape activity.ts's HOOK_STALE_BUDGET_MS and readiness-format.ts's
+ *  ACTIVITY_DO_STALE_SECONDS both derive from that cadence. A ticker outage
+ *  freezes `observedAt`, and without this the frozen idle would park a live
+ *  lead. */
+export const AUTO_PARK_ACTIVITY_STALE_MS = 3 * 30 * 1000;
+
 /** One open board task this studio is assigned. `state` null = drifted. */
 export interface AutoParkOpenTask {
   number: number;
@@ -32,6 +52,12 @@ export interface AutoParkSweepDeps {
   enabled: boolean;
   /** Idle budget in ms before a park (env AUTO_PARK_IDLE_MINUTES, default 30). */
   idleThresholdMs: number;
+  /** An idle observation older than this is frozen, not idle. */
+  activityStaleMs: number;
+  /** Per-sweep cap on board reads. */
+  maxBoardCalls: number;
+  /** Per-sweep cap on parks. */
+  maxParks: number;
   now: () => Date;
   listStudios: () => Promise<StudioStatus[]>;
   /** Every OPEN task this studio is assigned, or null when the board read
@@ -41,6 +67,10 @@ export interface AutoParkSweepDeps {
   /** Park exactly like `fleet destroy <id> --park`: rescue first, resumable.
    *  `ok: false` is a refusal (e.g. rescue could not confirm unsynced work). */
   park: (studio: StudioStatus) => Promise<{ ok: boolean; reason?: string }>;
+  /** True while a destroy/park is already in flight for this studio (the
+   *  persisted DESTROYING_KEY marker, read from the studio DO). Overlapping
+   *  cron ticks must never call destroyStudio twice on the same studio. */
+  inFlight?: (studio: StudioStatus) => Promise<boolean>;
   /** Log the park as a board comment on the task that was awaiting merge.
    *  The wiring resolves the board repo from the studio row (repoSlug ??
    *  AGENT_REPO), same as openTasks. */
@@ -49,11 +79,15 @@ export interface AutoParkSweepDeps {
 }
 
 /**
- * One sweep. For each running studio: confirm every open task is
- * `awaiting_merge` (none working/submitted/input_required/drifted), confirm
- * the lead has been idle past `idleThresholdMs`, then park. A refused park is
- * reported, never retried in the same pass — the next minute's sweep sees it
- * again, same as the container-watch/watchdog cron blocks.
+ * One sweep. For each running studio: confirm the lead's idle observation is
+ * FRESH and held past `idleThresholdMs` (the cheap, network-free check —
+ * ordered first so a studio that is not yet idle costs no board read), then
+ * confirm every open task is `awaiting_merge` (none working/submitted/
+ * input_required/drifted), confirm no park is already in flight, then park.
+ * A refused park is reported, never retried in the same pass — the next
+ * minute's sweep sees it again, same as the container-watch/watchdog cron
+ * blocks. Board reads and parks are capped per sweep so a fleet-wide outage
+ * (or a mass of idle studios) cannot turn one tick into unbounded work.
  */
 export async function autoParkSweep(deps: AutoParkSweepDeps): Promise<AutoParkOutcome[]> {
   if (!deps.enabled) return [];
@@ -61,9 +95,36 @@ export async function autoParkSweep(deps: AutoParkSweepDeps): Promise<AutoParkOu
   const now = deps.now();
   const studios = await deps.listStudios();
   const outcomes: AutoParkOutcome[] = [];
+  let boardCalls = 0;
+  let parks = 0;
 
   for (const s of studios) {
     if (s.state !== "running") continue;
+
+    // Activity first: free, and the below-threshold case must never pay a
+    // board read (review MUST #2). A stale observation is a frozen pane,
+    // never trusted as idle (review MUST #1).
+    const act = s.observed?.activity ?? null;
+    if (act === null || act.state !== "idle") {
+      outcomes.push({ studioId: s.id, outcome: "skipped", reason: `lead is ${act?.state ?? "unknown"}, not idle` });
+      continue;
+    }
+    const observedAgeMs = now.getTime() - Date.parse(act.observedAt);
+    if (!Number.isFinite(observedAgeMs) || observedAgeMs > deps.activityStaleMs) {
+      outcomes.push({ studioId: s.id, outcome: "skipped", reason: "idle observation is stale" });
+      continue;
+    }
+    const idleMs = now.getTime() - Date.parse(act.since);
+    if (!Number.isFinite(idleMs) || idleMs < deps.idleThresholdMs) {
+      outcomes.push({ studioId: s.id, outcome: "skipped", reason: "lead idle below threshold" });
+      continue;
+    }
+
+    if (boardCalls >= deps.maxBoardCalls) {
+      outcomes.push({ studioId: s.id, outcome: "skipped", reason: "board-call cap reached" });
+      continue;
+    }
+    boardCalls += 1;
 
     const tasks = await deps.openTasks(s);
     if (tasks === null) {
@@ -83,16 +144,16 @@ export async function autoParkSweep(deps: AutoParkSweepDeps): Promise<AutoParkOu
       continue;
     }
 
-    const act = s.observed?.activity ?? null;
-    if (act === null || act.state !== "idle") {
-      outcomes.push({ studioId: s.id, outcome: "skipped", reason: `lead is ${act?.state ?? "unknown"}, not idle` });
+    if (deps.inFlight && (await deps.inFlight(s))) {
+      outcomes.push({ studioId: s.id, outcome: "skipped", reason: "park already in flight" });
       continue;
     }
-    const idleMs = now.getTime() - Date.parse(act.since);
-    if (!Number.isFinite(idleMs) || idleMs < deps.idleThresholdMs) {
-      outcomes.push({ studioId: s.id, outcome: "skipped", reason: "lead idle below threshold" });
+
+    if (parks >= deps.maxParks) {
+      outcomes.push({ studioId: s.id, outcome: "skipped", reason: "park cap reached" });
       continue;
     }
+    parks += 1;
 
     const park = await deps.park(s);
     if (!park.ok) {
