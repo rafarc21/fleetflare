@@ -139,6 +139,33 @@ describe("verdictToStatusArgs: executed/skipped totals (#1449)", () => {
     expect(args.description.length).toBeLessThanOrEqual(140);
     expect(args.description.endsWith(`(run ${RUN_ID})`)).toBe(true);
   });
+
+  // The real run id is 'gate-<16hex>-<40sha>' (68 chars), and a rerun of it is
+  // longer still. The counts + zero-exec flag can outgrow the tail even after
+  // the name list collapses to '+N more' — the counts must drop whole, never
+  // the run tag (which is what `fleet gate watch` copies).
+  const RERUN_ID = `rerun-gate-${"a".repeat(16)}-${"b".repeat(40)}`;
+
+  it("a red roster whose counts overflow drops the counts, keeping the run tag", () => {
+    const expected = Array.from({ length: 30 }, (_, i) => `vitest-${i + 1}-long-name`);
+    const results = expected.map((l, i): LegResult & { summary?: string } => ({
+      leg: l, state: i < 3 ? "failure" : "success", description: "x",
+      summary: i < 3 ? "Tests 4210 passed | 12 skipped (4222)" : "0 pass, 0 fail",
+    }));
+    const args = verdictToStatusArgs({ state: "failure", description: "x" }, { expected, results, runId: RERUN_ID });
+    expect(args.description.length).toBeLessThanOrEqual(140);
+    expect(args.description.endsWith(`(run ${RERUN_ID})`)).toBe(true);
+  });
+
+  it("a green all-zero roster that overflows still ends with the run tag", () => {
+    const expected = Array.from({ length: 24 }, (_, i) => `vitest-${i + 1}`);
+    const results = expected.map((l): LegResult & { summary?: string } => ({
+      leg: l, state: "success", summary: "0 pass, 0 fail",
+    }));
+    const args = verdictToStatusArgs({ state: "success" }, { expected, results, runId: RERUN_ID });
+    expect(args.description.length).toBeLessThanOrEqual(140);
+    expect(args.description.endsWith(`(run ${RERUN_ID})`)).toBe(true);
+  });
 });
 
 // #1343 LOW: a DID-NOT-RUN browser leg is named in the roster, not just "red".

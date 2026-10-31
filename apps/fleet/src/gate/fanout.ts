@@ -47,19 +47,30 @@ function rosterDescription({ expected, results, runId }: RosterInput): string {
   // in the roster, and a leg that ran zero tests is flagged. The container's
   // summary is the only source (the image is frozen): vitest's "Tests ... (N)"
   // and bun's "N pass, M fail". Totals ride BETWEEN the roster body and the run
-  // tag, so the tag (what `fleet gate watch` copies) always ends the text — the
-  // existing truncation in withLegList still applies.
+  // tag, so the tag (what `fleet gate watch` copies) always ends the text.
   const counts = testCountsSuffix(expected, byLeg);
+  let head: string;
+  let names: string[];
+  let tail: string;
   if (red.length > 0) {
     // #1343 LOW: a DID-NOT-RUN leg reads "<leg> (DID-NOT-RUN)", not the bare
     // generic "<leg>" — the zero-spec reason is the headline, never hidden
     // behind "red: e2e".
-    const names = red.map((leg) => byLeg.get(leg)?.description?.startsWith("DID-NOT-RUN") ? `${leg} (DID-NOT-RUN)` : leg);
-    return withLegList(`${green}/${total} green; red: `, names, `${counts} ${runTag}`);
+    head = `${green}/${total} green; red: `;
+    names = red.map((leg) => byLeg.get(leg)?.description?.startsWith("DID-NOT-RUN") ? `${leg} (DID-NOT-RUN)` : leg);
+    tail = ` ${runTag}`;
+  } else {
+    const flaky = expected.filter((leg) => byLeg.get(leg)?.description?.startsWith("flaky:"));
+    head = flaky.length === 0 ? `${total}/${total} green` : `${total}/${total} green (${flaky.length} flaky: `;
+    names = flaky;
+    tail = flaky.length === 0 ? ` ${runTag}` : `) ${runTag}`;
   }
-  const flaky = expected.filter((leg) => byLeg.get(leg)?.description?.startsWith("flaky:"));
-  if (flaky.length === 0) return `${total}/${total} green${counts} ${runTag}`;
-  return withLegList(`${total}/${total} green (${flaky.length} flaky: `, flaky, `)${counts} ${runTag}`);
+  // The counts are the first thing dropped when the roster is long, then the
+  // leg names (collapsed by withLegList). The run tag is never cut: GitHub 422s
+  // a status over 140 chars, and the tag is what `fleet gate watch` copies.
+  const withCounts = withLegList(head, names, `${counts}${tail}`);
+  if (withCounts.length <= MAX_STATUS_CHARS) return withCounts;
+  return withLegList(head, names, tail);
 }
 
 /** Executed/skipped test counts parsed from one leg's stored summary. */
