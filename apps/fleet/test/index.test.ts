@@ -5,6 +5,7 @@ import * as registryModule from "../src/studio/registry";
 import * as stateModule from "../src/state";
 import * as modelQualityCronModule from "../src/llm/model-quality-cron";
 import * as boardApiModule from "../src/board/api";
+import * as boardModule from "../src/board/board";
 import * as githubAuthModule from "../src/github/auth";
 import worker from "../src/index";
 import { getFlag } from "../src/state";
@@ -342,6 +343,63 @@ describe("scheduled() order (PR #109 review)", () => {
 // wiring (deps.collect/deps.post -> the real GitHub-facing functions) rather
 // than re-testing runDailyModelQuality's own demote/post logic, which
 // test/llm.model-quality-cron.test.ts already covers directly.
+// Board #1448: the auto-park glue in handleScheduled (autoParkSweepFromEnv).
+// Same seam every other cron block uses — listTasks spied on its module
+// namespace, and a hand-built STUDIO namespace returning a stub whose
+// destroyStudio records its args — so the wiring (off switch, the park RPC
+// shape) is proven without a real board or DO. The decision rules themselves
+// are covered by test/bun/auto-park.test.ts.
+describe("scheduled() auto-park glue (#1448)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const idleActivity = (minutes: number) => ({
+    activity: {
+      state: "idle", since: new Date(Date.now() - minutes * 60_000).toISOString(),
+      anchored: true, observedAt: new Date().toISOString(), source: "pane", reason: null, membersTickingAt: null,
+    },
+    memberAlerts: null,
+  });
+
+  function awaitingMergeRow(id: string) {
+    return {
+      id, state: "running", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
+      burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: "acme/example",
+      observed: idleActivity(45),
+    };
+  }
+
+  function fakeEnvWithStudio(stub: Record<string, unknown>) {
+    return { ...env, AGENT: fakeAgentReturning(null), STUDIO: nsWith(stub), FLEET_AUTO_PARK: "on" };
+  }
+
+  it("off by default: FLEET_AUTO_PARK unset parks nothing", async () => {
+    const parked: string[] = [];
+    await recordStudio(env, awaitingMergeRow("acme--pilot") as any);
+    const fakeEnv = { ...env, AGENT: fakeAgentReturning(null), STUDIO: nsWith((id: string) => ({ destroyStudio: async () => { parked.push(id); return { ok: true, status: {} }; } })) };
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 9, 31, 12, 40) } as any, fakeEnv, {} as any);
+    expect(parked).toEqual([]);
+  });
+
+  it("parks an idle awaiting_merge studio via destroyStudio(false, false, true)", async () => {
+    const calls: [boolean, boolean, boolean][] = [];
+    await recordStudio(env, awaitingMergeRow("acme--pilot") as any);
+    vi.spyOn(boardModule, "listTasks").mockResolvedValue({
+      ok: true, value: [{ number: 99, url: "", title: "t", body: "", state: "awaiting_merge", labels: [], assignee: "acme--pilot", milestone: null, open: true, updatedAt: new Date().toISOString(), stale: false }],
+    });
+    const studioStub = {
+      destroyStudio: async (force: boolean, discardUnsynced: boolean, park: boolean) => {
+        calls.push([force, discardUnsynced, park]);
+        return { ok: true, status: {} };
+      },
+    };
+    const fakeEnv = fakeEnvWithStudio(studioStub);
+
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 9, 31, 12, 40) } as any, fakeEnv, {} as any);
+
+    expect(calls).toEqual([[false, false, true]]);
+  });
+});
+
 describe("scheduled() model quality glue (#717, Task 6)", () => {
   it("wires collectOutcomes and postModelQualityComment into runDailyModelQuality", async () => {
     vi.spyOn(githubAuthModule, "repoTokenMinter").mockReturnValue(async () => "glue-test-token");
