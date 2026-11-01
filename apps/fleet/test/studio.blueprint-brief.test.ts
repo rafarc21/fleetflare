@@ -100,6 +100,11 @@ describe("the real shipped blueprint files parse cleanly", () => {
     // "~10-line" system prompt, per the task brief — a loose sanity bound,
     // not a byte-exact pin (the prose itself is free to be edited later).
     expect(role.prompt.split("\n").length).toBeGreaterThanOrEqual(8);
+    // Issue #1463: pin effort high so a pilot lead launches with --effort high
+    // regardless of claude CLI default drift. The cto->max default is the only
+    // other role-defaulted path; an explicit frontmatter value must win here.
+    expect(role.effort).toBe("high");
+    expect(roleBringupEnv(role).ROLE_EFFORT).toBe("high");
   });
 
   it("the real pilot.md's role is declared in the real fleet.json's roles", () => {

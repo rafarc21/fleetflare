@@ -1,5 +1,6 @@
 ---
 name: pilot
+effort: high
 skills: []
 mcp: [codebase-memory]
 allowedTools: Bash(git *) Bash(gh *) Bash(bun *) Bash(fleet *) Edit Write

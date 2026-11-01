@@ -2,6 +2,7 @@
 name: web-studio
 title: Web Studio
 lead: Web Designer
+effort: high
 skills: [frontend-design, qa, landing-page, pricing-page, web-perf, unsplash-integration, ego-browser]
 secrets: [UNSPLASH_KEY]
 mcp: [codebase-memory]
