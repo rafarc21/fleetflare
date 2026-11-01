@@ -30,6 +30,18 @@ describe("authored studio files", () => {
     expect(release.mcp).toEqual(["codebase-memory"]);
     expect(maestro.mcp).toEqual([]);
   });
+
+  // Issue #1463: pin effort high on web-studio only. release-studio and maestro
+  // stay unpinned (maestro keeps its own downstream "max" default, release-studio
+  // keeps claude's default).
+  test("web-studio pins effort: high; release-studio and maestro stay unpinned", () => {
+    const web = parseStudioFile(readFileSync(join(ROOT, "web-studio", "studio.md"), "utf8"));
+    const release = parseStudioFile(readFileSync(join(ROOT, "release-studio", "studio.md"), "utf8"));
+    const maestro = parseStudioFile(readFileSync(join(ROOT, "maestro", "studio.md"), "utf8"));
+    expect(web.effort).toBe("high");
+    expect(release.effort).toBeUndefined();
+    expect(maestro.effort).toBeUndefined();
+  });
 });
 
 // Board issue #160. Every authored file that already states the #98 one-heavy-
