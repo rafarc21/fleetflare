@@ -1369,6 +1369,9 @@ fi
 fleet_mcp_config() {
   local file="$1" names="$2"
   if [ -z "$names" ]; then
+    if [ -f "$file" ]; then
+      echo "studio-bringup: mcp name list empty -- removing $file (claude launches without MCP)" >&2
+    fi
     rm -f "$file"
     return 0
   fi

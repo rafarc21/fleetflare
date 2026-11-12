@@ -116,6 +116,19 @@ describe("bring-up MCP config — roles honor mcp: (issue #276)", () => {
     expect(out.args).toEqual([]);
   });
 
+  test("empty name list with an existing config logs the removal", () => {
+    const home = fakeHome();
+    bringUp({ ROLE_MCP: "playwright" }, home);
+    const out = bringUp({ ROLE_MCP: "" }, home);
+    expect(out.stderr).toContain("mcp name list empty -- removing");
+    expect(out.stderr).toContain("fleet-mcp.json");
+  });
+
+  test("empty name list with no existing config stays silent", () => {
+    const out = bringUp({});
+    expect(out.stderr).not.toContain("mcp name list empty");
+  });
+
   test("an unknown server name is skipped loudly, known ones still land", () => {
     const out = bringUp({ ROLE_MCP: "nope,playwright" });
     expect(Object.keys(out.config?.mcpServers ?? {})).toEqual(["playwright"]);
