@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
 import {
   chunkKey, sessionLatestKey, sessionDailyKey, advance, shouldRotate,
+  contextBundleKey,
   ROTATION_THRESHOLD_BYTES,
   TRANSCRIPT_PULL_MAX, HOT_TAIL_BYTES, SESSION_SINGLE_READ_MAX,
   SESSION_SPLIT_PART, SESSION_TOTAL_MAX, SESSION_SUBAGENT_RAW_BUDGET,
@@ -58,6 +59,16 @@ describe("sessionLatestKey / sessionDailyKey", () => {
   // two studios' session archives onto one key.
   it("a second instance gets its own key, never colliding with instance 1", () => {
     expect(sessionLatestKey("websites--pilot--2")).not.toBe(sessionLatestKey("websites--pilot"));
+  });
+});
+
+describe("contextBundleKey (#1282)", () => {
+  it("builds the fixed .context bundle key under the session prefix", () => {
+    expect(contextBundleKey("websites--pilot")).toBe("sessions/websites--pilot/context.tar.gz");
+  });
+
+  it("a second instance gets its own context key, same as the session keys", () => {
+    expect(contextBundleKey("websites--pilot--2")).not.toBe(contextBundleKey("websites--pilot"));
   });
 });
 

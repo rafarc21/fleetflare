@@ -54,7 +54,7 @@ import {
 import { sessionStats, newestMark, SessionArchiveFormatError, type SessionMark } from "./burn";
 import { MEMORY_INDEX_PATH } from "../memory/index-file";
 import { memoryIndexPrompt } from "../memory/prompt";
-import { sessionLatestKey, SESSION_SINGLE_READ_MAX } from "./archive";
+import { sessionLatestKey, contextBundleKey, SESSION_SINGLE_READ_MAX } from "./archive";
 import { runInstallCacheRestore, type InstallCacheRestoreDeps } from "./install-cache";
 import {
   computeSessionVerdict, bringupObservationCmd, parseBringupObservation, getObserved,
@@ -2315,6 +2315,58 @@ export async function runSessionRestore(
 }
 
 /**
+ * Issue #1282 — restore `.context/` from R2 after a container replacement,
+ * the counterpart to do.ts's `contextSync` ship. Placed AFTER the clone (the
+ * caller runs it post-clone, beside the session restore) so the checkout the
+ * `.context` dir lives under already exists, and BEFORE bring-up so the lead
+ * reads its restored evidence on its first turn.
+ *
+ * Simpler than runSessionRestore by design: the bundle is ONE small tar, not a
+ * multi-part session archive, so it is fetched with `deps.r2Get`, untarred
+ * straight into the checkout with one `sbExec`, and a corrupt/missing bundle
+ * is a no-op ("none") — never a degradation. Absent `r2Get`/`sbExec` returns
+ * "not-attempted", same convention runSessionRestore's own header states.
+ *
+ * `repo` is the parsed work-repo slug — the SAME segment the ship-side
+ * `contextBundleCmd(repo)` tars under, so a restore can never land `.context`
+ * in a different checkout than the one that shipped it.
+ */
+export async function runContextRestore(
+  deps: ProvisionDeps, id: string, repo: string,
+): Promise<"restored" | "none" | "not-attempted" | "failed"> {
+  if (!deps.r2Get || !deps.writeFile) return "not-attempted";
+  let bytes: Uint8Array<ArrayBuffer> | null;
+  try {
+    bytes = await deps.r2Get(contextBundleKey(id));
+  } catch (err) {
+    console.error(`studio ${id}: context restore read failed`, err instanceof Error ? err.message : err);
+    return "failed";
+  }
+  if (!bytes) return "none";
+  const dir = `/workspace/${repo}`;
+  // A fresh checkout has no .context to clobber; a restart of a live
+  // container DOES — so the restore untars over it, replacing whatever the
+  // (old, pre-swap) container left with the R2 bundle, the same "R2 wins"
+  // the session restore already asserts. The tar's members are relative to
+  // the checkout (contextBundleCmd tars `-C <dir> .context`), so untarring
+  // into the checkout reproduces the original layout.
+  // Write the bundle to a staging path, untar, delete — matching
+  // runSessionRestore's own write-then-verify pattern.
+  try {
+    await deps.writeFile("/tmp/fleet-context-restore.tar.gz", bytes);
+    const untar = await deps.sbExec(`mkdir -p ${dir} && tar -xzf /tmp/fleet-context-restore.tar.gz -C ${dir} && rm -f /tmp/fleet-context-restore.tar.gz`);
+    if (untar.code !== 0) {
+      console.error(`studio ${id}: context restore untar failed (${untar.code}): ${untar.stderr.slice(0, 300)}`);
+      return "failed";
+    }
+    return "restored";
+  } catch (err) {
+    console.error(`studio ${id}: context restore failed`, err instanceof Error ? err.message : err);
+    return "failed";
+  }
+}
+
+/**
  * Issue #94: which snapshot to restore. `latest` whenever it holds a session:
  * a keeper is older by construction, and `latest` lacking the keeper's newest
  * file most often means the studio moved on to a new session (no line count
@@ -2727,6 +2779,16 @@ export async function runProvision(
     // argument — see `ProvisionDeps.onRestoreOutcome`'s own doc comment.
     deps.onRestoreOutcome?.(restoreOutcome, restoreSource);
 
+    // Issue #1282: restore .context/ right after the session restore, same
+    // own-try/catch posture — a context restore failure must never degrade
+    // provisioning any more than a session-restore failure does.
+    try {
+      const ctx = await runContextRestore(deps, id, cfg.repo);
+      if (ctx === "failed") console.error(`studio ${id}: context restore failed`);
+    } catch (err) {
+      console.error(`studio ${id}: context restore failed, proceeding without it`, err instanceof Error ? err.message : String(err));
+    }
+
     // Board #350: same own-try/catch posture as the session restore just
     // above, right after it and before bring-up per the design's own stated
     // restore point — a failure here (network, an expired/invalid presign,
@@ -3104,6 +3166,19 @@ export async function runRestart(
     // Board #250: `restoreSource` forwarded the same way — see that call
     // site's own comment.
     deps.onRestoreOutcome?.(restoreOutcome, restoreSource);
+
+    // Issue #1282: restore .context/ on restart too, same gating as the
+    // install-cache restore just below — only when a clone actually landed,
+    // so a refusal never writes context into a checkout that may not hold
+    // this studio's repo.
+    if (cloned && repo !== null) {
+      try {
+        const ctx = await runContextRestore(deps, status.id, repo);
+        if (ctx === "failed") console.error(`studio ${status.id}: context restore failed on restart`);
+      } catch (err) {
+        console.error(`studio ${status.id}: context restore failed on restart, continuing without it`, err instanceof Error ? err.message : String(err));
+      }
+    }
 
     // Board #350: same call, same placement, as runProvision's identical
     // block above — gated on `cloned`, not merely `repo`/`workRepoSlug`
