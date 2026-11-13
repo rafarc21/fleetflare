@@ -436,6 +436,37 @@ describe("closeOwnAttachTerminal — board task #1468 item 2", () => {
   });
 });
 
+describe("cmdAttach closes its own terminal on BOTH exit paths (board task #1468 item 2)", () => {
+  const src = readFileSync(join(import.meta.dir, "../../cli/fleet.ts"), "utf8");
+
+  function body(sig: string): string {
+    const start = src.indexOf(sig);
+    expect(start).toBeGreaterThan(-1);
+    return src.slice(start, src.indexOf("\n}\n", start));
+  }
+
+  test("the refusal exit (exit 1) closes its own terminal before process.exit", () => {
+    const fn = body("export async function cmdAttach(");
+    const refusal = src.indexOf("await closeOwnAttachTerminal(id, defaultOrcaDeps());");
+    const exit1 = src.indexOf("process.exit(1);", refusal);
+    // Both call sites precede their own exit; the first is the refusal path.
+    expect(refusal).toBeGreaterThan(-1);
+    expect(exit1).toBeGreaterThan(refusal);
+    expect(fn).toContain("closeOwnAttachTerminal");
+  });
+
+  test("the clean detach exit (exit 0) closes its own terminal before process.exit", () => {
+    const fn = body("export async function cmdAttach(");
+    // The LAST closeOwnAttachTerminal call is the detach path's; its exit 0
+    // is the final statement of cmdAttach.
+    const lastClose = src.lastIndexOf("await closeOwnAttachTerminal(id, defaultOrcaDeps());");
+    const exit0 = src.indexOf("process.exit(0);", lastClose);
+    expect(lastClose).toBeGreaterThan(-1);
+    expect(exit0).toBeGreaterThan(lastClose);
+    expect(fn).toContain("process.exit(0);");
+  });
+});
+
 
 // ---------------------------------------------------------------------------
 // Board #175: a lost registry entry must still find its row by a STABLE key
