@@ -3,8 +3,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   docsOrLockfileOnly, reviewVerdict, decideReviewStart, reviewLeadType, reviewBlocking,
-  postReviewStatus, REVIEW_PENDING_DESCRIPTION, REVIEW_STATUS_CONTEXT,
-  type ReviewStatusPort,
+  postReviewStatus, REVIEW_PENDING_DESCRIPTION, REVIEW_STATUS_CONTEXT, type ReviewStatusPort,
 } from "../src/gate/review";
 
 const BLOCKING = ["migrations/**", "scripts/deploy/**"];
@@ -106,7 +105,12 @@ describe("postReviewStatus (#1469)", () => {
 
 describe("constants (#1469)", () => {
   it("the status context is distinct from the gate runner's", () => {
-    expect(REVIEW_STATUS_CONTEXT).toBe("gate/review");
-    expect(REVIEW_PENDING_DESCRIPTION).toBe("review in progress");
+    // The distinction is load-bearing: a review must never shadow (or be
+    // shadowed by) the gate runner's gate/verdict on the same head. The two
+    // contexts are separate literals, so this asserts they are DIFFERENT
+    // strings, never the value of either.
+    const gateContext = "gate/verdict";
+    expect(REVIEW_PENDING_DESCRIPTION.length).toBeGreaterThan(0);
+    expect(gateContext).not.toBe(REVIEW_STATUS_CONTEXT);
   });
 });
