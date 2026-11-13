@@ -410,6 +410,23 @@ describe("closeOwnAttachTerminal — board task #1468 item 2", () => {
     expect(f.calls).toEqual([]);
   });
 
+  test("closes an attach terminal whose title is the #153 OSC live form, not bare \"fleet\"", async () => {
+    // At exit time the attach terminal's title is `fleet <id> · live` (the
+    // #153 OSC title), not the bare process-name "fleet" a just-created
+    // terminal reports. isAttachTerminal accepts all four forms; this pins
+    // the one that actually exists when cmdAttach exits.
+    const f = fake({
+      "worktree list": worktreesWithPath({ displayName: "studio-websites--maestro", path: "/fake/orca/studio-websites--maestro" }),
+      "terminal list": terminalEntries(
+        { handle: "term_me", title: attachTitle("websites--maestro", "live"), connected: true, worktreeId: "repo-websites::/w/studio-websites--maestro" },
+      ),
+    });
+    f.deps.env = { ...ORCA_ENV, ORCA_WORKTREE_ID: "repo-websites::/w/studio-websites--maestro" };
+    await closeOwnAttachTerminal("websites--maestro", f.deps);
+    const close = f.calls.find((c) => c[0] === "terminal" && c[1] === "close");
+    expect(close).toEqual(["terminal", "close", "--terminal", "term_me", "--json"]);
+  });
+
   test("a wedged orca call degrades to one log line, never a throw", async () => {
     const f = fake({ "worktree list": { ok: false, stdout: "", stderr: "", timedOut: true } });
     f.deps.env = { ...ORCA_ENV, ORCA_WORKTREE_ID: "repo-websites::/w/studio-websites--maestro" };
