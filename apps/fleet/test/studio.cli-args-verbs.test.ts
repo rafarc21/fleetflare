@@ -840,3 +840,27 @@ describe("gate start / gate watch", () => {
       .toEqual({ cmd: "gate-log", pr: 715, leg: "vitest-6", evidence: true });
   });
 });
+
+// #1469: `fleet review <pr> [--axis spec|standards|security]`. One top-level
+// word; --axis may appear before or after the PR number.
+describe("review", () => {
+  it("review <pr> parses the PR number with no axis", () => {
+    expect(parseCliArgs(["review", "715"])).toEqual({ cmd: "review", pr: 715 });
+  });
+  it("review --axis <axis> <pr> and review <pr> --axis <axis> parse the same", () => {
+    expect(parseCliArgs(["review", "--axis", "security", "715"])).toEqual({ cmd: "review", pr: 715, axis: "security" });
+    expect(parseCliArgs(["review", "715", "--axis", "standards"])).toEqual({ cmd: "review", pr: 715, axis: "standards" });
+  });
+  it("review with no PR or a non-numeric PR -> usage", () => {
+    expect(parseCliArgs(["review"]).cmd).toBe("usage");
+    expect(parseCliArgs(["review", "abc"]).cmd).toBe("usage");
+  });
+  it("review with an unknown axis -> usage", () => {
+    expect(parseCliArgs(["review", "715", "--axis", "style"]).cmd).toBe("usage");
+    expect(parseCliArgs(["review", "--axis", "", "715"]).cmd).toBe("usage");
+  });
+  it("review's help text names --axis and the one-reviewer cap", () => {
+    expect(VERBS["review"].args).toContain("--axis");
+    expect(VERBS["review"].summary).toContain("gate/review");
+  });
+});

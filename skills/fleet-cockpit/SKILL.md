@@ -66,7 +66,7 @@ never for the deliverable, which goes to a worker. It arms monitors in its own
 session, never inside a subagent. Full rule: `~/.claude/CLAUDE.md`
 `## Agent Dispatch`.
 
-Roles: `maestro`, `web-studio`, `release-studio`, `pilot`, `scratch`.
+Roles: `maestro`, `web-studio`, `release-studio`, `pilot`, `scratch`, `reviewer` (read-only, spawned by `fleet review <pr>`, #1469).
 
 **One studio per role per repo.** The id is `<repo>--<role>`, so there is
 exactly one `acme-os--web-studio`. "One studio per task" and "every task on a

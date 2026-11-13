@@ -241,3 +241,32 @@ Operator steps for the one-bundle-per-run path. Off by default, in two switches.
 3. **Range parity rule:** opt in only a repo whose legs read no git history beyond the checked-out tree. A leg that reads history by range, such as `git log origin/<base>..HEAD`, `git diff origin/<base>...HEAD`, or a range-based secret scan, sees a different range on the snapshot: the snapshot has no `origin` remote, four shallow commits and no tags. Such a repo stays off until range parity exists, that is, legs get an `origin` remote with the base ref and the full PR range, so those commands match a clone. The config parser does not reject these repos. The opt-in is the guard.
 4. **R2 lifecycle:** add a rule on the archive bucket that expires objects under the prefix `gate-bundles/` after 1 day. Bundles live under their own top-level prefix because a lifecycle rule matches a plain prefix only, and `gate/*/*/bundles/` cannot be expressed.
 5. **Cap:** bundles over `MAX_BUNDLE_BYTES` (256 MiB) are not uploaded, and every leg clones. Measured snapshot sizes, local `file://` runs of the PR's own `runGate`: a small repo 6.4 MiB, a mid-size consumer 181 MiB (fits), a large consumer 311 MiB (over the cap, so its legs clone). The cap is unchanged; raising it is a separate decision.
+
+## Cloud PR review (#1469)
+
+`fleet review <pr>` spawns a read-only reviewer studio that reviews a PR's
+diff at its current head and posts a `gate/review` commit status. Per-repo
+opt-in, independent of the gate runner.
+
+1. **Opt-in:** a repo's gate block in `fleet.json` sets a `review` field:
+   `"review": { "enabled": true, "blockingPaths": ["migrations/**"], "lead": "claude" }`.
+   Absent = disabled, and `fleet review` is a no-op. `lead` is
+   `claude|deepseek|glm|kimi` (default `claude`); the OSS keys share the
+   glm-led route. `blockingPaths` are the only diffs a failed review fails
+   the merge gate on (security, migrations, deploy); everything else is
+   advisory. The block is read at the repo's default branch, never the PR
+   head — a PR cannot edit its own review config.
+2. **One reviewer per head sha.** The `gate/review` status on the head is
+   the dedup key: a head already carrying a non-pending status is never
+   re-reviewed. Re-review only on a new head sha.
+3. **Skips:** docs-only and lockfile-only diffs post a neutral status
+   without spawning a reviewer. `gate/review` is a separate context from
+   `gate/verdict` — a review never blocks a merge the gate itself certified,
+   except on a blocking path it failed.
+4. **The reviewer is read-only** (`fleet/blueprint/roles/reviewer.md`): no
+   Edit/Write, read-only git, no push, no merge, no secrets, no test run.
+   It reads the diff and repo files, posts one findings comment, and reports
+   a result envelope the Worker reads back to post the verdict.
+5. **Cap:** 15 minutes per review, no loop. A review that never reports
+   stays pending; the CLI polls to the cap and exits non-zero rather than
+   blocking forever.

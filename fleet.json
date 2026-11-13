@@ -3,7 +3,7 @@
     "repo": "rafarc21/fleetflare",
     "ref": "main"
   },
-  "roles": ["pilot", "scratch", "maestro", "web-studio", "release-studio"],
+  "roles": ["pilot", "scratch", "maestro", "web-studio", "release-studio", "reviewer"],
   "instance_type": "standard-2",
   "gate": {
     "install": "cd apps/fleet && bun install --frozen-lockfile",

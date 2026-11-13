@@ -172,7 +172,7 @@ describe("the real shipped blueprint files parse cleanly", () => {
   it("fleet/blueprint/org.json declares the operator and pilot edges, no dead cto edge (board issue #10)", () => {
     const org = JSON.parse(env.TEST_ORG_JSON) as { edges: Record<string, string[]> };
     expect(org.edges.operator)
-      .toEqual(["pilot", "scratch", "maestro", "web-studio", "release-studio"]);
+      .toEqual(["pilot", "scratch", "maestro", "web-studio", "release-studio", "reviewer"]);
     expect(org.edges.pilot).toEqual(["scratch"]);
     expect(org.edges.cto).toBeUndefined();
   });

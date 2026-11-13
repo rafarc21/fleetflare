@@ -27,9 +27,13 @@ import {
 } from "./spawn";
 import { reachRepo, repoTokenMinter, mintRepoToken } from "../github/auth";
 import type { RepoReachFetch } from "../github/reach";
-import { fetchRepoFile, getDefaultBranch } from "../github/api";
-import { resolveWorkRepo, parseRepoSlug, type WorkRepoDeps } from "./repo";
-import { briefPromptResolver, assignedBriefResolver } from "../board/routes";
+import {
+  fetchRepoFile, getDefaultBranch, compareFiles, getPullRequest, getPullRequestHeadSha, postCommitStatus, getCommitContextStatus,
+} from "../github/api";
+import { resolveWorkRepo, parseRepoSlug, repoIdSegment, type WorkRepoDeps } from "./repo";
+import { briefPromptResolver, assignedBriefResolver, githubBoardApi } from "../board/routes";
+import { createTask, showTask } from "../board/board";
+import { findLatestResultEnvelope } from "../board/verify";
 import { resolveProjectCard } from "../directus/card";
 import { redactSecrets } from "./redact";
 import { resolveOpsRepo } from "../ops-repo";
@@ -54,6 +58,8 @@ import { writeFleetAccountUsage, readOneAccountUsage } from "./account-usage-sto
 import { countWorkerExceptions } from "../exceptions";
 import { handleModelsRoute } from "../llm/models-route";
 import { handleGateRoute } from "../gate/routes";
+import { handleReviewRoute, type ReviewBoard, type ReviewPort, type ReviewRunIndex } from "../gate/review-route";
+import { REVIEW_STATUS_CONTEXT } from "../gate/review";
 import { parseGateRunnerRepos } from "../gate/config";
 import { loadGateConfig } from "../gate/load-config";
 import { fleetJsonReader } from "../gate/fleet-json";
@@ -431,6 +437,86 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
  *  provision route already uses for its optional body. */
 function spawnBody(req: Request): Promise<unknown> {
   return req.json().catch(() => ({}));
+}
+
+/** #1469: the D1 review-runs index, one row per (repo, pr). */
+function reviewRunIndex(db: D1Database): ReviewRunIndex {
+  return {
+    async latest(repo, pr) {
+      const row = await db
+        .prepare("SELECT head_sha AS headSha, studio_id AS studioId, task FROM review_runs WHERE repo = ? AND pr = ?")
+        .bind(repo.toLowerCase(), pr)
+        .first<{ headSha: string; studioId: string; task: number }>();
+      return row ?? null;
+    },
+    async record(repo, pr, run) {
+      await db
+        .prepare(
+          "INSERT INTO review_runs (repo, pr, head_sha, studio_id, task) VALUES (?, ?, ?, ?, ?) "
+            + "ON CONFLICT (repo, pr) DO UPDATE SET head_sha = excluded.head_sha, studio_id = excluded.studio_id, task = excluded.task",
+        )
+        .bind(repo.toLowerCase(), pr, run.headSha, run.studioId, run.task)
+        .run();
+    },
+  };
+}
+
+/** #1469: the real ReviewPort over GitHub + the fleet repo's gate config. */
+function reviewPort(env: Env): ReviewPort {
+  const mint = repoTokenMinter(env);
+  return {
+    pr: async (repo, pr) => {
+      const token = await mint(repo);
+      const pull = await getPullRequest(token, repo, pr);
+      if (pull.headSha === "") throw new Error(`read pull ${repo}#${pr} head failed: no head sha`);
+      return { headSha: pull.headSha, baseSha: pull.baseRef };
+    },
+    changedFiles: async (repo, base, head) => (await compareFiles(await mint(repo), repo, base, head)).files,
+    reviewConfig: async (repo) => {
+      const branch = await getDefaultBranch(await mint(repo), repo);
+      const cfg = await loadGateConfig({ repo, fleetRepo: env.AGENT_REPO, configSha: branch }, fleetJsonReader(mint));
+      return cfg?.review ?? null;
+    },
+    status: {
+      mintToken: mint,
+      post: (token, repo, sha, state, description) =>
+        postCommitStatus(token, repo, sha, state, REVIEW_STATUS_CONTEXT, description),
+      get: (token, repo, sha) => getCommitContextStatus(token, repo, sha, REVIEW_STATUS_CONTEXT),
+    },
+  };
+}
+
+/** #1469: the real ReviewBoard over the board api. */
+function reviewBoard(env: Env): ReviewBoard {
+  const api = githubBoardApi(env);
+  return {
+    createTask: async (repo, brief) => {
+      const result = await createTask(api, repo, brief);
+      if (!result.ok) throw new Error(`review task create failed: ${result.message}`);
+      return result.value.number;
+    },
+    latestEnvelopeStatus: async (repo, task) => {
+      const shown = await showTask(api, repo, task);
+      if (!shown.ok) return undefined;
+      return findLatestResultEnvelope(shown.value.comments)?.payload.status;
+    },
+  };
+}
+
+/** #1469: the reviewer spawn — the operator's own /studio/spawn, reusing the
+ *  existing spawn path (same org chart, same role check, same provision). */
+function reviewSpawn(env: Env, fetchFile: BlueprintFetch, resolveBrief: BriefResolve) {
+  return async (repo: string, role: string, leadType: "claude" | "glm", task: number): Promise<string> => {
+    const deps = spawnDeps(env, fetchFile, resolveBrief);
+    const segment = repoIdSegment(repo.split("/")[1] ?? repo);
+    if (segment === null) throw new Error(`review: repo ${repo} cannot name a reviewer studio`);
+    const parent: SpawnParent = { id: OPERATOR_ID, role: OPERATOR_ID, repo: segment, repoSlug: repo };
+    const res = await runSpawn(deps, parent, { role, repo, leadType, task });
+    if (res.status !== 200) throw new Error(`review spawn failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
+    const status = (await res.json()) as { id?: string };
+    if (typeof status.id !== "string") throw new Error("review spawn answered without a studio id");
+    return status.id;
+  };
 }
 
 /**
@@ -1148,6 +1234,22 @@ export async function handleStudio(
     || url.pathname.startsWith("/studio/gate/evidence")
   ) {
     return handleGateRoute(req, env);
+  }
+
+  /**
+   * #1469 cloud PR review: /studio/review/start, /studio/review/status. Same
+   * Access-gated lane as /studio/gate/* above — handleReviewRoute carries no
+   * auth of its own, so this mount point is the only guard. The gate runner
+   * flag does NOT gate this: review is a per-repo fleet.json opt-in, read at
+   * the repo's default branch, independent of FLEET_GATE_RUNNER.
+   */
+  if (url.pathname === "/studio/review/start" || url.pathname === "/studio/review/status") {
+    return handleReviewRoute(req, {
+      port: reviewPort(env),
+      board: reviewBoard(env),
+      spawn: reviewSpawn(env, fetchFile, resolveBrief),
+      index: reviewRunIndex(env.DB),
+    });
   }
 
   /**
