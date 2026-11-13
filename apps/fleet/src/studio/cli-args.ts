@@ -312,6 +312,9 @@ export type CliCommand =
   | { cmd: "gate-watch"; pr: number; runId: string }
   | { cmd: "gate-protect"; repo: string }
   | { cmd: "gate-log"; pr: number; leg: string; runId?: string; full?: boolean; all?: boolean; evidence?: boolean }
+  // #1469: `fleet review <pr> [--axis spec|standards|security]` — the cloud PR
+  // review verb (read-only reviewer studio + gate/review commit status).
+  | { cmd: "review"; pr: number; axis?: "spec" | "standards" | "security" }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -550,6 +553,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help" | "verb-h
   "gate-log": {
     args: "log <pr> <leg> [--run <runId>] [--full] [--all] [--evidence]",
     summary: "Read one gate leg's final R2 output for <pr> via the Worker (no Cloudflare creds needed) and print its failing-test lines first; --full prints the whole kept tail, --all lists every attempt of the leg (first try + retry) with its first failing test, --evidence prints the leg's evidence (screens, console JSON) links. --run names a specific run; the default is the PR's latest.",
+  },
+  review: {
+    args: "<pr> [--axis spec|standards|security]",
+    summary: "Review one PR's diff at its current head with a read-only reviewer studio and post a gate/review commit status (success/failure/neutral). Opt-in per repo (fleet.json gate block `review`); a repo without it is a no-op. One reviewer per head sha, 15 min cap, no test run. Re-review only on a new head sha.",
   },
 };
 
@@ -1641,6 +1648,23 @@ export function parseCliArgs(argv: string[]): CliCommand {
         return { cmd: "gate-log", pr: Number(positional[0]), leg: positional[1], ...(runId !== undefined ? { runId } : {}), ...(full ? { full: true } : {}), ...(all ? { all: true } : {}), ...(evidence ? { evidence: true } : {}) };
       }
       return usage("usage: fleet gate [run [--failed-only] <pr> | start <pr> | watch <pr> <runId> | log <pr> <leg>]");
+    }
+    // #1469: `fleet review <pr> [--axis spec|standards|security]`. One top-level
+    // word. The --axis may appear before or after the PR number, same shape
+    // `fleet gate run --failed-only` already uses.
+    case "review": {
+      const rest = argv.slice(1);
+      const axisIdx = rest.indexOf("--axis");
+      const axis = axisIdx >= 0 ? rest[axisIdx + 1] : undefined;
+      const positional = rest.filter((a) => a !== "--axis" && a !== axis);
+      if (positional.length !== 1 || !/^\d+$/.test(positional[0])) {
+        return usage("usage: fleet review [--axis spec|standards|security] <pr>");
+      }
+      if (axisIdx >= 0 && (axis !== "spec" && axis !== "standards" && axis !== "security")) {
+        return usage("usage: fleet review [--axis spec|standards|security] <pr>");
+      }
+      const parsedAxis = axisIdx >= 0 ? (axis as "spec" | "standards" | "security") : undefined;
+      return { cmd: "review", pr: Number(positional[0]), ...(parsedAxis === undefined ? {} : { axis: parsedAxis }) };
     }
     default:
       return { cmd: "usage", message: CLI_USAGE };

@@ -1,6 +1,6 @@
 {
   "edges": {
-    "operator": ["pilot", "scratch", "maestro", "web-studio", "release-studio"],
+    "operator": ["pilot", "scratch", "maestro", "web-studio", "release-studio", "reviewer"],
     "pilot": ["scratch"],
     "maestro": ["web-studio", "release-studio"]
   },

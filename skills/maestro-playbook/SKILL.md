@@ -328,6 +328,14 @@ even on a hit). Security-adjacent work — rescue, failover, deploy, migration
 become follow-up issues); an ordinary small PR merges on green plus a clean
 scan.
 
+**Cloud review first (#1469):** `fleet review <pr>` is the default review
+path — it spawns a read-only reviewer studio in a cloud container and posts a
+`gate/review` commit status, off the Mac's RAM/disk and Claude slots. Local
+subagents are the fallback, only when the repo is not opted in (`review` in
+its gate block) or a human needs to see the diff. One reviewer per head sha,
+15 min cap; `gate/review` is separate from `gate/verdict`, so an advisory
+review never blocks a merge the gate itself certified.
+
 **Gate:** one serialized queue under a lock file, detached so it survives
 the end of your own turn. **Gate the MERGE RESULT, not the branch**:
 merge-tree, then commit-tree with `origin/main` as the parent, then gate

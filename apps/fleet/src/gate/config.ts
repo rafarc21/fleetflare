@@ -82,6 +82,42 @@ export interface GateLeg {
   browser?: boolean;
 }
 
+/** The lead model a reviewer studio boots on (#1469). "claude" is the default
+ *  (operator update 2026-11-13: Claude slots are scarce but review quality is
+ *  the point); the other three ride the glm-lead route's model pool. */
+export const REVIEW_LEADS = ["claude", "deepseek", "glm", "kimi"] as const;
+export type ReviewLead = (typeof REVIEW_LEADS)[number];
+export const DEFAULT_REVIEW_LEAD: ReviewLead = "claude";
+
+/** #1469: a repo's opt-in cloud PR review. Absent = disabled (`fleet review`
+ *  is a no-op). `blockingPaths` are the only diffs a review verdict fails the
+ *  merge gate on (security, migrations, deploy); everything else is advisory.
+ *  Same `/**`-prefix shape as pathRules. */
+export interface ReviewConfig {
+  enabled: boolean;
+  blockingPaths: string[];
+  lead: ReviewLead;
+}
+
+/** Parses one gate block's optional `review` field. Null on any malformed
+ *  entry, the same fail-closed contract as the block itself. Absent is
+ *  `{enabled:false}` — disabled, never a throw. */
+export function parseReviewConfig(raw: unknown): ReviewConfig | null {
+  if (raw === undefined || raw === null) return { enabled: false, blockingPaths: [], lead: DEFAULT_REVIEW_LEAD };
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const enabled = r.enabled === undefined ? true : r.enabled;
+  if (typeof enabled !== "boolean") return null;
+  const blockingPaths = r.blockingPaths ?? [];
+  if (!isStringArray(blockingPaths)) return null;
+  let lead: ReviewLead = DEFAULT_REVIEW_LEAD;
+  if (r.lead !== undefined) {
+    if (typeof r.lead !== "string" || !(REVIEW_LEADS as readonly string[]).includes(r.lead)) return null;
+    lead = r.lead as ReviewLead;
+  }
+  return { enabled, blockingPaths, lead };
+}
+
 export interface GateConfig {
   install: string;
   legs: GateLeg[];
@@ -105,6 +141,8 @@ export interface GateConfig {
   bundle?: boolean;
   /** The block's image key (#1066). Absent means DEFAULT_GATE_IMAGE at run time. */
   image?: string;
+  /** #1469: the repo's cloud PR review opt-in. Absent means disabled. */
+  review?: ReviewConfig;
 }
 
 function isStringArray(v: unknown): v is string[] {
@@ -225,6 +263,10 @@ export function parseGateBlock(block: unknown): GateConfig | null {
   if (g.vitestTimeoutMin !== undefined && (typeof g.vitestTimeoutMin !== "number" || !Number.isFinite(g.vitestTimeoutMin))) return null;
   if (g.bunTimeoutMin !== undefined && (typeof g.bunTimeoutMin !== "number" || !Number.isFinite(g.bunTimeoutMin))) return null;
   if (g.bundle !== undefined && typeof g.bundle !== "boolean") return null;
+  // #1469: the optional review opt-in. A malformed review field is a malformed
+  // block (fail closed), the same as any other field; absent is disabled.
+  const review = parseReviewConfig(g.review);
+  if (review === null) return null;
   // Bun shards only take cap room when the block has a bun lane. A vitest
   // lane, when configured, needs at least one shard of room.
   const bunLegs = g.bunLaneRoot === undefined ? 0 : bunShards;
@@ -243,6 +285,9 @@ export function parseGateBlock(block: unknown): GateConfig | null {
     ...(g.bundle === true ? { bundle: true } : {}),
     ...(g.vitestTimeoutMin === undefined ? {} : { vitestTimeoutMin: legTimeoutMin(g.vitestTimeoutMin) }),
     ...(g.bunTimeoutMin === undefined ? {} : { bunTimeoutMin: legTimeoutMin(g.bunTimeoutMin) }),
+    // #1469: `review` rides only when the block declares one. Absent = no key,
+    // and callers treat undefined as disabled (never a malformed block).
+    ...(g.review === undefined ? {} : { review }),
   };
 }
 

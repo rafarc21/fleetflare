@@ -343,6 +343,117 @@ export function firstLine(text: string): string {
   return line.slice(0, 200);
 }
 
+// ---------------------------------------------------------------------------
+// #1469: `fleet review <pr> [--axis ...]`. One-shot: POST /studio/review/start
+// (server-side dedupes to one reviewer per head sha), then poll
+// /studio/review/status to a verdict. Exit 0 green/neutral, 1 red/blocking
+// fail, 2 infra error or review off.
+
+/** How long `fleet review` waits for a verdict before giving up. The server
+ *  caps a review at 15 min; this ceiling is that cap plus start/poll headroom. */
+export const REVIEW_WATCH_DEADLINE_MS = 16 * 60_000;
+
+export type ReviewAxis = "spec" | "standards" | "security";
+
+/** The one status-poll reply body shape, same contract gate-watch parses. */
+export interface ReviewStatusResponse {
+  state: "pending" | "success" | "failure" | "neutral" | "error";
+  description?: string;
+}
+
+/** Pure parse of a review-status reply. Non-JSON or a missing state is
+ *  `ok:false` (the CLI prints the body head), never a throw. */
+export function parseReviewStatusResponse(text: string): { ok: true; status: ReviewStatusResponse } | { ok: false } {
+  try {
+    const v = JSON.parse(text) as ReviewStatusResponse;
+    if (v === null || typeof v !== "object" || typeof v.state !== "string") return { ok: false };
+    return { ok: true, status: v };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** The repo the review targets: the folder's own origin, same as gate. */
+async function reviewedRepo(): Promise<string | null> {
+  return gatedRepo();
+}
+
+/** `fleet review <pr>`: start (deduped) then poll to a verdict. The repo rides
+ *  from the cwd, so it runs from any clone of the target repo. */
+export async function cmdReview(creds: Credentials, pr: number, axis?: ReviewAxis): Promise<void> {
+  const repo = await reviewedRepo();
+  if (!repo) return;
+  const headers = { ...accessHeaders(creds), "content-type": "application/json" };
+  let res: Response;
+  try {
+    res = await fetch(new URL("/studio/review/start", creds.workerUrl), {
+      method: "POST", headers,
+      body: JSON.stringify({ repo, pr, ...(axis === undefined ? {} : { axis }) }),
+    });
+  } catch (err) {
+    throw new Error(`fleet review: could not reach ${creds.workerUrl}: ${errText(err)}`);
+  }
+  const startText = await res.text();
+  const start = parseReviewStart(startText);
+  if (!res.ok || !start.ok) {
+    const detail = start.ok ? (start.body.error ?? res.status) : `HTTP ${res.status}: ${firstLine(startText)}`;
+    console.error(`fleet review start failed: ${detail}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (start.body.noop === true) {
+    console.log(start.body.line ?? `fleet review: review disabled for ${repo}`);
+    return;
+  }
+
+  const url = new URL("/studio/review/status", creds.workerUrl);
+  url.searchParams.set("repo", repo);
+  url.searchParams.set("pr", String(pr));
+  const started = Date.now();
+  for (;;) {
+    let sres: Response;
+    try {
+      sres = await fetch(url, { headers: accessHeaders(creds) });
+    } catch (err) {
+      console.error(`fleet review: could not reach ${creds.workerUrl}: ${errText(err)}`);
+      process.exitCode = 2;
+      return;
+    }
+    const text = await sres.text();
+    const parsed = parseReviewStatusResponse(text);
+    if (!sres.ok || !parsed.ok) {
+      console.error(`fleet review: HTTP ${sres.status}${parsed.ok ? "" : " (non-JSON reply)"}`);
+      process.exitCode = 2;
+      return;
+    }
+    if (parsed.status.state !== "pending") {
+      const s = parsed.status;
+      console.log(`review: ${s.state}${s.description ? ` — ${s.description}` : ""}`);
+      process.exitCode = s.state === "success" || s.state === "neutral" ? 0 : s.state === "failure" ? 1 : 2;
+      return;
+    }
+    if (Date.now() - started >= REVIEW_WATCH_DEADLINE_MS) {
+      console.error(`fleet review: no verdict after ${Math.round(REVIEW_WATCH_DEADLINE_MS / 60000)} min`);
+      process.exitCode = 2;
+      return;
+    }
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+}
+
+type ReviewStartBody = { noop?: boolean; line?: string; runId?: string; error?: string };
+type ParsedReviewStart = { ok: true; body: ReviewStartBody } | { ok: false };
+
+function parseReviewStart(text: string): ParsedReviewStart {
+  try {
+    const v = JSON.parse(text) as ReviewStartBody;
+    if (v === null || typeof v !== "object") return { ok: false };
+    return { ok: true, body: v };
+  } catch {
+    return { ok: false };
+  }
+}
+
 /** The `fleet gate log` header line (#1277/#1318): the leg and its state —
  *  the description (the cause line) when present, then the summary, then the
  *  run id. Kept pure so the default-output shape is pinned by a test (r1

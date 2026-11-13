@@ -7,7 +7,7 @@ import {
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR, legTimeoutMin,
   GATE_IMAGES, fleetJsonChanged, gateDecision, decideGateRun, headFleetJsonFailure,
   gateMapHasInvalidEntry, FIXED_STEP_NAMES,
-  guardSuccessStatus, sharedHeadFailure,
+  guardSuccessStatus, sharedHeadFailure, parseReviewConfig, DEFAULT_REVIEW_LEAD,
 } from "../../src/gate/config";
 import FLEET_JSON from "../../../../fleet.json";
 
@@ -554,5 +554,37 @@ describe("parseGateBlock: browser flag (#1343)", () => {
     for (const browser of ["true", 1, null]) {
       expect(parseGateBlock({ ...BLOCK, legs: [{ name: "e2e", cmd: "c", browser }] })).toBeNull();
     }
+  });
+});
+
+// #1469: a gate block's optional `review` opt-in. Absent = disabled; a
+// malformed field is a malformed block (fail closed, same as every field).
+describe("parseReviewConfig + parseGateBlock review (#1469)", () => {
+  it("absent -> disabled with the claude default", () => {
+    expect(parseReviewConfig(undefined)).toEqual({ enabled: false, blockingPaths: [], lead: DEFAULT_REVIEW_LEAD });
+  });
+  it("{} -> enabled with no blocking paths and the claude default", () => {
+    expect(parseReviewConfig({})).toEqual({ enabled: true, blockingPaths: [], lead: "claude" });
+  });
+  it("reads enabled/blockingPaths/lead; lead defaults to claude when absent", () => {
+    expect(parseReviewConfig({ blockingPaths: ["apps/**", "migrations/**"] }))
+      .toEqual({ enabled: true, blockingPaths: ["apps/**", "migrations/**"], lead: "claude" });
+    expect(parseReviewConfig({ lead: "deepseek" }))
+      .toEqual({ enabled: true, blockingPaths: [], lead: "deepseek" });
+  });
+  it("enabled:false -> disabled; lead still validated", () => {
+    expect(parseReviewConfig({ enabled: false })).toEqual({ enabled: false, blockingPaths: [], lead: "claude" });
+    expect(parseReviewConfig({ enabled: false, lead: "not-a-lead" })).toBeNull();
+  });
+  it("null on a bad lead or a non-string blocking path", () => {
+    expect(parseReviewConfig({ lead: "openai" })).toBeNull();
+    expect(parseReviewConfig({ lead: 3 })).toBeNull();
+    expect(parseReviewConfig({ blockingPaths: ["a/**", 3] })).toBeNull();
+    expect(parseReviewConfig("review")).toBeNull();
+  });
+  it("parseGateBlock carries review through and nulls on a bad one", () => {
+    expect(parseGateBlock({ ...BLOCK, review: { blockingPaths: ["m/**"] } })?.review)
+      .toEqual({ enabled: true, blockingPaths: ["m/**"], lead: "claude" });
+    expect(parseGateBlock({ ...BLOCK, review: { lead: "bad" } })).toBeNull();
   });
 });
