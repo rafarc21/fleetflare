@@ -22,6 +22,7 @@ import {
   readStudioRows,
   ensureStudioWorkspace,
   findAttachHandle,
+  closeOwnAttachTerminal,
   type WorkspaceRegistry,
   type OrcaDeps,
   type OrcaResult,
@@ -372,6 +373,97 @@ describe("removeStudioWorkspace — teardown", () => {
     const lines = describeWorkspaceRemoval("websites--maestro", { kind: "refused", why: "has 11 screenshot(s) + 24 context file(s)" });
     expect(lines[0]).toContain("NOT removed");
     expect(lines[0]).toContain("11 screenshot(s) + 24 context file(s)");
+  });
+});
+
+describe("closeOwnAttachTerminal — board task #1468 item 2", () => {
+  test("closes the fleet-titled connected terminal inside THIS studio's own worktree", async () => {
+    const f = fake({
+      "worktree list": worktreesWithPath({ displayName: "studio-websites--maestro", path: "/fake/orca/studio-websites--maestro" }),
+      "terminal list": terminalEntries(
+        { handle: "term_me", title: "fleet", connected: true, worktreeId: "repo-websites::/w/studio-websites--maestro" },
+      ),
+    });
+    f.deps.env = { ...ORCA_ENV, ORCA_WORKTREE_ID: "repo-websites::/w/studio-websites--maestro" };
+    await closeOwnAttachTerminal("websites--maestro", f.deps);
+    const close = f.calls.find((c) => c[0] === "terminal" && c[1] === "close");
+    expect(close).toEqual(["terminal", "close", "--terminal", "term_me", "--json"]);
+  });
+
+  test("closes nothing when the shell is not inside this studio's worktree (operator's own shell)", async () => {
+    const f = fake({
+      "worktree list": worktreesWithPath({ displayName: "studio-websites--maestro", path: "/fake/orca/studio-websites--maestro" }),
+      "terminal list": terminalEntries(
+        { handle: "term_me", title: "fleet", connected: true, worktreeId: "repo-websites::/w/studio-websites--maestro" },
+      ),
+    });
+    // ORCA_WORKTREE_ID names some OTHER worktree: this is a hand-typed attach.
+    f.deps.env = { ...ORCA_ENV, ORCA_WORKTREE_ID: "repo-x::/w/other" };
+    await closeOwnAttachTerminal("websites--maestro", f.deps);
+    expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+  });
+
+  test("closes nothing when no ORCA_WORKTREE_ID is set (running outside Orca)", async () => {
+    const f = fake({});
+    f.deps.env = ORCA_ENV;
+    await closeOwnAttachTerminal("websites--maestro", f.deps);
+    expect(f.calls).toEqual([]);
+  });
+
+  test("closes an attach terminal whose title is the #153 OSC live form, not bare \"fleet\"", async () => {
+    // At exit time the attach terminal's title is `fleet <id> · live` (the
+    // #153 OSC title), not the bare process-name "fleet" a just-created
+    // terminal reports. isAttachTerminal accepts all four forms; this pins
+    // the one that actually exists when cmdAttach exits.
+    const f = fake({
+      "worktree list": worktreesWithPath({ displayName: "studio-websites--maestro", path: "/fake/orca/studio-websites--maestro" }),
+      "terminal list": terminalEntries(
+        { handle: "term_me", title: attachTitle("websites--maestro", "live"), connected: true, worktreeId: "repo-websites::/w/studio-websites--maestro" },
+      ),
+    });
+    f.deps.env = { ...ORCA_ENV, ORCA_WORKTREE_ID: "repo-websites::/w/studio-websites--maestro" };
+    await closeOwnAttachTerminal("websites--maestro", f.deps);
+    const close = f.calls.find((c) => c[0] === "terminal" && c[1] === "close");
+    expect(close).toEqual(["terminal", "close", "--terminal", "term_me", "--json"]);
+  });
+
+  test("a wedged orca call degrades to one log line, never a throw", async () => {
+    const f = fake({ "worktree list": { ok: false, stdout: "", stderr: "", timedOut: true } });
+    f.deps.env = { ...ORCA_ENV, ORCA_WORKTREE_ID: "repo-websites::/w/studio-websites--maestro" };
+    await closeOwnAttachTerminal("websites--maestro", f.deps);
+    expect(f.lines.length).toBe(1);
+    expect(f.lines[0]).toContain("could not close this attach terminal");
+  });
+});
+
+describe("cmdAttach closes its own terminal on BOTH exit paths (board task #1468 item 2)", () => {
+  const src = readFileSync(join(import.meta.dir, "../../cli/fleet.ts"), "utf8");
+
+  function body(sig: string): string {
+    const start = src.indexOf(sig);
+    expect(start).toBeGreaterThan(-1);
+    return src.slice(start, src.indexOf("\n}\n", start));
+  }
+
+  test("the refusal exit (exit 1) closes its own terminal before process.exit", () => {
+    const fn = body("export async function cmdAttach(");
+    const refusal = src.indexOf("await closeOwnAttachTerminal(id, defaultOrcaDeps());");
+    const exit1 = src.indexOf("process.exit(1);", refusal);
+    // Both call sites precede their own exit; the first is the refusal path.
+    expect(refusal).toBeGreaterThan(-1);
+    expect(exit1).toBeGreaterThan(refusal);
+    expect(fn).toContain("closeOwnAttachTerminal");
+  });
+
+  test("the clean detach exit (exit 0) closes its own terminal before process.exit", () => {
+    const fn = body("export async function cmdAttach(");
+    // The LAST closeOwnAttachTerminal call is the detach path's; its exit 0
+    // is the final statement of cmdAttach.
+    const lastClose = src.lastIndexOf("await closeOwnAttachTerminal(id, defaultOrcaDeps());");
+    const exit0 = src.indexOf("process.exit(0);", lastClose);
+    expect(lastClose).toBeGreaterThan(-1);
+    expect(exit0).toBeGreaterThan(lastClose);
+    expect(fn).toContain("process.exit(0);");
   });
 });
 
