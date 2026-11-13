@@ -81,7 +81,7 @@ import type { AssignWakeReport } from "../src/board/assign-wake";
 import type { OpenPr } from "../src/board/open-prs";
 import { formatMemoryTable, MEMORY_LEGEND, type MemoryFileRow } from "./memory-format";
 import {
-  openStudioRow, closeStudioRow, reconcileStudioWorkspaces, planStudioWorkspaces, defaultOrcaDeps,
+  openStudioRow, closeStudioRow, closeOwnAttachTerminal, reconcileStudioWorkspaces, planStudioWorkspaces, defaultOrcaDeps,
   studioWorkspaceTitle, readStudioRows, findAttachHandle, ensureLocalStudioWorktree, resolveStudioWorktreePath,
   resolveLocalWake,
   type OrcaDeps, type TabsReport, type TabsPlanEntry,
@@ -1252,9 +1252,12 @@ export async function runTabs(flags: TabsFlags, deps: TabsDeps): Promise<TabsRun
   // The plan: one line per studio THIS RUN will touch, printed before any
   // Orca mutation and before the confirmation prompt below — an operator (or
   // the y/N answer) must be able to see what would happen before it does.
-  const plan = await planStudioWorkspaces(studios, deps.orcaDeps);
+  // Board task #1468 (item 3): on a fleet-wide run a stopped studio's row
+  // reads `reap` — the run will tear its stale Orca row down, not skip it.
+  const plan = await planStudioWorkspaces(studios, deps.orcaDeps, { reapStopped: flags.all });
   for (const p of plan) {
     if (p.kind === "skipped") deps.log(`skipped  ${p.id} (${p.why})`);
+    else if (p.kind === "reap") deps.log(`reap     ${p.id} (${p.why})`);
     else if (p.kind === "has one") deps.log(`has one  ${p.id}`);
     else deps.log(`open     ${p.id} (${p.detail})`);
   }
@@ -1279,10 +1282,15 @@ export async function runTabs(flags: TabsFlags, deps: TabsDeps): Promise<TabsRun
     studios,
     (id) => studioWorkspaceTitle(id, tasksByStudio.get(id) ?? []),
     deps.orcaDeps,
+    { reapStopped: flags.all },
   );
   for (const id of report.opened) deps.log(`opened   ${id}`);
   for (const id of report.existing) deps.log(`has one  ${id}`);
   for (const s of report.skipped) deps.log(`skipped  ${s.id} (${s.why})`);
+  for (const r of report.reaped) {
+    deps.log(`reaped   ${r.id}`);
+    for (const line of r.lines) deps.log(`  ${r.id}  ${line}`);
+  }
   // Board #42, requirement 3: a recurrence must be loud, never a silent pick.
   for (const d of report.deduped) {
     deps.log(`deduped  ${d.id} (closed ${d.closed.length} duplicate attach terminal(s): ${d.closed.join(", ")})`);
@@ -1605,8 +1613,11 @@ function defaultGitRun(): GitRun {
 
 /** The pure teardown decision for a local studio's worktree.
  *
- *  park -> keep: a park is a pause, never a deletion, and `--park` used to
- *    still `worktree rm` a local checkout. Remove only on a real destroy.
+ *  park -> keep (LOCAL only): a park is a pause, never a deletion, and a
+ *    LOCAL checkout is the work itself. A CLOUD worktree is only a sidebar
+ *    row, so a cloud park is still removed — `localWorktreeRemoval` returns
+ *    `remove: true` for any non-local row regardless of `park`, and this
+ *    decision is only ever reached on the local path.
  *  not (force && discardUnsynced) -> keep: without the operator explicitly
  *    naming the price (the same two flags the cloud path already honours),
  *    a destroy never deletes work it could still rescue.
@@ -3981,6 +3992,9 @@ export async function cmdAttach(creds: Credentials, id: string): Promise<void> {
     if (refusal !== null) {
       restoreTerminal(); // first, or leaving the alt screen erases the line
       console.error(`fleet: ${refusal}`);
+      // Board task #1468 (item 2): a failed attach must not leave its own
+      // dead shell tab in Orca — close THIS terminal before exiting.
+      await closeOwnAttachTerminal(id, defaultOrcaDeps());
       process.exit(1);
     }
 
@@ -3995,6 +4009,10 @@ export async function cmdAttach(creds: Credentials, id: string): Promise<void> {
     if ((await waitOrExit(delay)) === "exit") break;
   }
 
+  // Board task #1468 (item 2): a detach (ctrl-]) ends this attach cleanly —
+  // close THIS terminal too, so the operator's own detach never leaves a
+  // dead shell tab behind. Only this code's own terminal is a target.
+  await closeOwnAttachTerminal(id, defaultOrcaDeps());
   process.exit(0);
 }
 

@@ -178,10 +178,15 @@ describe("localWorktreeRemoval (B1 fix round)", () => {
     expect(r).toEqual({ remove: false, note: "worktree path could not be resolved — kept" });
   });
 
-  test("park -> keep", async () => {
+  test("park -> keep (local)", async () => {
     const clean = runner({ "-C /wt status --porcelain": { code: 0, stdout: "" }, "-C /wt rev-list --count @{u}..": { code: 0, stdout: "0\n" } });
     const r = await localWorktreeRemoval({ host: "local", localPath: "/clone" }, { force: true, discardUnsynced: true, park: true }, { run: clean, resolveWorktreePath: resolve("/wt") }, "id");
     expect(r.remove).toBe(false);
     expect(r.note).toContain("parked");
+  });
+
+  test("park -> removes a CLOUD row (its worktree is a sidebar row, not a checkout)", async () => {
+    const r = await localWorktreeRemoval({ host: "cloud" as "local", localPath: null }, { force: false, discardUnsynced: false, park: true }, { run, resolveWorktreePath: resolve("/wt") }, "id");
+    expect(r).toEqual({ remove: true, note: null });
   });
 });

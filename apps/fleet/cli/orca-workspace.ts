@@ -1546,6 +1546,52 @@ export async function closeStudioRow(
   return describeWorkspaceRemoval(id, await removeStudioWorkspace(id, deps, salvageDest));
 }
 
+/**
+ * Board task #1468 (item 2): close the Orca terminal THIS `fleet attach`
+ * process is running in, so a failed or exited attach never leaves a dead
+ * shell tab behind. `ensureStudioWorkspace` launches the attach terminal with
+ * `--command "fleet attach <id>"` inside the studio's worktree, so Orca
+ * exports `ORCA_WORKTREE_ID` (the worktree) and `TERM_PROGRAM=Orca` into that
+ * shell; THIS process is the terminal whose pane is running the `fleet attach`
+ * process, matched by `isAttachTerminal` (connected AND one of the four attach
+ * title forms for studio `id`). Only an attach terminal created by this code
+ * is a target: the owner is the studio id whose worktree this shell is
+ * standing in, matched by the deterministic name `findStudioWorktree` already
+ * trusts — never every attach-titled terminal in the app, which would close
+ * the operator's own unrelated shells.
+ *
+ * Same "never fails its caller" posture as every other entry point here: one
+ * try/catch, at most one `deps.log` line, never a throw — `cmdAttach`'s exit
+ * paths must not turn a cleanup miss into a failed detach. A process running
+ * outside Orca (a plain terminal, `fleet attach <id>` typed by hand) has no
+ * `ORCA_WORKTREE_ID`, so it closes nothing: the terminal it lives in is the
+ * operator's own, not one this code created.
+ */
+export async function closeOwnAttachTerminal(id: string, deps: OrcaDeps): Promise<void> {
+  const worktreeId = deps.env.ORCA_WORKTREE_ID;
+  if (!worktreeId || !orcaPresent(deps)) return;
+  try {
+    const worktrees = await fullList(deps, "worktrees", LIST_TIMEOUT_MS);
+    // The worktree THIS shell is standing in must be studio `id`'s own —
+    // matched by the same deterministic name every other lookup here trusts.
+    // A mismatch (or no row at all) means this is the operator's own shell
+    // running `fleet attach` by hand, never a tab this code created: leave it.
+    if (findStudioWorktree(id, worktrees, deps.registry)?.id !== worktreeId) return;
+    const terms = await orcaJson(deps, ["terminal", "list", "--worktree", `id:${worktreeId}`, "--json"], LIST_TIMEOUT_MS);
+    // `isAttachTerminal`, not a bare `title === "fleet"` — the title at exit
+    // time is one of the FOUR forms `isAttachTitle` accepts (bare "fleet",
+    // `<id>`, `fleet <id> · waiting|live`, or the STALE form), and the
+    // studio id must match so a DIFFERENT `fleet` command in this worktree is
+    // never closed.
+    const mine = (terms.result?.terminals ?? []).find((t) => t.handle && isAttachTerminal(t, id));
+    if (mine?.handle) {
+      await orcaJson(deps, ["terminal", "close", "--terminal", mine.handle, "--json"], LIST_TIMEOUT_MS);
+    }
+  } catch (err) {
+    deps.log(`${id}: could not close this attach terminal — ${errText(err)}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // fleet ls's ROW column — board #55 defect B, #57 item 4. The Orca row is
 // where the operator looks at a studio; `fleet ls` must say when it lies.
@@ -2013,6 +2059,11 @@ export interface TabsReport {
   existing: string[];
   /** Studios deliberately or unavoidably passed over, each with the reason. */
   skipped: { id: string; why: string }[];
+  /** Board task #1468 (item 3): stopped studios whose Orca row + attach
+   *  terminal were torn down on this `--all` run — each with the removal's
+   *  printed lines. Populated only when the run asked for the reap; never
+   *  on an ordinary repo-scoped run. */
+  reaped: { id: string; lines: string[] }[];
   /**
    * Board #42, requirements 2 and 3: studios where MORE than one connected
    * attach terminal was found and reconciled down to one. Always populated
@@ -2043,11 +2094,22 @@ export async function reconcileStudioWorkspaces(
   // and each row's title is that studio's own current task.
   titleFor: (id: string) => string,
   deps: OrcaDeps,
+  // Board task #1468 (item 3): reap stopped studios' Orca rows instead of
+  // merely skipping them. `fleet tabs --all` is the operator's explicit
+  // "touch the whole fleet" opt-in, so it is the one reconcile pass that may
+  // tear down a stopped studio's stale row + dead attach terminal. A stopped
+  // LOCAL studio's worktree is its checkout and is never removed here — the
+  // same keep rule cmdDestroy's own local teardown enforces.
+  opts: { reapStopped?: boolean } = {},
 ): Promise<TabsReport> {
-  const report: TabsReport = { opened: [], existing: [], skipped: [], deduped: [] };
+  const report: TabsReport = { opened: [], existing: [], skipped: [], reaped: [], deduped: [] };
   for (const s of studios) {
     if (s.state === "stopped") {
-      report.skipped.push({ id: s.id, why: "stopped" });
+      if (opts.reapStopped && s.host !== "local") {
+        report.reaped.push({ id: s.id, lines: await closeStudioRow(s.id, deps) });
+      } else {
+        report.skipped.push({ id: s.id, why: "stopped" });
+      }
       continue;
     }
     const outcome = await ensureStudioWorkspace(s.id, titleFor(s.id), deps);
@@ -2114,6 +2176,7 @@ export async function previewStudioWorkspace(id: string, deps: OrcaDeps): Promis
 export type TabsPlanEntry =
   | { id: string; kind: "open"; detail: "no attach" | "attach DEAD" | "no worktree" }
   | { id: string; kind: "has one" }
+  | { id: string; kind: "reap"; why: string }
   | { id: string; kind: "skipped"; why: string };
 
 /**
@@ -2123,12 +2186,21 @@ export type TabsPlanEntry =
  * called on the exact studio list (already repo-scoped) `fleet tabs` is
  * about to reconcile, so the two loops can never drift into naming a
  * different set of studios.
+ *
+ * Board task #1468 (item 3): when the run asked to reap stopped studios, a
+ * stopped CLOUD studio's row reads `reap` (its stale Orca row + dead attach
+ * terminal will be torn down); a stopped LOCAL studio still reads `skipped`
+ * (its worktree IS its checkout and is never removed here).
  */
-export async function planStudioWorkspaces(studios: StudioStatus[], deps: OrcaDeps): Promise<TabsPlanEntry[]> {
+export async function planStudioWorkspaces(
+  studios: StudioStatus[], deps: OrcaDeps, opts: { reapStopped?: boolean } = {},
+): Promise<TabsPlanEntry[]> {
   const plan: TabsPlanEntry[] = [];
   for (const s of studios) {
     if (s.state === "stopped") {
-      plan.push({ id: s.id, kind: "skipped", why: "stopped" });
+      plan.push(opts.reapStopped && s.host !== "local"
+        ? { id: s.id, kind: "reap", why: "stopped" }
+        : { id: s.id, kind: "skipped", why: "stopped" });
       continue;
     }
     const preview = await previewStudioWorkspace(s.id, deps);

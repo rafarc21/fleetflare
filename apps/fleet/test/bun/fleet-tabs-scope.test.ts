@@ -327,3 +327,60 @@ test("--repo naming an invalid segment refuses, same posture as a no-repo cwd", 
   expect(result.message).toBe(`fleet tabs: repo "acme/-" cannot name a studio: "-" is not a valid id segment ` +
     "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)");
 });
+
+// ---------------------------------------------------------------------------
+// --all reaps stopped studios' Orca rows (board task #1468 item 3).
+
+test("--all reaps a stopped CLOUD studio's Orca row, and the plan says reap", async () => {
+  const orca = fakeOrca({
+    "worktree list": worktrees("studio-websites--maestro"),
+    "terminal list": ok(JSON.stringify({ ok: true, result: { terminals: [{ handle: "term_dead", title: "fleet", connected: false }] } })),
+  });
+  const { deps } = fakeDeps({
+    studios: [studio("websites--maestro", "stopped")],
+    orca,
+  });
+
+  const result = await runTabs(flags({ all: true, yes: true }), deps);
+  expect(result.ok).toBe(true);
+  if (!result.ok || result.cancelled) throw new Error("unreachable");
+
+  expect(result.plan[0].kind).toBe("reap");
+  expect(result.report.reaped.map((r) => r.id)).toEqual(["websites--maestro"]);
+  expect(result.report.skipped).toEqual([]);
+  // The destructive call is always by path, never by name.
+  const rm = orca.calls.find((c) => c[0] === "worktree" && c[1] === "rm");
+  expect(rm).toBeDefined();
+  expect(rm!.some((tok) => tok.startsWith("path:"))).toBe(true);
+  expect(rm!.some((tok) => tok.startsWith("name:"))).toBe(false);
+});
+
+test("--all SKIPS a stopped LOCAL studio's row — its worktree is its checkout", async () => {
+  const orca = fakeOrca({});
+  const localStopped = { id: "websites--maestro", state: "stopped", host: "local" } as StudioStatus;
+  const { deps } = fakeDeps({ studios: [localStopped], orca });
+
+  const result = await runTabs(flags({ all: true, yes: true }), deps);
+  expect(result.ok).toBe(true);
+  if (!result.ok || result.cancelled) throw new Error("unreachable");
+
+  expect(result.plan[0].kind).toBe("skipped");
+  expect(result.report.reaped).toEqual([]);
+  expect(result.report.skipped.map((s) => s.id)).toEqual(["websites--maestro"]);
+});
+
+test("a repo-scoped run never reaps a stopped studio — it is skipped", async () => {
+  const orca = fakeOrca({});
+  const { deps } = fakeDeps({
+    detectRepo: async () => ({ slug: "some-org/websites", reason: null }),
+    studios: [studio("websites--maestro", "stopped")],
+    orca,
+  });
+
+  const result = await runTabs(flags(), deps);
+  expect(result.ok).toBe(true);
+  if (!result.ok || result.cancelled) throw new Error("unreachable");
+
+  expect(result.plan[0].kind).toBe("skipped");
+  expect(result.report.reaped).toEqual([]);
+});

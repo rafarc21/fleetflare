@@ -22,6 +22,7 @@ import {
   readStudioRows,
   ensureStudioWorkspace,
   findAttachHandle,
+  closeOwnAttachTerminal,
   type WorkspaceRegistry,
   type OrcaDeps,
   type OrcaResult,
@@ -372,6 +373,49 @@ describe("removeStudioWorkspace — teardown", () => {
     const lines = describeWorkspaceRemoval("websites--maestro", { kind: "refused", why: "has 11 screenshot(s) + 24 context file(s)" });
     expect(lines[0]).toContain("NOT removed");
     expect(lines[0]).toContain("11 screenshot(s) + 24 context file(s)");
+  });
+});
+
+describe("closeOwnAttachTerminal — board task #1468 item 2", () => {
+  test("closes the fleet-titled connected terminal inside THIS studio's own worktree", async () => {
+    const f = fake({
+      "worktree list": worktreesWithPath({ displayName: "studio-websites--maestro", path: "/fake/orca/studio-websites--maestro" }),
+      "terminal list": terminalEntries(
+        { handle: "term_me", title: "fleet", connected: true, worktreeId: "repo-websites::/w/studio-websites--maestro" },
+      ),
+    });
+    f.deps.env = { ...ORCA_ENV, ORCA_WORKTREE_ID: "repo-websites::/w/studio-websites--maestro" };
+    await closeOwnAttachTerminal("websites--maestro", f.deps);
+    const close = f.calls.find((c) => c[0] === "terminal" && c[1] === "close");
+    expect(close).toEqual(["terminal", "close", "--terminal", "term_me", "--json"]);
+  });
+
+  test("closes nothing when the shell is not inside this studio's worktree (operator's own shell)", async () => {
+    const f = fake({
+      "worktree list": worktreesWithPath({ displayName: "studio-websites--maestro", path: "/fake/orca/studio-websites--maestro" }),
+      "terminal list": terminalEntries(
+        { handle: "term_me", title: "fleet", connected: true, worktreeId: "repo-websites::/w/studio-websites--maestro" },
+      ),
+    });
+    // ORCA_WORKTREE_ID names some OTHER worktree: this is a hand-typed attach.
+    f.deps.env = { ...ORCA_ENV, ORCA_WORKTREE_ID: "repo-x::/w/other" };
+    await closeOwnAttachTerminal("websites--maestro", f.deps);
+    expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
+  });
+
+  test("closes nothing when no ORCA_WORKTREE_ID is set (running outside Orca)", async () => {
+    const f = fake({});
+    f.deps.env = ORCA_ENV;
+    await closeOwnAttachTerminal("websites--maestro", f.deps);
+    expect(f.calls).toEqual([]);
+  });
+
+  test("a wedged orca call degrades to one log line, never a throw", async () => {
+    const f = fake({ "worktree list": { ok: false, stdout: "", stderr: "", timedOut: true } });
+    f.deps.env = { ...ORCA_ENV, ORCA_WORKTREE_ID: "repo-websites::/w/studio-websites--maestro" };
+    await closeOwnAttachTerminal("websites--maestro", f.deps);
+    expect(f.lines.length).toBe(1);
+    expect(f.lines[0]).toContain("could not close this attach terminal");
   });
 });
 
