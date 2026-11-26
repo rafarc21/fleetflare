@@ -10,8 +10,8 @@ import { getModelStates, setAssignedModel, setModelState } from "./model-store";
 import type { Env } from "../env";
 
 // Accepts either a pool `key` ("kimi") or a raw Workers AI `id`
-// ("@cf/moonshotai/kimi-k2.7-code") — the CLI and a human curling this
-// route both reach for the short key, D1-stored assignments are the id.
+// ("@cf/qwen/qwen3.8-27b") — the CLI and a human curling this route both
+// reach for the short key, D1-stored assignments are the id.
 const resolve = (m: unknown) => (typeof m === "string" ? modelByKey(m) ?? modelById(m) : undefined);
 
 const j = (v: unknown, status = 200) =>
