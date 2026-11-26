@@ -29,34 +29,41 @@ if (!acct || !token) {
 // Issue #1476: CF retired kimi-k2.7-code and deepseek-v4-pro-0813 with no
 // signal into this repo; the pool kept `smokePassed: true` on both, so a
 // studio kept reaching a dead id until an operator noticed. Refuse before
-// spending a live inference call on an id CF's own catalog already lists as
-// retired — same read-only `wrangler` spawnSync pattern as
-// scripts/deploy-target.ts's `wranglerJson` (appDir = scripts/..).
+// spending a live inference call on an id CF's own catalog has dropped —
+// same read-only `wrangler` spawnSync pattern as scripts/deploy-target.ts's
+// `wranglerJson` (appDir = scripts/..).
+//
+// Round 2 (#1476): the subcommand is `wrangler ai models list --json`
+// (wrangler 4.141) — `wrangler ai models --json` (round 1) is not a real
+// command. Retirement is catalog-ABSENCE, not a stale date (see
+// deprecation.ts's own round-2 note): CF simply drops a retired id from
+// this list entirely, it does not keep listing it with a past
+// `planned_deprecation_date`.
 const appDir = join(import.meta.dir, "..");
-const catalog = spawnSync(join(appDir, "node_modules", ".bin", "wrangler"), ["ai", "models", "--json"], {
+const catalog = spawnSync(join(appDir, "node_modules", ".bin", "wrangler"), ["ai", "models", "list", "--json"], {
   cwd: appDir, encoding: "utf8", timeout: 60_000,
   env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: acct, CLOUDFLARE_API_TOKEN: token },
 });
 if (catalog.status !== 0) {
-  console.error(`SMOKE FAIL catalog fetch: wrangler ai models --json exited ${catalog.status}: ${(catalog.stderr ?? "").trim().split("\n").slice(-2).join(" ")}`);
+  console.error(`SMOKE FAIL catalog fetch: wrangler ai models list --json exited ${catalog.status}: ${(catalog.stderr ?? "").trim().split("\n").slice(-2).join(" ")}`);
   process.exit(1);
 }
 let entries: ModelCatalogEntry[] = [];
 try {
   const out = catalog.stdout ?? "";
-  entries = JSON.parse(out.slice(out.search(/[[{]/)));
+  entries = JSON.parse(out.slice(out.search(/[[{]/))).map((e: any) => ({ id: e.id ?? e.name, planned_deprecation_date: e.planned_deprecation_date }));
 } catch (e) {
   console.error(`SMOKE FAIL catalog parse: ${String(e)}`);
   process.exit(1);
 }
-const entry = entries.find((e: any) => e.name === m.id || e.id === m.id);
-if (entry !== undefined) {
-  const status = checkDeprecation(entry, Date.now());
-  if (status === "retired") {
-    console.error(`SMOKE FAIL ${m.id} is retired on CF's own catalog (planned_deprecation_date in the past) — refusing before spending an inference call`);
-    process.exit(1);
-  }
-  if (status === "warn") console.warn(`model-smoke: ${m.id} deprecation is within the warning window (planned_deprecation_date=${entry.planned_deprecation_date})`);
+const status = checkDeprecation(entries, m.id, Date.now());
+if (status === "retired") {
+  console.error(`SMOKE FAIL ${m.id} is retired — absent from CF's own catalog (wrangler ai models list --json), or carries a past planned_deprecation_date — refusing before spending an inference call`);
+  process.exit(1);
+}
+if (status === "warn") {
+  const entry = entries.find((e) => e.id === m.id);
+  console.warn(`model-smoke: ${m.id} deprecation is within the warning window (planned_deprecation_date=${entry?.planned_deprecation_date})`);
 }
 
 const url = `https://gateway.ai.cloudflare.com/v1/${acct}/${gw}/workers-ai/${m.id}`;
