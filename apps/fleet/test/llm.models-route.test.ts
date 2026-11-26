@@ -17,7 +17,21 @@ describe("models route", () => {
       (await handleModelsRoute(post("/studio/models/assign", { studio: "r--web-studio--49", model: "kimi" }), env)).status,
     ).toBe(200);
     const list = (await (await handleModelsRoute(new Request("https://x/studio/models"), env)).json()) as any;
-    expect(list.assignments["r--web-studio--49"]).toBe(POOL[1].id);
+    expect(list.assignments["r--web-studio--49"].resolved).toBe(POOL[1].id);
+    expect(list.assignments["r--web-studio--49"].stored).toBe(POOL[1].id);
+  });
+
+  // Issue #1476 round 2: a studio pinned to an old retired id must stay
+  // visible in the listing (not silently misleading) — `stored` is the raw
+  // D1 value, `resolved` is what the studio will actually run (via
+  // resolveStaleId, models.ts).
+  it("a stale-pinned studio shows both its stored id and the resolved current id", async () => {
+    await env.DB.prepare(
+      `INSERT OR REPLACE INTO fleet_state (key, value, ts) VALUES (?, ?, ?)`,
+    ).bind("lead-model:r--stale", "@cf/moonshotai/kimi-k2.7-code", Date.now()).run();
+    const list = (await (await handleModelsRoute(new Request("https://x/studio/models"), env)).json()) as any;
+    expect(list.assignments["r--stale"].stored).toBe("@cf/moonshotai/kimi-k2.7-code");
+    expect(list.assignments["r--stale"].resolved).toBe(POOL[1].id);
   });
 
   it("assign unknown model is 400", async () => {

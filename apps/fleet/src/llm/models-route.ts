@@ -5,7 +5,7 @@
 // /studio/accounts*) already ran verifyAccess before reaching here, exactly
 // like that file's own accounts routes; this module carries no auth of its
 // own by design, so every test below calls it directly.
-import { POOL, modelByKey, modelById } from "./models";
+import { POOL, modelByKey, modelById, resolveStaleId } from "./models";
 import { getModelStates, setAssignedModel, setModelState } from "./model-store";
 import type { Env } from "../env";
 
@@ -29,8 +29,14 @@ export async function handleModelsRoute(req: Request, env: Env): Promise<Respons
     const rows = await env.DB
       .prepare("SELECT key, value FROM fleet_state WHERE key LIKE 'lead-model:%'")
       .all<{ key: string; value: string }>();
-    const assignments: Record<string, string> = {};
-    for (const r of rows.results ?? []) assignments[r.key.slice("lead-model:".length)] = r.value;
+    // Issue #1476 round 2: `stored` is the raw D1 value, `resolved` is what
+    // the studio will actually run (resolveStaleId, models.ts) — a stale
+    // pin on a since-retired id stays visible instead of silently
+    // misleading (resolveStaleId is pure, no extra DB round trip).
+    const assignments: Record<string, { stored: string; resolved: string | null }> = {};
+    for (const r of rows.results ?? []) {
+      assignments[r.key.slice("lead-model:".length)] = { stored: r.value, resolved: resolveStaleId(r.value) };
+    }
     return j({
       models: POOL.map((m) => ({ key: m.key, id: m.id, state: states[m.id], smokePassed: m.smokePassed })),
       assignments,
