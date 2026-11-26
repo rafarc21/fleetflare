@@ -573,6 +573,17 @@ function closeParagraph(state: StreamState): void {
   scan.para = "";
 }
 
+/** Issue #1476 round 4: the runaway guard's one reasoning-text read, covering
+ *  both shapes a backend streams reasoning in -- GLM/deepseek's
+ *  `reasoning_content`, and qwen's `reasoning` (measured live, 44/44 deltas;
+ *  qwen never sends `reasoning_content`). First non-empty field wins; a real
+ *  delta never carries both. */
+function reasoningDeltaText(delta: Json): string | null {
+  if (typeof delta?.reasoning_content === "string" && delta.reasoning_content.length > 0) return delta.reasoning_content;
+  if (typeof delta?.reasoning === "string" && delta.reasoning.length > 0) return delta.reasoning;
+  return null;
+}
+
 /** Issue #1099: feeds one text or reasoning delta to the runaway scan. Trips
  *  `state.runaway` for a repeated line or paragraph. Tool-call arguments are
  *  never scanned: a kimi think region that carries a tool call is latched as
@@ -856,7 +867,12 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
 
   // Issue #1099: reasoning_content (GLM) is scanned but never forwarded, same
   // as before. A delta that trips the scan is not emitted; the pump aborts.
-  if (typeof delta.reasoning_content === "string") scanForRunaway(state, delta.reasoning_content);
+  // Issue #1476 round 4: qwen (the current kimi pool id) streams the SAME
+  // reasoning text in `delta.reasoning` instead -- measured live, 44/44
+  // deltas -- never `reasoning_content`, so reading only that field left a
+  // kimi-key (qwen) stream's reasoning invisible to this scan entirely.
+  const reasoningText = reasoningDeltaText(delta);
+  if (reasoningText !== null) scanForRunaway(state, reasoningText);
   if (typeof delta.content === "string") scanForRunaway(state, delta.content);
   if (state.runaway !== null) return events;
 

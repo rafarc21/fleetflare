@@ -701,6 +701,18 @@ describe("runaway output detection (issue #1099)", () => {
     expect(state.runaway).toBe("repeat_line");
   });
 
+  // Issue #1476 round 4: qwen (the current kimi pool id, @cf/qwen/qwen3.8-27b)
+  // streams its reasoning text in `delta.reasoning`, NOT `delta.reasoning_content`
+  // (the field GLM/deepseek use) -- measured live, 44/44 deltas. Before the
+  // runaway guard read both shapes, a kimi-key (qwen) stream's reasoning text
+  // was invisible to the #1099 scan entirely, leaving the 24k maxMaxTokens
+  // ceiling as the only bound on a runaway qwen stream.
+  test("repeated delta.reasoning (qwen shape) trips the same repeat check as reasoning_content", () => {
+    const state = createStreamState();
+    for (let i = 0; i < 60; i++) applyOpenAIStreamChunk(state, delta({ reasoning: "loop loop loop loop loop loop loop loop loop loop\n" }));
+    expect(state.runaway).toBe("repeat_line");
+  });
+
   test("a line under 40 chars repeated many times does not trip (`}` and `---` style lines)", () => {
     const state = createStreamState();
     for (let i = 0; i < 200; i++) applyOpenAIStreamChunk(state, delta({ content: "  {\"a\": 1},\n" }));
