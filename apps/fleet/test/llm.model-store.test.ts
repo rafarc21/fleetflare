@@ -10,7 +10,7 @@ import {
   recordNoFinishReasonFailure, getNoFinishReasonFailures, clearNoFinishReasonFailures,
   NO_FINISH_REASON_WINDOW_MS,
 } from "../src/llm/model-store";
-import { POOL } from "../src/llm/models";
+import { POOL, modelByKey } from "../src/llm/models";
 
 describe("model store", () => {
   beforeEach(async () => {
@@ -31,6 +31,22 @@ describe("model store", () => {
       `INSERT OR REPLACE INTO fleet_state (key, value, ts) VALUES (?, ?, ?)`,
     ).bind("lead-model:r--x", "@cf/typo/x", Date.now()).run();
     expect(await getAssignedModel(env.DB, "r--x")).toBeNull();
+  });
+
+  // Issue #1476 round 2: a studio pinned (by `fleet spawn --lead deepseek`)
+  // to a pool key's OLD live id before a catalog repoint must stay on that
+  // key's CURRENT id, not fall through to the router's hash default — a
+  // genuine typo (above) was never a pool member and still reads null.
+  it("a stale id that was a previous live id for a pool key resolves to that key's current id", async () => {
+    await env.DB.prepare(
+      `INSERT OR REPLACE INTO fleet_state (key, value, ts) VALUES (?, ?, ?)`,
+    ).bind("lead-model:r--kimi-old", "@cf/moonshotai/kimi-k2.7-code", Date.now()).run();
+    expect(await getAssignedModel(env.DB, "r--kimi-old")).toBe(modelByKey("kimi")!.id);
+
+    await env.DB.prepare(
+      `INSERT OR REPLACE INTO fleet_state (key, value, ts) VALUES (?, ?, ?)`,
+    ).bind("lead-model:r--deepseek-old", "@cf/deepseek-ai/deepseek-v4-pro-0813", Date.now()).run();
+    expect(await getAssignedModel(env.DB, "r--deepseek-old")).toBe(modelByKey("deepseek")!.id);
   });
 
   it("set refuses unknown model", async () => {

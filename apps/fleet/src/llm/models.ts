@@ -26,6 +26,12 @@ export interface PoolModel {
 
 export const POOL: readonly PoolModel[] = [
   { key: "glm", id: "@cf/zai-org/glm-5.3", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: true },
+  // Issue #1476 round 2: catalog says `supports_max_tokens:false` for this
+  // id — the #717 output ceiling (maxMaxTokens, translate.ts
+  // anthropicRequestToOpenAI) may not actually bound it server-side.
+  // Known risk, not actionable from in-repo data alone — needs a live
+  // measurement (maestro-only, no CF creds in this container) to confirm
+  // one way or the other.
   { key: "kimi", id: "@cf/qwen/qwen3.8-27b", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: KIMI_MAX_MAX_TOKENS, smokePassed: false },
   { key: "deepseek", id: "@cf/deepseek-ai/deepseek-v4.1-flash-1017", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: false },
 ];
@@ -36,4 +42,23 @@ export function modelByKey(key: string): PoolModel | undefined {
 
 export function modelById(id: string): PoolModel | undefined {
   return POOL.find((m) => m.id === id);
+}
+
+/** Issue #1476 round 2: a retired Workers AI id that was PREVIOUSLY a live
+ *  id for a pool key, keyed to that key — lets a stale D1 pin follow its
+ *  key through a catalog repoint instead of silently going unresolvable. */
+const RETIRED_TO_KEY: Readonly<Record<string, PoolModel["key"]>> = {
+  "@cf/moonshotai/kimi-k2.7-code": "kimi",
+  "@cf/deepseek-ai/deepseek-v4-pro-0813": "deepseek",
+};
+
+/** A stored id that no longer resolves (`modelById` miss) but WAS a
+ *  previous live id for a pool key resolves to that key's CURRENT id —
+ *  `fleet spawn --lead deepseek` stays on the deepseek key across a
+ *  catalog repoint. A truly unknown id (typo, never-pool-member) still
+ *  returns null. */
+export function resolveStaleId(id: string): string | null {
+  if (modelById(id)) return id;
+  const key = RETIRED_TO_KEY[id];
+  return key !== undefined ? modelByKey(key)!.id : null;
 }
