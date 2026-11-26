@@ -26,8 +26,8 @@ export interface PoolModel {
 
 export const POOL: readonly PoolModel[] = [
   { key: "glm", id: "@cf/zai-org/glm-5.3", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: true },
-  { key: "kimi", id: "@cf/moonshotai/kimi-k2.7-code", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: KIMI_MAX_MAX_TOKENS, smokePassed: true, thinkTags: true },
-  { key: "deepseek", id: "@cf/deepseek-ai/deepseek-v4-pro-0813", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: true },
+  { key: "kimi", id: "@cf/qwen/qwen3.8-27b", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: KIMI_MAX_MAX_TOKENS, smokePassed: false },
+  { key: "deepseek", id: "@cf/deepseek-ai/deepseek-v4.1-flash-1017", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: false },
 ];
 
 export function modelByKey(key: string): PoolModel | undefined {

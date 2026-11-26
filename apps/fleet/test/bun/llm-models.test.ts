@@ -3,6 +3,7 @@
 // docs/superpowers/specs/2026-10-13-model-pool-design.md.
 import { describe, test, expect } from "bun:test";
 import { POOL, modelByKey, modelById } from "../../src/llm/models";
+import { pickModels } from "../../src/llm/router";
 
 describe("model pool registry", () => {
   test("has exactly glm, kimi, deepseek in that order", () => {
@@ -27,5 +28,33 @@ describe("model pool registry", () => {
   test("lookups miss cleanly", () => {
     expect(modelByKey("gpt4")).toBeUndefined();
     expect(modelById("@cf/nope/nope")).toBeUndefined();
+  });
+});
+
+// Issue #1476: CF retired kimi-k2.7-code and deepseek-v4-pro-0813, but the
+// pool kept walking them as a demoted overflow tail (by design — see
+// router.ts's own rank comment), so a studio still reached a dead id. The
+// fix is catalog-only: repoint the ids. These guard against the old ids
+// ever coming back, in the catalog itself and in the walk order a real
+// studio request would see.
+describe("model pool registry no longer serves the retired #1476 ids", () => {
+  const RETIRED = ["@cf/moonshotai/kimi-k2.7-code", "@cf/deepseek-ai/deepseek-v4-pro-0813"];
+
+  test("POOL carries neither retired id", () => {
+    for (const id of RETIRED) expect(POOL.some((m) => m.id === id)).toBe(false);
+  });
+
+  test("pickModels never walks a retired id, even with every model demoted except glm", () => {
+    const states = {
+      [POOL[0].id]: "active",
+      [POOL[1].id]: "demoted",
+      [POOL[2].id]: "demoted",
+    } as const;
+    const pool = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const order = pickModels({
+      studioId: "r--web-studio--1", requestedModel: "claude-opus-4", assigned: null,
+      states, pool, poolOn: true, overflowOn: true,
+    });
+    for (const id of order) expect(RETIRED).not.toContain(id);
   });
 });

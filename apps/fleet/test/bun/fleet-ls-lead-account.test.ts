@@ -13,7 +13,7 @@ const MAIN_HEADERS = [
 ];
 const ASSIGN: Record<string, string> = {
   "beta--pilot": "@cf/zai-org/glm-5.3",
-  "websites--pilot": "@cf/moonshotai/kimi-k2.7-code",
+  "websites--pilot": "@cf/qwen/qwen3.8-27b",
 };
 
 describe("fleet ls column count (#1074)", () => {
@@ -35,9 +35,9 @@ describe("ACCOUNT cell for a non-Claude lead (#1074)", () => {
       .toBe("glm:glm-5.3");
   });
 
-  test("a pool-pinned glm lead shows its pool key and short model id: kimi:kimi-k2.7-code", () => {
+  test("a pool-pinned glm lead shows its pool key and short model id: kimi:qwen3.8-27b", () => {
     expect(formatAccount(row({ id: "websites--pilot", leadType: "glm", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN" }), leadModelOf(row({ id: "websites--pilot", leadType: "glm", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN" }), ASSIGN)))
-      .toBe("kimi:kimi-k2.7-code");
+      .toBe("kimi:qwen3.8-27b");
   });
 
   test("a glm lead with no assignment shows the bare type, never the Claude token name", () => {

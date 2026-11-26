@@ -1469,11 +1469,11 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("30");
     expect((await res.json() as any).error.type).toBe("rate_limit_error");
-    // #767: the LAST candidate has no untried model left to move to (every
-    // other candidate already 3021'd this walk), so it reruns through the
-    // same-model backoff — 1 first turn + 4 backoff rounds. 3 candidates
-    // in the pool → 1 + 1 + 5 = 7 ai.run calls.
-    expect(ai.run).toHaveBeenCalledTimes(7);
+    // #767/#1476: the real POOL has only one smoke-passed model today (GLM —
+    // kimi/deepseek's repointed ids are not yet smoke-tested), so there is no
+    // other candidate to move to: this reruns through the same-model
+    // backoff — 1 first turn + 4 backoff rounds = 5 ai.run calls.
+    expect(ai.run).toHaveBeenCalledTimes(5);
     // Global Constraint: the logged usage row's model must be the LAST
     // model actually tried, never a hardcoded constant (code review,
     // Spec axis, #717).
@@ -1913,11 +1913,37 @@ describe("handleFleetAnthropicMessages — think-block parsing is kimi-only (iss
     });
   }
 
-  it("a kimi stream recovers the think-block tool call as a tool_use block", async () => {
-    const kimiOnly: readonly PoolModel[] = [{ ...POOL[1], smokePassed: true }];
-    const r = await streamVia(kimiOnly, THINK_TOOL_CALL);
-    expect(r.status).toBe(200);
-    const events = parseEvents(await r.text());
+  // #1476: kimi's catalog entry no longer carries `thinkTags` (repointed off
+  // the retired kimi-k2.7-code to qwen3.8-27b, not a think-tag model), and
+  // `anthropic-route.ts`'s wiring reads `thinkTags` through `modelById` on
+  // the real, shared POOL — never this test's own `pool` override — so no
+  // model id reachable through `streamVia`/`handleFleetAnthropicMessages`
+  // exercises this path today. Dropped to `pumpAnthropicStream` directly
+  // (already called this way below, "ping clock" describe block) with an
+  // explicit `poolModel.thinkTags: true`, so the parse path itself — unlike
+  // the route's model-id wiring, untouched by #1476 — still has coverage.
+  it("a thinkTags-wired stream recovers the think-block tool call as a tool_use block", async () => {
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = writable.getWriter();
+    // Drains in the background WHILE the pump writes — same reason
+    // `consume()` elsewhere in this file does, below: an unread
+    // TransformStream backpressures its writer, so a sequential
+    // pump-then-drain deadlocks.
+    const dec = new TextDecoder();
+    let text = "";
+    const drain = (async () => {
+      const reader = readable.getReader();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += dec.decode(value);
+      }
+    })();
+    const poolModel: PoolModel = { ...POOL[1], thinkTags: true };
+    await pumpAnthropicStream(sseStream(THINK_TOOL_CALL), writer, "msg_test", poolModel.id, 1024, 5_000, poolModel);
+    await writer.close();
+    await drain;
+    const events = parseEvents(text);
     expect(events.find((e) => e.event === "content_block_start")?.data.content_block).toMatchObject({ type: "tool_use", name: "Read" });
     expect(events.some((e) => e.event === "content_block_delta" && e.data.delta.type === "text_delta")).toBe(false);
   });

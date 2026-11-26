@@ -585,7 +585,7 @@ import { leadModelOf, leadAccountLabel } from "../cli/lead-model";
 describe("lead model (#1074): ACCOUNT label and --json leadType/leadModel", () => {
   const T = new Date("2026-09-25T12:00:00.000Z");
   const ASSIGN: Record<string, string> = {
-    "websites--pilot": "@cf/moonshotai/kimi-k2.7-code",
+    "websites--pilot": "@cf/qwen/qwen3.8-27b",
     "beta--pilot": "@cf/zai-org/glm-5.3",
   };
 
@@ -595,7 +595,7 @@ describe("lead model (#1074): ACCOUNT label and --json leadType/leadModel", () =
 
   it("a glm-led studio assigned the kimi pool model reads leadType kimi and the short model id", () => {
     expect(leadModelOf(status({ id: "websites--pilot", leadType: "glm" }), ASSIGN))
-      .toEqual({ leadType: "kimi", leadModel: "kimi-k2.7-code" });
+      .toEqual({ leadType: "kimi", leadModel: "qwen3.8-27b" });
   });
 
   it("a glm-led studio assigned the glm pool model reads leadType glm and its short model id", () => {
@@ -610,7 +610,7 @@ describe("lead model (#1074): ACCOUNT label and --json leadType/leadModel", () =
 
   it("the ACCOUNT label for a non-Claude lead is lead type, colon, short model id", () => {
     expect(leadAccountLabel({ leadType: "glm", leadModel: "glm-5.3" })).toBe("glm:glm-5.3");
-    expect(leadAccountLabel({ leadType: "kimi", leadModel: "kimi-k2.7-code" })).toBe("kimi:kimi-k2.7-code");
+    expect(leadAccountLabel({ leadType: "kimi", leadModel: "qwen3.8-27b" })).toBe("kimi:qwen3.8-27b");
     expect(leadAccountLabel({ leadType: "glm", leadModel: null })).toBe("glm");
   });
 
@@ -619,7 +619,7 @@ describe("lead model (#1074): ACCOUNT label and --json leadType/leadModel", () =
       [status({ id: "websites--pilot", leadType: "glm" }), status({ id: "gamma--pilot" })],
       T, undefined, undefined, undefined, ASSIGN,
     );
-    expect(rows[0]).toMatchObject({ id: "websites--pilot", leadType: "kimi", leadModel: "kimi-k2.7-code" });
+    expect(rows[0]).toMatchObject({ id: "websites--pilot", leadType: "kimi", leadModel: "qwen3.8-27b" });
     expect(rows[1]).toMatchObject({ id: "gamma--pilot", leadType: "claude", leadModel: null });
   });
 
