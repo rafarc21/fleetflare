@@ -20,8 +20,15 @@
 import { parseInstallCacheRepos } from "../studio/install-cache";
 
 /** Measured 2026-09-28 replay eval: the only two models that scored >= 2.9/3
- *  with zero harmful edits. Anything else is refused at the Worker. */
-export const JUNIOR_MODELS: readonly string[] = ["@cf/zai-org/glm-5.3", "@cf/deepseek-ai/deepseek-v4-pro-0813"];
+ *  with zero harmful edits. Anything else is refused at the Worker.
+ *
+ *  Issue #1476 round 2: `deepseek-v4-pro-0813` is retired on CF's catalog —
+ *  repointed to `deepseek-v4.1-flash-1017` (same live id the lead model
+ *  pool's `deepseek` key now uses, src/llm/models.ts). CAVEAT: the
+ *  2026-09-28 score above was measured against the OLD id; it does NOT
+ *  carry over to this one. A re-eval is out of scope for #1476, which only
+ *  closes the dead-route hole. */
+export const JUNIOR_MODELS: readonly string[] = ["@cf/zai-org/glm-5.3", "@cf/deepseek-ai/deepseek-v4.1-flash-1017"];
 
 interface JuniorGateEnv { FLEET_JUNIOR?: string; JUNIOR_REPOS?: string }
 

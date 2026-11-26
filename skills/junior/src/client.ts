@@ -3,7 +3,11 @@
 // 2026-09-28 replay eval (docs/superpowers/specs/2026-09-28-junior-workers-ai-design.md).
 
 export const GLM = "@cf/zai-org/glm-5.3";
-export const DEEPSEEK = "@cf/deepseek-ai/deepseek-v4-pro-0813";
+// Issue #1476 round 2: deepseek-v4-pro-0813 is retired on CF's catalog;
+// repointed to the same live id the lead model pool's `deepseek` key now
+// uses (src/llm/models.ts). See gate.ts's JUNIOR_MODELS doc comment for the
+// caveat on the 2026-09-28 replay eval score not carrying over to this id.
+export const DEEPSEEK = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 export const MAX_TOKENS_CAP = 128_000;
 
 export type Transport =
