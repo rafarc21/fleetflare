@@ -730,7 +730,7 @@ export const PARK_WARNING_UNKNOWN_SCAN =
 // route `fleet models` reads), studio id -> Workers AI model id. Best-effort:
 // null on any failure, so the listing degrades (a glm lead reads plain glm)
 // and never fails.
-async function fetchLeadAssignments(creds: Credentials): Promise<Record<string, string> | null> {
+export async function fetchLeadAssignments(creds: Credentials): Promise<Record<string, string> | null> {
   try {
     const res = await fetch(new URL("/studio/models", creds.workerUrl), {
       headers: { ...accessHeaders(creds), Accept: "application/json" },
