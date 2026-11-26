@@ -176,10 +176,14 @@ environment and drives one tool call, a multi-turn tool-result reply, and
 a streamed reply through the Anthropic↔OpenAI translator against the real,
 live Workers AI binding. Run this by the maestro only, from your own Mac
 or ops environment — never inside a studio container, since no Cloudflare
-credentials exist there. Before any of that, the script also reads
-`planned_deprecation_date` for the model off `wrangler ai models --json`
-and refuses (exit 1) a model CF's own catalog already lists as retired,
-so a dead id never costs a live inference call (#1476).
+credentials exist there. Before any of that, the script fetches
+`wrangler ai models list --json` and refuses (exit 1) a model whose id is
+simply ABSENT from that catalog — CF drops a retired id from the list
+entirely, it does not keep listing it with a past date — so a dead id
+never costs a live inference call. A `planned_deprecation_date` on a
+still-listed entry is a secondary, forward-looking signal: a past date
+also refuses, a near-future date (within 14 days) only warns and
+continues (#1476).
 
 Auto-demotion (daily cron, pool on only): a model is demoted to `demoted`
 state when, over its last 10 closed PRs (minimum 5 PRs before it is even

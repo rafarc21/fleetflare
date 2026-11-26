@@ -39,7 +39,7 @@ export function leadModelOf(s: StudioStatus, assignments: Record<string, string>
 
 /**
  * The ACCOUNT cell of a non-Claude lead (#1074 review): `glm:glm-5.3`,
- * `kimi:kimi-k2.7-code`. A glm studio runs no Claude account, so its ACCOUNT
+ * `kimi:qwen3.8-27b`. A glm studio runs no Claude account, so its ACCOUNT
  * cell names the lead's model instead of a Claude token name. Claude leads
  * never reach this (formatAccount keeps their cell).
  */
