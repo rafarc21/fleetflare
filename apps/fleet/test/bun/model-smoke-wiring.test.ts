@@ -99,7 +99,7 @@ describe("smokeCall (#1476 round 3, R3): AI Gateway cache-skip header", () => {
   });
 
   test("a non-ok response still throws (unchanged behavior) even with the new header set", async () => {
-    const fakeFetch = (async () => new Response("boom", { status: 500 })) as typeof fetch;
+    const fakeFetch = (async (_url: string, _init: RequestInit) => new Response("boom", { status: 500 })) as typeof fetch;
     await expect(smokeCall("https://example.invalid/x", "tok", POOL[0], {}, fakeFetch)).rejects.toThrow(/HTTP 500/);
   });
 });
