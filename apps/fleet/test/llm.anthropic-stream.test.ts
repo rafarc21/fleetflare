@@ -1469,11 +1469,14 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("30");
     expect((await res.json() as any).error.type).toBe("rate_limit_error");
-    // #767/#1476: the real POOL has only one smoke-passed model today (GLM —
-    // kimi/deepseek's repointed ids are not yet smoke-tested), so there is no
-    // other candidate to move to: this reruns through the same-model
-    // backoff — 1 first turn + 4 backoff rounds = 5 ai.run calls.
-    expect(ai.run).toHaveBeenCalledTimes(5);
+    // #767/#1476: round 3 flipped kimi/deepseek's repointed ids to
+    // `smokePassed: true` (live smoke 3/3 PASS, see models.ts's own round-3
+    // comment) — the real POOL now has all 3 models as candidates, so the
+    // overflow walk tries each of the other 2 once before the LAST model's
+    // same-model backoff: 3 first-turn tries + 4 backoff rounds = 7 ai.run
+    // calls (same shape as the "genuine multi-model exhaustion" fixture
+    // test below, now true of the real POOL too).
+    expect(ai.run).toHaveBeenCalledTimes(7);
     // Global Constraint: the logged usage row's model must be the LAST
     // model actually tried, never a hardcoded constant (code review,
     // Spec axis, #717).

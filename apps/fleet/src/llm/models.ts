@@ -26,14 +26,17 @@ export interface PoolModel {
 
 export const POOL: readonly PoolModel[] = [
   { key: "glm", id: "@cf/zai-org/glm-5.3", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: true },
-  // Issue #1476 round 2: catalog says `supports_max_tokens:false` for this
-  // id — the #717 output ceiling (maxMaxTokens, translate.ts
-  // anthropicRequestToOpenAI) may not actually bound it server-side.
-  // Known risk, not actionable from in-repo data alone — needs a live
-  // measurement (maestro-only, no CF creds in this container) to confirm
-  // one way or the other.
-  { key: "kimi", id: "@cf/qwen/qwen3.8-27b", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: KIMI_MAX_MAX_TOKENS, smokePassed: false },
-  { key: "deepseek", id: "@cf/deepseek-ai/deepseek-v4.1-flash-1017", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: false },
+  // Issue #1476 round 3: maestro re-ran a corrected, live, cache-skipped
+  // model-smoke 3x against the real catalog — 3/3 PASS, reasoning in
+  // `reasoning` (not `reasoning_content`), 0 `<think>` in content, tool
+  // calls OK, max_tokens honored (first run 59.1s cold, see PR body for the
+  // full per-run probe-ms table). The #717 output-ceiling risk flagged in
+  // round 2 (catalog's `supports_max_tokens:false`) did not reproduce live.
+  { key: "kimi", id: "@cf/qwen/qwen3.8-27b", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: KIMI_MAX_MAX_TOKENS, smokePassed: true },
+  // Issue #1476 round 3: same live, cache-skipped model-smoke, 3/3 PASS —
+  // reasoning in `reasoning_content` (+ `reasoning` in stream), 0 `<think>`,
+  // tool calls OK, max_tokens honored. See PR body for the full table.
+  { key: "deepseek", id: "@cf/deepseek-ai/deepseek-v4.1-flash-1017", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: true },
 ];
 
 export function modelByKey(key: string): PoolModel | undefined {
