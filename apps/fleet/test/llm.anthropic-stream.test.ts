@@ -2391,6 +2391,38 @@ describe("handleFleetAnthropicMessages — keepalive follows the client (issue #
     expect(text).toContain("event: message_stop");
   });
 
+  // Qwen-shaped twin of the test above (#1476 round 4, L5): qwen (the
+  // current kimi pool id, @cf/qwen/qwen3.8-27b) streams the SAME reasoning
+  // text in `delta.reasoning`, NOT `delta.reasoning_content` (translate.ts's
+  // own `reasoningDeltaText` reads both shapes, first non-empty field wins —
+  // see its doc comment). The GLM-shaped test above only pins the keepalive
+  // clock; this one pins the stronger invariant directly: that reasoning
+  // text is EVER forwarded into visible content is the bug, not just
+  // whether pings keep flowing while it streams. `reasoningDeltaText`'s one
+  // caller feeds the #1099 runaway scan and nothing else (translate.ts,
+  // `applyOpenAIStreamChunk`) — a qwen reasoning delta must never produce a
+  // `content_block_delta`/`text_delta` event, and the client-visible text
+  // must never contain the reasoning marker string itself.
+  it("qwen-shaped delta.reasoning still gets keepalive pings, but its text is never forwarded into visible content", async () => {
+    const reasoning = (i: number) => frame({ choices: [{ delta: { reasoning: `qwen-reasoning-marker-${i}` } }] });
+    const parts = [
+      ...Array.from({ length: 15 }, (_, i) => ({ gapMs: 10, data: reasoning(i) })),
+      { gapMs: 0, data: finishChunk },
+      { gapMs: 0, data: "data: [DONE]\n\n" },
+    ];
+    const { token, rows, e } = await setupWith(gappedUpstream(parts), { LEAD_STREAM_PING_MS: "40", LEAD_STREAM_IDLE_MS: "5000" } as Partial<Env>);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await consume(r);
+    expect(text.split("event: ping").length - 1).toBeGreaterThanOrEqual(2);
+    expect(text).toContain("event: message_stop");
+    // The decisive check this twin adds over the GLM-shaped test above:
+    // none of the 15 reasoning markers the client never actually sees ever
+    // appear in what it actually received -- not as a text_delta, not
+    // anywhere else in the raw SSE wire text.
+    expect(text).not.toContain("content_block_delta");
+    for (let i = 0; i < 15; i++) expect(text).not.toContain(`qwen-reasoning-marker-${i}`);
+  });
+
   it("a client that stops reading and then hangs up unblocks the pump at once (writes race the client's abort)", async () => {
     let cancelled = false;
     const upstream = gappedUpstream([{ gapMs: 0, data: frame({ choices: [{ delta: { content: "partial" } }] }) }, { gapMs: Infinity }], () => { cancelled = true; });

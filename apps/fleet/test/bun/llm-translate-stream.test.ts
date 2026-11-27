@@ -713,6 +713,20 @@ describe("runaway output detection (issue #1099)", () => {
     expect(state.runaway).toBe("repeat_line");
   });
 
+  // Pins translate.ts's own `reasoningDeltaText` doc comment ("First
+  // non-empty field wins; a real delta never carries both") directly: a
+  // delta that DOES carry both fields at once (not something any live
+  // backend has been measured to send, but not something this scan's own
+  // logic rules out either) must scan only `reasoning_content`'s own text,
+  // never both fields concatenated together.
+  test("a delta carrying BOTH reasoning fields at once: reasoning_content wins, never concatenated with delta.reasoning", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, delta({ reasoning_content: "AAAAA", reasoning: "BBBBBBBBBBBBBBBB" }));
+    // Concatenating both would scan 5 + 16 = 21 chars; first-field-wins
+    // scans only reasoning_content's own 5.
+    expect(state.scan.chars).toBe(5);
+  });
+
   test("a line under 40 chars repeated many times does not trip (`}` and `---` style lines)", () => {
     const state = createStreamState();
     for (let i = 0; i < 200; i++) applyOpenAIStreamChunk(state, delta({ content: "  {\"a\": 1},\n" }));
