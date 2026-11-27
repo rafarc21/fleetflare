@@ -10,7 +10,9 @@
 // test below stubs the `wrangler` binary the same way
 // helpers/deploy-rescue-harness.ts stubs it for deploy-target.ts.
 import { describe, expect, test, afterEach } from "bun:test";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -104,25 +106,35 @@ describe("smokeCall (#1476 round 3, R3): AI Gateway cache-skip header", () => {
   });
 });
 
-// Wiring (#1476 round 2, R2): the maestro's mutation run found two surviving
-// mutants in the REMAINING top-level script glue -- deleting the
+// Wiring (#1476 round 2/3/4, R2/R6): the maestro's mutation run found two
+// surviving mutants in the REMAINING top-level script glue -- deleting the
 // retired-exit branch, and hardcoding the decision's status to "ok" -- with
-// 191/191 of the then-existing suite still green. Runs the REAL script as a
-// subprocess (same technique test/bun/model-smoke.test.ts already uses),
-// with a stub `wrangler` standing in for the live binary (same technique
+// 191/191 of the then-existing suite still green. Round 4's LIVE review
+// found the round-2/3 fix for this still incomplete: the "present id" test
+// below used to send a REAL request to the live gateway on every CI run
+// (network-dependent, and the fake token's 401 was the ONLY thing standing
+// in for "proceeded past the catalog check" -- a live gateway outage or a
+// change to its auth-failure shape would silently break the test's own
+// signal), and neither test ever observed what the script's own requests
+// actually carried (the `cf-aig-skip-cache` header was asserted only on
+// direct `smokeCall` unit calls above, never on the 3 requests `main()`
+// itself sends end to end).
+//
+// Fix: runs the REAL script as a subprocess (same technique
+// test/bun/model-smoke.test.ts already uses), with a stub `wrangler`
+// standing in for the live binary (same technique
 // test/bun/helpers/deploy-rescue-harness.ts uses for deploy-target.ts's own
-// `wranglerJson`): a fresh temp tree, the real script copied in, `../src`
-// symlinked to the real src/ (model-smoke.ts's only non-relative-to-itself
-// dependency), and node_modules/.bin/wrangler replaced with a script that
-// prints a catalog missing the target id. If `main()` ever reaches the live
-// inference call on a retired id, that call hits the real
-// gateway.ai.cloudflare.com host with a fake token -- reachable from this
-// container -- and throws `HTTP <code>: ...` (smokeCall's own error), a
-// message this test's exact stderr assertion below does not match; either
-// of the maestro's named mutants takes that path, not the catalog-refusal
-// one.
+// `wranglerJson`) AND fixtures/model-smoke-fetch-spy.ts preloaded ahead of
+// the script (`bun --preload <spy> <script> <key>`) to replace
+// `globalThis.fetch` itself before model-smoke.ts's module body ever runs.
+// The spy logs one JSON line per request -- `{url, skip, stream}` -- to a
+// file named by FETCH_SPY_LOG and answers with canned OpenAI-shape
+// responses; the real network is never reached by either test, online or
+// offline, because `fetch` itself never resolves to the real implementation
+// at any point in the child process's lifetime.
 const SCRIPT = join(import.meta.dir, "../../scripts/model-smoke.ts");
 const SRC = join(import.meta.dir, "../../src");
+const SPY = join(import.meta.dir, "fixtures/model-smoke-fetch-spy.ts");
 
 let root: string | undefined;
 afterEach(() => {
@@ -130,7 +142,7 @@ afterEach(() => {
   root = undefined;
 });
 
-function buildWiringHarness(catalogJson: string): { scriptPath: string } {
+function buildWiringHarness(catalogJson: string): { scriptPath: string; logPath: string } {
   root = mkdtempSync(join(tmpdir(), "model-smoke-wiring-"));
   mkdirSync(join(root, "scripts"), { recursive: true });
   mkdirSync(join(root, "node_modules", ".bin"), { recursive: true });
@@ -150,47 +162,68 @@ function buildWiringHarness(catalogJson: string): { scriptPath: string } {
     "",
   ].join("\n"));
   chmodSync(wrangler, 0o755);
-  return { scriptPath: join(root, "scripts", "model-smoke.ts") };
+  return { scriptPath: join(root, "scripts", "model-smoke.ts"), logPath: join(root, "fetch-spy.log") };
 }
 
-describe("model-smoke.ts wiring (#1476 round 2, R2): catalog check refuses before any inference call", () => {
-  test("catalog missing the target id: exits non-zero with the catalog-refusal message, never reaches a live inference call", () => {
+/** Missing log file (nothing ever fetched) reads as zero requests, rather
+ *  than throwing on the absent-id path where the spy's own
+ *  `appendFileSync` never runs at all. */
+function readLoggedRequests(logPath: string): Array<{ url: string; skip: string | null; stream: boolean }> {
+  if (!existsSync(logPath)) return [];
+  return readFileSync(logPath, "utf8")
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line));
+}
+
+function runWithSpy(scriptPath: string, logPath: string) {
+  return Bun.spawnSync({
+    cmd: ["bun", "--preload", SPY, scriptPath, "glm"],
+    env: {
+      PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: "acct-fake", CLOUDFLARE_API_TOKEN: "token-fake",
+      FETCH_SPY_LOG: logPath,
+    },
+    stdout: "pipe", stderr: "pipe", timeout: 15_000,
+  });
+}
+
+describe("model-smoke.ts wiring (#1476 round 2/4, R2/R6): catalog check refuses before any inference call", () => {
+  test("catalog missing the target id: exits 1 with the catalog-refusal message, 0 inference requests ever sent", () => {
     // A catalog that has OTHER entries but not glm's id — same real shape
     // parseCatalogEntry reads (.name as the model id string).
-    const { scriptPath } = buildWiringHarness(JSON.stringify([
+    const { scriptPath, logPath } = buildWiringHarness(JSON.stringify([
       { id: "aaaa-bbbb", name: "@cf/some/other-model" },
     ]));
-    const proc = Bun.spawnSync({
-      cmd: ["bun", scriptPath, "glm"],
-      env: { PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: "acct-fake", CLOUDFLARE_API_TOKEN: "token-fake" },
-      stdout: "pipe", stderr: "pipe", timeout: 15_000,
-    });
+    const proc = runWithSpy(scriptPath, logPath);
     const stderr = proc.stderr.toString();
     expect(proc.exitCode, stderr).toBe(1);
     expect(stderr).toContain("SMOKE FAIL @cf/zai-org/glm-5.3 is retired");
     expect(stderr).toContain("refusing before spending an inference call");
-    // The distinguishing check: neither surviving mutant (deleting the exit
-    // branch, hardcoding status "ok") produces this exact message -- both
-    // instead proceed to a live inference attempt, which throws smokeCall's
-    // own `HTTP <code>` error, not this one.
-    expect(stderr).not.toContain("HTTP ");
+    // The decisive check (catches M2b: deleting the `process.exit(1);
+    // return;` right after the refusal message): with the real `fetch`
+    // fully replaced by the spy, nothing distinguishes "refused, stopped"
+    // from "refused, kept going" except whether a request was ever logged
+    // at all — the mutant falls through to the live inference calls, which
+    // the spy happily answers, so the log would carry 3 entries instead.
+    expect(readLoggedRequests(logPath)).toHaveLength(0);
   });
 
-  test("catalog carries the target id: proceeds past the catalog check (reaches smokeCall's own HTTP-error path, not the catalog refusal)", () => {
-    const { scriptPath } = buildWiringHarness(JSON.stringify([
+  test("catalog carries the target id: proceeds, sends exactly 3 inference requests, every one cache-skipped, and PASSes", () => {
+    const { scriptPath, logPath } = buildWiringHarness(JSON.stringify([
       { id: "aaaa-bbbb", name: "@cf/zai-org/glm-5.3" },
     ]));
-    const proc = Bun.spawnSync({
-      cmd: ["bun", scriptPath, "glm"],
-      env: { PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: "acct-fake", CLOUDFLARE_API_TOKEN: "token-fake" },
-      stdout: "pipe", stderr: "pipe", timeout: 15_000,
-    });
+    const proc = runWithSpy(scriptPath, logPath);
+    const stdout = proc.stdout.toString();
     const stderr = proc.stderr.toString();
-    expect(stderr).not.toContain("is retired");
-    // Never actually a SMOKE PASS: the fake token means the live gateway
-    // call itself fails -- this only proves the catalog check let it
-    // through, not that the live call succeeded (needs real credentials,
-    // maestro-only).
-    expect(proc.exitCode).not.toBe(0);
+    expect(proc.exitCode, stderr).toBe(0);
+    expect(stdout).toContain("SMOKE PASS @cf/zai-org/glm-5.3");
+    const requests = readLoggedRequests(logPath);
+    // The decisive check (catches M4b: the stream call site sent as a raw
+    // `fetch` bypassing `smokeCall`, so it never carries the header): all 3
+    // of the script's own live-shaped calls (tool call, multi-turn, stream)
+    // go through this one assertion, not just the two covered by the direct
+    // `smokeCall` unit tests above.
+    expect(requests).toHaveLength(3);
+    for (const r of requests) expect(r.skip).toBe("true");
   });
 });
