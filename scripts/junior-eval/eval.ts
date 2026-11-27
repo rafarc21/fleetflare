@@ -125,7 +125,11 @@ if (import.meta.main) {
   const out = flag("--out") ?? "junior-eval-out";
   if (cmd === "run") {
     const commits = flag("--commits")?.split(",") ?? pickCommits(Number(flag("--auto") ?? 10));
-    await run((flag("--models") ?? "@cf/zai-org/glm-5.3,@cf/deepseek-ai/deepseek-v4-pro-0813").split(","), commits, out);
+    // Issue #1476 round 2: deepseek-v4-pro-0813 is retired on CF's catalog;
+    // default repointed to deepseek-v4.1-flash-1017, the same live id
+    // skills/junior/src/client.ts's DEEPSEEK and gate.ts's JUNIOR_MODELS
+    // now use.
+    await run((flag("--models") ?? "@cf/zai-org/glm-5.3,@cf/deepseek-ai/deepseek-v4.1-flash-1017").split(","), commits, out);
   } else if (cmd === "packets") packets(out);
   else if (cmd === "score") score(out);
   else { console.error("usage: eval.ts run|packets|score [--out dir] [--models a,b] [--commits h1,h2 | --auto N]"); process.exit(2); }

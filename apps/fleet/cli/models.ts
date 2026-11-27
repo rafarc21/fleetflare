@@ -16,7 +16,11 @@ interface ModelsListRow {
 
 interface ModelsListResponse {
   models: ModelsListRow[];
-  assignments: Record<string, string>;
+  // Issue #1476 round 2: `stored` is the raw D1 value, `resolved` is what
+  // the studio actually runs (null for a genuinely unresolvable id) — a
+  // stale pin on a since-retired id stays visible instead of silently
+  // misleading (models-route.ts's own resolveStaleId).
+  assignments: Record<string, { stored: string; resolved: string | null }>;
 }
 
 async function fetchModelsList(creds: Credentials): Promise<ModelsListResponse> {
@@ -65,7 +69,12 @@ export async function cmdModelsLs(creds: Credentials): Promise<void> {
     }
     console.log("");
     console.log("STUDIO                            MODEL");
-    for (const [studio, model] of Object.entries(assignments)) {
+    for (const [studio, a] of Object.entries(assignments)) {
+      // `resolved` is what the studio actually runs; a stale pin (resolved
+      // !== stored) or a genuinely unknown id (resolved === null) is
+      // flagged inline rather than silently shown as the live model
+      // (#1476 round 2, models-route.ts's own resolveStaleId).
+      const model = a.resolved === null ? `${a.stored} (unresolved)` : a.resolved === a.stored ? a.stored : `${a.resolved} (was ${a.stored})`;
       console.log(`${studio.padEnd(33)} ${model}`);
     }
   } catch (err) {

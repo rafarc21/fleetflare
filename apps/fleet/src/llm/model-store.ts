@@ -3,7 +3,7 @@
 // pool state are both just flags: `lead-model:<studioId>` -> model id,
 // `model-state:<modelId>` -> ModelState.
 import { deleteFlag, getFlag, setFlag } from "../state";
-import { POOL, modelById, type ModelState } from "./models";
+import { POOL, modelById, resolveStaleId, type ModelState } from "./models";
 
 const ASSIGN = (studioId: string) => `lead-model:${studioId}`;
 const STATE = (modelId: string) => `model-state:${modelId}`;
@@ -12,7 +12,10 @@ const STATES: readonly ModelState[] = ["active", "overflow", "demoted"];
 export async function getAssignedModel(db: D1Database, studioId: string): Promise<string | null> {
   const v = await getFlag(db, ASSIGN(studioId));
   // Never trust a stored id blindly — the pool can shrink between releases.
-  return v !== null && modelById(v) ? v : null;
+  // resolveStaleId (models.ts) also follows a retired id back to its pool
+  // key's current id, so a stale pin doesn't fall through to the router's
+  // hash default (#1476 round 2).
+  return v !== null ? resolveStaleId(v) : null;
 }
 
 export async function setAssignedModel(db: D1Database, studioId: string, modelId: string): Promise<void> {

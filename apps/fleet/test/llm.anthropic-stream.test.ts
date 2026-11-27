@@ -1428,16 +1428,20 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
   });
 
   it("pool on: 3021 on first model moves to next model, no backoff", async () => {
-    // The real pool has exactly ONE smoke-passed model today (GLM —
-    // models.ts's own POOL, kimi/deepseek not yet smoke-tested) — pickModels
-    // never offers a smoke-UNtested model as an overflow candidate (the
-    // pool's own entry rule, enforced in router.ts, not something this
-    // route may bypass), so there is genuinely no SECOND model to move to
-    // without a fixture pool where kimi has smoke-passed. Built as a plain
-    // copy of the real POOL (code review, Standards axis, #717) and handed
-    // to `callRoute`'s own `pool` override — `handleFleetAnthropicMessages`'s
-    // test-injection seam — rather than mutating the real, shared `models.ts`
-    // POOL export, which no sibling test could be sure stayed unmutated.
+    // #767/#1476: round 3 flipped kimi/deepseek's repointed ids to
+    // `smokePassed: true` (live smoke 3/3 PASS, see models.ts's own round-3
+    // comment), so the real POOL already has kimi as a genuine overflow
+    // candidate today. This fixture still builds its own copy with
+    // `smokePassed: true` forced on kimi explicitly rather than relying on
+    // that happening to already be true in the real POOL — a model can go
+    // back to smoke-UNtested (the same CF-repoint problem #1476 itself was
+    // opened over), and this test's own "there is a second model to move
+    // to" setup should not silently stop exercising that branch if it ever
+    // does. Built as a plain copy of the real POOL (code review, Standards
+    // axis, #717) and handed to `callRoute`'s own `pool` override —
+    // `handleFleetAnthropicMessages`'s test-injection seam — rather than
+    // mutating the real, shared `models.ts` POOL export, which no sibling
+    // test could be sure stayed unmutated.
     const kimi = { ...POOL[1], smokePassed: true };
     const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
     const seen: string[] = [];
@@ -1469,10 +1473,13 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("30");
     expect((await res.json() as any).error.type).toBe("rate_limit_error");
-    // #767: the LAST candidate has no untried model left to move to (every
-    // other candidate already 3021'd this walk), so it reruns through the
-    // same-model backoff — 1 first turn + 4 backoff rounds. 3 candidates
-    // in the pool → 1 + 1 + 5 = 7 ai.run calls.
+    // #767/#1476: round 3 flipped kimi/deepseek's repointed ids to
+    // `smokePassed: true` (live smoke 3/3 PASS, see models.ts's own round-3
+    // comment) — the real POOL now has all 3 models as candidates, so the
+    // overflow walk tries each of the other 2 once before the LAST model's
+    // same-model backoff: 3 first-turn tries + 4 backoff rounds = 7 ai.run
+    // calls (same shape as the "genuine multi-model exhaustion" fixture
+    // test below, now true of the real POOL too).
     expect(ai.run).toHaveBeenCalledTimes(7);
     // Global Constraint: the logged usage row's model must be the LAST
     // model actually tried, never a hardcoded constant (code review,
@@ -1483,13 +1490,18 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(rowsLogged[0].model).toBe(seen[seen.length - 1]);
   });
 
-  // Review Focus item 3: a genuine multi-model exhaustion — the real POOL
-  // has only one smoke-passed model today, so the test above cannot
-  // distinguish "last model tried" from "first model tried" (code review,
-  // Spec axis, #717). Built the same way as the "moves to next model"
-  // fixture pool above: a plain copy of the real POOL with every entry
-  // forced to `smokePassed: true`, handed to `callRoute`'s own `pool`
-  // injection seam rather than mutating the shared `models.ts` POOL export.
+  // Review Focus item 3: a genuine multi-model exhaustion. #767/#1476
+  // round 3 flipped kimi/deepseek's repointed ids to `smokePassed: true`
+  // (live smoke 3/3 PASS, see models.ts's own round-3 comment), so the real
+  // POOL now has all 3 models as genuine candidates too — this fixture no
+  // longer exists to manufacture a second/third model that didn't exist in
+  // reality, but still pins the SAME exhaustion shape down explicitly
+  // rather than depending on the real POOL's current smokePassed values
+  // (code review, Spec axis, #717). Built the same way as the "moves to
+  // next model" fixture pool above: a plain copy of the real POOL with
+  // every entry forced to `smokePassed: true`, handed to `callRoute`'s own
+  // `pool` injection seam rather than mutating the shared `models.ts` POOL
+  // export.
   it("pool on: 3021 on every model (genuine multi-model exhaustion) → 429, first models once, LAST model retried via #767 backoff, usage row logs the LAST model tried", async () => {
     const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
     const seen: string[] = [];
@@ -1913,11 +1925,37 @@ describe("handleFleetAnthropicMessages — think-block parsing is kimi-only (iss
     });
   }
 
-  it("a kimi stream recovers the think-block tool call as a tool_use block", async () => {
-    const kimiOnly: readonly PoolModel[] = [{ ...POOL[1], smokePassed: true }];
-    const r = await streamVia(kimiOnly, THINK_TOOL_CALL);
-    expect(r.status).toBe(200);
-    const events = parseEvents(await r.text());
+  // #1476: kimi's catalog entry no longer carries `thinkTags` (repointed off
+  // the retired kimi-k2.7-code to qwen3.8-27b, not a think-tag model), and
+  // `anthropic-route.ts`'s wiring reads `thinkTags` through `modelById` on
+  // the real, shared POOL — never this test's own `pool` override — so no
+  // model id reachable through `streamVia`/`handleFleetAnthropicMessages`
+  // exercises this path today. Dropped to `pumpAnthropicStream` directly
+  // (already called this way below, "ping clock" describe block) with an
+  // explicit `poolModel.thinkTags: true`, so the parse path itself — unlike
+  // the route's model-id wiring, untouched by #1476 — still has coverage.
+  it("a thinkTags-wired stream recovers the think-block tool call as a tool_use block", async () => {
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = writable.getWriter();
+    // Drains in the background WHILE the pump writes — same reason
+    // `consume()` elsewhere in this file does, below: an unread
+    // TransformStream backpressures its writer, so a sequential
+    // pump-then-drain deadlocks.
+    const dec = new TextDecoder();
+    let text = "";
+    const drain = (async () => {
+      const reader = readable.getReader();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += dec.decode(value);
+      }
+    })();
+    const poolModel: PoolModel = { ...POOL[1], thinkTags: true };
+    await pumpAnthropicStream(sseStream(THINK_TOOL_CALL), writer, "msg_test", poolModel.id, 1024, 5_000, poolModel);
+    await writer.close();
+    await drain;
+    const events = parseEvents(text);
     expect(events.find((e) => e.event === "content_block_start")?.data.content_block).toMatchObject({ type: "tool_use", name: "Read" });
     expect(events.some((e) => e.event === "content_block_delta" && e.data.delta.type === "text_delta")).toBe(false);
   });
@@ -2351,6 +2389,38 @@ describe("handleFleetAnthropicMessages — keepalive follows the client (issue #
     const text = await consume(r);
     expect(text.split("event: ping").length - 1).toBeGreaterThanOrEqual(2);
     expect(text).toContain("event: message_stop");
+  });
+
+  // Qwen-shaped twin of the test above (#1476 round 4, L5): qwen (the
+  // current kimi pool id, @cf/qwen/qwen3.8-27b) streams the SAME reasoning
+  // text in `delta.reasoning`, NOT `delta.reasoning_content` (translate.ts's
+  // own `reasoningDeltaText` reads both shapes, first non-empty field wins —
+  // see its doc comment). The GLM-shaped test above only pins the keepalive
+  // clock; this one pins the stronger invariant directly: that reasoning
+  // text is EVER forwarded into visible content is the bug, not just
+  // whether pings keep flowing while it streams. `reasoningDeltaText`'s one
+  // caller feeds the #1099 runaway scan and nothing else (translate.ts,
+  // `applyOpenAIStreamChunk`) — a qwen reasoning delta must never produce a
+  // `content_block_delta`/`text_delta` event, and the client-visible text
+  // must never contain the reasoning marker string itself.
+  it("qwen-shaped delta.reasoning still gets keepalive pings, but its text is never forwarded into visible content", async () => {
+    const reasoning = (i: number) => frame({ choices: [{ delta: { reasoning: `qwen-reasoning-marker-${i}` } }] });
+    const parts = [
+      ...Array.from({ length: 15 }, (_, i) => ({ gapMs: 10, data: reasoning(i) })),
+      { gapMs: 0, data: finishChunk },
+      { gapMs: 0, data: "data: [DONE]\n\n" },
+    ];
+    const { token, rows, e } = await setupWith(gappedUpstream(parts), { LEAD_STREAM_PING_MS: "40", LEAD_STREAM_IDLE_MS: "5000" } as Partial<Env>);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await consume(r);
+    expect(text.split("event: ping").length - 1).toBeGreaterThanOrEqual(2);
+    expect(text).toContain("event: message_stop");
+    // The decisive check this twin adds over the GLM-shaped test above:
+    // none of the 15 reasoning markers the client never actually sees ever
+    // appear in what it actually received -- not as a text_delta, not
+    // anywhere else in the raw SSE wire text.
+    expect(text).not.toContain("content_block_delta");
+    for (let i = 0; i < 15; i++) expect(text).not.toContain(`qwen-reasoning-marker-${i}`);
   });
 
   it("a client that stops reading and then hangs up unblocks the pump at once (writes race the client's abort)", async () => {

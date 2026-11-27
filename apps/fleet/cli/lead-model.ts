@@ -15,11 +15,11 @@ import type { StudioStatus } from "../src/studio/types";
 export interface LeadModel {
   /** claude, glm, or a pool key (kimi, deepseek) when the studio is pinned to one. */
   leadType: string;
-  /** The Workers AI model id's last path segment (kimi-k2.7-code), or null. */
+  /** The Workers AI model id's last path segment (glm-5.3), or null. */
   leadModel: string | null;
 }
 
-/** The short form of a Workers AI model id: "@cf/moonshotai/kimi-k2.7-code" -> "kimi-k2.7-code". */
+/** The short form of a Workers AI model id: "@cf/zai-org/glm-5.3" -> "glm-5.3". */
 function shortModelId(id: string): string {
   return id.slice(id.lastIndexOf("/") + 1);
 }
@@ -39,7 +39,7 @@ export function leadModelOf(s: StudioStatus, assignments: Record<string, string>
 
 /**
  * The ACCOUNT cell of a non-Claude lead (#1074 review): `glm:glm-5.3`,
- * `kimi:kimi-k2.7-code`. A glm studio runs no Claude account, so its ACCOUNT
+ * `kimi:qwen3.8-27b`. A glm studio runs no Claude account, so its ACCOUNT
  * cell names the lead's model instead of a Claude token name. Claude leads
  * never reach this (formatAccount keeps their cell).
  */

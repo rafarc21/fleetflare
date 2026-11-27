@@ -730,15 +730,24 @@ export const PARK_WARNING_UNKNOWN_SCAN =
 // route `fleet models` reads), studio id -> Workers AI model id. Best-effort:
 // null on any failure, so the listing degrades (a glm lead reads plain glm)
 // and never fails.
-async function fetchLeadAssignments(creds: Credentials): Promise<Record<string, string> | null> {
+export async function fetchLeadAssignments(creds: Credentials): Promise<Record<string, string> | null> {
   try {
     const res = await fetch(new URL("/studio/models", creds.workerUrl), {
       headers: { ...accessHeaders(creds), Accept: "application/json" },
       signal: AbortSignal.timeout(LEAD_INFER_TIMEOUT_MS),
     });
     if (!res.ok) return null;
-    const body = (await res.json()) as { assignments?: Record<string, string> };
-    return body.assignments ?? {};
+    // Issue #1476 round 2: the route's `assignments` entries are now
+    // `{ stored, resolved }` (models-route.ts's resolveStaleId) — this
+    // listing wants what the studio actually RUNS, so take `resolved`.
+    // A genuinely unresolvable stored id (resolved === null) falls back to
+    // `stored` so leadModelOf still has a string to show (same degrade as
+    // before this id ever got route-side resolution).
+    const body = (await res.json()) as { assignments?: Record<string, { stored: string; resolved: string | null }> };
+    const assignments = body.assignments ?? {};
+    const out: Record<string, string> = {};
+    for (const [studio, a] of Object.entries(assignments)) out[studio] = a.resolved ?? a.stored;
+    return out;
   } catch {
     return null;
   }

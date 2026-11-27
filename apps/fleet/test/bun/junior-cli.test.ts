@@ -111,7 +111,7 @@ describe("junior.sh", () => {
     const dir = repo({ "a.ts": "x\n" });
     replies = [{ content: "ok" }];
     const r = await run(dir, ["--mode", "text", "--model", "deepseek", "--task", "t", "a.ts"]);
-    expect(r.err).toContain("model=deepseek-v4-pro-0813");
+    expect(r.err).toContain("model=deepseek-v4.1-flash-1017");
   });
 
   // Regression: a network-level failure (connection refused, DNS failure —
