@@ -1428,16 +1428,20 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
   });
 
   it("pool on: 3021 on first model moves to next model, no backoff", async () => {
-    // The real pool has exactly ONE smoke-passed model today (GLM —
-    // models.ts's own POOL, kimi/deepseek not yet smoke-tested) — pickModels
-    // never offers a smoke-UNtested model as an overflow candidate (the
-    // pool's own entry rule, enforced in router.ts, not something this
-    // route may bypass), so there is genuinely no SECOND model to move to
-    // without a fixture pool where kimi has smoke-passed. Built as a plain
-    // copy of the real POOL (code review, Standards axis, #717) and handed
-    // to `callRoute`'s own `pool` override — `handleFleetAnthropicMessages`'s
-    // test-injection seam — rather than mutating the real, shared `models.ts`
-    // POOL export, which no sibling test could be sure stayed unmutated.
+    // #767/#1476: round 3 flipped kimi/deepseek's repointed ids to
+    // `smokePassed: true` (live smoke 3/3 PASS, see models.ts's own round-3
+    // comment), so the real POOL already has kimi as a genuine overflow
+    // candidate today. This fixture still builds its own copy with
+    // `smokePassed: true` forced on kimi explicitly rather than relying on
+    // that happening to already be true in the real POOL — a model can go
+    // back to smoke-UNtested (the same CF-repoint problem #1476 itself was
+    // opened over), and this test's own "there is a second model to move
+    // to" setup should not silently stop exercising that branch if it ever
+    // does. Built as a plain copy of the real POOL (code review, Standards
+    // axis, #717) and handed to `callRoute`'s own `pool` override —
+    // `handleFleetAnthropicMessages`'s test-injection seam — rather than
+    // mutating the real, shared `models.ts` POOL export, which no sibling
+    // test could be sure stayed unmutated.
     const kimi = { ...POOL[1], smokePassed: true };
     const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
     const seen: string[] = [];
@@ -1486,13 +1490,18 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(rowsLogged[0].model).toBe(seen[seen.length - 1]);
   });
 
-  // Review Focus item 3: a genuine multi-model exhaustion — the real POOL
-  // has only one smoke-passed model today, so the test above cannot
-  // distinguish "last model tried" from "first model tried" (code review,
-  // Spec axis, #717). Built the same way as the "moves to next model"
-  // fixture pool above: a plain copy of the real POOL with every entry
-  // forced to `smokePassed: true`, handed to `callRoute`'s own `pool`
-  // injection seam rather than mutating the shared `models.ts` POOL export.
+  // Review Focus item 3: a genuine multi-model exhaustion. #767/#1476
+  // round 3 flipped kimi/deepseek's repointed ids to `smokePassed: true`
+  // (live smoke 3/3 PASS, see models.ts's own round-3 comment), so the real
+  // POOL now has all 3 models as genuine candidates too — this fixture no
+  // longer exists to manufacture a second/third model that didn't exist in
+  // reality, but still pins the SAME exhaustion shape down explicitly
+  // rather than depending on the real POOL's current smokePassed values
+  // (code review, Spec axis, #717). Built the same way as the "moves to
+  // next model" fixture pool above: a plain copy of the real POOL with
+  // every entry forced to `smokePassed: true`, handed to `callRoute`'s own
+  // `pool` injection seam rather than mutating the shared `models.ts` POOL
+  // export.
   it("pool on: 3021 on every model (genuine multi-model exhaustion) → 429, first models once, LAST model retried via #767 backoff, usage row logs the LAST model tried", async () => {
     const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
     const seen: string[] = [];
