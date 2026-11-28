@@ -190,22 +190,28 @@ a mutant as "what a test must catch", never as something to do.
 
 ## 3. Dispatch is not done until watched
 
-Dispatch and monitor are one action, not two. The monitor must be persistent
-and cover ALL agents, not just the one you just spawned. It should emit on: a
-PR opening, its head changing, or closing; a task state change; a CI or gate
-verdict; an agent dying; a studio going GONE; AND an agent stopping cleanly
-without crashing. Ask, for every monitor you arm: "if it crashed right now,
-would this filter emit?" and "if it went idle right now, would this filter
-emit?" — both must be yes, or widen it. Poll remote APIs no more often than
-every 30 seconds, diff against the previous state, and emit only the changes.
-A background-shell monitor cannot hold an overnight watch by itself — host
-memory pressure or a background-process time cap can kill it silently, and a
-dead watch is worse than no watch. What holds up instead: a cron-driven tick
-(e.g. every 30 minutes) that re-enters the session, sweeps everything, and
-emits ONLY what changed — the "no change" line is itself proof it is alive.
-Rewrite a tick's brief the moment the facts it asserts change, or it will
-eventually be believed over reality. A process-check pattern (`pgrep -f
-"<pattern>"`) run from inside the monitor script can match the script's OWN
+Dispatch and watch are one action, not two. **The watch is a ONE-SHOT
+background wait, never a persistent `Monitor` and never a cron tick** (token
+diet, 2026-11-01). Every wake re-reads the session's whole context — measured
+0.7–1.6M tokens per wake; monitor events were 45% of Claude spend over 72h,
+and a `Monitor` also expires within 30 minutes, the expiry notice itself being
+a wake. Run `~/.fleetflare-maestro/tools/token-diet/wait-change.sh
+<owner/repo> <studio-id> [pr ...]` via Bash `run_in_background`: it polls
+every 120 s, diffs against a baseline snapshot, and EXITS on the first real
+change — a PR opening, its head moving or its state changing; a gate verdict;
+a board task state change; the studio stopping or going GONE; the lead idle
+15 minutes. One exit = exactly one wake. Handle it, then re-arm. No progress
+lines, no working↔idle flips. Ask, for every wait you arm: "if it crashed
+right now, would this exit?" and "if it went idle right now, would this
+exit?" — both must be yes, or widen it.
+
+**Sleep rule.** Arm a wait only while something it watches is actually
+moving. When everything is stalled or waiting on the operator, arm nothing
+and sleep fully — overnight ticks reporting "no change" were the leak, not
+proof of life. A killed background wait still notifies on exit; a dead
+SESSION does not, which is what keepalive limit recovery (and later the
+spec's out-of-session wake gateway) covers. A process-check pattern (`pgrep
+-f "<pattern>"`) run from inside a watch script can match the script's OWN
 command line and wait forever on itself — anchor it (e.g. `^/bin/bash
 .*script`).
 
@@ -569,7 +575,7 @@ desktop session — an isolated browser for testing is always fine regardless.
 Read the repo's house rules and memory index; note the gate commands and
 deploy script. Create a coordination directory (ordered queue, detach
 helper, watch script, studio-watch script, shared `briefs/_tail.txt`,
-HANDOFF file). Arm every monitor as persistent and verify each one actually
-emits once. Run the backlog engine, dispatch the first junior batches,
+HANDOFF file). Arm a one-shot wait (section 3) per moving lane; arm nothing for a
+stalled one. Run the backlog engine, dispatch the first junior batches,
 verify each lead is actually working within 3 minutes (section 3). Send the
 operator a first status: lanes, studios, gate state, decisions needed.
